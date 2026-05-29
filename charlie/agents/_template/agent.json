@@ -1,0 +1,24 @@
+{
+  "name": "AGENT_NAME",
+  "description": "AGENT_DESCRIPTION",
+  "version": "1.0.0",
+  "enabled": true,
+  "system_prompt": "You are a specialized AI agent for C.H.A.R.L.I.E. Your role is: AGENT_ROLE. Be precise, thorough, and always explain your reasoning.",
+  "tools": [],
+  "skills": [],
+  "triggers": {
+    "keywords": [],
+    "intent_description": "INTENT_DESCRIPTION"
+  },
+  "config": {
+    "max_chain_depth": 8,
+    "timeout_seconds": 120,
+    "priority": "NORMAL"
+  },
+  "mcp_servers": {},
+  "metadata": {
+    "author": "user",
+    "created": "CREATED_DATE",
+    "icon": "🤖"
+  }
+}

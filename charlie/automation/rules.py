@@ -1,0 +1,112 @@
+"""Default automation rules."""
+from charlie.automation.models import AutomationRule, RiskTier
+
+
+def get_default_rules() -> list[AutomationRule]:
+    """Return the default set of automation rules."""
+    return [
+        AutomationRule(
+            name="calendar_reminder",
+            trigger="calendar_alert",
+            condition="True",
+            action="send_reminder",
+            risk_tier=RiskTier.TIER_0,
+            description="Send reminder 30 min before calendar event",
+        ),
+        AutomationRule(
+            name="vip_email_summary",
+            trigger="email_received",
+            condition="data.get('priority', '') == 'high' or data.get('from', '').endswith('@company.com')",
+            action="summarize_email",
+            risk_tier=RiskTier.TIER_0,
+            description="Auto-summarize high-priority emails",
+        ),
+        AutomationRule(
+            name="email_deadline_extract",
+            trigger="email_received",
+            condition="'deadline' in data.get('body', '').lower() or 'due' in data.get('body', '').lower()",
+            action="extract_deadline",
+            risk_tier=RiskTier.TIER_1,
+            description="Extract deadlines from emails and create calendar events",
+        ),
+        AutomationRule(
+            name="vram_warning",
+            trigger="system_warning",
+            condition="data.get('metric') == 'vram' and data.get('value', 0) > 90",
+            action="close_heavy_apps",
+            risk_tier=RiskTier.TIER_2,
+            description="Close heavy apps when VRAM exceeds 90%",
+        ),
+        AutomationRule(
+            name="disk_cleanup",
+            trigger="system_warning",
+            condition="data.get('metric') == 'disk' and data.get('value', 100) < 10",
+            action="run_cleanup",
+            risk_tier=RiskTier.TIER_2,
+            description="Run cleanup when disk space below 10%",
+        ),
+        AutomationRule(
+            name="news_notify",
+            trigger="news_breaking",
+            condition="data.get('relevance', 0) > 0.7",
+            action="notify_news",
+            risk_tier=RiskTier.TIER_0,
+            description="Notify on breaking news matching user interests",
+        ),
+        AutomationRule(
+            name="earthquake_alert",
+            trigger="earthquake_alert",
+            condition="data.get('magnitude', 0) >= 5.0",
+            action="notify_earthquake",
+            risk_tier=RiskTier.TIER_0,
+            description="Alert on significant earthquakes (M5.0+)",
+        ),
+        AutomationRule(
+            name="idle_suggestion",
+            trigger="idle_detected",
+            condition="data.get('minutes', 0) > 10",
+            action="suggest_next_task",
+            risk_tier=RiskTier.TIER_0,
+            description="Suggest next task after 10+ minutes idle",
+        ),
+        AutomationRule(
+            name="morning_briefing",
+            trigger="morning_routine",
+            condition="True",
+            action="daily_briefing",
+            risk_tier=RiskTier.TIER_0,
+            description="Daily morning briefing at 8am on weekdays",
+        ),
+        AutomationRule(
+            name="weekly_report",
+            trigger="weekly_report",
+            condition="True",
+            action="generate_weekly_summary",
+            risk_tier=RiskTier.TIER_0,
+            description="Generate weekly summary on Friday 5pm",
+        ),
+        AutomationRule(
+            name="github_pr_review",
+            trigger="github_notification",
+            condition="data.get('type') == 'pull_request' and data.get('action') == 'assigned'",
+            action="review_pr",
+            risk_tier=RiskTier.TIER_1,
+            description="Review assigned PRs and summarize changes",
+        ),
+        AutomationRule(
+            name="pattern_suggest",
+            trigger="pattern_detected",
+            condition="data.get('count', 0) >= 3",
+            action="suggest_automation",
+            risk_tier=RiskTier.TIER_0,
+            description="Suggest automation when pattern repeated 3+ times",
+        ),
+        AutomationRule(
+            name="auto_research_news",
+            trigger="news_breaking",
+            condition="data.get('relevance', 0) > 0.5",
+            action="auto_research",
+            risk_tier=RiskTier.TIER_0,
+            description="Auto-research breaking news topics and summarize",
+        ),
+    ]

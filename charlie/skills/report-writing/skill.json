@@ -1,0 +1,14 @@
+{
+  "name": "report-writing",
+  "description": "Report templates (pentest, research, technical), writing guide, documentation standards",
+  "version": "1.0.0",
+  "enabled": true,
+  "content_files": ["writing_guide.md"],
+  "inject_mode": "on_demand",
+  "tags": ["writing", "documentation", "reports", "templates"],
+  "metadata": {
+    "author": "system",
+    "created": "2026-05-22",
+    "icon": "📝"
+  }
+}

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CHARLIE Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app">
+    <nav class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">C</div>
+        <span>CHARLIE</span>
+      </div>
+      <ul class="nav-links">
+        <li><a href="#home" class="nav-link active" data-page="home">Home</a></li>
+        <li><a href="#chat" class="nav-link" data-page="chat">Chat</a></li>
+        <li><a href="#tasks" class="nav-link" data-page="tasks">Tasks</a></li>
+        <li><a href="#agents" class="nav-link" data-page="agents">Agents</a></li>
+        <li><a href="#skills" class="nav-link" data-page="skills">Skills</a></li>
+        <li><a href="#tools" class="nav-link" data-page="tools">Tools</a></li>
+        <li><a href="#settings" class="nav-link" data-page="settings">Settings</a></li>
+        <li><a href="#globe" class="nav-link" data-page="globe">Globe</a></li>
+      </ul>
+      <div class="daemon-status" id="daemon-status">
+        <span class="status-dot offline"></span>
+        <span>Daemon Offline</span>
+      </div>
+    </nav>
+
+    <main class="content">
+      <div id="page-home" class="page active">
+        <h1>Overview</h1>
+        <div class="card-grid">
+          <div class="card">
+            <h3>Mood</h3>
+            <div class="mood-display" id="mood-display">idle</div>
+          </div>
+          <div class="card">
+            <h3>Brain Status</h3>
+            <div class="status-value" id="brain-status">—</div>
+          </div>
+          <div class="card">
+            <h3>Active Tasks</h3>
+            <div class="status-value" id="task-count">—</div>
+          </div>
+          <div class="card">
+            <h3>Model</h3>
+            <div class="status-value" id="model-name">—</div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <h3>Quick Actions</h3>
+          <div class="action-buttons">
+            <button class="btn" onclick="navigate('chat')">Open Chat</button>
+            <button class="btn" onclick="navigate('tasks')">View Tasks</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="page-chat" class="page">
+        <h1>Chat</h1>
+        <div class="chat-container">
+          <div class="messages" id="messages"></div>
+          <div class="chat-input-area">
+            <input type="text" id="chat-input" placeholder="Say something to CHARLIE..." onkeydown="if(event.key==='Enter')sendChat()">
+            <button class="btn" onclick="sendChat()">Send</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="page-tasks" class="page">
+        <h1>Tasks</h1>
+        <div id="task-list" class="card"><div class="loading">Loading tasks...</div></div>
+      </div>
+
+      <div id="page-agents" class="page">
+        <h1>Agents</h1>
+        <div id="agent-list" class="card-grid"></div>
+      </div>
+
+      <div id="page-skills" class="page">
+        <h1>Skills</h1>
+        <div id="skill-list" class="card-grid"></div>
+      </div>
+
+      <div id="page-tools" class="page">
+        <h1>Tools</h1>
+        <div id="tool-list" class="card-grid"></div>
+      </div>
+
+      <div id="page-settings" class="page">
+        <h1>Settings</h1>
+        <div class="card">
+          <h3>LLM Configuration</h3>
+          <div class="form-group">
+            <label>Provider</label>
+            <input type="text" id="setting-provider" value="nvidia_nim" readonly>
+          </div>
+          <div class="form-group">
+            <label>Model</label>
+            <input type="text" id="setting-model" placeholder="e.g. google/gemma-4-7b">
+          </div>
+          <button class="btn" onclick="saveSettings()">Save</button>
+        </div>
+      </div>
+
+      <section id="page-globe" class="page">
+        <div class="globe-toolbar">
+          <div class="view-modes">
+            <button class="view-mode-btn active" data-view="world">World Intel</button>
+            <button class="view-mode-btn" data-view="knowledge">Knowledge Graph</button>
+            <button class="view-mode-btn" data-view="workspace">Workspace</button>
+            <button class="view-mode-btn" data-view="combined">Combined</button>
+          </div>
+          <div class="layer-toggles">
+            <label class="layer-toggle"><input type="checkbox" id="layer-earthquakes" checked> Earthquakes</label>
+            <label class="layer-toggle"><input type="checkbox" id="layer-nasa" checked> NASA Events</label>
+            <label class="layer-toggle"><input type="checkbox" id="layer-news" checked> News</label>
+            <label class="layer-toggle"><input type="checkbox" id="layer-weather"> Weather</label>
+            <label class="layer-toggle"><input type="checkbox" id="layer-calendar" checked> Calendar</label>
+            <label class="layer-toggle"><input type="checkbox" id="layer-memory"> Memory</label>
+            <label class="layer-toggle"><input type="checkbox" id="layer-workspace"> Workspace</label>
+            <label class="layer-toggle"><input type="checkbox" id="layer-user" checked> User Position</label>
+          </div>
+          <button id="globe-refresh" class="btn">&#8635; Refresh</button>
+          <label class="auto-rotate-toggle">
+            <input type="checkbox" id="globe-auto-rotate" checked>
+            <span>Auto-rotate</span>
+          </label>
+        </div>
+        <div id="globe-container"></div>
+        <div id="globe-detail-panel" class="card" style="display:none"></div>
+      </section>
+    </main>
+  </div>
+
+  <canvas id="avatar-canvas" width="200" height="200"></canvas>
+
+  <script src="/static/globe.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

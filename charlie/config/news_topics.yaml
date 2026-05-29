@@ -1,0 +1,23 @@
+topics:
+  - name: CVE_ALERTS
+    sources:
+      - https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss.xml
+      - https://www.bleepingcomputer.com/feed/
+    priority: critical
+    proactive: true
+
+  - name: CYBER_NEWS
+    sources:
+      - https://thehackernews.com/feeds/posts/default
+      - https://krebsonsecurity.com/feed/
+    proactive: false
+
+  - name: EXPLOITS
+    sources:
+      - https://www.exploit-db.com/rss.xml
+    proactive: true
+
+  - name: CTF_EVENTS
+    sources:
+      - https://ctftime.org/event/list/upcoming/rss/
+    proactive: true

@@ -1,0 +1,107 @@
+# ── Compiled Python ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ── Virtual Environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+ENV/
+.env
+
+# ── Logs & Caches ─────────────────────────────────────────────────────────────
+logs/
+*.log
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.spotify_cache
+.graphify*
+graphify-out/
+
+# ── OS Generated ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Agent Metadata & Tools ────────────────────────────────────────────────────
+.agents/
+.gemini/
+.claude/
+.openclaude/
+.kilo/
+.roo/
+.roomodes
+.obsidian/
+plans/
+.understand-anything/
+scratch/
+hotpatches/
+Charlie.spec
+
+# ── Memory & Database (Local Data) ───────────────────────────────────────────
+charlie/memory/*.json
+charlie/memory/*.jsonl
+charlie/memory/chroma_db/
+memory/
+*.sqlite
+*.db
+
+# ── Models (Heavy Binaries) ──────────────────────────────────────────────────
+charlie/models/
+models/
+*.weights
+*.bin
+
+# ── Visual Artifacts & Privacy ────────────────────────────────────────────────
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.mp4
+*.gif
+screenshot_*.png
+webcam_*.jpg
+
+# ── Tests (audit-generated, removed for v0.1) ─────────────────────────────────
+tests/
+
+# ── Temporary & System ────────────────────────────────────────────────────────
+*.tmp
+*.bak
+*.swp
+*.swo
+apply_fixes*.py
+Vision part.txt
+charlie/bin/
+charlie/reports/
+test_reports/
+config/secure/
+
+# ── Next.js Build ────────────────────────────────────────────────────────────
+dashboard/.next/
+dashboard/node_modules/
+dashboard/tsconfig.tsbuildinfo
+
+# ── Config (may contain secrets) ────────────────────────────────────────────
+charlie_config.json
+skills-lock.json
