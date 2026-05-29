@@ -7,6 +7,7 @@ Starts all subsystems except HUD. HUD connects as a client via WebSocket.
 
 import os
 import sys
+import time
 import ctypes
 import warnings
 import multiprocessing
@@ -102,6 +103,18 @@ def main():
 
     try:
         supervisor.start()
+        # If monitor() returns (e.g. intentional shutdown), keep daemon alive
+        # until all child processes exit or user interrupts
+        logger.info("daemon_monitor_exited | keeping_alive_until_children_exit")
+        try:
+            while True:
+                alive = [p for p in supervisor.processes.values() if p["process"].is_alive()]
+                if not alive:
+                    logger.info("all_children_exited | daemon_shutting_down")
+                    break
+                time.sleep(5)
+        except KeyboardInterrupt:
+            pass
     except Exception as e:
         logger.error("daemon_failure", error=str(e), exc_info=True)
     finally:

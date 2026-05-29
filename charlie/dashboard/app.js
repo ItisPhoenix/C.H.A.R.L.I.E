@@ -82,7 +82,8 @@ async function pollStatus() {
   // Refresh chat history if on chat page
   if (document.getElementById('messages')) {
     try {
-      const history = await api('chat/history');
+      const resp = await api('chat/history');
+      const history = resp?.messages || resp || [];
       const oldLast = state.chatHistory[state.chatHistory.length - 1]?.content;
       const newLast = history?.[history.length - 1]?.content;
       if (history && newLast !== oldLast) {
@@ -122,7 +123,8 @@ async function loadHome() {
 
 async function loadChat() {
   try {
-    state.chatHistory = await api('chat/history') || [];
+    const resp = await api('chat/history');
+    state.chatHistory = resp?.messages || resp || [];
   } catch {
     state.chatHistory = [];
   }
@@ -162,7 +164,8 @@ async function sendChat() {
     const initialLen = state.chatHistory.length;
     for (let i = 0; i < 30; i++) {
       await new Promise(r => setTimeout(r, 1000));
-      const history = await api('chat/history');
+      const resp = await api('chat/history');
+      const history = resp?.messages || resp || [];
       if (history && history.length > initialLen) {
         state.chatHistory = history;
         renderMessages();
@@ -215,7 +218,8 @@ async function loadAgents() {
   const el = document.getElementById('agent-list');
   if (!el) return;
   try {
-    state.agents = await api('agents') || [];
+    const resp = await api('agents/status');
+    state.agents = resp?.agents || [];
   } catch {
     state.agents = [];
   }
@@ -259,8 +263,8 @@ async function loadTools() {
   const el = document.getElementById('tool-list');
   if (!el) return;
   try {
-    const data = await api('tools') || {};
-    state.tools = data.tools || [];
+    const data = await api('tools/log') || {};
+    state.tools = data.executions || [];
   } catch {
     state.tools = [];
   }
@@ -270,8 +274,8 @@ async function loadTools() {
   }
   el.innerHTML = state.tools.map(t => `
     <div class="card">
-      <h3>${t.name}</h3>
-      <p style="font-size:12px;color:#8090a0;margin-top:8px">${t.description || ''}</p>
+      <h3>${t.name || t.tool || 'Unknown'}</h3>
+      <p style="font-size:12px;color:#8090a0;margin-top:8px">${t.description || t.status || ''}</p>
     </div>
   `).join('');
 }
@@ -290,12 +294,13 @@ let avatarTargetMood = null;
 
 function connectAvatarWS() {
   try {
-    avatarWs = new WebSocket('ws://localhost:8090/ws/avatar');
+    avatarWs = new WebSocket('ws://localhost:3005/ws/events');
     avatarWs.onopen = () => console.log('[avatar WS] connected');
     avatarWs.onmessage = ev => {
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === 'AVATAR_STATE') {
+        // Handle avatar state updates from the event stream
+        if (msg.type === 'AVATAR_STATE' || msg.type === 'PHASE') {
           updateAvatarState(msg);
         }
       } catch {}

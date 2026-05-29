@@ -78,18 +78,18 @@ class DaemonSupervisor(PhoenixSupervisor):
             logger.error("ipc_bridge_start_failed", error=str(e))
 
     def _start_dashboard(self):
-        """Start the dashboard FastAPI server on port 3000 in a background thread."""
+        """Start the dashboard FastAPI server on port 3005 in a background thread."""
         try:
             def _run_dashboard():
                 import uvicorn
                 from charlie.dashboard.main import app
-                uvicorn.run(app, host="0.0.0.0", port=3000, log_level="warning")
+                uvicorn.run(app, host="0.0.0.0", port=3005, log_level="warning")
 
             thread = threading.Thread(
                 target=_run_dashboard, daemon=True, name="Dashboard"
             )
             thread.start()
-            logger.info("dashboard_started | port=3000")
+            logger.info("dashboard_started | port=3005")
         except ImportError:
             logger.warning("dashboard_not_available | skipping")
         except Exception as e:
@@ -148,8 +148,12 @@ class DaemonSupervisor(PhoenixSupervisor):
     @staticmethod
     def _run_audio_safe(audio_q, brain_task_q, tts_q, status_q, audio_cmd_q,
                         heartbeat, interrupt_event):
-        import pythoncom
+        from dotenv import load_dotenv
+        load_dotenv()
+        from charlie.config import ensure_initialized
+        ensure_initialized()
 
+        import pythoncom
         from charlie.audio_proc import AudioEngine
         pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
         engine = AudioEngine(brain_task_q, tts_q, status_q, audio_cmd_q,
@@ -160,8 +164,12 @@ class DaemonSupervisor(PhoenixSupervisor):
     def _run_brain_safe(brain_task_q, tts_q, status_q, audio_cmd_q,
                         browser_req_q, browser_res_q, telegram_q, heartbeat,
                         interrupt_event, reboot_event):
-        import pythoncom
+        from dotenv import load_dotenv
+        load_dotenv()
+        from charlie.config import ensure_initialized
+        ensure_initialized()
 
+        import pythoncom
         from charlie.brain.core import Brain
         pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
         brain = Brain(
@@ -175,6 +183,11 @@ class DaemonSupervisor(PhoenixSupervisor):
 
     @staticmethod
     def _run_browser_safe(browser_req_q, browser_res_q, status_q, heartbeat):
+        from dotenv import load_dotenv
+        load_dotenv()
+        from charlie.config import ensure_initialized
+        ensure_initialized()
+
         from charlie.browser.headless_browser import HeadlessBrowserProcess
         proc = HeadlessBrowserProcess(browser_req_q, browser_res_q, heartbeat,
                                       status_q=status_q)
@@ -183,16 +196,24 @@ class DaemonSupervisor(PhoenixSupervisor):
     @staticmethod
     def _run_telegram_safe(brain_task_q, status_q, telegram_q, audio_cmd_q,
                            heartbeat):
-        import pythoncom
+        from dotenv import load_dotenv
+        load_dotenv()
+        from charlie.config import ensure_initialized
+        ensure_initialized()
 
+        import pythoncom
         from charlie.telegram.bridge import run_bridge
         pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
         run_bridge(brain_task_q, status_q, telegram_q, audio_cmd_q, heartbeat)
 
     @staticmethod
     def _run_vision_safe(brain_task_q, status_q, heartbeat):
-        import os
+        from dotenv import load_dotenv
+        load_dotenv()
+        from charlie.config import ensure_initialized
+        ensure_initialized()
 
+        import os
         from charlie.vision.activity_sentinel import ActivitySentinel
         if os.name == 'nt':
             try:

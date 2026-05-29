@@ -5,8 +5,8 @@
  * 8 data layers, 4 view modes, tab-focused hybrid refresh.
  */
 
-const CONTROLLER_URL = 'http://localhost:8090';
-const WS_URL = 'ws://localhost:8090/ws/events';
+const CONTROLLER_URL = 'http://localhost:3005';
+const WS_URL = 'ws://localhost:3005/ws/events';
 const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 min
 
 // ── 20 Major Cities for weather layer ─────────────────────────────────────────

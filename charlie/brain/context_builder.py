@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from typing import Optional
 
@@ -291,6 +292,19 @@ class ContextBuilder:
             prompt += f"\n\n{user_ctx}"
 
         return prompt
+
+    def _get_user_profile(self) -> str:
+        """Read USER.md from project root for persistent user context."""
+        try:
+            user_md = os.path.join(os.getcwd(), "USER.md")
+            if os.path.exists(user_md):
+                with open(user_md, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                if content:
+                    return "## User Profile (USER.md)\n" + content[:2000]
+        except Exception:
+            pass
+        return ""
 
     def _get_user_context(self) -> str:
         """Get user profile from the dialectic user model."""

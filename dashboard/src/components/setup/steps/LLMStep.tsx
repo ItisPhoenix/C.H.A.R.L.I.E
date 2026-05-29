@@ -14,7 +14,7 @@ export function LLMStep({ data, onChange }: { data: SetupData; onChange: (d: Set
     setTesting(true)
     setTestResult(null)
     try {
-      const resp = await fetch('http://localhost:8090/api/settings')
+      const resp = await fetch('http://localhost:3005/api/settings')
       if (resp.ok) setTestResult('success')
       else setTestResult('error')
     } catch {

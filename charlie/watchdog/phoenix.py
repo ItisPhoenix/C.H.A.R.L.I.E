@@ -26,6 +26,11 @@ MONITOR_INTERVAL = 2.5  # Frequency of watchdog checks
 def run_audio(
     audio_q, brain_task_q, tts_q, status_q, audio_cmd_q, heartbeat, interrupt_event
 ):
+    from dotenv import load_dotenv
+    load_dotenv()
+    from charlie.config import ensure_initialized
+    ensure_initialized()
+
     import pythoncom
 
     from charlie.audio_proc import AudioEngine
@@ -38,6 +43,11 @@ def run_audio(
 
 
 def run_browser(browser_req_q, browser_res_q, status_q, heartbeat):
+    from dotenv import load_dotenv
+    load_dotenv()
+    from charlie.config import ensure_initialized
+    ensure_initialized()
+
     from charlie.browser.headless_browser import HeadlessBrowserProcess
 
     proc = HeadlessBrowserProcess(
@@ -58,6 +68,11 @@ def run_brain(
     interrupt_event,
     reboot_event,
 ):
+    from dotenv import load_dotenv
+    load_dotenv()
+    from charlie.config import ensure_initialized
+    ensure_initialized()
+
     import pythoncom
 
     from charlie.brain.core import Brain
@@ -79,6 +94,11 @@ def run_brain(
 
 
 def run_telegram(brain_task_q, status_q, telegram_q, audio_cmd_q, heartbeat):
+    from dotenv import load_dotenv
+    load_dotenv()
+    from charlie.config import ensure_initialized
+    ensure_initialized()
+
     import pythoncom
 
     from charlie.telegram.bridge import run_bridge
@@ -88,6 +108,11 @@ def run_telegram(brain_task_q, status_q, telegram_q, audio_cmd_q, heartbeat):
 
 
 def run_vision(brain_task_q, status_q, heartbeat):
+    from dotenv import load_dotenv
+    load_dotenv()
+    from charlie.config import ensure_initialized
+    ensure_initialized()
+
     from charlie.vision.activity_sentinel import ActivitySentinel
     # Suppress C-level driver logs (VCAMDS/NBX hive) for the vision process
     if os.name == 'nt':
