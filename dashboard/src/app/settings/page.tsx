@@ -98,8 +98,8 @@ export default function SettingsPage() {
     setActionLoading(true)
     try {
       await action()
-    } catch {
-      // action failed
+    } catch (e) {
+      console.error('Failed to execute daemon action:', e)
     }
     setActionLoading(false)
     setConfirmAction(null)

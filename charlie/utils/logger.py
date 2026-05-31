@@ -6,28 +6,65 @@ import sys
 from logging.handlers import RotatingFileHandler
 
 
+# Single source of truth for credential redaction. Each entry is a
+# (compiled_pattern, replacement) pair that masks a credential value while
+# preserving the surrounding key/label so logs stay readable.
+_CREDENTIAL_PATTERNS = [
+    (re.compile(r'(?i)(api[_-]?key|token|password|secret|pwd)["\s:=]+[a-zA-Z0-9_\-\.]{8,}', re.IGNORECASE), r"\1: [REDACTED]"),
+    (re.compile(r'(?i)(authorization:\s*bearer\s+)[a-zA-Z0-9_\-\.]+', re.IGNORECASE), r"\1[REDACTED]"),
+    (re.compile(r'(?i)(telegram_token|TELEGRAM_TOKEN)["\s:=]+[a-zA-Z0-9:_\-]+'), r"\1=[REDACTED]"),
+    (re.compile(r'(?i)(NIM_API_KEY|nim_api_key)["\s:=]+[a-zA-Z0-9_\-\.]+'), r"\1=[REDACTED]"),
+]
+
+# Filesystem-path patterns redact local usernames from paths. These are applied
+# only on the logging path (not by redact_secrets, which targets credentials).
+_PATH_PATTERNS = [
+    (re.compile(r'C:\\Users\\[^\\]+\\'), r'C:\\Users\\[USER]\\'),
+    (re.compile(r'/home/[^/]+/'), r'/home/[USER]/'),
+]
+
+
+def _apply_patterns(text, patterns):
+    """Apply a list of (pattern, replacement) pairs to ``text`` in order."""
+    for pattern, replacement in patterns:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def redact_secrets(text: str) -> str:
+    """Mask credential patterns (API key, token, password, secret, bearer auth,
+    NIM_API_KEY, TELEGRAM_TOKEN) in ``text``.
+
+    This is a pure, side-effect-free helper (no logging, no I/O) and the single
+    source of truth for credential redaction. Strings without secrets are
+    returned unchanged. Non-string input is returned as-is so callers can pass
+    arbitrary log arguments safely.
+    """
+    if not isinstance(text, str):
+        return text
+    return _apply_patterns(text, _CREDENTIAL_PATTERNS)
+
+
 class SensitiveDataFilter(logging.Filter):
     """Redacts sensitive patterns from log records before they reach handlers."""
 
-    _SENSITIVE_PATTERNS = [
-        (re.compile(r'(?i)(api[_-]?key|token|password|secret|pwd)["\s:=]+[a-zA-Z0-9_\-\.]{8,}', re.IGNORECASE), r"\1: [REDACTED]"),
-        (re.compile(r'(?i)(authorization:\s*bearer\s+)[a-zA-Z0-9_\-\.]+', re.IGNORECASE), r"\1[REDACTED]"),
-        (re.compile(r'(?i)(telegram_token|TELEGRAM_TOKEN)["\s:=]+[a-zA-Z0-9:_\-]+'), r"\1=[REDACTED]"),
-        (re.compile(r'(?i)(NIM_API_KEY|nim_api_key)["\s:=]+[a-zA-Z0-9_\-\.]+'), r"\1=[REDACTED]"),
-        (re.compile(r'C:\\Users\\[^\\]+\\'), r'C:\\Users\\[USER]\\'),
-        (re.compile(r'/home/[^/]+/'), r'/home/[USER]/'),
-    ]
+    # Reuse the shared credential patterns (via redact_secrets) plus path
+    # patterns; no regex list is duplicated.
+    _SENSITIVE_PATTERNS = _CREDENTIAL_PATTERNS + _PATH_PATTERNS
+
+    @staticmethod
+    def _scrub(text: str) -> str:
+        """Redact credentials (shared helper) then local filesystem paths."""
+        return _apply_patterns(redact_secrets(text), _PATH_PATTERNS)
 
     def filter(self, record):
         if hasattr(record, 'msg') and isinstance(record.msg, str):
-            for pattern, replacement in self._SENSITIVE_PATTERNS:
-                record.msg = pattern.sub(replacement, record.msg)
+            record.msg = self._scrub(record.msg)
         if hasattr(record, 'args') and record.args:
             new_args = []
             for arg in (record.args if isinstance(record.args, tuple) else [record.args]):
                 if isinstance(arg, str):
-                    for pattern, replacement in self._SENSITIVE_PATTERNS:
-                        arg = pattern.sub(replacement, arg)
+                    arg = self._scrub(arg)
                 new_args.append(arg)
             record.args = tuple(new_args)
         return True

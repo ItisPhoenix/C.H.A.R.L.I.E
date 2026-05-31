@@ -69,17 +69,34 @@ class LearningTracker:
     def get_user_approval_rate(self, action: str) -> float:
         """How often does the user approve this action?"""
         if self._use_tracker():
-            recent = self._tracker.get_recent_outcomes(
-                event_type="task_complete", limit=500
-            )
-            relevant = [
-                o for o in recent
-                if o.tool_name == action and o.details.get("user_approved") is not None
-            ]
-            if relevant:
-                return sum(
-                    1 for o in relevant if o.details.get("user_approved", True)
-                ) / len(relevant)
+            try:
+                recent = self._tracker.get_recent_outcomes(
+                    event_type="task_complete", limit=500
+                )
+                relevant = []
+                for o in recent:
+                    if o.tool_name != action:
+                        continue
+                    # details is a JSON string or None on the canonical Outcome
+                    details = o.details
+                    if details is None:
+                        details_dict = {}
+                    elif isinstance(details, str):
+                        import json
+                        try:
+                            details_dict = json.loads(details)
+                        except (json.JSONDecodeError, TypeError):
+                            details_dict = {}
+                    else:
+                        details_dict = details
+                    if details_dict.get("user_approved") is not None:
+                        relevant.append(details_dict)
+                if relevant:
+                    return sum(
+                        1 for d in relevant if d.get("user_approved", True)
+                    ) / len(relevant)
+            except Exception as e:
+                logger.warning("get_user_approval_rate tracker error: %s", e)
         relevant = [o for o in self._outcomes if o.action == action]
         if not relevant:
             return 0.0

@@ -17,11 +17,18 @@ const sizeMap = {
   lg: 'w-3 h-3',
 }
 
+const statusLabel: Record<Status, string> = {
+  online: 'Status: online',
+  warning: 'Status: warning',
+  error: 'Status: error',
+  idle: 'Status: idle',
+}
+
 export function StatusDot({ status, pulse, size = 'md', className }: StatusDotProps) {
   const shadowMap: Record<Status, string> = {
-    online: 'shadow-[0_0_6px_rgba(34,197,94,0.5)]',
-    warning: 'shadow-[0_0_6px_rgba(245,158,11,0.5)]',
-    error: 'shadow-[0_0_6px_rgba(239,68,68,0.5)]',
+    online: '0 0 8px color-mix(in srgb, var(--charlie-green) 40%, transparent)',
+    warning: '0 0 8px color-mix(in srgb, var(--charlie-amber) 40%, transparent)',
+    error: '0 0 8px color-mix(in srgb, var(--charlie-red) 40%, transparent)',
     idle: '',
   }
 
@@ -38,10 +45,14 @@ export function StatusDot({ status, pulse, size = 'md', className }: StatusDotPr
         'rounded-full inline-block flex-shrink-0',
         sizeMap[size],
         colorMap[status],
-        shadowMap[status],
-        pulse && 'animate-pulse',
+        pulse && 'animate-pulse duration-1000',
         className,
       )}
-    />
+      style={{ boxShadow: shadowMap[status] || undefined }}
+      aria-label={statusLabel[status]}
+      role="status"
+    >
+      <span className="sr-only">{statusLabel[status]}</span>
+    </span>
   )
 }

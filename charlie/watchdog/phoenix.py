@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -19,6 +20,10 @@ logger = get_logger("Phoenix")
 # ── Heartbeat Protocol Constants ─────────────────────────────────────────────
 HEARTBEAT_TIMEOUT = 120.0  # INCREASED: Allows for slow starts and heavy VRAM usage
 MONITOR_INTERVAL = 2.5  # Frequency of watchdog checks
+# Non-blocking restart cooldown (Req 15.5): after a crash we defer the respawn by
+# this many seconds using a per-process ``restart_not_before`` timestamp instead
+# of a blocking ``time.sleep`` that would stall detection of other failures.
+RESTART_COOLDOWN = 10
 
 # ── Shared Entry Points ──────────────────────────────────────────────────────
 
@@ -27,7 +32,7 @@ def run_audio(
     audio_q, brain_task_q, tts_q, status_q, audio_cmd_q, heartbeat, interrupt_event
 ):
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
     from charlie.config import ensure_initialized
     ensure_initialized()
 
@@ -44,7 +49,7 @@ def run_audio(
 
 def run_browser(browser_req_q, browser_res_q, status_q, heartbeat):
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
     from charlie.config import ensure_initialized
     ensure_initialized()
 
@@ -67,9 +72,11 @@ def run_brain(
     heartbeat,
     interrupt_event,
     reboot_event,
+    brain_req_q=None,
+    brain_res_q=None,
 ):
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
     from charlie.config import ensure_initialized
     ensure_initialized()
 
@@ -89,13 +96,15 @@ def run_brain(
         heartbeat=heartbeat,
         interrupt_event=interrupt_event,
         reboot_event=reboot_event,
+        brain_req_q=brain_req_q,
+        brain_res_q=brain_res_q,
     )
     brain.run()
 
 
 def run_telegram(brain_task_q, status_q, telegram_q, audio_cmd_q, heartbeat):
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
     from charlie.config import ensure_initialized
     ensure_initialized()
 
@@ -109,7 +118,7 @@ def run_telegram(brain_task_q, status_q, telegram_q, audio_cmd_q, heartbeat):
 
 def run_vision(brain_task_q, status_q, heartbeat):
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
     from charlie.config import ensure_initialized
     ensure_initialized()
 
@@ -340,13 +349,20 @@ class PhoenixSupervisor:
     def __init__(self, interrupt_event, reboot_event=None):
         self.interrupt_event = interrupt_event
         self.reboot_event = reboot_event or multiprocessing.Event()
-        manager = multiprocessing.Manager()
-        self.audio_q = manager.Queue(maxsize=100)
-        self.brain_task_q = manager.Queue(maxsize=100)
-        self.tts_q = manager.Queue(maxsize=100)
-        self.status_q = manager.Queue(maxsize=200)
-        self.audio_cmd_q = manager.Queue(maxsize=100)
-        self.telegram_q = manager.Queue(maxsize=100)
+        # Shutdown is routed through the main monitor thread, identical to reboot
+        # (Reqs 14.3, 14.4). Any thread (ControlServer, tray) sets this event;
+        # only monitor() — which runs on the main thread — acts on it so the
+        # whole process is torn down instead of just the calling thread.
+        self.shutdown_event = multiprocessing.Event()
+        # Keep a reference to the Manager so stop() can shut it down (Req 14.2).
+        # A LOCAL var would leak the manager process on teardown.
+        self._manager = multiprocessing.Manager()
+        self.audio_q = self._manager.Queue(maxsize=100)
+        self.brain_task_q = self._manager.Queue(maxsize=100)
+        self.tts_q = self._manager.Queue(maxsize=100)
+        self.status_q = self._manager.Queue(maxsize=200)
+        self.audio_cmd_q = self._manager.Queue(maxsize=100)
+        self.telegram_q = self._manager.Queue(maxsize=100)
 
         # Heartbeats (shared multiprocessing values)
         self.heartbeats = {
@@ -357,10 +373,15 @@ class PhoenixSupervisor:
             "Vision": multiprocessing.Value("d", time.time()),
         }
 
-        self.browser_req_q = manager.Queue(maxsize=50)
-        self.browser_res_q = manager.Queue(maxsize=50)
+        self.browser_req_q = self._manager.Queue(maxsize=50)
+        self.browser_res_q = self._manager.Queue(maxsize=50)
+
+        # Cross-process Brain RPC queues (Req 7 / Design §D)
+        self.brain_req_q = self._manager.Queue(maxsize=50)
+        self.brain_res_q = self._manager.Queue(maxsize=50)
 
         self.processes = {}
+        self._processes_lock = threading.RLock()
         self.running = True
         self.healer = SelfHealer()
         self.doctor = Doctor(status_q=self.status_q)
@@ -443,6 +464,8 @@ class PhoenixSupervisor:
                 heartbeat,
                 self.interrupt_event,
                 self.reboot_event,
+                self.brain_req_q,
+                self.brain_res_q,
             )
         elif name == "Browser":
             args = (
@@ -471,7 +494,8 @@ class PhoenixSupervisor:
 
         p = multiprocessing.Process(target=target, args=args, name=name, daemon=daemon)
         p.start()
-        self.processes[name] = {"process": p, "target": target, "restarts": restarts, "started_at": time.time()}
+        with self._processes_lock:
+            self.processes[name] = {"process": p, "target": target, "restarts": restarts, "started_at": time.time()}
         logger.info(f"process_started: {name} (PID: {p.pid})")
 
     def monitor(self):
@@ -489,8 +513,33 @@ class PhoenixSupervisor:
                 self.reboot()
                 return
 
-            for name in list(self.processes.keys()):
-                data = self.processes[name]
+            # ── Check for Manual Shutdown Signal ──
+            # Routed here from any thread (ControlServer/tray) via shutdown_event
+            # so the teardown executes on the main monitor thread (Reqs 14.3, 14.4).
+            if self.shutdown_event.is_set():
+                logger.info("shutdown_signal_detected | stopping_engine")
+                self.stop()
+                return
+
+            # Locked snapshot of the current role names; the lock is NOT held for
+            # the whole loop body so a slow restart/cooldown cannot block monitoring.
+            with self._processes_lock:
+                names = list(self.processes.keys())
+
+            for name in names:
+                # Re-acquire briefly to read the specific entry (it may have been
+                # replaced/removed by a concurrent restart_subsystem call).
+                with self._processes_lock:
+                    data = self.processes.get(name)
+                if data is None:
+                    continue
+
+                # ── Quarantine enforcement (Req 15.3) ──
+                # A quarantined process is never re-processed: no restart, no
+                # traceback re-extraction, no re-alert. Skip it every cycle.
+                if data.get("quarantined"):
+                    continue
+
                 p = data["process"]
                 heartbeat = self.heartbeats[name]
 
@@ -504,6 +553,25 @@ class PhoenixSupervisor:
                 # Check for crash (is_alive) or hang (heartbeat timeout)
                 is_hung = (now - heartbeat.value) > HEARTBEAT_TIMEOUT
                 if not p.is_alive() or is_hung:
+                    # ── Non-blocking cooldown gate (Req 15.5) ──
+                    # If this crash has already been processed (strike counted,
+                    # alerted, patch attempted) we are simply waiting out the
+                    # restart cooldown. Don't re-process; either restart now if
+                    # the cooldown elapsed, or skip this process THIS cycle so
+                    # the rest of the fleet is still monitored.
+                    not_before = data.get("restart_not_before", 0)
+                    if not_before:
+                        if now < not_before:
+                            # Still cooling down — never block the loop.
+                            continue
+                        logger.info(
+                            f"phoenix_cooldown_elapsed | service={name} | restarting"
+                        )
+                        self.start_process(
+                            name, data["target"], restarts=data["restarts"]
+                        )
+                        continue
+
                     if p.is_alive() and is_hung:
                         logger.warning(
                             f"process_hung: {name}. Heartbeat timeout ({now - heartbeat.value:.1f}s). Terminating..."
@@ -534,20 +602,24 @@ class PhoenixSupervisor:
                         )
                         data["quarantined"] = True
 
-                        self._safe_put(self.tts_q, {
-                            "type": "SPEAK",
-                            "content": f"{name} service has crashed consecutively and is now quarantined, Sir."
-                        })
-                        self._safe_put(self.status_q, {"type": "PHASE", "content": "ALERT"})
+                        # Exactly one quarantine alert per quarantine event
+                        # (Req 15.4), guarded so later cycles never re-alert.
+                        if not data.get("quarantine_alerted"):
+                            self._safe_put(self.tts_q, {
+                                "type": "SPEAK",
+                                "content": f"{name} service has crashed consecutively and is now quarantined, Sir."
+                            })
+                            self._safe_put(self.status_q, {"type": "PHASE", "content": "ALERT"})
 
-                        # Direct Telegram fall-back alert dispatch
-                        alert_text = (
-                            f"<b>🚨 [SRE QUARANTINE PROTOCOL ACTIVATED]</b>\n\n"
-                            f"Service <b>{name}</b> has crashed consecutively (3 strikes exceeded) and has been placed in quarantine to prevent thrashing.\n\n"
-                            f"<b>Crash Traceback Extracted:</b>\n"
-                            f"<pre>{tb or 'No traceback available.'}</pre>"
-                        )
-                        self._send_direct_telegram(alert_text)
+                            # Direct Telegram fall-back alert dispatch
+                            alert_text = (
+                                f"<b>🚨 [SRE QUARANTINE PROTOCOL ACTIVATED]</b>\n\n"
+                                f"Service <b>{name}</b> has crashed consecutively (3 strikes exceeded) and has been placed in quarantine to prevent thrashing.\n\n"
+                                f"<b>Crash Traceback Extracted:</b>\n"
+                                f"<pre>{tb or 'No traceback available.'}</pre>"
+                            )
+                            self._send_direct_telegram(alert_text)
+                            data["quarantine_alerted"] = True
                         continue
 
                     # Verbal alert for restart
@@ -559,7 +631,14 @@ class PhoenixSupervisor:
                     # Alert
                     self._safe_put(self.status_q, {"type": "PHOENIX_ALERT", "content": name})
 
-                    if tb:
+                    # ── Auto-patcher gate (Req 15.6 / 17.4) ──
+                    # The source-rewriting recovery path (Doctor auto-repair +
+                    # SelfHealer patch + rollback) only runs when the Operator
+                    # has explicitly enabled the Auto_Patcher. While disabled
+                    # (the default), recovery is restart + quarantine only — we
+                    # NEVER modify live source in response to a crash. Use a
+                    # defensive getattr so a missing flag fails closed (no patch).
+                    if tb and getattr(settings.security, "auto_patcher_enabled", False):
                         self.doctor.auto_repair_brain(tb)
                         if data.get("is_patched", False):
                             logger.error(f"patch_failed: {name}. Rolling back...")
@@ -572,22 +651,29 @@ class PhoenixSupervisor:
                             if patched:
                                 logger.info(f"self_repair_success: {name} hot-patched.")
                                 data["is_patched"] = True
+                    elif tb:
+                        # Auto_Patcher disabled (default): restart + quarantine
+                        # are the only recovery paths; live source is untouched.
+                        logger.info("auto_patcher_disabled | recovery=restart_only | service=%s", name)
 
                     data["restarts"] += 1
 
-                    # 10s cooldown before restart
+                    # Non-blocking cooldown before restart (Req 15.5): record a
+                    # per-process timestamp instead of sleeping. The process is
+                    # restarted on a later cycle once the cooldown elapses, so
+                    # other processes keep being monitored in the meantime.
+                    data["restart_not_before"] = now + RESTART_COOLDOWN
                     logger.info(
-                        f"phoenix_cooldown_started | service={name} | duration=10s"
+                        f"phoenix_cooldown_started | service={name} | duration={RESTART_COOLDOWN}s | non_blocking=True"
                     )
-                    time.sleep(10)
-
-                    self.start_process(name, data["target"], restarts=data["restarts"])
 
             # Autonomic Vitals Check (The Doctor)
             try:
+                with self._processes_lock:
+                    process_snapshot = list(self.processes.values())
                 active_pids = [
                     d["process"].pid
-                    for d in self.processes.values()
+                    for d in process_snapshot
                     if d["process"].is_alive()
                 ]
                 self.doctor.update_pids(active_pids)
@@ -595,13 +681,116 @@ class PhoenixSupervisor:
             except Exception as e:
                 logger.error("doctor_vital_check_failed", error=str(e))
 
+    def _teardown_servers(self) -> None:
+        """Overridable hook to tear down servers owned by a subclass.
+
+        The base :class:`PhoenixSupervisor` owns no HTTP/WS servers, so this is
+        a no-op. :class:`DaemonSupervisor` overrides it to stop the IPC bridge
+        and the Control_Server. Keeping the hook on the base lets ``stop()``
+        perform full teardown without a hard dependency on subclass-only
+        attributes (Reqs 14.2, 14.8).
+        """
+        return None
+
     def stop(self):
-        self.running = False
-        for name, data in self.processes.items():
+        """Full, fault-isolated teardown of the supervisor (Reqs 14.2, 14.8).
+
+        Each step is independently guarded so that one failure never aborts the
+        rest of teardown, and no exception escapes ``stop()``. Order:
+          1. mark not-running
+          2. terminate + join all child processes
+          3. tear down servers (no-op on base, IPC bridge + Control_Server on
+             the daemon subclass)
+          4. shut down the multiprocessing Manager so its process does not leak
+        """
+        logger.info("supervisor_teardown_started")
+
+        # 1. Stop the monitor loop.
+        try:
+            self.running = False
+        except Exception as e:
+            logger.error("teardown_set_running_failed", error=str(e))
+
+        # 2. Terminate + join all child processes. Snapshot under the lock
+        #    (Req 14.6 / task 3.1) so a concurrent restart cannot mutate the
+        #    set mid-iteration.
+        try:
+            with self._processes_lock:
+                process_items = list(self.processes.items())
+            for name, data in process_items:
+                try:
+                    p = data["process"]
+                    if p.is_alive():
+                        p.terminate()
+                        p.join(timeout=5)
+                    if p.is_alive():
+                        p.kill()
+                        p.join(timeout=5)
+                    logger.info(f"child_terminated | name={name}")
+                except Exception as e:
+                    logger.error("child_terminate_failed", name=name, error=str(e))
+        except Exception as e:
+            logger.error("teardown_children_failed", error=str(e))
+
+        # 3. Tear down subclass-owned servers (IPC bridge + Control_Server).
+        try:
+            self._teardown_servers()
+        except Exception as e:
+            logger.error("teardown_servers_failed", error=str(e))
+
+        # 4. Shut down the multiprocessing Manager so its process is released
+        #    (Req 14.2) — without this the manager process leaks.
+        try:
+            if getattr(self, "_manager", None):
+                self._manager.shutdown()
+                logger.info("manager_shutdown_complete")
+        except Exception as e:
+            logger.error("manager_shutdown_failed", error=str(e))
+
+        logger.info("supervisor_teardown_complete")
+
+    def restart_subsystem(self, name: str) -> bool:
+        """Restart a single managed subsystem by role name.
+
+        Serializes access to the process set (Req 14.6) and confirms the
+        predecessor process is fully dead before spawning the successor so no
+        orphaned predecessor for the same role remains running (Req 14.7).
+
+        Returns True on success, False if the subsystem name is unknown.
+        """
+        # Terminate the predecessor under the lock, then release before calling
+        # start_process (which re-acquires the lock for its own mutation). The
+        # RLock makes nested acquisition safe regardless.
+        with self._processes_lock:
+            data = self.processes.get(name)
+            if data is None:
+                logger.warning(f"restart_subsystem_unknown | name={name}")
+                return False
+
+            target = data["target"]
+            restarts = data["restarts"]
             p = data["process"]
+
+            # Confirm the predecessor is dead before respawning.
             if p.is_alive():
                 p.terminate()
                 p.join(timeout=5)
+                if p.is_alive():
+                    p.kill()
+                    p.join(timeout=5)
+
+            if p.is_alive():
+                # Could not confirm termination — refuse to spawn a successor so
+                # we never orphan the predecessor.
+                logger.error(
+                    f"restart_subsystem_failed | name={name} | predecessor_still_alive"
+                )
+                return False
+
+        logger.info(f"restart_subsystem | name={name} | predecessor_terminated")
+        # start_process re-acquires the lock to record the successor entry.
+        self.start_process(name, target, restarts=restarts)
+        return True
 
     def reboot(self):
         """Full system restart by replacing the current process."""
@@ -609,7 +798,9 @@ class PhoenixSupervisor:
         logger.info("executing_os_reboot")
 
         # Kill all managed processes
-        for name, data in self.processes.items():
+        with self._processes_lock:
+            process_items = list(self.processes.items())
+        for name, data in process_items:
             p = data["process"]
             if p.is_alive():
                 p.terminate()
@@ -638,7 +829,9 @@ class PhoenixSupervisor:
         """Returns a formatted string of current system health for the Brain."""
         vitals = self.doctor.obs.get_vitals()
         stats = []
-        for name, data in self.processes.items():
+        with self._processes_lock:
+            process_items = list(self.processes.items())
+        for name, data in process_items:
             p = data["process"]
             restarts = data["restarts"]
             pid = p.pid

@@ -19,7 +19,7 @@ export function EmptyState({ icon, title, description, action, terminal, classNa
   if (useTerminal) {
     return (
       <div className={cn('flex flex-col items-center justify-center py-12', className)}>
-        <div className="font-mono text-charlie-dim/60 text-sm text-center space-y-1">
+        <div className="font-mono text-charlie-dim/60 text-sm text-center space-y-1 bg-charlie-card/30 p-4 rounded-xl border border-charlie-border/20 shadow-inner">
           <span className="text-charlie-cyan/40">$</span> {title.toLowerCase().replace(/\s+/g, '_')}
           <span className="inline-block w-2 h-4 bg-charlie-cyan/40 ml-1 animate-pulse" />
         </div>

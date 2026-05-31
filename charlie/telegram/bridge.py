@@ -447,7 +447,6 @@ class TelegramBridge(multiprocessing.Process):
         text = update.message.text
 
         # Prompt injection sanitization
-        from charlie.brain.core import Brain
         _injection_patterns = [
             r"(?i)ignore\s+(all\s+)?(previous|prior|above|earlier)",
             r"(?i)you\s+are\s+now\s+(a|an|the)",

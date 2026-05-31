@@ -102,10 +102,10 @@ class GitHubIntegration(BaseIntegration):
             logger.error(f"github | fetch_failed | {e}")
             return []
 
-    def execute(self, action: str, **kwargs) -> bool:
-        """Read-only implementation."""
+    def execute(self, action: str, **kwargs) -> str:
+        """GitHub write actions are not yet implemented. Read-only fetch is available."""
         logger.warning(f"github | execute_not_implemented | action={action}")
-        return False
+        return "GitHub write actions are not yet implemented. Read-only fetch is available."
 
     def disconnect(self):
         self.client = None

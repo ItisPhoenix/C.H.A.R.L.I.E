@@ -7,9 +7,8 @@ import { SearchInput } from '@/components/ui/SearchInput'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
-import { HudCorners } from '@/components/background/HudCorners'
 import * as api from '@/lib/api'
-import { formatTimestamp, cn } from '@/lib/utils'
+import { formatTimestamp, cn, createVisibilityAwareInterval } from '@/lib/utils'
 import { useWSEvent } from '@/lib/ws'
 import type { ToolExecution } from '@/lib/types'
 
@@ -38,13 +37,21 @@ function ToolRow({ exec }: { exec: ToolExecution }) {
   const [expanded, setExpanded] = useState(false)
 
   return (
-    <HudCorners>
       <div
         className={cn(
           'border-l-2 rounded-r-lg bg-charlie-card/50 mb-2 cursor-pointer transition-all hover:bg-charlie-card/80 hover:shadow-neon-cyan-sm',
           borderColorMap[exec.status] || 'border-l-charlie-border',
         )}
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
         onClick={() => setExpanded(!expanded)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            setExpanded(!expanded)
+          }
+        }}
       >
         <div className="flex items-center justify-between p-3">
           <div className="flex items-center gap-3 min-w-0">
@@ -88,7 +95,7 @@ function ToolRow({ exec }: { exec: ToolExecution }) {
             {exec.input && Object.keys(exec.input).length > 0 && (
               <div className="terminal-block">
                 <div className="terminal-header">
-                  <div className="dot" style={{ background: '#00D4FF' }} />
+                  <div className="dot" style={{ background: '#88ccff' }} />
                   <span className="text-charlie-dim text-xs">input</span>
                 </div>
                 <pre className="terminal-content text-xs overflow-x-auto">
@@ -129,7 +136,6 @@ function ToolRow({ exec }: { exec: ToolExecution }) {
           </div>
         )}
       </div>
-    </HudCorners>
   )
 }
 
@@ -145,8 +151,8 @@ export default function ToolLogPage() {
     try {
       const data = await api.fetchToolLog()
       setExecutions(data.executions)
-    } catch {
-      // keep existing state
+    } catch (e) {
+      console.error('Failed to load tool log:', e)
     } finally {
       setLoading(false)
     }
@@ -154,8 +160,7 @@ export default function ToolLogPage() {
 
   useEffect(() => {
     loadLog()
-    const interval = setInterval(loadLog, 3000)
-    return () => clearInterval(interval)
+    return createVisibilityAwareInterval(loadLog, 3000)
   }, [loadLog])
 
   // Real-time WS updates for new tool executions

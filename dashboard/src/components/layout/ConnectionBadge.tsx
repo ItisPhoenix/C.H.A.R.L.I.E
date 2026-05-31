@@ -7,14 +7,14 @@ export function ConnectionBadge() {
   const status = useDashboardStore((s) => s.connectionStatus)
 
   const config = {
-    connected: { label: 'Connected', dot: 'bg-charlie-green', shadow: 'shadow-charlie-green/50' },
-    disconnected: { label: 'Disconnected', dot: 'bg-charlie-red', shadow: 'shadow-charlie-red/50' },
-    reconnecting: { label: 'Reconnecting', dot: 'bg-charlie-amber', shadow: 'shadow-charlie-amber/50' },
+    connected: { label: 'Sync Active', dot: 'bg-charlie-green', shadow: 'rgba(34,197,94,0.3)' },
+    disconnected: { label: 'Link Severed', dot: 'bg-charlie-red', shadow: 'rgba(239,68,68,0.3)' },
+    reconnecting: { label: 'Relinking...', dot: 'bg-charlie-amber', shadow: 'rgba(245,158,11,0.3)' },
   }[status]
 
   return (
     <div className="flex items-center gap-2">
-      <span className={cn('w-2 h-2 rounded-full', config.dot, `shadow-[0_0_6px]`, config.shadow)} />
+      <span className={cn('w-2 h-2 rounded-full', config.dot)} style={{ boxShadow: `0 0 10px ${config.shadow}` }} />
       <span className="text-charlie-dim text-xs">{config.label}</span>
     </div>
   )

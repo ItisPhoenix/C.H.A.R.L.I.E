@@ -22,7 +22,7 @@ export function ResourceBar({ label, value, max = 100, unit = '%', className }: 
       </div>
       <div className="h-2 bg-charlie-border rounded-full overflow-hidden">
         <div
-          className={cn('h-full rounded-full transition-all duration-700', color)}
+          className={cn('h-full rounded-full transition-all duration-300', color)}
           style={{ width: `${pct}%` }}
         />
       </div>

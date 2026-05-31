@@ -20,20 +20,28 @@ module.exports = {
         'charlie-orange': 'var(--charlie-orange)',
         'charlie-red': 'var(--charlie-red)',
         'charlie-green': 'var(--charlie-green)',
+        'charlie-bg': 'var(--charlie-card)',
         'voice-listening': 'var(--voice-listening)',
         'voice-processing': 'var(--voice-processing)',
         'voice-speaking': 'var(--voice-speaking)',
         'voice-idle': 'var(--voice-idle)',
       },
       fontFamily: {
-        display: ['var(--font-display)', 'sans-serif'],
-        body: ['var(--font-body)', 'system-ui', 'sans-serif'],
+        sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],
+        display: ['var(--font-sans)', 'system-ui', 'sans-serif'],
+        body: ['var(--font-sans)', 'system-ui', 'sans-serif'],
         mono: ['var(--font-mono)', 'Consolas', 'monospace'],
       },
       boxShadow: {
-        'neon-cyan': '0 0 10px rgba(0, 212, 255, 0.3), 0 0 30px rgba(0, 212, 255, 0.1)',
-        'neon-glow': '0 0 20px rgba(0, 212, 255, 0.4), 0 0 60px rgba(0, 212, 255, 0.15)',
-        'neon-cyan-sm': '0 0 5px rgba(0, 212, 255, 0.2), 0 0 15px rgba(0, 212, 255, 0.08)',
+        'premium': '0 4px 24px -4px rgba(0, 0, 0, 0.4)',
+        'glow': '0 0 12px rgba(255, 255, 255, 0.1)',
+        'inner-light': 'inset 0 1px 0 0 rgba(255, 255, 255, 0.05)',
+        // NOTE: rgba(136, 204, 255, ...) values are dark-mode only (charlie-cyan #88ccff).
+        // Tailwind config cannot use CSS var() in boxShadow, so these remain hardcoded.
+        'neon-glow': '0 0 10px rgba(136, 204, 255, 0.15), 0 0 30px rgba(136, 204, 255, 0.1)',
+        'neon-glow-strong': '0 0 20px rgba(136, 204, 255, 0.3), 0 0 60px rgba(136, 204, 255, 0.15)',
+        'neon-cyan': '0 0 10px rgba(136, 204, 255, 0.2)',
+        'neon-cyan-sm': '0 0 6px rgba(136, 204, 255, 0.15)',
       },
       animation: {
         'pulse-slow': 'pulse 3s ease-in-out infinite',
@@ -50,9 +58,11 @@ module.exports = {
         'stagger': 'fadeInUp 0.3s ease-out both',
       },
       keyframes: {
+        // NOTE: rgba(136, 204, 255, ...) values are dark-mode only (charlie-cyan #88ccff).
+        // Tailwind keyframes cannot use CSS var() in box-shadow values.
         glow: {
-          '0%': { boxShadow: '0 0 5px rgba(0, 212, 255, 0.2)' },
-          '100%': { boxShadow: '0 0 20px rgba(0, 212, 255, 0.4)' },
+          '0%': { boxShadow: '0 0 5px rgba(136, 204, 255, 0.2)' },
+          '100%': { boxShadow: '0 0 20px rgba(136, 204, 255, 0.4)' },
         },
         slideIn: {
           '0%': { opacity: '0', transform: 'translateY(-10px)' },
@@ -71,8 +81,8 @@ module.exports = {
           '100%': { opacity: '1', transform: 'translateY(0)' },
         },
         voicePulse: {
-          '0%, 100%': { opacity: '0.6', transform: 'scale(1)' },
-          '50%': { opacity: '1', transform: 'scale(1.1)' },
+          '0%, 100%': { opacity: '0.8', transform: 'scale(1)', boxShadow: '0 0 10px var(--tw-shadow-color)' },
+          '50%': { opacity: '1', transform: 'scale(1.05)', boxShadow: '0 0 25px var(--tw-shadow-color)' },
         },
         scanline: {
           '0%': { transform: 'translateY(-100%)' },
@@ -86,9 +96,18 @@ module.exports = {
           '80%': { transform: 'translate(2px, -2px)' },
           '100%': { transform: 'translate(0)' },
         },
+        // NOTE: rgba(136, 204, 255, ...) values are dark-mode only (charlie-cyan #88ccff).
         neonPulse: {
-          '0%, 100%': { boxShadow: '0 0 10px rgba(0, 212, 255, 0.3)' },
-          '50%': { boxShadow: '0 0 25px rgba(0, 212, 255, 0.6)' },
+          '0%, 100%': { boxShadow: '0 0 10px rgba(136, 204, 255, 0.3)' },
+          '50%': { boxShadow: '0 0 25px rgba(136, 204, 255, 0.6)' },
+        },
+        'slide-in': {
+          '0%': { opacity: '0', transform: 'scale(0.95) translateY(10px)' },
+          '100%': { opacity: '1', transform: 'scale(1) translateY(0)' },
+        },
+        'slide-up': {
+          '0%': { opacity: '0', transform: 'translateY(10px)' },
+          '100%': { opacity: '1', transform: 'translateY(0)' },
         },
         hexSpin: {
           '0%': { transform: 'rotate(0deg)' },

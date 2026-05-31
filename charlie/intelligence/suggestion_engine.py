@@ -153,6 +153,10 @@ class SuggestionEngine:
         """Set the pattern tracker dependency."""
         self._pattern_tracker = tracker
 
+    def set_brain(self, brain):
+        """Set the brain reference for calendar access in meeting reminders."""
+        self._brain = brain
+
     def set_pattern_detector(self, detector: PatternDetector):
         """Set the PatternDetector dependency."""
         self._pattern_detector = detector
@@ -331,6 +335,7 @@ class SuggestionEngine:
                 if now <= start <= window:
                     title = event.get('title', event.get('summary', 'Meeting'))
                     time_str = start.strftime('%H:%M')
+                    minutes_until = int((start - now).total_seconds() / 60)
 
                     # Avoid duplicate reminders
                     event_id = event.get('id', title)
@@ -342,7 +347,7 @@ class SuggestionEngine:
                     suggestion = Suggestion(
                         id=f"meeting_{event_id}",
                         type="meeting_reminder",
-                        message=f"You have '{title}' at {time_str} (in ~{(start - now).minutes} min).",
+                        message=f"You have '{title}' at {time_str} (in ~{minutes_until} min).",
                         actions=[
                             {"label": "Thanks", "action": "dismiss"},
                             {"label": "Prep notes", "action": "meeting_prep"},

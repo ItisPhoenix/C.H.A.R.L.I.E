@@ -388,6 +388,7 @@ class ChainExecutor:
                     full_response_parts = []
                     reasoning_content_buffer_parts = []
                     in_thought_block = False
+                    self._last_fa_streamed_len = 0
                     source = chain.source
 
                     try:
@@ -422,40 +423,8 @@ class ChainExecutor:
                                     self._speculative_triggered = False
 
                                 # ── Live "Thinking" Streaming to Chat Widget ──────────────────
-                                # If the LLM starts speaking (not just reasoning), push it to Chat
-                                # Filter: skip if inside thought block or looks like empty noise
-                                if not in_thought_block and content.strip():
-                                    # Buffering to reduce IPC frequency
-                                    if not hasattr(self, "_status_buffer"):
-                                        self._status_buffer = ""
-                                        self._last_stream_emit = 0.0
-
-                                    self._status_buffer += content
-                                    now = time.time()
-                                    if now - self._last_stream_emit > 0.15: # Emit every 150ms
-                                        if source == "local" or source == "all":
-                                            brain._safe_put(
-                                                brain.status_q,
-                                                {
-                                                    "type": "THINKING_STATUS",
-                                                    "content": self._status_buffer,
-                                                },
-                                            )
-                                        self._status_buffer = ""
-                                        self._last_stream_emit = now
-
-                                    # B. Telegram Bridge
-                                    if (
-                                        source.startswith("telegram")
-                                        or source == "all"
-                                    ) and brain.telegram_q:
-                                        brain._safe_put(
-                                            brain.telegram_q,
-                                            {
-                                                "type": "STREAM_PARTIAL",
-                                                "content": content,
-                                            },
-                                        )
+                                # Only stream the extracted final_answer content (not raw JSON tokens)
+                                # Dashboard and Telegram streaming moved to final_answer extraction block below
 
                                 # ── Live Pipelining: final_answer -> TTS (Issue: natural-convo.md) ──
                                 # Detect when the model starts outputting the final_answer field
@@ -479,6 +448,42 @@ class ChainExecutor:
                                         current_fa = current_fa[
                                             : current_fa.find('"')
                                         ]
+
+                                    # ── Stream clean final_answer to Dashboard & Telegram ──
+                                    fa_clean = (
+                                        current_fa
+                                        .replace('\\"', '"')
+                                        .replace("\\n", " ")
+                                        .replace("\\t", " ")
+                                    )
+                                    fa_clean = re.sub(r"<[^>]+>", "", fa_clean)
+                                    fa_clean = re.sub(
+                                        r"(?i)\b(user|assistant|system|sir|tts|charlie):\s*",
+                                        "", fa_clean,
+                                    )
+                                    fa_clean = fa_clean.replace("<endofturn>", "").replace("<startofturn>", "").strip()
+
+                                    if fa_clean:
+                                        # Track what we've already streamed to avoid re-sending
+                                        if not hasattr(self, "_last_fa_streamed_len"):
+                                            self._last_fa_streamed_len = 0
+                                        if len(fa_clean) > self._last_fa_streamed_len:
+                                            new_text = fa_clean[self._last_fa_streamed_len:]
+                                            self._last_fa_streamed_len = len(fa_clean)
+
+                                            # Dashboard: THINKING_STATUS with clean text
+                                            if new_text.strip():
+                                                if source == "local" or source == "all":
+                                                    brain._safe_put(
+                                                        brain.status_q,
+                                                        {"type": "THINKING_STATUS", "content": new_text},
+                                                    )
+                                                # Telegram: STREAM_PARTIAL with clean text
+                                                if (source.startswith("telegram") or source == "all") and brain.telegram_q:
+                                                    brain._safe_put(
+                                                        brain.telegram_q,
+                                                        {"type": "STREAM_PARTIAL", "content": new_text},
+                                                    )
 
                                     # Split into fragments (sentences or long clauses) and push to TTS immediately
                                     fa_fragments = re.split(

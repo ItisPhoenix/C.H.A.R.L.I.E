@@ -5,6 +5,7 @@ DaemonSupervisor extends PhoenixSupervisor to run Charlie as a headless daemon.
 Dashboard is the sole interface.
 """
 
+import asyncio
 import threading
 import time
 
@@ -32,9 +33,6 @@ class DaemonSupervisor(PhoenixSupervisor):
 
         # Start control server if available
         self._start_control_server()
-
-        # Start dashboard web server on port 3000
-        self._start_dashboard()
 
         # Start system tray icon
         self._start_tray()
@@ -77,23 +75,51 @@ class DaemonSupervisor(PhoenixSupervisor):
         except Exception as e:
             logger.error("ipc_bridge_start_failed", error=str(e))
 
-    def _start_dashboard(self):
-        """Start the dashboard FastAPI server on port 3005 in a background thread."""
-        try:
-            def _run_dashboard():
-                import uvicorn
-                from charlie.dashboard.main import app
-                uvicorn.run(app, host="0.0.0.0", port=3005, log_level="warning")
+    def _teardown_servers(self) -> None:
+        """Stop the IPC bridge and Control_Server during supervisor teardown.
 
-            thread = threading.Thread(
-                target=_run_dashboard, daemon=True, name="Dashboard"
-            )
-            thread.start()
-            logger.info("dashboard_started | port=3005")
-        except ImportError:
-            logger.warning("dashboard_not_available | skipping")
+        Overrides the base no-op hook (Reqs 14.2, 14.8). Each server is torn
+        down under its own try/except so a failure stopping one does not block
+        the other — or the manager shutdown that follows in ``stop()``.
+
+        The Control_Server's ``stop()`` is an async coroutine running on its own
+        event loop in a separate thread. We schedule it onto that loop via
+        ``run_coroutine_threadsafe`` and wait briefly for it to release port
+        8090 (Req 14.5). If the loop is gone or scheduling fails, we fall back
+        to flipping the server's ``_running`` flag so its run loop unwinds.
+        """
+        # Stop the IPC bridge (sole status_q consumer) first so it stops
+        # forwarding to a Control_Server that is about to close.
+        try:
+            if getattr(self, "_ipc_bridge", None) is not None:
+                self._ipc_bridge.stop()
+                logger.info("ipc_bridge_stopped_on_teardown")
         except Exception as e:
-            logger.error("dashboard_start_failed", error=str(e))
+            logger.error("ipc_bridge_teardown_failed", error=str(e))
+
+        # Stop the Control_Server (async coroutine on its own loop/thread).
+        try:
+            cs = getattr(self, "_control_server", None)
+            if cs is not None:
+                loop = getattr(cs, "_loop", None)
+                stopped = False
+                if loop is not None and loop.is_running():
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(cs.stop(), loop)
+                        future.result(timeout=5)
+                        stopped = True
+                        logger.info("control_server_stopped_on_teardown")
+                    except Exception as e:
+                        logger.error("control_server_stop_coro_failed", error=str(e))
+                if not stopped:
+                    # Fall back to signalling the run loop to unwind.
+                    try:
+                        cs._running = False
+                        logger.info("control_server_stop_fallback")
+                    except Exception as e:
+                        logger.error("control_server_stop_fallback_failed", error=str(e))
+        except Exception as e:
+            logger.error("control_server_teardown_failed", error=str(e))
 
     def _start_tray(self):
         """Start system tray icon in a background thread."""
@@ -149,7 +175,7 @@ class DaemonSupervisor(PhoenixSupervisor):
     def _run_audio_safe(audio_q, brain_task_q, tts_q, status_q, audio_cmd_q,
                         heartbeat, interrupt_event):
         from dotenv import load_dotenv
-        load_dotenv()
+        load_dotenv(override=True)
         from charlie.config import ensure_initialized
         ensure_initialized()
 
@@ -163,9 +189,10 @@ class DaemonSupervisor(PhoenixSupervisor):
     @staticmethod
     def _run_brain_safe(brain_task_q, tts_q, status_q, audio_cmd_q,
                         browser_req_q, browser_res_q, telegram_q, heartbeat,
-                        interrupt_event, reboot_event):
+                        interrupt_event, reboot_event, brain_req_q=None,
+                        brain_res_q=None):
         from dotenv import load_dotenv
-        load_dotenv()
+        load_dotenv(override=True)
         from charlie.config import ensure_initialized
         ensure_initialized()
 
@@ -177,14 +204,15 @@ class DaemonSupervisor(PhoenixSupervisor):
             audio_cmd_q=audio_cmd_q, browser_req_q=browser_req_q,
             browser_res_q=browser_res_q, telegram_q=telegram_q,
             heartbeat=heartbeat, interrupt_event=interrupt_event,
-            reboot_event=reboot_event,
+            reboot_event=reboot_event, brain_req_q=brain_req_q,
+            brain_res_q=brain_res_q,
         )
         brain.run()
 
     @staticmethod
     def _run_browser_safe(browser_req_q, browser_res_q, status_q, heartbeat):
         from dotenv import load_dotenv
-        load_dotenv()
+        load_dotenv(override=True)
         from charlie.config import ensure_initialized
         ensure_initialized()
 
@@ -197,7 +225,7 @@ class DaemonSupervisor(PhoenixSupervisor):
     def _run_telegram_safe(brain_task_q, status_q, telegram_q, audio_cmd_q,
                            heartbeat):
         from dotenv import load_dotenv
-        load_dotenv()
+        load_dotenv(override=True)
         from charlie.config import ensure_initialized
         ensure_initialized()
 
@@ -209,7 +237,7 @@ class DaemonSupervisor(PhoenixSupervisor):
     @staticmethod
     def _run_vision_safe(brain_task_q, status_q, heartbeat):
         from dotenv import load_dotenv
-        load_dotenv()
+        load_dotenv(override=True)
         from charlie.config import ensure_initialized
         ensure_initialized()
 

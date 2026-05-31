@@ -10,6 +10,10 @@ from charlie.tools.tool_decorator import tool, RiskTier
 )
 def set_volume(level: int) -> str:
     """Set system volume to a specific level."""
+    from charlie.security.safety_guard import clamp_volume
+
+    level = clamp_volume(level)
+
     try:
         from ctypes import cast, POINTER
         from comtypes import CLSCTX_ALL

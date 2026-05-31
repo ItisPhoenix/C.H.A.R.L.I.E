@@ -1,5 +1,6 @@
 'use client'
 
+import { useEffect, useRef } from 'react'
 import { cn } from '@/lib/utils'
 
 interface ModalProps {
@@ -11,27 +12,39 @@ interface ModalProps {
 }
 
 export function Modal({ open, onClose, title, children, className }: ModalProps) {
+  const closeRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+
+    // Focus the close button when modal opens
+    closeRef.current?.focus()
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        onClose()
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [open, onClose])
+
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    <div className="fixed inset-0 z-50 flex items-center justify-center" role="dialog" aria-modal="true" aria-label={title}>
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
       <div
         className={cn(
-          'relative glass-card p-6 max-w-md w-full mx-4 animate-slide-in',
-          'border-charlie-cyan/25 shadow-neon-cyan',
+          'relative glass-card p-6 max-w-md w-full mx-4 animate-slide-in rounded-2xl',
+          'border-charlie-cyan/30 shadow-neon-glow',
           className,
         )}
       >
-        {/* Scanline header overlay */}
-        <div
-          className="absolute top-0 left-0 right-0 h-12 pointer-events-none rounded-t-xl"
-          style={{
-            background: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0, 212, 255, 0.03) 2px, rgba(0, 212, 255, 0.03) 4px)',
-          }}
-        />
         <div className="relative flex items-center justify-between mb-4">
-          <h2 className="font-display text-charlie-cyan font-bold tracking-wide">{title}</h2>
+          <h2 className="font-display bg-gradient-to-r from-charlie-cyan to-charlie-teal bg-clip-text text-transparent font-bold tracking-[0.05em] uppercase text-sm">{title}</h2>
           <button
+            ref={closeRef}
             onClick={onClose}
             className="text-charlie-dim hover:text-charlie-text transition-colors cursor-pointer"
             aria-label="Close modal"

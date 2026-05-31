@@ -61,6 +61,15 @@ def tool(
             "required": required,
         }
 
+        # Detect variadic (*args) parameters for VARIADIC calling convention
+        variadic_param = None
+        for param_name, param in sig.parameters.items():
+            if param_name in ("self", "cls"):
+                continue
+            if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                variadic_param = param_name
+                break
+
         # Store metadata on the function
         # Extract integer value from RiskTier enum for compatibility
         tier_value = risk_tier.value if hasattr(risk_tier, 'value') else int(risk_tier)
@@ -73,6 +82,8 @@ def tool(
             "category": category,
             "timeout": timeout,
             "handler": func,
+            "calling_convention": "VARIADIC" if variadic_param else "KWARGS",
+            "variadic_param": variadic_param,
         }
         # Also set _risk_tier so get_tool_tier() from security/tiers.py can find it
         func._risk_tier = tier_value

@@ -10,6 +10,7 @@ import json
 import re
 import sqlite3
 import time
+from collections import deque
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
@@ -41,6 +42,9 @@ class OutcomeTracker:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or OUTCOMES_DB
         SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+        # Bounded in-memory ring buffer of recent tool gate/execution decisions
+        # for the dashboard (RPC GET_TOOL_LOG). Newest entries are appended last.
+        self.tool_exec_log: deque[dict] = deque(maxlen=200)
         self._init_db()
 
     def _init_db(self) -> None:
@@ -151,6 +155,67 @@ class OutcomeTracker:
             agent_name=agent_name,
             details=details,
         )
+
+    # --- Tool execution / gate-decision log ---
+
+    def record_tool_decision(
+        self,
+        tool_name: str,
+        risk_tier,
+        decision: str,
+        outcome: Optional[str] = None,
+        details: Optional[dict] = None,
+    ) -> None:
+        """Record a single tool gate/execution decision.
+
+        ``decision`` is one of "gated" | "confirmed" | "cancelled" | "executed".
+        ``risk_tier`` may be a :class:`RiskTier` enum or a string; either way its
+        string name (e.g. ``"TIER_2"``) is stored.
+
+        Exactly-once: a single call appends exactly one ring-buffer entry and
+        writes exactly one SQLite row, so the in-memory dashboard view and the
+        persisted learning record stay in lockstep.
+        """
+        # Normalize the risk tier to its string name (accept enum or string).
+        if risk_tier is None:
+            tier_name = None
+        elif hasattr(risk_tier, "name"):
+            tier_name = risk_tier.name
+        else:
+            tier_name = str(risk_tier)
+
+        # 1) Append to the in-memory ring buffer (newest last).
+        self.tool_exec_log.append(
+            {
+                "timestamp": time.time(),
+                "tool_name": tool_name,
+                "risk_tier": tier_name,
+                "decision": decision,
+                "outcome": outcome,
+                "details": details,
+            }
+        )
+
+        # 2) Persist a single SQLite row so the decision survives restart and
+        #    feeds the learning subsystem. The outcome_type is the explicit
+        #    outcome when provided, otherwise the decision itself.
+        persisted_details = dict(details) if details else {}
+        persisted_details.setdefault("decision", decision)
+        persisted_details.setdefault("risk_tier", tier_name)
+        self.record_outcome(
+            event_type="tool_call",
+            outcome_type=outcome or decision,
+            tool_name=tool_name,
+            details=persisted_details,
+        )
+
+    def get_tool_exec_log(self, limit: int = 50) -> list[dict]:
+        """Return the most recent ``limit`` tool-decision entries, newest first."""
+        if limit <= 0:
+            return []
+        entries = list(self.tool_exec_log)[-limit:]
+        entries.reverse()
+        return entries
 
     # --- Queries ---
 

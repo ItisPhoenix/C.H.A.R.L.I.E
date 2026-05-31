@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from charlie.utils.persona import get_system_prompt
 
 logger = logging.getLogger("charlie.config")
-load_dotenv()
+load_dotenv(override=True)
 
 
 class LLMSettings:
@@ -38,9 +38,12 @@ class LLMSettings:
 
 class ResourceSettings:
     def __init__(self):
-        self.vram_threshold_mb = 6500
+        self.vram_budget_mb = 7168
+        self.vram_warning_mb = 6500
+        self.vram_threshold_mb = 6500  # kept for backward compat
         self.model_priority = {"text": "primary", "vision": "on_demand"}
-        self.model_unload_delay = 30
+        self.model_unload_delay_s = 30
+        self.model_unload_delay = 30  # kept for backward compat
         self.max_context_tokens = 4096
 
 
@@ -51,7 +54,7 @@ class AudioSettings:
         self.stt_device = "cuda"
         self.stt_initial_prompt = "Charlie, C.H.A.R.L.I.E., Phoenix protocol, system commands, code, terminal."
         self.stt_language = "en"
-        self.kokoro_voice = "af_sarah"
+        self.kokoro_voice = "af_heart"
         self.kokoro_speed = 1.0
         self.kokoro_lang = "en-us"
         self.voice_mode = "local"
@@ -73,7 +76,10 @@ class WatchdogSettings:
         self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.reports_path = "charlie/reports"
         self.patch_timeout = 60
-        self.auto_patch = True
+        # Deprecated: kept for backward compatibility only. The authoritative
+        # auto-patcher flag is now ``settings.security.auto_patcher_enabled``
+        # (default False). Do not read this attribute for gating decisions.
+        self.auto_patch = False
 
 
 class SecuritySettings:
@@ -82,6 +88,11 @@ class SecuritySettings:
         self.snapshots_enabled = True
         self.require_confirmation_tier1 = True
         self.restricted_paths = ["charlie/security", "charlie/watchdog"]
+        # Dangerous capabilities default to OFF (Reqs 17.1, 17.2). These are the
+        # canonical feature flags; the Operator may enable them via
+        # charlie_config.json ("safety" block) and changes are persisted back.
+        self.self_modify_enabled = False
+        self.auto_patcher_enabled = False
 
 
 class AuditSettings:
@@ -121,6 +132,27 @@ class Settings:
         self.providers = {}
         self.mcp_servers = {}
 
+    def to_dict(self):
+        """Serialize all settings to a flat dict for API responses."""
+        def _obj_to_dict(obj):
+            if hasattr(obj, '__dict__'):
+                return {k: v for k, v in obj.__dict__.items() if not k.startswith('_')}
+            return obj
+
+        return {
+            "llm": _obj_to_dict(self.llm),
+            "audio": _obj_to_dict(self.audio),
+            "supervisor": _obj_to_dict(self.supervisor),
+            "security": _obj_to_dict(self.security),
+            "audit": _obj_to_dict(self.audit),
+            "startup": _obj_to_dict(self.startup),
+            "persona": _obj_to_dict(self.persona),
+            "resources": _obj_to_dict(self.resources),
+            "integrations": self.integrations,
+            "providers": self.providers,
+            "mcp_servers": self.mcp_servers,
+        }
+
 
 def load_json_overrides():
     """Reads charlie_config.json and overrides default settings."""
@@ -159,6 +191,10 @@ def load_json_overrides():
                 settings.security.require_confirmation_tier1 = s[
                     "require_confirmation_tier1"
                 ]
+            if "self_modify_enabled" in s:
+                settings.security.self_modify_enabled = s["self_modify_enabled"]
+            if "auto_patcher_enabled" in s:
+                settings.security.auto_patcher_enabled = s["auto_patcher_enabled"]
 
         # Startup
         if "startup" in data:
@@ -191,6 +227,19 @@ def load_json_overrides():
         if "providers" in data:
             settings.providers = data["providers"]
 
+        # Resources (VRAM budget, model priority)
+        if "resources" in data:
+            r = data["resources"]
+            if "vram_budget_mb" in r:
+                settings.resources.vram_budget_mb = int(r["vram_budget_mb"])
+            if "vram_warning_mb" in r:
+                settings.resources.vram_warning_mb = int(r["vram_warning_mb"])
+            if "model_unload_delay_s" in r:
+                settings.resources.model_unload_delay_s = int(r["model_unload_delay_s"])
+                settings.resources.model_unload_delay = int(r["model_unload_delay_s"])
+            if "model_priority" in r:
+                settings.resources.model_priority = r["model_priority"]
+
         # MCP Servers
         if "mcp_servers" in data:
             settings.mcp_servers = data["mcp_servers"]
@@ -200,6 +249,43 @@ def load_json_overrides():
 
 
 settings = Settings()
+
+
+def persist_safety_flags() -> None:
+    """Persist the current safety feature flags back to charlie_config.json (Req 17.6).
+
+    Merges the live ``settings.security`` safety flags (``self_modify_enabled``,
+    ``auto_patcher_enabled``, ``require_confirmation_tier1``) into the file's
+    ``"safety"`` object so changes survive a restart. Other top-level keys and
+    existing ``safety`` keys are preserved. Tolerates the file not existing by
+    creating it.
+    """
+    config_path = Path(__file__).parent.parent / "charlie_config.json"
+
+    data = {}
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                data = {}
+        except Exception as e:
+            logger.error(f"persist_safety_flags failed to read existing config: {e}")
+            data = {}
+
+    safety = data.get("safety")
+    if not isinstance(safety, dict):
+        safety = {}
+    safety["self_modify_enabled"] = settings.security.self_modify_enabled
+    safety["auto_patcher_enabled"] = settings.security.auto_patcher_enabled
+    safety["require_confirmation_tier1"] = settings.security.require_confirmation_tier1
+    data["safety"] = safety
+
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"persist_safety_flags failed to write config: {e}")
 
 
 def setup_windows_vault():

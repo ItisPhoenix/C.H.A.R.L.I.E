@@ -17,11 +17,12 @@ export function WaveformVisualizer({ active, volumeLevel = 0, className }: Wavef
         return (
           <div
             key={i}
-            className="w-1 bg-charlie-cyan rounded-full transition-all"
+            className="w-1.5 bg-gradient-to-t from-charlie-cyan to-charlie-teal rounded-full transition-all duration-300"
             style={{
               height: `${Math.max(4, height)}px`,
-              opacity: active ? 0.8 : 0.2,
-              animation: active ? `waveform 0.${5 + i}s ease-in-out infinite` : 'none',
+              opacity: active ? 1 : 0.15,
+              animation: active ? `waveform 0.${4 + i}s ease-in-out infinite alternate` : 'none',
+              boxShadow: active ? '0 0 10px color-mix(in srgb, var(--charlie-cyan) 30%, transparent)' : 'none',
               ['--wave-height' as string]: `${20 + volumeLevel * 30}px`,
             }}
           />

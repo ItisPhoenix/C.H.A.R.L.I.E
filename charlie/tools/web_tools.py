@@ -128,6 +128,12 @@ def scrape_page(url: str, selector: str = "body") -> str:
 )
 def check_website(url: str) -> str:
     """Check website availability."""
+    from charlie.security.safety_guard import check_ssrf
+
+    allowed, msg = check_ssrf(url)
+    if not allowed:
+        return msg
+
     try:
         import requests
         resp = requests.head(url, timeout=5, allow_redirects=True)

@@ -11,12 +11,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-# ── Tool timeout constants (seconds) ─────────────────────────────────────────
-VISION_TOOL_TIMEOUT = 45   # Vision model inference (screen analysis, image description)
-GLOBE_REFRESH_TIMEOUT = 15 # Globe data refresh
-WEATHER_API_TIMEOUT = 10   # Geocoding + weather API calls
-HISTORY_MESSAGE_LIMIT = 50 # Max messages persisted to disk
-
 import pyautogui
 import pygetwindow as gw
 import pyperclip
@@ -34,6 +28,12 @@ from charlie.config import settings
 from charlie.integrations.github import GitHubIntegration
 from charlie.integrations.notion import NotionIntegration
 from charlie.security.tiers import CONFIRMATION_PENDING, RiskTier, get_tool_tier, risk_tier
+
+# ── Tool timeout constants (seconds) ─────────────────────────────────────────
+VISION_TOOL_TIMEOUT = 45   # Vision model inference (screen analysis, image description)
+GLOBE_REFRESH_TIMEOUT = 15 # Globe data refresh
+WEATHER_API_TIMEOUT = 10   # Geocoding + weather API calls
+HISTORY_MESSAGE_LIMIT = 50 # Max messages persisted to disk
 
 logger = logging.getLogger("charlie.brain.tools")
 
@@ -83,15 +83,23 @@ class ToolHandler:
 
                 # 1. Verification Gate
                 if not skip_guardian:
+                    # Resolve the authoritative tier from the unified catalog when
+                    # available; otherwise let the guardian fall back (fail-closed
+                    # to TIER_3 for an unknown handler).
+                    registry = getattr(self.brain, "tool_registry", None)
+                    catalog_tier = registry.get_tier(tool) if registry is not None else None
+
                     allowed, reason = self.brain.guardian.verify_tool(
-                        tool, args, sir_input, tool_func=tool_func
+                        tool, args, sir_input, tool_func=tool_func, tier=catalog_tier
                     )
 
-                    if get_tool_tier(tool_func) == RiskTier.TIER_0:
+                    effective_tier = catalog_tier if catalog_tier is not None else get_tool_tier(tool_func)
+
+                    if effective_tier == RiskTier.TIER_0:
                         allowed = True
 
                     if allowed == CONFIRMATION_PENDING:
-                        tier = get_tool_tier(tool_func)
+                        tier = effective_tier
                         self.brain.awaiting_confirmation = {
                             "tool": tool,
                             "args": args,
@@ -109,7 +117,7 @@ class ToolHandler:
                             "type": "CONFIRM_REQUIRED",
                             "content": {
                                 "desc": reason,
-                                "tier": get_tool_tier(tool_func).value,
+                                "tier": effective_tier.value,
                             },
                         }
 
@@ -537,6 +545,10 @@ class ToolHandler:
     @risk_tier(RiskTier.TIER_3)
     def _tool_self_modify(self, args: dict[str, Any]) -> str:
         """Triggers the code modification lifecycle (Simulation -> Diff -> Confirm -> Apply)."""
+        # Req 17.3: refuse while the Self_Modify_Engine is disabled (default OFF).
+        if not getattr(settings.security, "self_modify_enabled", False):
+            logger.info("self_modify_blocked | tool=%s | reason=disabled", "self_modify")
+            return "Self-modification is disabled, Sir. Enable 'self_modify_enabled' in charlie_config.json to allow code changes."
         path, content = args.get("file") or args.get("path"), args.get("content")
         if not path or not content: return "File and content required."
         if not self._is_safe_path(path):
@@ -583,6 +595,10 @@ class ToolHandler:
 
     @risk_tier(RiskTier.TIER_3)
     def _tool_apply_edit(self, args: dict[str, Any]) -> str:
+        # Req 17.3: refuse while the Self_Modify_Engine is disabled (default OFF).
+        if not getattr(settings.security, "self_modify_enabled", False):
+            logger.info("self_modify_blocked | tool=%s | reason=disabled", "apply_edit")
+            return "Self-modification is disabled, Sir. Enable 'self_modify_enabled' in charlie_config.json to allow code changes."
         path, content = args.get("path"), args.get("content")
         if not path: return "Missing path."
         p_obj = Path(path).resolve()
@@ -808,8 +824,10 @@ class ToolHandler:
         try:
             from charlie.tools.app_controller import UniversalAppController
             controller = UniversalAppController()
-            success, msg = controller.close_app(app)
-            return f"Successfully terminated {app}, Sir." if success else f"I couldn't close {app}. {msg}"
+            # UniversalAppController.close_app(args: dict) -> str: pass a dict and
+            # consume the str return directly (Req 5.6). The returned message
+            # already names the affected application on failure (Req 5.7).
+            return controller.close_app({"name": app})
         except Exception as e:
             logger.error("close_app_failed | %s | %s", app, e)
             return f"Error closing {app}: {str(e)}"
@@ -1158,10 +1176,42 @@ class ToolHandler:
             from charlie.integrations.gmail import GmailIntegration
             self._gmail_poller = GmailIntegration()
 
+        # Check credentials before attempting fetch
+        if not self._gmail_poller.service and not self._gmail_poller.connect():
+            return (
+                "Gmail credentials missing or invalid. "
+                "Please configure OAuth in config/secure/credentials.json."
+            )
+
         limit = args.get("limit", 5)
         query = args.get("query", "is:unread")
         msgs = self._gmail_poller.fetch(max_results=limit, query=query)
-        return json.dumps(msgs) if msgs else "No messages found or connection failed."
+        return json.dumps(msgs) if msgs else "No messages found."
+
+    @risk_tier(RiskTier.TIER_1)
+    def _tool_send_gmail(self, args: dict[str, Any]) -> str:
+        """Send an email via Gmail. Gated at TIER_1 (requires confirmation)."""
+        if not hasattr(self, "_gmail_poller"):
+            from charlie.integrations.gmail import GmailIntegration
+            self._gmail_poller = GmailIntegration()
+
+        # Check credentials before attempting send
+        if not self._gmail_poller.service and not self._gmail_poller.connect():
+            return (
+                "Gmail credentials missing or invalid. "
+                "Please configure OAuth in config/secure/credentials.json."
+            )
+
+        to = args.get("to")
+        subject = args.get("subject", "No Subject")
+        body = args.get("body", "")
+        if not to:
+            return "Error: 'to' address is required to send an email."
+
+        success = self._gmail_poller.execute("send_email", to=to, subject=subject, body=body)
+        if success:
+            return f"Email sent to {to}."
+        return "Failed to send email. Check logs for details."
 
     @risk_tier(RiskTier.TIER_1)
     def _tool_manage_notion(self, args: dict[str, Any]) -> str:
@@ -1169,6 +1219,13 @@ class ToolHandler:
         if not hasattr(self, "_notion_poller"):
             from charlie.integrations.notion import NotionIntegration
             self._notion_poller = NotionIntegration()
+
+        # Check credentials before attempting action
+        if not self._notion_poller.client and not self._notion_poller.connect():
+            return (
+                "Notion credentials missing or invalid. "
+                "Please set the NOTION_TOKEN environment variable."
+            )
 
         action = args.get("action")
         if action == "fetch":

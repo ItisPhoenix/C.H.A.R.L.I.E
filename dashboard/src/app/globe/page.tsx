@@ -6,9 +6,8 @@ import { Button } from '@/components/ui/Button'
 import { StatusDot } from '@/components/ui/StatusDot'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
-import { HudCorners } from '@/components/background/HudCorners'
 import * as api from '@/lib/api'
-import { cn } from '@/lib/utils'
+import { cn, createVisibilityAwareInterval } from '@/lib/utils'
 
 interface GlobeStatus {
   running: boolean
@@ -27,8 +26,8 @@ export default function GlobePage() {
     try {
       const data = await api.fetchGlobeStatus()
       setStatus(data as GlobeStatus)
-    } catch {
-      // keep existing state
+    } catch (e) {
+      console.error('Failed to load globe status:', e)
     } finally {
       setLoading(false)
     }
@@ -36,8 +35,7 @@ export default function GlobePage() {
 
   useEffect(() => {
     loadStatus()
-    const interval = setInterval(loadStatus, 5000)
-    return () => clearInterval(interval)
+    return createVisibilityAwareInterval(loadStatus, 5000)
   }, [loadStatus])
 
   async function handleLaunch() {
@@ -49,7 +47,8 @@ export default function GlobePage() {
         await loadStatus()
         setLaunching(false)
       }, 2000)
-    } catch {
+    } catch (e) {
+      console.error('Failed to launch globe:', e)
       setLaunching(false)
     }
   }
@@ -83,7 +82,6 @@ export default function GlobePage() {
       />
 
       {/* Status card */}
-      <HudCorners>
       <GlassCard>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -132,7 +130,6 @@ export default function GlobePage() {
           </div>
         )}
       </GlassCard>
-      </HudCorners>
 
       {/* Globe embed */}
       {isRunning && (

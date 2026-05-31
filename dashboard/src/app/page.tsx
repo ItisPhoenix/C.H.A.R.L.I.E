@@ -5,9 +5,8 @@ import { GlassCard } from '@/components/ui/GlassCard'
 import { Badge } from '@/components/ui/Badge'
 import { StatusDot } from '@/components/ui/StatusDot'
 import { Metric } from '@/components/ui/Metric'
-import { HudCorners } from '@/components/background/HudCorners'
 import { useDashboardStore } from '@/lib/store'
-import { formatUptime } from '@/lib/utils'
+import { formatUptime, createVisibilityAwareInterval } from '@/lib/utils'
 import { fetchTasks, fetchToolLog, fetchStatus } from '@/lib/api'
 import type { Task, ToolExecution } from '@/lib/types'
 import { Mic, MicOff, Activity, Zap, Brain } from 'lucide-react'
@@ -21,27 +20,34 @@ function VoiceOrb() {
   const isSpeaking = voice?.is_speaking ?? false
   const isProcessing = phase === 'processing'
 
-  let orbColor = 'rgba(100, 116, 139, 0.4)' // idle
-  let glowColor = 'rgba(100, 116, 139, 0.15)'
+  let orbColorVar = 'var(--voice-idle)'
+  let orbOpacity = 0.4
+  let glowOpacity = 0.15
   let label = 'Idle'
   let pulseSpeed = '3s'
 
   if (isSpeaking) {
-    orbColor = 'rgba(34, 197, 94, 0.6)'
-    glowColor = 'rgba(34, 197, 94, 0.3)'
+    orbColorVar = 'var(--voice-speaking)'
+    orbOpacity = 0.6
+    glowOpacity = 0.3
     label = 'Speaking'
     pulseSpeed = '1s'
   } else if (isProcessing) {
-    orbColor = 'rgba(245, 158, 11, 0.6)'
-    glowColor = 'rgba(245, 158, 11, 0.3)'
+    orbColorVar = 'var(--voice-processing)'
+    orbOpacity = 0.6
+    glowOpacity = 0.3
     label = 'Processing'
     pulseSpeed = '0.6s'
   } else if (isListening) {
-    orbColor = 'rgba(0, 212, 255, 0.6)'
-    glowColor = 'rgba(0, 212, 255, 0.3)'
+    orbColorVar = 'var(--voice-listening)'
+    orbOpacity = 0.6
+    glowOpacity = 0.3
     label = 'Listening'
     pulseSpeed = '2s'
   }
+
+  const orbColor = `color-mix(in srgb, ${orbColorVar} ${orbOpacity * 100}%, transparent)`
+  const glowColor = `color-mix(in srgb, ${orbColorVar} ${glowOpacity * 100}%, transparent)`
 
   return (
     <div className="flex flex-col items-center justify-center py-8">
@@ -79,9 +85,9 @@ function VoiceOrb() {
           }}
         >
           {isListening ? (
-            <Mic size={32} className="text-white drop-shadow-lg" />
+            <Mic size={32} className="text-charlie-text drop-shadow-lg" />
           ) : isSpeaking ? (
-            <Activity size={32} className="text-white drop-shadow-lg" />
+            <Activity size={32} className="text-charlie-text drop-shadow-lg" />
           ) : (
             <MicOff size={32} className="text-charlie-dim" />
           )}
@@ -94,7 +100,7 @@ function VoiceOrb() {
           status={isListening ? 'online' : isSpeaking ? 'online' : isProcessing ? 'warning' : 'idle'}
           pulse={isListening || isSpeaking || isProcessing}
         />
-        <span className="font-display text-sm tracking-[0.15em] uppercase" style={{ color: orbColor.replace('0.6', '1').replace('0.4', '0.8') }}>
+        <span className="font-display text-sm tracking-[0.15em] uppercase" style={{ color: orbColorVar }}>
           {label}
         </span>
       </div>
@@ -118,7 +124,9 @@ function TranscriptDisplay() {
           time: m.timestamp ? new Date(m.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
         }))
         if (msgs.length > 0) setTranscript(msgs)
-      } catch {}
+      } catch (e) {
+        console.error('Failed to load transcript:', e)
+      }
     }
     loadTranscript()
   }, [])
@@ -181,19 +189,19 @@ function KeyMetrics() {
           system: statusData.system || { cpu: 0, ram: 0 },
         })
       }
-    } catch {}
+    } catch (e) {
+      console.error('Failed to load metrics:', e)
+    }
   }, [setDaemonStatus])
 
   useEffect(() => {
     loadMetrics()
-    const interval = setInterval(loadMetrics, 10000)
-    return () => clearInterval(interval)
+    return createVisibilityAwareInterval(loadMetrics, 10000)
   }, [loadMetrics])
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
       {/* Current Task */}
-      <HudCorners>
         <GlassCard className="p-4">
           <div className="flex items-center gap-2 mb-3">
             <Zap size={16} className="text-charlie-cyan" />
@@ -208,10 +216,8 @@ function KeyMetrics() {
             <div className="text-charlie-dim text-sm font-body">No active tasks</div>
           )}
         </GlassCard>
-      </HudCorners>
 
       {/* Recent Activity */}
-      <HudCorners>
         <GlassCard className="p-4">
           <div className="flex items-center gap-2 mb-3">
             <Activity size={16} className="text-charlie-green" />
@@ -231,10 +237,8 @@ function KeyMetrics() {
             )}
           </div>
         </GlassCard>
-      </HudCorners>
 
       {/* System Health */}
-      <HudCorners>
         <GlassCard className="p-4">
           <div className="flex items-center gap-2 mb-3">
             <Brain size={16} className="text-charlie-purple" />
@@ -283,7 +287,6 @@ function KeyMetrics() {
             <div className="text-charlie-dim text-sm">Connecting...</div>
           )}
         </GlassCard>
-      </HudCorners>
     </div>
   )
 }

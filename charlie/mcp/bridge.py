@@ -1,10 +1,10 @@
 """C.H.A.R.L.I.E. — MCP Tool Bridge
-Translates MCP tool schemas into Charlie's ToolHandler registry format.
+Translates MCP tool schemas into Charlie's ToolHandler registry format
+and registers them into the unified Tool_Catalog.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -12,16 +12,27 @@ from charlie.mcp.manager import MCPManager
 
 if TYPE_CHECKING:
     from charlie.brain.tool_handler import ToolHandler
+    from charlie.tools.tool_registry import ToolRegistry
 
 logger = logging.getLogger("charlie.mcp.bridge")
 
 
 class MCPToolBridge:
-    """Bridges MCP tools into Charlie's ToolHandler registry."""
+    """Bridges MCP tools into Charlie's ToolHandler registry and the unified catalog."""
 
     def __init__(self, manager: MCPManager):
         self.manager = manager
         self._registered_tools: dict[str, dict] = {}  # prefixed_name → tool_info
+        self._tool_registry: "ToolRegistry | None" = None
+
+    def set_registry(self, registry: "ToolRegistry") -> None:
+        """Set the unified tool registry for MCP tool registration (Req 9.3).
+
+        Called during Brain initialization so that discovered MCP tools are
+        registered into the unified catalog with proper source, calling
+        convention, and risk tier.
+        """
+        self._tool_registry = registry
 
     async def register_tools(self, tool_handler: ToolHandler) -> int:
         """Discover and register all MCP tools into the ToolHandler registry.
@@ -50,6 +61,9 @@ class MCPToolBridge:
                 # Register in tool handler
                 tool_handler.registry[prefixed_name] = wrapper
 
+                # Register into the unified catalog (Req 9.3)
+                self._register_in_catalog(prefixed_name, tool, name, wrapper)
+
                 # Store tool info for system prompt generation
                 self._registered_tools[prefixed_name] = {
                     "server": name,
@@ -64,41 +78,57 @@ class MCPToolBridge:
             logger.info(f"mcp_bridge_registered | tools={count}")
         return count
 
+    def _register_in_catalog(
+        self,
+        prefixed_name: str,
+        tool: dict,
+        server_name: str,
+        wrapper,
+    ) -> None:
+        """Register a single MCP tool into the unified Tool_Catalog (Req 9.3).
+
+        MCP tools are external and gated at TIER_2 by default.
+        """
+        if self._tool_registry is None:
+            return
+
+        from charlie.security.tiers import RiskTier
+
+        self._tool_registry.register(
+            name=prefixed_name,
+            description=tool.get("description", ""),
+            parameters=tool.get("input_schema", {}),
+            handler=wrapper,
+            risk_tier=RiskTier.TIER_2,
+            category="mcp",
+            source=f"mcp:{server_name}",
+            calling_convention="ARGS_DICT",
+        )
+
     def _create_wrapper(self, client, tool_name: str):
         """Create a sync wrapper function for an async MCP tool call.
 
         The wrapper matches Charlie's tool signature: (args: dict) -> str
-        and handles lazy connection + async-to-sync bridging.
+        and handles lazy connection + async-to-sync bridging via the
+        manager's dedicated MCP event loop (Req 9.4).
         """
+        manager = self.manager
 
         def wrapper(args: dict[str, Any]) -> str:
             # Lazy init: connect if not already connected
             if not client.connected:
                 try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # We're inside an async context, use run_coroutine_threadsafe
-                        future = asyncio.run_coroutine_threadsafe(
-                            self.manager.ensure_connected(client.name),
-                            loop,
-                        )
-                        future.result(timeout=30)
-                    else:
-                        asyncio.run(self.manager.ensure_connected(client.name))
+                    manager.run_coroutine(
+                        manager.ensure_connected(client.name)
+                    )
                 except Exception as e:
                     return f"Error: MCP server '{client.name}' not available: {e}"
 
-            # Call the tool
+            # Call the tool via the dedicated MCP event loop
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    future = asyncio.run_coroutine_threadsafe(
-                        client.call_tool(tool_name, args),
-                        loop,
-                    )
-                    return future.result(timeout=60)
-                else:
-                    return asyncio.run(client.call_tool(tool_name, args))
+                return manager.run_coroutine(
+                    client.call_tool(tool_name, args)
+                )
             except Exception as e:
                 return f"Error calling MCP tool '{tool_name}': {e}"
 
@@ -170,20 +200,16 @@ class MCPToolBridge:
     def _create_lazy_dispatcher(self, client, tool_handler: ToolHandler):
         """Create a dispatcher that connects to the MCP server on first call,
         discovers tools, registers them, and then dispatches to the correct tool."""
+        manager = self.manager
+        bridge = self
 
         def dispatcher(args: dict[str, Any]) -> str:
-            # Connect and discover on first call
+            # Connect and discover on first call via the dedicated MCP event loop
             if not client.connected:
                 try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        future = asyncio.run_coroutine_threadsafe(
-                            self._lazy_setup(client, tool_handler),
-                            loop,
-                        )
-                        future.result(timeout=30)
-                    else:
-                        asyncio.run(self._lazy_setup(client, tool_handler))
+                    manager.run_coroutine(
+                        bridge._lazy_setup(client, tool_handler)
+                    )
                 except Exception as e:
                     return f"Error: MCP server '{client.name}' failed to start: {e}"
 
@@ -204,6 +230,10 @@ class MCPToolBridge:
             prefixed_name = f"mcp_{client.name}_{tool['name']}"
             wrapper = self._create_wrapper(client, tool["name"])
             tool_handler.registry[prefixed_name] = wrapper
+
+            # Register into the unified catalog (Req 9.3)
+            self._register_in_catalog(prefixed_name, tool, client.name, wrapper)
+
             self._registered_tools[prefixed_name] = {
                 "server": client.name,
                 "original_name": tool["name"],

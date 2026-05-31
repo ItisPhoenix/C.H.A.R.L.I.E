@@ -421,3 +421,22 @@
 {"timestamp": "2026-05-28T00:59:06.673339", "event": "user_correction", "delta": -2.0, "new_score": 49.0, "reason": "test correction"}
 {"timestamp": "2026-05-30T02:56:14.402268", "event": "tool_success", "delta": 1.0, "new_score": 51.0, "reason": "test tool"}
 {"timestamp": "2026-05-30T02:56:14.402268", "event": "user_correction", "delta": -2.0, "new_score": 49.0, "reason": "test correction"}
+{"timestamp": "2026-05-31T00:40:06.305041", "event": "tool_success", "delta": 1.0, "new_score": 81.0, "reason": "Chain completed: Hello Charlie, how are you?"}
+{"timestamp": "2026-05-31T01:04:43.528662", "event": "tool_success", "delta": 1.0, "new_score": 82.0, "reason": "Chain completed: What is happening around the world right now?"}
+{"timestamp": "2026-05-31T01:07:39.702349", "event": "tool_success", "delta": 1.0, "new_score": 83.0, "reason": "Chain completed: What is happening around the world in the sector o"}
+{"timestamp": "2026-05-31T01:08:48.977149", "event": "tool_success", "delta": 1.0, "new_score": 84.0, "reason": "Chain completed: Open YouTube and Laysa Music Come."}
+{"timestamp": "2026-05-31T01:09:46.432326", "event": "tool_success", "delta": 1.0, "new_score": 85.0, "reason": "Chain completed: Well,"}
+{"timestamp": "2026-05-31T01:10:13.534399", "event": "tool_success", "delta": 1.0, "new_score": 86.0, "reason": "Chain completed: What is the red of my screen right now?"}
+{"timestamp": "2026-05-31T01:11:11.728851", "event": "tool_success", "delta": 1.0, "new_score": 87.0, "reason": "Chain completed: What do you see on my screen?"}
+{"timestamp": "2026-05-31T01:29:11.187652", "event": "tool_success", "delta": 1.0, "new_score": 88.0, "reason": "Chain completed: system status"}
+{"timestamp": "2026-05-31T01:29:27.444621", "event": "tool_success", "delta": 1.0, "new_score": 89.0, "reason": "Chain completed: Open YouTube"}
+{"timestamp": "2026-05-31T01:29:53.793492", "event": "tool_success", "delta": 1.0, "new_score": 90.0, "reason": "Chain completed: Open YouTube"}
+{"timestamp": "2026-05-31T02:48:34.464988", "event": "tool_success", "delta": 1.0, "new_score": 91.0, "reason": "Chain completed: Open YouTube"}
+{"timestamp": "2026-06-01T00:09:44.655412", "event": "tool_success", "delta": 1.0, "new_score": 92.0, "reason": "Chain completed: What is happening around the world?"}
+{"timestamp": "2026-06-01T00:10:17.781900", "event": "tool_success", "delta": 1.0, "new_score": 93.0, "reason": "Chain completed: What is happening around the world in the field of"}
+{"timestamp": "2026-06-01T00:10:54.630119", "event": "tool_success", "delta": 1.0, "new_score": 94.0, "reason": "Chain completed: Open YouTube."}
+{"timestamp": "2026-06-01T00:11:11.203996", "event": "tool_success", "delta": 1.0, "new_score": 95.0, "reason": "Chain completed: Open a new tab with YouTube."}
+{"timestamp": "2026-06-01T00:11:34.669081", "event": "tool_success", "delta": 1.0, "new_score": 96.0, "reason": "Chain completed: Open noteped."}
+{"timestamp": "2026-06-01T00:13:40.966100", "event": "tool_success", "delta": 1.0, "new_score": 97.0, "reason": "Chain completed: What do you see on my screen right now?"}
+{"timestamp": "2026-06-01T00:18:22.118057", "event": "tool_success", "delta": 1.0, "new_score": 98.0, "reason": "Chain completed: Charlie?"}
+{"timestamp": "2026-06-01T00:53:43.677526", "event": "tool_success", "delta": 1.0, "new_score": 99.0, "reason": "Chain completed: Hello, Charlie."}

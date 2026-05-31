@@ -28,14 +28,15 @@ import {
   Sun,
   Moon,
   Bell,
+  TrendingUp,
 } from 'lucide-react'
 
 import type { LucideIcon } from 'lucide-react'
 import { NotificationCenter } from '@/components/notifications/NotificationCenter'
 
 interface NavItem {
-  href: string
   label: string
+  href: string
   icon: LucideIcon
 }
 
@@ -46,42 +47,45 @@ interface NavGroup {
 
 const navGroups: NavGroup[] = [
   {
-    label: 'Core',
+    label: 'Overview',
     items: [
-      { href: '/', label: 'Voice', icon: Mic },
-      { href: '/status', label: 'Status', icon: Activity },
-      { href: '/chat', label: 'Chat', icon: MessageSquare },
-      { href: '/tasks', label: 'Tasks', icon: ListTodo },
+      { label: 'Status', href: '/status', icon: Activity },
+      { label: 'Briefing', href: '/briefing', icon: Sparkles },
+      { label: 'Analytics', href: '/analytics', icon: BarChart3 },
     ],
   },
   {
     label: 'Intelligence',
     items: [
-      { href: '/memory', label: 'Memory', icon: Brain },
-      { href: '/briefing', label: 'Briefing', icon: FileText },
-      { href: '/agents', label: 'Agents', icon: Users },
-      { href: '/search', label: 'Search', icon: Search },
+      { label: 'Agents', href: '/agents', icon: Brain },
+      { label: 'Knowledge', href: '/memory', icon: History },
+      { label: 'Evolution', href: '/evolution', icon: TrendingUp },
     ],
   },
   {
-    label: 'Systems',
+    label: 'Operations',
     items: [
-      { href: '/tools', label: 'Tools', icon: Terminal },
-      { href: '/mcp', label: 'MCP', icon: Server },
-      { href: '/integrations', label: 'Integrations', icon: Puzzle },
-      { href: '/automation', label: 'Automation', icon: Zap },
-      { href: '/skills', label: 'Skills', icon: Sparkles },
-      { href: '/evolution', label: 'Evolution', icon: History },
+      { label: 'Tasks', href: '/tasks', icon: ListTodo },
+      { label: 'Approvals', href: '/approvals', icon: Shield },
+      { label: 'Automation', href: '/automation', icon: Zap },
     ],
   },
   {
-    label: 'Control',
+    label: 'Ecosystem',
     items: [
-      { href: '/approvals', label: 'Approvals', icon: Shield },
-      { href: '/settings', label: 'Settings', icon: Settings },
-      { href: '/globe', label: 'Globe', icon: Globe },
-      { href: '/logs', label: 'Logs', icon: ScrollText },
-      { href: '/analytics', label: 'Analytics', icon: BarChart3 },
+      { label: 'MCP Servers', href: '/mcp', icon: Server },
+      { label: 'Skills', href: '/skills', icon: Puzzle },
+      { label: 'Integrations', href: '/integrations', icon: Globe },
+      { label: 'Tools', href: '/tools', icon: Terminal },
+    ],
+  },
+  {
+    label: 'Interface',
+    items: [
+      { label: 'Conversation', href: '/chat', icon: MessageSquare },
+      { label: 'Voice Control', href: '/voice', icon: Mic },
+      { label: 'Logs', href: '/logs', icon: ScrollText },
+      { label: 'Settings', href: '/settings', icon: Settings },
     ],
   },
 ]
@@ -97,7 +101,7 @@ function SidebarTranscript() {
   if (lines.length === 0) return null
 
   return (
-    <div className="px-3 py-2 border-b border-charlie-border/30">
+    <div className="px-3 py-3 border-b border-charlie-border/20 bg-charlie-cyan/5">
       {lines.map((line, i) => (
         <div
           key={i}
@@ -122,35 +126,35 @@ function SidebarVoiceOrb({ expanded }: { expanded: boolean }) {
   const isSpeaking = voice?.is_speaking ?? false
   const isProcessing = phase === 'processing'
 
-  let orbColor = '#64748B' // idle
-  let glowColor = 'rgba(100, 116, 139, 0.2)'
+  let orbColorVar = 'var(--voice-idle)'
+  let orbGlowOpacity = 0.2
   let label = 'Idle'
 
   if (isSpeaking) {
-    orbColor = '#22C55E'
-    glowColor = 'rgba(34, 197, 94, 0.4)'
+    orbColorVar = 'var(--voice-speaking)'
+    orbGlowOpacity = 0.4
     label = 'Speaking'
   } else if (isProcessing) {
-    orbColor = '#F59E0B'
-    glowColor = 'rgba(245, 158, 11, 0.4)'
+    orbColorVar = 'var(--voice-processing)'
+    orbGlowOpacity = 0.4
     label = 'Processing'
   } else if (isListening) {
-    orbColor = '#00D4FF'
-    glowColor = 'rgba(0, 212, 255, 0.4)'
+    orbColorVar = 'var(--voice-listening)'
+    orbGlowOpacity = 0.4
     label = 'Listening'
   }
 
   const isActive = isListening || isSpeaking || isProcessing
 
   return (
-    <div className="flex items-center justify-center py-3 border-b border-charlie-border/50">
+    <div className="flex items-center justify-center py-4 border-b border-charlie-border/20">
       <Link href="/" className="group flex items-center gap-2">
         <div
           className={`${expanded ? 'w-10 h-10' : 'w-6 h-6'} rounded-full transition-all duration-300 flex items-center justify-center`}
           style={{
-            background: `radial-gradient(circle, ${orbColor}40, transparent)`,
-            boxShadow: isActive ? `0 0 15px ${glowColor}, 0 0 30px ${glowColor}` : 'none',
-            border: `1.5px solid ${orbColor}60`,
+            background: `radial-gradient(circle at 30% 30%, color-mix(in srgb, ${orbColorVar} 50%, transparent), color-mix(in srgb, ${orbColorVar} 12%, transparent))`,
+            boxShadow: isActive ? `0 4px 15px color-mix(in srgb, ${orbColorVar} ${orbGlowOpacity * 100}%, transparent), 0 0 30px color-mix(in srgb, ${orbColorVar} ${orbGlowOpacity * 100}%, transparent)` : 'none',
+            border: `1px solid color-mix(in srgb, ${orbColorVar} 50%, transparent)`,
             animation: isActive
               ? isSpeaking
                 ? 'voicePulse 1s ease-in-out infinite'
@@ -161,13 +165,13 @@ function SidebarVoiceOrb({ expanded }: { expanded: boolean }) {
           }}
         >
           {isActive ? (
-            <Mic size={expanded ? 16 : 12} style={{ color: orbColor }} />
+            <Mic size={expanded ? 16 : 12} style={{ color: orbColorVar }} />
           ) : (
             <MicOff size={expanded ? 16 : 12} className="text-charlie-dim" />
           )}
         </div>
         {expanded && (
-          <span className="font-display text-[10px] tracking-[0.1em] uppercase" style={{ color: orbColor }}>
+          <span className="font-sans text-[10px] tracking-[0.1em] uppercase font-semibold" style={{ color: orbColorVar }}>
             {label}
           </span>
         )}
@@ -191,19 +195,19 @@ export function Sidebar() {
     <aside
       className={cn(
         'fixed left-0 top-0 bottom-0 z-50 flex flex-col',
-        'bg-charlie-card/50 backdrop-blur-md border-r border-charlie-border',
+        'bg-charlie-dark/80 backdrop-blur-md border-r border-charlie-border',
         'transition-all duration-300 ease-out',
         isExpanded ? 'w-56' : 'w-14',
       )}
       onMouseEnter={() => collapsed && setHovered(true)}
       onMouseLeave={() => collapsed && setHovered(false)}
     >
-      {/* Logo + Voice Orb */}
+      {/* Logo */}
       <div className="h-14 flex items-center px-4 border-b border-charlie-border flex-shrink-0">
         <div className="flex items-center gap-2 overflow-hidden">
-          <div className="w-2.5 h-2.5 rounded-full bg-charlie-cyan animate-pulse flex-shrink-0 shadow-neon-cyan-sm" />
+          <div className="w-2 h-2 bg-charlie-text flex-shrink-0" />
           {isExpanded && (
-            <span className="font-display text-charlie-cyan font-bold text-sm tracking-[0.2em] neon-text whitespace-nowrap">
+            <span className="font-sans text-charlie-text font-semibold text-sm tracking-widest whitespace-nowrap">
               CHARLIE
             </span>
           )}
@@ -221,7 +225,7 @@ export function Sidebar() {
         {navGroups.map((group) => (
           <div key={group.label} className="mb-1">
             {isExpanded && (
-              <div className="px-4 pt-3 pb-1 text-[10px] font-semibold tracking-[0.15em] uppercase text-charlie-dim/60">
+              <div className="px-4 pt-3 pb-1 text-[10px] font-semibold tracking-[0.15em] uppercase text-charlie-dim">
                 {group.label}
               </div>
             )}
@@ -234,30 +238,27 @@ export function Sidebar() {
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    'flex items-center gap-3 mx-2 rounded-lg text-sm transition-all duration-200 relative group',
+                    'flex items-center gap-3 mx-2 rounded-md text-sm transition-all duration-200 relative group',
                     isExpanded ? 'px-3 py-2' : 'px-0 py-2 justify-center',
                     isActive
-                      ? 'bg-charlie-cyan/10 text-charlie-cyan'
-                      : 'text-charlie-dim hover:text-charlie-text hover:bg-charlie-card',
+                      ? 'bg-charlie-text/10 text-charlie-text shadow-inner-light'
+                      : 'text-charlie-dim hover:text-charlie-text hover:bg-charlie-text/5',
                   )}
                   title={!isExpanded ? item.label : undefined}
                   aria-label={item.label}
                 >
                   {isActive && (
-                    <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-charlie-cyan rounded-r shadow-neon-cyan-sm" />
+                    <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-4 bg-charlie-text rounded-r" />
                   )}
                   <Icon
                     size={18}
-                    className={cn(
-                      'flex-shrink-0 transition-all duration-200',
-                      isActive && 'drop-shadow-[0_0_6px_rgba(0,212,255,0.5)]',
-                    )}
+                    className="flex-shrink-0 transition-all duration-200 group-hover:scale-105"
                   />
                   {isExpanded && <span className="whitespace-nowrap">{item.label}</span>}
                   {item.href === '/approvals' && pendingApprovals > 0 && (
                     <span
                       className={cn(
-                        'bg-charlie-red text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center font-semibold',
+                        'bg-charlie-red text-charlie-dark text-[10px] w-5 h-5 rounded flex items-center justify-center font-medium',
                         isExpanded ? 'absolute right-3' : 'absolute -top-1 -right-1 w-4 h-4 text-[9px]',
                       )}
                     >
@@ -276,27 +277,27 @@ export function Sidebar() {
         {/* Notification bell */}
         <div
           className={cn(
-            'w-full flex items-center gap-3 px-4 py-2.5 text-charlie-dim hover:text-charlie-text hover:bg-charlie-card transition-colors',
-            !isExpanded && 'justify-center px-0',
+            'w-full flex items-center gap-3 px-4 py-2 text-charlie-dim hover:text-charlie-text hover:bg-charlie-text/5 transition-all duration-200 rounded-md mx-2 w-[calc(100%-16px)] mb-1',
+            !isExpanded && 'justify-center px-0 mx-0 w-full rounded-none',
           )}
         >
           <NotificationCenter />
-          {isExpanded && <span className="text-sm">Notifications</span>}
+          {isExpanded && <span className="text-sm text-inherit">Notifications</span>}
         </div>
 
         {/* Theme toggle */}
         <button
           onClick={toggleTheme}
           className={cn(
-            'w-full flex items-center gap-3 px-4 py-2.5 text-charlie-dim hover:text-charlie-text hover:bg-charlie-card transition-colors cursor-pointer',
-            !isExpanded && 'justify-center px-0',
+            'w-full flex items-center gap-3 px-4 py-2 text-charlie-dim hover:text-charlie-text hover:bg-charlie-text/5 transition-all duration-200 cursor-pointer rounded-md mx-2 w-[calc(100%-16px)] mb-2',
+            !isExpanded && 'justify-center px-0 mx-0 w-full rounded-none',
           )}
           title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
           aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
         >
           {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
           {isExpanded && (
-            <span className="text-sm">{theme === 'dark' ? 'Light Mode' : 'Dark Mode'}</span>
+            <span className="text-sm text-inherit">{theme === 'dark' ? 'Light Mode' : 'Dark Mode'}</span>
           )}
         </button>
       </div>

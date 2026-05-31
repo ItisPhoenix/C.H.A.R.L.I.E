@@ -191,6 +191,12 @@ def code_analyze(path: str) -> str:
     category="file",
 )
 def code_search(pattern: str, path: str = ".", file_types: str = ".py,.js,.ts") -> str:
+    from charlie.security.safety_guard import check_path_boundary
+
+    allowed, msg = check_path_boundary(path)
+    if not allowed:
+        return msg
+
     import re
     try:
         extensions = [t.strip() for t in file_types.split(",")]

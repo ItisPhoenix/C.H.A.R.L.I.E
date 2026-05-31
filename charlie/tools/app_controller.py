@@ -125,7 +125,7 @@ class UniversalAppController:
                 )
                 if result.returncode == 0:
                     return f"Successfully closed app tree: {app_name}."
-                return f"Close failed: {result.stderr.strip()}"
+                return f"Failed to close '{app_name}': {result.stderr.strip()}"
 
             else:
                 # Fallback for Linux/macOS

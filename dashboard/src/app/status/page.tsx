@@ -8,8 +8,7 @@ import { StatusDot } from '@/components/ui/StatusDot'
 import { Metric } from '@/components/ui/Metric'
 import { Modal } from '@/components/ui/Modal'
 import { ErrorState } from '@/components/ui/ErrorState'
-import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
-import { HudCorners } from '@/components/background/HudCorners'
+import { SkeletonCard } from '@/components/ui/SkeletonCard'
 import { ResourceBar } from '@/components/charts/ResourceBar'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { useWebSocket } from '@/lib/ws'
@@ -72,8 +71,8 @@ export default function StatusPage() {
       if (action === 'restart') await restartSubsystem(name)
       else await stopSubsystem(name)
       await loadStatus()
-    } catch {
-      // silently fail, next poll will refresh
+    } catch (e) {
+      console.error('Failed to execute subsystem action:', e)
     } finally {
       setActionLoading(null)
     }
@@ -84,8 +83,8 @@ export default function StatusPage() {
     setActionLoading('shutdown')
     try {
       await shutdownDaemon()
-    } catch {
-      // daemon will stop
+    } catch (e) {
+      console.error('Failed to shut down daemon:', e)
     }
   }
 
@@ -94,8 +93,8 @@ export default function StatusPage() {
     setActionLoading('reboot')
     try {
       await rebootDaemon()
-    } catch {
-      // daemon will restart
+    } catch (e) {
+      console.error('Failed to reboot daemon:', e)
     } finally {
       setActionLoading(null)
     }
@@ -105,8 +104,25 @@ export default function StatusPage() {
     return (
       <div className="max-w-6xl mx-auto space-y-6">
         <PageHeader title="System Status" subtitle="Loading..." />
-        <div className="flex items-center justify-center h-64">
-          <LoadingSpinner size="lg" label="Connecting to Charlie..." />
+
+        {/* System Resources skeleton */}
+        <div className="glass-card p-6">
+          <div className="flex items-center gap-6 mb-4">
+            <div className="skeleton h-4 w-24 rounded" />
+            <div className="skeleton h-4 w-20 rounded" />
+            <div className="skeleton h-4 w-20 rounded" />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="skeleton h-6 w-full rounded" />
+            <div className="skeleton h-6 w-full rounded" />
+          </div>
+        </div>
+
+        {/* Subsystem cards skeleton */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <SkeletonCard lines={4} />
+          <SkeletonCard lines={4} />
+          <SkeletonCard lines={4} />
         </div>
       </div>
     )
@@ -172,15 +188,14 @@ export default function StatusPage() {
       {/* Subsystem Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {subsystemEntries.map(([name, sub]) => (
-          <HudCorners key={name}>
             <SubsystemCard
+              key={name}
               name={name}
               sub={sub}
               actionLoading={actionLoading}
               onRestart={() => handleSubsystemAction(name, 'restart')}
               onStop={() => handleSubsystemAction(name, 'stop')}
             />
-          </HudCorners>
         ))}
       </div>
 

@@ -3,7 +3,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { GlassCard } from '@/components/ui/GlassCard'
-import { HudCorners } from '@/components/background/HudCorners'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import { fetchToolLog } from '@/lib/api'
 import {
@@ -98,7 +97,9 @@ export default function AnalyticsPage() {
           .map(([name, count]) => ({ name, tasks: count }))
         if (topTools.length > 0) setToolActivity(topTools)
       }
-    } catch {} finally {
+    } catch (e) {
+      console.error('Failed to load analytics:', e)
+    } finally {
       setLoading(false)
     }
   }, [])
@@ -121,25 +122,24 @@ export default function AnalyticsPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Tool Usage */}
-        <HudCorners>
           <GlassCard className="p-5">
             <h3 className="font-display text-sm text-charlie-cyan mb-4 tracking-wide">Tool Usage</h3>
             <ResponsiveContainer width="100%" height={250}>
               <AreaChart data={toolUsage}>
                 <defs>
                   <linearGradient id="cyanGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#00D4FF" stopOpacity={0.3} />
-                    <stop offset="100%" stopColor="#00D4FF" stopOpacity={0} />
+                    <stop offset="0%" stopColor="#88ccff" stopOpacity={0.3} />
+                    <stop offset="100%" stopColor="#88ccff" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,212,255,0.1)" />
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(136,204,255,0.1)" />
                 <XAxis dataKey="time" stroke="#64748B" fontSize={12} />
                 <YAxis stroke="#64748B" fontSize={12} />
                 <Tooltip content={<CustomTooltip />} />
                 <Area
                   type="monotone"
                   dataKey="calls"
-                  stroke="#00D4FF"
+                  stroke="#88ccff"
                   strokeWidth={2}
                   fill="url(#cyanGrad)"
                   animationDuration={1500}
@@ -147,32 +147,28 @@ export default function AnalyticsPage() {
               </AreaChart>
             </ResponsiveContainer>
           </GlassCard>
-        </HudCorners>
 
         {/* Response Time */}
-        <HudCorners>
           <GlassCard className="p-5">
             <h3 className="font-display text-sm text-charlie-cyan mb-4 tracking-wide">Response Time (ms)</h3>
             <ResponsiveContainer width="100%" height={250}>
               <LineChart data={responseTime}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,212,255,0.1)" />
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(136,204,255,0.1)" />
                 <XAxis dataKey="time" stroke="#64748B" fontSize={12} />
                 <YAxis stroke="#64748B" fontSize={12} />
                 <Tooltip content={<CustomTooltip />} />
-                <Line type="monotone" dataKey="avg" stroke="#00D4FF" strokeWidth={2} dot={false} animationDuration={1500} />
+                <Line type="monotone" dataKey="avg" stroke="#88ccff" strokeWidth={2} dot={false} animationDuration={1500} />
                 <Line type="monotone" dataKey="p95" stroke="#F59E0B" strokeWidth={1.5} strokeDasharray="5 5" dot={false} animationDuration={1500} />
               </LineChart>
             </ResponsiveContainer>
           </GlassCard>
-        </HudCorners>
 
         {/* Tool Usage Breakdown */}
-        <HudCorners>
           <GlassCard className="p-5">
             <h3 className="font-display text-sm text-charlie-cyan mb-4 tracking-wide">Tool Usage Breakdown</h3>
             <ResponsiveContainer width="100%" height={250}>
               <BarChart data={toolActivity}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,212,255,0.1)" />
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(136,204,255,0.1)" />
                 <XAxis dataKey="name" stroke="#64748B" fontSize={11} />
                 <YAxis stroke="#64748B" fontSize={12} />
                 <Tooltip content={<CustomTooltip />} />
@@ -180,23 +176,20 @@ export default function AnalyticsPage() {
               </BarChart>
             </ResponsiveContainer>
           </GlassCard>
-        </HudCorners>
 
         {/* Top Tools */}
-        <HudCorners>
           <GlassCard className="p-5">
             <h3 className="font-display text-sm text-charlie-cyan mb-4 tracking-wide">Top Tools by Usage</h3>
             <ResponsiveContainer width="100%" height={250}>
               <BarChart data={toolActivity} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,212,255,0.1)" />
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(136,204,255,0.1)" />
                 <XAxis type="number" stroke="#64748B" fontSize={12} />
                 <YAxis type="category" dataKey="name" stroke="#64748B" fontSize={11} width={100} />
                 <Tooltip content={<CustomTooltip />} />
-                <Bar dataKey="tasks" fill="#00D4FF" radius={[0, 4, 4, 0]} animationDuration={1500} />
+                <Bar dataKey="tasks" fill="#88ccff" radius={[0, 4, 4, 0]} animationDuration={1500} />
               </BarChart>
             </ResponsiveContainer>
           </GlassCard>
-        </HudCorners>
       </div>
     </div>
   )

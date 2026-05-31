@@ -4,11 +4,9 @@ import { useState, useEffect } from 'react'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { GlassCard } from '@/components/ui/GlassCard'
 import { Badge } from '@/components/ui/Badge'
-import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
-import { HudCorners } from '@/components/background/HudCorners'
-import { Sparkles, Check, X, Plus } from 'lucide-react'
+import { Sparkles } from 'lucide-react'
 import { fetchSkills } from '@/lib/api'
 
 interface Skill {
@@ -38,7 +36,9 @@ export default function SkillsPage() {
           triggerCount: ((s as Record<string, unknown>).trigger_count as number) || 0,
         }))
         setSkills(mapped)
-      } catch {} finally {
+      } catch (e) {
+        console.error('Failed to load skills:', e)
+      } finally {
         setLoading(false)
       }
     }
@@ -53,12 +53,6 @@ export default function SkillsPage() {
       <PageHeader
         title="Skills"
         subtitle="Manage installed skills and pending approvals"
-        actions={
-          <Button variant="primary">
-            <Plus size={16} className="mr-1" />
-            Create Skill
-          </Button>
-        }
       />
 
       {/* Filter tabs */}
@@ -88,8 +82,7 @@ export default function SkillsPage() {
       ) : filtered.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {filtered.map((skill) => (
-            <HudCorners key={skill.name}>
-              <GlassCard className="p-4">
+              <GlassCard key={skill.name} className="p-4">
                 <div className="flex items-start justify-between mb-2">
                   <div className="flex items-center gap-2">
                     <Sparkles size={16} className="text-charlie-cyan" />
@@ -113,28 +106,7 @@ export default function SkillsPage() {
                     {skill.category}
                   </span>
                 )}
-                {skill.status === 'pending' && (
-                  <div className="flex gap-2 mt-3 pt-3 border-t border-charlie-border">
-                    <Button variant="primary" className="flex-1" onClick={() => {
-                      window.dispatchEvent(new CustomEvent('charlie-notification', {
-                        detail: { type: 'info', title: 'Skill', message: `Approved: ${skill.name}` },
-                      }))
-                    }}>
-                      <Check size={14} className="mr-1" />
-                      Approve
-                    </Button>
-                    <Button variant="danger" className="flex-1" onClick={() => {
-                      window.dispatchEvent(new CustomEvent('charlie-notification', {
-                        detail: { type: 'info', title: 'Skill', message: `Rejected: ${skill.name}` },
-                      }))
-                    }}>
-                      <X size={14} className="mr-1" />
-                      Reject
-                    </Button>
-                  </div>
-                )}
               </GlassCard>
-            </HudCorners>
           ))}
         </div>
       ) : (

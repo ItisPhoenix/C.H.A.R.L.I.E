@@ -3,24 +3,23 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { fetchTasks, fetchToolLog, fetchAgentStatus, fetchIntegrations, fetchChatHistory, sendMessage } from '@/lib/api'
-import type { Task, ToolExecution, AgentStatus, IntegrationHealth, TimelineEntry } from '@/lib/types'
+import { fetchChatHistory, sendMessage } from '@/lib/api'
 import { GlassCard } from '@/components/ui/GlassCard'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { StatusDot } from '@/components/ui/StatusDot'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
-import { HudCorners } from '@/components/background/HudCorners'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { useWSEvent } from '@/lib/ws'
 import { useDashboardStore } from '@/lib/store'
 import { formatTimestamp, cn } from '@/lib/utils'
 import type { ChatMessage } from '@/lib/types'
-import { Mic, MicOff, Send, ChevronRight, ChevronLeft, Brain, Terminal, Users, Activity, Zap, Puzzle, Gauge } from 'lucide-react'
+import { Mic, MicOff, Send, ChevronRight, ChevronLeft, Brain, Terminal, Users, Activity, Zap, Puzzle, PanelRightOpen } from 'lucide-react'
+import { createVisibilityAwareInterval } from '@/lib/utils'
 
 // ==================== CONTEXT PANEL ====================
 
-function ContextPanel({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+function ContextPanel({ collapsed, onToggle, onQuickAction, mobile }: { collapsed: boolean; onToggle: () => void; onQuickAction?: (prompt: string) => void; mobile?: boolean }) {
   const [currentTask, setCurrentTask] = useState<{ name: string; status: string } | null>(null)
   const [recentMemory, setRecentMemory] = useState<string[]>([])
   const [toolsUsed, setToolsUsed] = useState<Array<{ name: string; status: string }>>([])
@@ -65,18 +64,19 @@ function ContextPanel({ collapsed, onToggle }: { collapsed: boolean; onToggle: (
           duration: msgs.length > 0 ? `${Math.max(1, Math.round((Date.now() / 1000 - (msgs[0]?.timestamp || Date.now() / 1000)) / 60))}m` : '0m',
           model: 'Active',
         })
-      } catch {}
+      } catch (e) {
+        console.error('Failed to load context:', e)
+      }
     }
     loadContext()
-    const interval = setInterval(loadContext, 15000)
-    return () => clearInterval(interval)
+    return createVisibilityAwareInterval(loadContext, 15000)
   }, [])
 
-  if (collapsed) {
+  if (collapsed && !mobile) {
     return (
       <button
         onClick={onToggle}
-        className="w-10 flex items-center justify-center border-l border-charlie-border hover:bg-charlie-card/50 transition-colors cursor-pointer"
+        className="hidden lg:flex w-10 items-center justify-center border-l border-charlie-border hover:bg-charlie-card/50 transition-colors cursor-pointer"
         title="Show context panel"
       >
         <ChevronLeft size={16} className="text-charlie-dim" />
@@ -85,7 +85,7 @@ function ContextPanel({ collapsed, onToggle }: { collapsed: boolean; onToggle: (
   }
 
   return (
-    <div className="w-80 border-l border-charlie-border flex flex-col overflow-hidden">
+    <div className={`w-80 border-l border-charlie-border flex flex-col overflow-hidden ${mobile ? '' : 'hidden lg:flex'}`}>
       <div className="flex items-center justify-between px-4 py-3 border-b border-charlie-border">
         <span className="font-display text-xs tracking-[0.1em] text-charlie-cyan uppercase">Context</span>
         <button onClick={onToggle} className="text-charlie-dim hover:text-charlie-text cursor-pointer">
@@ -177,12 +177,17 @@ function ContextPanel({ collapsed, onToggle }: { collapsed: boolean; onToggle: (
 
         <ContextSection icon={<Zap size={14} />} title="Quick Actions" color="amber">
           <div className="flex flex-wrap gap-1.5">
-            {['Summarize', 'Search memory', 'Create skill'].map((action) => (
+            {[
+              { label: 'Summarize', prompt: 'Summarize our conversation' },
+              { label: 'Search memory', prompt: 'Search my memory for ' },
+              { label: 'Create skill', prompt: 'Create a new skill that ' },
+            ].map((action) => (
               <button
-                key={action}
+                key={action.label}
+                onClick={() => onQuickAction?.(action.prompt)}
                 className="px-2 py-1 text-xs rounded bg-charlie-cyan/10 text-charlie-cyan border border-charlie-cyan/20 hover:bg-charlie-cyan/20 transition-colors cursor-pointer"
               >
-                {action}
+                {action.label}
               </button>
             ))}
           </div>
@@ -192,11 +197,21 @@ function ContextPanel({ collapsed, onToggle }: { collapsed: boolean; onToggle: (
   )
 }
 
+const colorMap: Record<string, string> = {
+  cyan: 'text-charlie-cyan',
+  green: 'text-charlie-green',
+  amber: 'text-charlie-amber',
+  purple: 'text-charlie-purple',
+  teal: 'text-charlie-teal',
+  orange: 'text-charlie-orange',
+  red: 'text-charlie-red',
+}
+
 function ContextSection({ icon, title, color, children }: { icon: React.ReactNode; title: string; color: string; children: React.ReactNode }) {
   return (
     <GlassCard className="p-3">
       <div className="flex items-center gap-2 mb-2">
-        <span className={`text-charlie-${color}`}>{icon}</span>
+        <span className={colorMap[color] || 'text-charlie-cyan'}>{icon}</span>
         <span className="font-display text-[10px] tracking-[0.1em] uppercase text-charlie-dim">{title}</span>
       </div>
       {children}
@@ -223,19 +238,29 @@ function VoiceInput({ onTranscript }: { onTranscript?: (text: string) => void })
   }, [])
 
   function startPushToTalk() {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+    const win = window as unknown as { SpeechRecognition: unknown; webkitSpeechRecognition: unknown }
+    const SpeechRecognition = (win.SpeechRecognition || win.webkitSpeechRecognition) as { new(): unknown; prototype: unknown } | undefined
     if (!SpeechRecognition) {
       console.warn('Speech recognition not supported in this browser')
       return
     }
 
-    const recognition = new SpeechRecognition()
+    const recognition = new SpeechRecognition() as {
+      continuous: boolean;
+      interimResults: boolean;
+      lang: string;
+      onresult: (event: unknown) => void;
+      onend: () => void;
+      onerror: () => void;
+      start: () => void;
+    }
     recognition.continuous = false
     recognition.interimResults = false
     recognition.lang = 'en-US'
 
-    recognition.onresult = (event: any) => {
-      const transcript = event.results[0]?.[0]?.transcript
+    recognition.onresult = (event: unknown) => {
+      const e = event as { results: { transcript: string }[][] }
+      const transcript = e.results[0]?.[0]?.transcript
       if (transcript && onTranscript) {
         onTranscript(transcript)
       }
@@ -300,9 +325,9 @@ function VoiceInput({ onTranscript }: { onTranscript?: (text: string) => void })
                   key={i}
                   className="w-1 bg-charlie-cyan rounded-full"
                   style={{
-                    height: `${8 + Math.random() * 8}px`,
+                    '--wave-height': `${10 + i * 3}px`,
                     animation: `waveform 0.6s ease-in-out ${i * 0.1}s infinite`,
-                  }}
+                  } as React.CSSProperties}
                 />
               ))}
             </div>
@@ -389,6 +414,7 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(true)
   const [sending, setSending] = useState(false)
   const [contextCollapsed, setContextCollapsed] = useState(false)
+  const [showMobileContext, setShowMobileContext] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -425,7 +451,8 @@ export default function ChatPage() {
     try {
       const data = await fetchChatHistory()
       setMessages(data.messages || [])
-    } catch {
+    } catch (e) {
+      console.error('Failed to load chat history:', e)
       setMessages([])
     }
     setLoading(false)
@@ -447,7 +474,8 @@ export default function ChatPage() {
 
     try {
       await sendMessage(content)
-    } catch {
+    } catch (e) {
+      console.error('Failed to send message:', e)
       setSending(false)
     }
   }
@@ -463,7 +491,20 @@ export default function ChatPage() {
     <div className="flex h-[calc(100vh-8rem)]">
       {/* Main chat area */}
       <div className="flex-1 flex flex-col min-w-0">
-        <PageHeader title="Chat" subtitle="Voice-first conversation with CHARLIE" />
+        <PageHeader
+          title="Chat"
+          subtitle="Voice-first conversation with CHARLIE"
+          actions={
+            <button
+              onClick={() => setShowMobileContext(!showMobileContext)}
+              className="lg:hidden flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-charlie-border text-charlie-dim hover:text-charlie-text hover:border-charlie-cyan/30 transition-colors cursor-pointer"
+              title="Toggle context panel"
+            >
+              <PanelRightOpen size={14} />
+              Context
+            </button>
+          }
+        />
 
         <GlassCard className="flex-1 flex flex-col min-h-0 !p-0 overflow-hidden">
           {/* Voice input */}
@@ -478,8 +519,8 @@ export default function ChatPage() {
             setSending(true)
             try {
               await sendMessage(text)
-            } catch {
-              // handled
+            } catch (e) {
+              console.error('Failed to send voice message:', e)
             }
           }} />
 
@@ -521,6 +562,7 @@ export default function ChatPage() {
               onKeyDown={handleKeyDown}
               placeholder="Type a message (or use voice above)..."
               disabled={sending}
+              aria-label="Chat message input"
               className="flex-1 bg-charlie-card border border-charlie-border rounded-lg px-4 py-2 text-sm text-charlie-text placeholder-charlie-dim focus:outline-none focus:border-charlie-cyan/50 focus:shadow-neon-cyan-sm transition-all disabled:opacity-50 font-body"
             />
             <Button
@@ -537,7 +579,22 @@ export default function ChatPage() {
       </div>
 
       {/* Context panel */}
-      <ContextPanel collapsed={contextCollapsed} onToggle={() => setContextCollapsed(!contextCollapsed)} />
+      <ContextPanel collapsed={contextCollapsed} onToggle={() => setContextCollapsed(!contextCollapsed)} onQuickAction={setInput} />
+
+      {/* Mobile context overlay */}
+      {showMobileContext && (
+        <div className="lg:hidden fixed inset-0 z-50 flex">
+          <div className="flex-1 bg-black/50" onClick={() => setShowMobileContext(false)} />
+          <div className="w-80 max-w-[85vw] bg-charlie-dark border-l border-charlie-border flex flex-col overflow-hidden">
+            <ContextPanel
+              collapsed={false}
+              onToggle={() => setShowMobileContext(false)}
+              onQuickAction={(text: string) => { setInput(text); setShowMobileContext(false) }}
+              mobile
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }

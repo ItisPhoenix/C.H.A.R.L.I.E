@@ -1,8 +1,24 @@
+import asyncio
+import inspect
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
 logger = logging.getLogger("charlie.integrations.base")
+
+
+async def call_integration(method, *args, **kwargs):
+    """Sync/async call adapter for integration methods.
+
+    If *method* is a coroutine function it is awaited directly.
+    Otherwise it is run in a thread via asyncio.to_thread so the event loop
+    is never blocked by a synchronous integration call.
+
+    Requirements: 11.4
+    """
+    if inspect.iscoroutinefunction(method):
+        return await method(*args, **kwargs)
+    return await asyncio.to_thread(method, *args, **kwargs)
 
 class BaseIntegration(ABC):
     """

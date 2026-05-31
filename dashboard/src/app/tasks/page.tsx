@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
-import { HudCorners } from '@/components/background/HudCorners'
 import { fetchTasks, cancelTask } from '@/lib/api'
 import { useWSEvent } from '@/lib/ws'
 import { formatTimestamp, cn } from '@/lib/utils'
@@ -48,7 +47,9 @@ export default function TasksPage() {
     try {
       const data = await fetchTasks()
       setTasks(data.tasks)
-    } catch {} finally {
+    } catch (e) {
+      console.error('Failed to load tasks:', e)
+    } finally {
       setLoading(false)
     }
   }, [])
@@ -161,7 +162,6 @@ function TaskCard({ task, cancelling, expanded, onToggle, onCancel }: TaskCardPr
   const hasDetail = !!(task.result || task.error)
 
   return (
-    <HudCorners>
       <GlassCard className="hover:shadow-neon-cyan-sm transition-all !p-0 overflow-hidden">
         <div
           className={cn('p-4', hasDetail && 'cursor-pointer')}
@@ -237,6 +237,5 @@ function TaskCard({ task, cancelling, expanded, onToggle, onCancel }: TaskCardPr
           </div>
         )}
       </GlassCard>
-    </HudCorners>
   )
 }

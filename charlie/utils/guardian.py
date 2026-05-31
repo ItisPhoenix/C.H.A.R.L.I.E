@@ -97,10 +97,19 @@ class Guardian:
         args: dict[str, Any],
         sir_input: str,
         tool_func: Optional[Callable] = None,
+        tier: RiskTier | None = None,
     ) -> tuple[bool | str, str]:
-        """Main security gate for tool execution."""
-        # Get tier (default to TIER 1 for safety if func not provided)
-        tier = get_tool_tier(tool_func) if tool_func else RiskTier.TIER_1
+        """Main security gate for tool execution.
+
+        The authoritative ``tier`` is supplied by the unified Tool_Catalog
+        (``ToolRegistry.get_tier``). When provided it is used as-is and is never
+        re-derived from ``tool_func``. When ``tier`` is ``None``, fall back to
+        the handler's declared tier; an unknown/missing handler fails closed at
+        ``RiskTier.TIER_3`` — the most restrictive tier — so a tool is never
+        silently under-gated (Reqs 4.1, 4.2, 4.3, 4.4).
+        """
+        if tier is None:
+            tier = get_tool_tier(tool_func) if tool_func else RiskTier.TIER_3
 
         # Mask sensitive data before any processing or logging
         masked_args = self.mask_sensitive_data(str(args))
@@ -290,6 +299,10 @@ class Guardian:
             )
 
         # 6. Tier-based routing
+        if tier == RiskTier.TIER_0:
+            # READ-ONLY — allow without confirmation.
+            return True, "Verified"
+
         if tier == RiskTier.TIER_1:
             from charlie.config import settings
 

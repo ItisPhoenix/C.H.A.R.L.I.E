@@ -36,34 +36,35 @@ export function StatusBar() {
   const isProcessing = phase === 'processing'
   const isVoiceActive = isListening || isSpeaking || isProcessing
 
-  let voiceColor = '#64748B'
+  let voiceColorVar = 'var(--voice-idle)'
   let voiceLabel = 'Idle'
-  if (isSpeaking) { voiceColor = '#22C55E'; voiceLabel = 'Speaking' }
-  else if (isProcessing) { voiceColor = '#F59E0B'; voiceLabel = 'Processing' }
-  else if (isListening) { voiceColor = '#00D4FF'; voiceLabel = 'Listening' }
+  if (isSpeaking) { voiceColorVar = 'var(--voice-speaking)'; voiceLabel = 'Speaking' }
+  else if (isProcessing) { voiceColorVar = 'var(--voice-processing)'; voiceLabel = 'Processing' }
+  else if (isListening) { voiceColorVar = 'var(--voice-listening)'; voiceLabel = 'Listening' }
 
   return (
     <div
-      className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 flex items-center gap-5 px-5 py-2 rounded-2xl text-xs font-mono glass-card"
+      aria-label="Status bar"
+      className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center flex-wrap justify-center gap-3 sm:gap-6 px-3 sm:px-6 py-2.5 rounded-xl text-xs font-mono premium-card"
     >
       <ConnectionBadge />
 
       {/* Voice State Indicator */}
-      <div className="flex items-center gap-2 px-2 py-0.5 rounded-lg" style={{ background: `${voiceColor}10`, border: `1px solid ${voiceColor}30` }}>
+      <div className="flex items-center gap-2 px-3 py-1 rounded-md transition-all duration-200" style={{ background: `color-mix(in srgb, ${voiceColorVar} 8%, transparent)`, border: `1px solid color-mix(in srgb, ${voiceColorVar} 19%, transparent)` }}>
         {isVoiceActive ? (
-          <Mic size={12} style={{ color: voiceColor }} />
+          <Mic size={12} style={{ color: voiceColorVar }} />
         ) : (
           <MicOff size={12} className="text-charlie-dim" />
         )}
-        <span className="font-semibold" style={{ color: voiceColor }}>{voiceLabel}</span>
-        <MiniWaveform active={isVoiceActive} color={voiceColor} />
+        <span className="font-semibold" style={{ color: voiceColorVar }}>{voiceLabel}</span>
+        <MiniWaveform active={isVoiceActive} color={voiceColorVar} />
       </div>
 
       {daemon && (
         <>
-          <MetricItem label="Uptime" value={formatUptime(daemon.uptime_seconds)} />
+          <MetricItem label="Uptime" value={formatUptime(daemon.uptime_seconds)} className="hidden sm:flex" />
           <MetricItem label="CPU" value={`${daemon.system.cpu}%`} warn={daemon.system.cpu > 70} />
-          <MetricItem label="RAM" value={`${daemon.system.ram}%`} warn={daemon.system.ram > 80} />
+          <MetricItem label="RAM" value={`${daemon.system.ram}%`} warn={daemon.system.ram > 80} className="hidden sm:flex" />
         </>
       )}
 
@@ -75,9 +76,9 @@ export function StatusBar() {
   )
 }
 
-function MetricItem({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
+function MetricItem({ label, value, warn, className }: { label: string; value: string; warn?: boolean; className?: string }) {
   return (
-    <div className="flex items-center gap-1.5">
+    <div className={`flex items-center gap-1.5 ${className ?? ''}`}>
       <span className="text-charlie-dim">{label}</span>
       <span className={warn ? 'text-charlie-amber font-semibold' : 'text-charlie-text'}>
         {value}

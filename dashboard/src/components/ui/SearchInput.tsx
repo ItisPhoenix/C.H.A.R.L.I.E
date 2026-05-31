@@ -19,7 +19,7 @@ export function SearchInput({ value, onChange, onSearch, placeholder = 'Search..
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => e.key === 'Enter' && onSearch?.()}
         placeholder={placeholder}
-        className="w-full bg-charlie-card border border-charlie-border rounded-lg px-4 py-2 pl-10 text-sm text-charlie-text placeholder-charlie-dim focus:outline-none focus:border-charlie-cyan/50 transition-colors"
+        className="w-full bg-charlie-dark border border-charlie-border rounded-lg px-4 py-2 pl-10 text-sm text-charlie-text placeholder-charlie-dim focus:outline-none focus:border-charlie-border transition-all duration-200 shadow-inner-light"
       />
       <svg
         className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-charlie-dim"

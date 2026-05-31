@@ -56,7 +56,8 @@ export default function SearchPage() {
         timestamp: r.timestamp ? new Date(r.timestamp * 1000).toLocaleString() : '',
       }))
       setResults(mapped)
-    } catch {
+    } catch (e) {
+      console.error('Failed to search:', e)
       setResults([])
     } finally {
       setLoading(false)

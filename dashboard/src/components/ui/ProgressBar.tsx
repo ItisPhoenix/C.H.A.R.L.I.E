@@ -10,10 +10,10 @@ interface ProgressBarProps {
 }
 
 const colorMap = {
-  cyan: 'bg-charlie-cyan shadow-[0_0_8px_rgba(0,212,255,0.3)]',
-  green: 'bg-charlie-green shadow-[0_0_8px_rgba(34,197,94,0.3)]',
-  amber: 'bg-charlie-amber shadow-[0_0_8px_rgba(245,158,11,0.3)]',
-  red: 'bg-charlie-red shadow-[0_0_8px_rgba(239,68,68,0.3)]',
+  cyan: 'bg-charlie-cyan',
+  green: 'bg-charlie-green',
+  amber: 'bg-charlie-amber',
+  red: 'bg-charlie-red',
 }
 
 export function ProgressBar({ value, max, color = 'cyan', className }: ProgressBarProps) {
@@ -21,7 +21,7 @@ export function ProgressBar({ value, max, color = 'cyan', className }: ProgressB
   return (
     <div className={cn('w-full h-1.5 bg-charlie-border rounded-full overflow-hidden', className)}>
       <div
-        className={cn('h-full rounded-full transition-all duration-700 ease-out', colorMap[color])}
+        className={cn('h-full rounded-full transition-all duration-300 ease-out', colorMap[color])}
         style={{ width: `${pct}%` }}
       />
     </div>

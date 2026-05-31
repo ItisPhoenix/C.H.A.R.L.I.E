@@ -1,29 +1,20 @@
 import type { Metadata } from 'next'
-import { Orbitron, Exo_2, Fira_Code } from 'next/font/google'
+import { Inter, Fira_Code } from 'next/font/google'
 import './globals.css'
 import { DashboardShell } from './shell'
 
-const orbitron = Orbitron({
+const inter = Inter({
   subsets: ['latin'],
-  variable: '--font-display',
+  variable: '--font-sans',
   display: 'swap',
-  weight: ['400', '500', '600', '700', '800', '900'],
-})
-
-const exo2 = Exo_2({
-  subsets: ['latin'],
-  variable: '--font-body',
-  display: 'swap',
-  weight: ['300', '400', '500', '600', '700'],
 })
 
 const firacode = Fira_Code({
   subsets: ['latin'],
   variable: '--font-mono',
   display: 'swap',
-  weight: ['300', '400', '500', '600', '700'],
+  weight: ['400', '500'],
 })
-
 export const metadata: Metadata = {
   title: 'CHARLIE Dashboard',
   description: 'CHARLIE AI Assistant Command Center',
@@ -31,8 +22,8 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`dark ${orbitron.variable} ${exo2.variable} ${firacode.variable}`}>
-      <body className="min-h-screen bg-charlie-dark text-charlie-text font-body">
+    <html lang="en" className={`dark ${inter.variable} ${firacode.variable}`}>
+      <body className="min-h-screen bg-black text-zinc-300 font-sans selection:bg-white/20">
         <DashboardShell>{children}</DashboardShell>
       </body>
     </html>

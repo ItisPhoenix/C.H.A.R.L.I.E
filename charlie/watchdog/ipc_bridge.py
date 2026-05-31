@@ -11,16 +11,9 @@ import threading
 import time
 
 from charlie.utils.logger import get_logger
+from charlie.watchdog.status_events import STATUS_EVENT_MAP, extract_ws_data
 
 logger = get_logger("IPCBridge")
-
-# Message types to forward from status_q to WS
-WS_FORWARD_TYPES = {
-    "PHASE", "CHAT_MSG", "VOICE_ACTIVITY", "VRAM",
-    "INTEGRATION_UPDATE", "PHOENIX_ALERT",
-    "RESEARCH_STATUS", "RESEARCH_LOG", "RESEARCH_PARTIAL",
-    "CONFIRM_REQUIRED",
-}
 
 
 class IPCBridge:
@@ -73,17 +66,22 @@ class IPCBridge:
                 time.sleep(0.5)
 
     def _forward_to_ws(self, msg):
-        """Forward a status_q message to WS clients."""
+        """Forward a status_q message to WS clients.
+
+        Uses the canonical STATUS_EVENT_MAP from status_events.py.
+        Unmapped event types are dropped with a debug log (they are frequent
+        and not actionable at warning level).
+        """
         if not self.control_server or not self.control_server.is_running:
             return
 
         msg_type = msg.get("type", "")
-        if msg_type not in WS_FORWARD_TYPES:
+        ws_event_type = STATUS_EVENT_MAP.get(msg_type)
+        if ws_event_type is None:
+            logger.debug("status_event_unmapped | type=%s", msg_type)
             return
 
-        # Map queue message types to WS event types
-        ws_event_type = self._map_to_ws_type(msg_type)
-        ws_data = self._extract_ws_data(msg)
+        ws_data = extract_ws_data(msg)
 
         try:
             self.control_server.broadcast_sync(ws_event_type, ws_data)
@@ -91,42 +89,7 @@ class IPCBridge:
             self._stats["last_forward_time"] = time.time()
         except Exception as e:
             self._stats["messages_dropped"] += 1
-            logger.debug(f"forward_failed | type={msg_type} | error={e}")
-
-    def _map_to_ws_type(self, msg_type: str) -> str:
-        """Map queue message type to WS event type."""
-        mapping = {
-            "PHASE": "phase_change",
-            "CHAT_MSG": "chat_message",
-            "VOICE_ACTIVITY": "voice_activity",
-            "VRAM": "vram_update",
-            "INTEGRATION_UPDATE": "integration_update",
-            "PHOENIX_ALERT": "subsystem_failure",
-            "RESEARCH_STATUS": "research_status",
-            "RESEARCH_LOG": "research_log",
-            "RESEARCH_PARTIAL": "research_partial",
-            "CONFIRM_REQUIRED": "approval_pending",
-        }
-        return mapping.get(msg_type, msg_type.lower())
-
-    def _extract_ws_data(self, msg: dict) -> dict:
-        """Extract WS-ready data from a queue message."""
-        # Most messages have "content" with the payload
-        content = msg.get("content", {})
-
-        # If content is a string, wrap it
-        if isinstance(content, str):
-            return {"message": content, "raw_type": msg.get("type")}
-
-        # If content is a dict, merge with metadata
-        if isinstance(content, dict):
-            return {
-                **content,
-                "source": msg.get("source", "unknown"),
-                "raw_type": msg.get("type"),
-            }
-
-        return {"content": str(content), "raw_type": msg.get("type")}
+            logger.debug("forward_failed | type=%s | error=%s", msg_type, e)
 
     def send_to_brain(self, msg_type: str, content: dict, source: str = "ws_client"):
         """Send a message to brain_task_q from WS client."""

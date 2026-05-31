@@ -157,6 +157,7 @@ class AudioEngine:
         self.tts_model = None
         self.input_q = queue.Queue()
         self._ww_inference_chunks = 3  # Increase chunks for better cadence capture
+        self._stt_task_q = queue.Queue()  # Persistent STT worker queue (replaces thread-per-call)
         # SPEED: Pre-compute resample decision at init time — not on every frame
         self._needs_resample = self.input_rate != self.target_rate
         if self._needs_resample:
@@ -309,18 +310,38 @@ class AudioEngine:
                 else:
                     raise
 
-            # 3. Vocal Synthesis (Kokoro-82M ONNX)
+            # 3. Vocal Synthesis (Kokoro-82M ONNX) — GPU-accelerated
+            import onnxruntime as ort
             from kokoro_onnx import Kokoro
             kokoro_model = os.getenv("KOKORO_MODEL_PATH", "charlie/models/kokoro-v1.0.onnx")
             kokoro_voices = os.getenv("KOKORO_VOICES_PATH", "charlie/models/voices-v1.0.bin")
-            self.tts_model = Kokoro(kokoro_model, kokoro_voices)
-            self.kokoro_voice = getattr(settings.audio, "kokoro_voice", "af_sarah")
+
+            # Try CUDA first, fall back to CPU
+            try:
+                opts = ort.SessionOptions()
+                opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                sess = ort.InferenceSession(
+                    kokoro_model, opts,
+                    providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+                )
+                self.tts_model = Kokoro.from_session(sess, kokoro_voices)
+                logger.info("kokoro_gpu_ready | provider=CUDAExecutionProvider")
+            except Exception as e:
+                logger.warning(f"kokoro_gpu_fail | error={e} | falling_back_to_cpu")
+                self.tts_model = Kokoro(kokoro_model, kokoro_voices)
+
+            self.kokoro_voice = getattr(settings.audio, "kokoro_voice", "af_heart")
             self.kokoro_speed = getattr(settings.audio, "kokoro_speed", 1.0)
             self.kokoro_lang = getattr(settings.audio, "kokoro_lang", "en-us")
             logger.info(f"audio_kokoro_ready | voice={self.kokoro_voice} speed={self.kokoro_speed}")
 
-            # Wait for models to fully stabilize
-            time.sleep(2.0)
+            # 4. Warm-up inferences (first call is slow due to CUDA kernel compilation)
+            logger.info("audio_warmup_starting")
+            _warmup_audio, _ = self.tts_model.create("test", voice=self.kokoro_voice, speed=1.0, lang=self.kokoro_lang)
+            dummy = np.zeros(16000, dtype=np.float32)
+            _segs, _ = self.stt_model.transcribe(dummy, beam_size=1, best_of=1, language="en")
+            list(_segs)  # exhaust generator
+            logger.info("audio_warmup_complete")
 
             logger.info("audio_models_ready | all_systems_go")
 
@@ -606,9 +627,10 @@ class AudioEngine:
                             f"ww_score_debug | score={score:.6f} | rms={rms:.4f} | peak={peak:.4f} | keys={list(prediction.keys())}"
                         )
 
-                    self.status_q.put(
-                        {"type": "WAKE_SCORE", "content": float(score)}, block=False
-                    )
+                    # WAKE_SCORE is high-frequency telemetry used only for
+                    # local threshold comparison — do NOT push to status_q
+                    # (the dashboard uses VOICE_ACTIVITY for the voice orb).
+
                     # Read the actual wake_threshold (not wake_word_sensitivity which is the user-facing 0-1 scale)
                     threshold = getattr(settings.audio, "wake_threshold", 0.02)
 
@@ -843,7 +865,9 @@ class AudioEngine:
             finally:
                 self.stt_in_progress = False
 
-        threading.Thread(target=_stt_task, daemon=True).start()
+        # SPEED: Queue to persistent worker instead of spawning a new thread per call.
+        # Eliminates thread creation overhead (~1-2ms) on every STT invocation.
+        self._stt_task_q.put(_stt_task)
 
     def _start_stt(self):
         """Resets the sensory state to begin listening for a fresh interaction."""
@@ -972,71 +996,70 @@ class AudioEngine:
                             # CRITICAL: Set speaking state before loop
                             self.is_speaking = True
 
-                            if current_task["type"] == "SPEAK":
-                                raw_text = current_task["content"]
-                                text = self._normalize_text(raw_text)
-                                chunks = re.split(r"(?<=[.!?])\s+", text)
-                                for chunk_text in chunks:
+                            # LOW-LATENCY TTS: Synthesize each sub-chunk and stream
+                            # immediately. With GPU (~300ms/chunk), the gap between
+                            # sub-chunks is imperceptible.
+                            for chunk_text in chunks:
+                                if not self.is_speaking:
+                                    break
+                                words = chunk_text.split()
+                                sub_chunks = (
+                                    [" ".join(words[i : i + 50]) for i in range(0, len(words), 50)]
+                                    if len(words) > 55
+                                    else [chunk_text]
+                                )
+
+                                for final_text in sub_chunks:
                                     if not self.is_speaking:
                                         break
-                                    words = chunk_text.split()
-                                    sub_chunks = (
-                                        [" ".join(words[i : i + 30]) for i in range(0, len(words), 30)]
-                                        if len(words) > 35
-                                        else [chunk_text]
-                                    )
-
-                                    for final_text in sub_chunks:
-                                        if not self.is_speaking:
-                                            break
-                                        final_text = final_text.strip()
-                                        # Kokoro generates complete audio per chunk
-                                        try:
-                                            samples, sr = self.tts_model.create(
-                                                final_text,
-                                                voice=self.kokoro_voice,
-                                                speed=self.kokoro_speed,
-                                                lang=self.kokoro_lang,
-                                            )
-                                        except Exception as e:
-                                            logger.error(f"kokoro_tts_error | {e}")
-                                            continue
-
+                                    final_text = final_text.strip()
+                                    try:
+                                        samples, sr = self.tts_model.create(
+                                            final_text,
+                                            voice=self.kokoro_voice,
+                                            speed=self.kokoro_speed,
+                                            lang=self.kokoro_lang,
+                                        )
                                         audio_block = np.array(samples, dtype=np.float32)
+                                    except Exception as e:
+                                        logger.error(f"kokoro_tts_error | {e}")
+                                        continue
 
-                                        # Yield audio in sub-blocks for responsive interruption
-                                        block_size = int(sr * 0.1)  # 100ms blocks
-                                        for i in range(0, len(audio_block), block_size):
-                                            if not self.is_speaking or (
-                                                self.interrupt_event and self.interrupt_event.is_set()
-                                            ):
-                                                self.is_speaking = False
-                                                self._playback_proc.terminate()
-                                                self._ensure_playback_proc()
-                                                while not self.tts_q.empty():
-                                                    try:
-                                                        self.tts_q.get_nowait()
-                                                    except Exception:
-                                                        break
-                                                break
+                                    # Stream this block immediately
+                                    if not self.is_speaking:
+                                        break
+                                    block_size = int(sr * 0.1)  # 100ms blocks
+                                    for i in range(0, len(audio_block), block_size):
+                                        if not self.is_speaking or (
+                                            self.interrupt_event and self.interrupt_event.is_set()
+                                        ):
+                                            self.is_speaking = False
+                                            self._playback_proc.terminate()
+                                            self._ensure_playback_proc()
+                                            while not self.tts_q.empty():
+                                                try:
+                                                    self.tts_q.get_nowait()
+                                                except Exception:
+                                                    break
+                                            break
 
-                                            sub_block = audio_block[i:i + block_size]
+                                        sub_block = audio_block[i:i + block_size]
 
-                                            # WAVEFORM: Generate for speaker output
-                                            step = max(1, len(sub_block) // 64)
-                                            waveform = (np.abs(sub_block[::step][:64])).tolist()
-                                            if len(waveform) < 64:
-                                                waveform.extend([0.0] * (64 - len(waveform)))
+                                        # WAVEFORM: Generate for speaker output
+                                        step = max(1, len(sub_block) // 64)
+                                        waveform = (np.abs(sub_block[::step][:64])).tolist()
+                                        if len(waveform) < 64:
+                                            waveform.extend([0.0] * (64 - len(waveform)))
 
-                                            self.status_q.put({
-                                                "type": "VOICE_ACTIVITY",
-                                                "peak": float(np.max(np.abs(sub_block))),
-                                                "waveform": waveform,
-                                                "source": "speaker"
-                                            }, block=False)
+                                        self.status_q.put({
+                                            "type": "VOICE_ACTIVITY",
+                                            "peak": float(np.max(np.abs(sub_block))),
+                                            "waveform": waveform,
+                                            "source": "speaker"
+                                        }, block=False)
 
-                                            # Send to playback process
-                                            self._playback_q.put(sub_block)
+                                        # Send to playback process
+                                        self._playback_q.put(sub_block)
 
                         except Exception as e:
                             if self.running:
@@ -1179,15 +1202,20 @@ class AudioEngine:
                 target=self._sensory_processor, daemon=True, name="SensoryProcessor"
             ).start()
 
-            # Dedicated STT Worker to avoid main loop choke
-            def _stt_loop():
+            # Persistent STT worker thread — drains tasks from _stt_task_q.
+            # Replaces the old polling loop + thread-per-call pattern.
+            def _stt_worker():
                 while self.running:
-                    if self.stt_ready and not self.stt_in_progress:
-                        self.trigger_stt()
-                    time.sleep(0.1)
+                    try:
+                        task = self._stt_task_q.get(timeout=0.5)
+                        if task is None:  # Shutdown sentinel
+                            break
+                        task()
+                    except queue.Empty:
+                        continue
 
             threading.Thread(
-                target=_stt_loop, daemon=True, name="STTWorker"
+                target=_stt_worker, daemon=True, name="STTWorker"
             ).start()
 
             # Push-to-talk listener: Right Ctrl activates listening
@@ -1217,7 +1245,6 @@ class AudioEngine:
                 target=_push_to_talk, daemon=True, name="PushToTalk"
             ).start()
 
-            time.sleep(2.0)
             self.brain_task_q.put({"type": "SENSORY_READY"})
             logger.info("audio_handshake_complete | sensory_ready_emitted")
 
@@ -1271,8 +1298,9 @@ class AudioEngine:
                     elif cmd_type in ["STOP", "SHUTDOWN"]:
                         logger.info(f"audio_cmd | {cmd_type} | killing_audio_engine")
                         self.running = False
-                        # Send sentinel to playback worker
+                        # Send sentinels to workers for clean shutdown
                         self._playback_q.put(None)
+                        self._stt_task_q.put(None)
                 except queue.Empty:
                     pass
                 time.sleep(0.01)

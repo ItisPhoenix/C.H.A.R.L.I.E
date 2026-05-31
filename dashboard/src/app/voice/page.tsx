@@ -6,7 +6,6 @@ import { StatusDot } from '@/components/ui/StatusDot'
 import { WaveformVisualizer } from '@/components/charts/WaveformVisualizer'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
-import { HudCorners } from '@/components/background/HudCorners'
 import * as api from '@/lib/api'
 import { useWSEvent } from '@/lib/ws'
 import { cn } from '@/lib/utils'
@@ -69,8 +68,8 @@ export default function VoicePage() {
         tts_model: data.tts_model,
         tts_speed: data.tts_speed,
       })
-    } catch {
-      // keep existing state
+    } catch (e) {
+      console.error('Failed to load voice status:', e)
     } finally {
       setLoading(false)
     }
@@ -124,10 +123,17 @@ export default function VoicePage() {
                 'relative w-16 h-16 rounded-full border-2 flex items-center justify-center transition-all duration-500',
                 active
                   ? label === 'Speaking'
-                    ? 'border-charlie-cyan bg-charlie-cyan/10 shadow-[0_0_30px_rgba(0,200,255,0.3)]'
-                    : 'border-charlie-green bg-charlie-green/10 shadow-[0_0_30px_rgba(0,255,100,0.3)]'
+                    ? 'border-charlie-cyan bg-charlie-cyan/10'
+                    : 'border-charlie-green bg-charlie-green/10'
                   : 'border-charlie-border bg-charlie-dark/60',
               )}
+              style={{
+                boxShadow: active
+                  ? label === 'Speaking'
+                    ? '0 0 30px color-mix(in srgb, var(--charlie-cyan) 30%, transparent)'
+                    : '0 0 30px color-mix(in srgb, var(--charlie-green) 30%, transparent)'
+                  : 'none',
+              }}
             >
               <StatusDot
                 status={status}

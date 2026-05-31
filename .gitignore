@@ -1,6 +1,10 @@
+# ── Temp / Scratch ────────────────────────────────────────────────────────────
+temp/
+
 # ── Compiled Python ───────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
+*.pyc
 *$py.class
 *.so
 .Python
@@ -49,6 +53,7 @@ desktop.ini
 .claude/
 .openclaude/
 .kilo/
+./kiro
 .roo/
 .roomodes
 .obsidian/
@@ -105,3 +110,4 @@ dashboard/tsconfig.tsbuildinfo
 # ── Config (may contain secrets) ────────────────────────────────────────────
 charlie_config.json
 skills-lock.json
+config/scheduler_state.json

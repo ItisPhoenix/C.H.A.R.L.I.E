@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react'
 import { GlassCard } from '@/components/ui/GlassCard'
-import { HudCorners } from '@/components/background/HudCorners'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
@@ -105,7 +104,6 @@ export default function BriefingPage() {
 
 function AgendaSection({ agenda }: { agenda: BriefingData['agenda'] }) {
   return (
-    <HudCorners>
     <GlassCard>
       <h3 className="text-sm font-semibold text-charlie-cyan mb-3 font-display tracking-[0.1em] uppercase">Agenda</h3>
       {!agenda?.events || agenda.events.length === 0 ? (
@@ -121,7 +119,6 @@ function AgendaSection({ agenda }: { agenda: BriefingData['agenda'] }) {
         </div>
       )}
     </GlassCard>
-    </HudCorners>
   )
 }
 
@@ -129,7 +126,6 @@ function HealthSection({ health }: { health: BriefingData['health'] }) {
   const vitals = health?.vitals || {}
 
   return (
-    <HudCorners>
     <GlassCard>
       <h3 className="text-sm font-semibold text-charlie-cyan mb-3 font-display tracking-[0.1em] uppercase">System Health</h3>
       <div className="grid grid-cols-2 gap-3 text-sm">
@@ -147,7 +143,6 @@ function HealthSection({ health }: { health: BriefingData['health'] }) {
         </div>
       </div>
     </GlassCard>
-    </HudCorners>
   )
 }
 
@@ -155,7 +150,6 @@ function TasksSection({ tasks }: { tasks: BriefingData['tasks'] }) {
   const pending = tasks?.pending || []
 
   return (
-    <HudCorners>
     <GlassCard>
       <h3 className="text-sm font-semibold text-charlie-cyan mb-3 font-display tracking-[0.1em] uppercase">
         Pending Tasks
@@ -178,7 +172,6 @@ function TasksSection({ tasks }: { tasks: BriefingData['tasks'] }) {
         </div>
       )}
     </GlassCard>
-    </HudCorners>
   )
 }
 
@@ -186,7 +179,6 @@ function IntelSection({ intel }: { intel: BriefingData['intel'] }) {
   const news = intel?.news || []
 
   return (
-    <HudCorners>
     <GlassCard>
       <h3 className="text-sm font-semibold text-charlie-cyan mb-3 font-display tracking-[0.1em] uppercase">Intel</h3>
       {news.length === 0 ? (
@@ -202,7 +194,6 @@ function IntelSection({ intel }: { intel: BriefingData['intel'] }) {
         </div>
       )}
     </GlassCard>
-    </HudCorners>
   )
 }
 
@@ -210,7 +201,6 @@ function ContextSection({ context }: { context: BriefingData['context'] }) {
   const world = context?.world_state
 
   return (
-    <HudCorners>
     <GlassCard>
       <h3 className="text-sm font-semibold text-charlie-cyan mb-3 font-display tracking-[0.1em] uppercase">Context</h3>
       {world ? (
@@ -247,6 +237,5 @@ function ContextSection({ context }: { context: BriefingData['context'] }) {
         </div>
       )}
     </GlassCard>
-    </HudCorners>
   )
 }

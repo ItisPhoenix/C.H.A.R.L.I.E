@@ -63,8 +63,10 @@ export function Metric({ label, value, trend, animate = true, className }: Metri
 
   return (
     <div className={cn('text-center', className)}>
-      <div className="font-mono text-charlie-cyan font-bold text-lg">{displayValue}</div>
-      <div className="font-display text-charlie-dim text-xs flex items-center justify-center gap-1 tracking-wider">
+      <div className="font-mono text-charlie-text font-medium text-xl tracking-tight">
+        {displayValue}
+      </div>
+      <div className="font-sans text-charlie-dim text-xs flex items-center justify-center gap-1.5 mt-0.5">
         {trend === 'up' && <span className="text-charlie-green">↑</span>}
         {trend === 'down' && <span className="text-charlie-red">↓</span>}
         {label}

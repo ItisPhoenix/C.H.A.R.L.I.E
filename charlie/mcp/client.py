@@ -4,7 +4,9 @@ Wraps the mcp Python SDK for stdio and SSE transport connections.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import AsyncExitStack
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
@@ -22,12 +24,12 @@ class MCPClient:
         self.args = config.get("args", [])
         self.env = config.get("env")
         self.url = config.get("url")
+        self.token = config.get("token")
+        self.headers = config.get("headers", {})
         self.enabled = config.get("enabled", True)
 
         self._session: ClientSession | None = None
-        self._context_stack = None
-        self._read = None
-        self._write = None
+        self._exit_stack: AsyncExitStack | None = None
         self._connected = False
         self._tools: list[dict] = []
 
@@ -55,10 +57,10 @@ class MCPClient:
                     f"or 'url' for remote servers. Example: {{'command': 'npx', 'args': ['-y', '@mcp/server']}}"
                 )
 
-            # Initialize the session
+            # Session is now entered — its receive loop is running.
+            # Initialize the session and discover tools.
             await self._session.initialize()
 
-            # Discover tools
             tools_result = await self._session.list_tools()
             self._tools = []
             for tool in tools_result.tools:
@@ -70,38 +72,49 @@ class MCPClient:
 
             self._connected = True
             logger.info(
-                f"mcp_connected | server={self.name} | tools={len(self._tools)}"
+                "mcp_connected | server=%s | tools=%d", self.name, len(self._tools)
             )
 
         except Exception as e:
-            logger.error(f"mcp_connect_failed | server={self.name} | error={e}")
+            logger.error("mcp_connect_failed | server=%s | error=%s", self.name, e)
+            # Clean up the exit stack if connection failed mid-way
+            if self._exit_stack is not None:
+                try:
+                    await self._exit_stack.aclose()
+                except Exception:
+                    pass
+                self._exit_stack = None
+            self._session = None
             self._connected = False
             raise
 
     async def _connect_stdio(self) -> None:
-        """Connect via stdio transport (local subprocess)."""
+        """Connect via stdio transport (local subprocess) using AsyncExitStack."""
         server_params = StdioServerParameters(
             command=self.command,
             args=self.args,
             env=self.env,
         )
-        # stdio_client is an async context manager that yields (read, write)
-        # We need to enter it and keep it alive
-        self._context_stack = stdio_client(server_params)
-        read, write = await self._context_stack.__aenter__()
-        self._read = read
-        self._write = write
-        self._session = ClientSession(read, write)
+        self._exit_stack = AsyncExitStack()
+        read, write = await self._exit_stack.enter_async_context(stdio_client(server_params))
+        self._session = await self._exit_stack.enter_async_context(ClientSession(read, write))
+        # Session is now entered — its receive loop is running
 
     async def _connect_sse(self) -> None:
-        """Connect via SSE transport (remote server)."""
+        """Connect via SSE transport (remote server) using AsyncExitStack."""
         from mcp.client.sse import sse_client
 
-        self._context_stack = sse_client(url=self.url)
-        read, write = await self._context_stack.__aenter__()
-        self._read = read
-        self._write = write
-        self._session = ClientSession(read, write)
+        # Build headers from token and/or explicit headers config
+        headers = dict(self.headers) if self.headers else {}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        self._exit_stack = AsyncExitStack()
+        read, write = await self._exit_stack.enter_async_context(
+            sse_client(url=self.url, headers=headers if headers else None)
+        )
+        self._session = await self._exit_stack.enter_async_context(ClientSession(read, write))
+        # Session is now entered — its receive loop is running
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         """Call a tool on this MCP server. Returns the text result."""
@@ -124,60 +137,66 @@ class MCPClient:
 
         except Exception as e:
             logger.error(
-                f"mcp_tool_failed | server={self.name} | tool={name} | error={e}"
+                "mcp_tool_failed | server=%s | tool=%s | error=%s", self.name, name, e
             )
             return f"Error calling MCP tool '{name}': {e}"
 
     async def disconnect(self) -> None:
-        """Clean shutdown of the MCP server connection."""
-        if not self._connected:
-            return
+        """Clean shutdown of the MCP server connection.
 
-        try:
-            if self._session:
-                await self._session.__aexit__(None, None, None)
-            if self._context_stack:
-                await self._context_stack.__aexit__(None, None, None)
-        except Exception as e:
-            logger.debug(f"mcp_disconnect_error | server={self.name} | error={e}")
-        finally:
-            self._session = None
-            self._context_stack = None
-            self._read = None
-            self._write = None
-            self._connected = False
-            logger.info(f"mcp_disconnected | server={self.name}")
+        Uses AsyncExitStack.aclose() which correctly tears down all entered
+        contexts in reverse order. Never calls __aexit__ on an unentered session
+        and never double-exits.
+        """
+        if self._exit_stack is not None:
+            try:
+                await self._exit_stack.aclose()
+            except Exception as e:
+                logger.debug("mcp_disconnect_error | server=%s | %s", self.name, e)
+            finally:
+                self._exit_stack = None
+                self._session = None
+                self._connected = False
+        logger.info("mcp_disconnected | server=%s", self.name)
 
-    async def reconnect(self, max_attempts: int = 3) -> bool:
+    async def reconnect(self, max_retries: int = 5) -> bool:
         """Attempt to reconnect with exponential backoff.
 
-        Returns True if reconnection succeeded, False otherwise.
+        Tries connect() up to max_retries times with delays of 1s, 2s, 4s, 8s,
+        16s (capped at 30s between attempts).
+        Returns True on success, False if all attempts are exhausted.
         """
-        import asyncio
-
-        for attempt in range(max_attempts):
+        for attempt in range(max_retries):
             try:
-                # Disconnect first if connected
-                if self._connected:
+                # Disconnect first if still connected
+                if self._connected or self._exit_stack is not None:
                     await self.disconnect()
 
-                # Wait with exponential backoff
+                # Exponential backoff: 1s, 2s, 4s, 8s, 16s (max 30s)
                 if attempt > 0:
-                    wait_time = 2 ** attempt  # 2s, 4s, 8s
-                    logger.info("mcp_reconnect_attempt | server=%s | attempt=%d | wait=%ds",
-                                self.name, attempt + 1, wait_time)
+                    wait_time = min(2 ** (attempt - 1), 30)
+                    logger.info(
+                        "mcp_reconnect_attempt | server=%s | attempt=%d | wait=%ds",
+                        self.name, attempt + 1, wait_time,
+                    )
                     await asyncio.sleep(wait_time)
 
-                # Try to connect
                 await self.connect()
-                logger.info("mcp_reconnect_success | server=%s | attempt=%d", self.name, attempt + 1)
+                logger.info(
+                    "mcp_reconnect_success | server=%s | attempt=%d",
+                    self.name, attempt + 1,
+                )
                 return True
 
             except Exception as e:
-                logger.warning("mcp_reconnect_failed | server=%s | attempt=%d | error=%s",
-                               self.name, attempt + 1, e)
+                logger.warning(
+                    "mcp_reconnect_failed | server=%s | attempt=%d | error=%s",
+                    self.name, attempt + 1, e,
+                )
 
-        logger.error("mcp_reconnect_exhausted | server=%s | attempts=%d", self.name, max_attempts)
+        logger.error(
+            "mcp_reconnect_exhausted | server=%s | attempts=%d", self.name, max_retries
+        )
         return False
 
     def get_tool_info(self, tool_name: str) -> dict | None:

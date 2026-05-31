@@ -74,6 +74,14 @@ def init_mcp(brain: "Brain") -> None:
     brain.mcp_manager = MCPManager()
     brain.mcp_bridge = MCPToolBridge(brain.mcp_manager)
 
+    # Give the bridge access to the unified tool registry (Req 9.3)
+    if hasattr(brain, "tool_registry"):
+        brain.mcp_bridge.set_registry(brain.tool_registry)
+
+    # Register MCP shutdown hook so Brain._shutdown_async tears down all
+    # MCP sessions cleanly (Req 9.7).
+    brain._shutdown_hooks.append(brain.mcp_manager.stop_all_sync)
+
 
 def init_personality(brain: "Brain") -> None:
     """Personality and relationship management."""
@@ -157,6 +165,7 @@ def init_intelligence(brain: "Brain") -> None:
     brain.suggestion_engine = SuggestionEngine()
     if hasattr(brain.ace, "tracker"):
         brain.suggestion_engine.set_pattern_tracker(brain.ace.tracker)
+    brain.suggestion_engine.set_brain(brain)
     brain.suggestion_engine.delivery_callback = brain._on_suggestion
 
     brain.context_broker = ContextBroker.get_context_broker(
@@ -236,7 +245,6 @@ def init_model(brain: "Brain") -> None:
     """LLM model manager, lock, and shared LLM client."""
     from charlie.brain.llm_client import LLMClient
     from charlie.brain.model_manager import ModelManager
-    from charlie.brain.model_router import ModelRouter
 
     brain.model_manager = ModelManager(settings)
     brain.model = settings.llm.primary_model

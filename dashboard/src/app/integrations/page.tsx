@@ -8,9 +8,8 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import { ErrorState } from '@/components/ui/ErrorState'
 import { PageHeader } from '@/components/layout/PageHeader'
-import { HudCorners } from '@/components/background/HudCorners'
 import { fetchIntegrations } from '@/lib/api'
-import { formatTimestamp, cn } from '@/lib/utils'
+import { formatTimestamp, cn, createVisibilityAwareInterval } from '@/lib/utils'
 import type { IntegrationHealth } from '@/lib/types'
 
 type StatusFilter = 'all' | 'connected' | 'error'
@@ -55,8 +54,7 @@ export default function IntegrationsPage() {
 
   useEffect(() => {
     loadIntegrations()
-    const interval = setInterval(loadIntegrations, 10000)
-    return () => clearInterval(interval)
+    return createVisibilityAwareInterval(loadIntegrations, 10000)
   }, [loadIntegrations])
 
   const filtered = integrations.filter((int) => {
@@ -145,7 +143,6 @@ function IntegrationCard({ integration }: { integration: IntegrationHealth }) {
   const dotStatus = STATUS_DOT_STATUS[integration.status] || 'idle'
 
   return (
-    <HudCorners>
       <GlassCard className="hover:shadow-neon-cyan-sm transition-all">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
@@ -191,6 +188,5 @@ function IntegrationCard({ integration }: { integration: IntegrationHealth }) {
           </div>
         )}
       </GlassCard>
-    </HudCorners>
   )
 }

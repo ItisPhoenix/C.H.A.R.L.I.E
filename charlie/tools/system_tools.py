@@ -132,7 +132,15 @@ def open_app(app_name: str) -> str:
     # Block path traversal
     if ".." in app_name or "/" in app_name or "\\" in app_name:
         return "Error: Invalid application name."
-    # Block dangerous file types
+    # Block dangerous file types (safety_guard check — .lnk, .url, .pif, .hta)
+    from charlie.security.safety_guard import check_dangerous_file_type
+
+    if check_dangerous_file_type(app_name):
+        return (
+            f"Error: Cannot open '{app_name}' — dangerous file type. "
+            "Files with extensions .lnk, .url, .pif, .hta can execute arbitrary code."
+        )
+    # Block dangerous executable types
     dangerous_exts = {".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".msi", ".com", ".scr"}
     from pathlib import Path
     p = Path(app_name)

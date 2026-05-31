@@ -10,7 +10,6 @@ import { SearchInput } from '@/components/ui/SearchInput'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import { PageHeader } from '@/components/layout/PageHeader'
-import { HudCorners } from '@/components/background/HudCorners'
 import { FlowNode } from '@/components/graphs/FlowNode'
 import { useAutoLayout } from '@/components/graphs/useAutoLayout'
 import { fetchAutomationRules, toggleAutomationRule } from '@/lib/api'
@@ -37,7 +36,8 @@ export default function AutomationPage() {
     try {
       const data = await fetchAutomationRules()
       setRules(data.rules || [])
-    } catch {
+    } catch (e) {
+      console.error('Failed to load automation rules:', e)
       setRules([])
     }
     setLoading(false)
@@ -67,8 +67,8 @@ export default function AutomationPage() {
           r.name === name ? { ...r, enabled: result.enabled } : r,
         ),
       )
-    } catch {
-      // Revert on failure
+    } catch (e) {
+      console.error('Failed to toggle automation rule:', e)
       setRules((prev) =>
         prev.map((r) =>
           r.name === name ? { ...r, enabled: !r.enabled } : r,
@@ -117,13 +117,13 @@ export default function AutomationPage() {
         id: `e-${rule.name}-tc`,
         source: `${rule.name}-trigger`,
         target: `${rule.name}-condition`,
-        style: { stroke: rule.enabled ? 'rgba(0, 212, 255, 0.3)' : 'rgba(100, 116, 139, 0.2)', strokeWidth: 1.5 },
+        style: { stroke: rule.enabled ? 'rgba(136, 204, 255, 0.3)' : 'rgba(100, 116, 139, 0.2)', strokeWidth: 1.5 },
       })
       graphEdges.push({
         id: `e-${rule.name}-ca`,
         source: `${rule.name}-condition`,
         target: `${rule.name}-action`,
-        style: { stroke: rule.enabled ? 'rgba(0, 212, 255, 0.3)' : 'rgba(100, 116, 139, 0.2)', strokeWidth: 1.5 },
+        style: { stroke: rule.enabled ? 'rgba(136, 204, 255, 0.3)' : 'rgba(100, 116, 139, 0.2)', strokeWidth: 1.5 },
       })
     })
 
@@ -180,7 +180,7 @@ export default function AutomationPage() {
             proOptions={{ hideAttribution: true }}
             style={{ background: 'transparent' }}
           >
-            <Background color="rgba(0, 212, 255, 0.05)" gap={20} />
+            <Background color="rgba(136, 204, 255, 0.05)" gap={20} />
             <Controls className="!bg-charlie-card !border-charlie-border !shadow-none" />
           </ReactFlow>
         </div>
@@ -191,8 +191,7 @@ export default function AutomationPage() {
             const isOpen = expanded.has(rule.name)
 
             return (
-              <HudCorners key={rule.name}>
-                <GlassCard className="!p-0 hover:shadow-neon-cyan-sm transition-all">
+                <GlassCard key={rule.name} className="!p-0 hover:shadow-neon-cyan-sm transition-all">
                   <div className="p-4">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
@@ -215,6 +214,8 @@ export default function AutomationPage() {
                         </Badge>
                         <button
                           onClick={() => toggleExpand(rule.name)}
+                          aria-expanded={isOpen}
+                          aria-label={isOpen ? 'Collapse rule details' : 'Expand rule details'}
                           className="text-charlie-dim hover:text-charlie-text transition-colors p-1 cursor-pointer"
                         >
                           <svg
@@ -263,7 +264,6 @@ export default function AutomationPage() {
                     </div>
                   )}
                 </GlassCard>
-              </HudCorners>
             )
           })}
         </div>

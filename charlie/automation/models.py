@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass, field
 from enum import IntEnum
 
+from charlie.intelligence.outcome_tracker import Outcome as CanonicalOutcome
 from charlie.security.tiers import RiskTier
 
 
@@ -69,13 +70,26 @@ class AutomationRule:
 
 @dataclass
 class Outcome:
-    """Record of an automation action's result."""
+    """Thin adapter over the canonical Outcome from outcome_tracker.
+
+    Preserves the legacy interface (event_type, action, success) while
+    mapping to canonical fields at construction time.
+    """
     event_type: str
     action: str
     success: bool
     user_approved: bool = True
     user_feedback: str = ""  # "good", "bad", "neutral"
     timestamp: float = field(default_factory=time.time)
+
+    def to_canonical(self) -> CanonicalOutcome:
+        """Convert to the canonical Outcome dataclass for persistence."""
+        return CanonicalOutcome(
+            timestamp=self.timestamp,
+            event_type=self.event_type,
+            outcome_type="success" if self.success else "failure",
+            tool_name=self.action,
+        )
 
 
 @dataclass

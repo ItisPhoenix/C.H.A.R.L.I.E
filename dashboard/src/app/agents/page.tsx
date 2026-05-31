@@ -6,7 +6,6 @@ import '@xyflow/react/dist/style.css'
 import { GlassCard } from '@/components/ui/GlassCard'
 import { Badge } from '@/components/ui/Badge'
 import { StatusDot } from '@/components/ui/StatusDot'
-import { HudCorners } from '@/components/background/HudCorners'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
@@ -75,7 +74,6 @@ function OrchestratorCard({ status }: { status: AgentStatus['orchestrator'] }) {
 
 function AgentCard({ agent }: { agent: AgentInfo }) {
   return (
-    <HudCorners>
     <GlassCard className="!p-4">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
@@ -99,7 +97,6 @@ function AgentCard({ agent }: { agent: AgentInfo }) {
         </div>
       )}
     </GlassCard>
-    </HudCorners>
   )
 }
 
@@ -113,8 +110,8 @@ export default function AgentsPage() {
     try {
       const status = await api.fetchAgentStatus()
       setData(status)
-    } catch {
-      // keep existing state
+    } catch (e) {
+      console.error('Failed to load agent status:', e)
     } finally {
       setLoading(false)
     }
@@ -157,7 +154,7 @@ export default function AgentsPage() {
       source: 'orchestrator',
       target: agent.id,
       style: {
-        stroke: agent.status === 'busy' ? 'rgba(0, 212, 255, 0.4)' : 'rgba(0, 212, 255, 0.15)',
+        stroke: agent.status === 'busy' ? 'rgba(136, 204, 255, 0.4)' : 'rgba(136, 204, 255, 0.15)',
         strokeWidth: agent.status === 'busy' ? 2 : 1,
       },
     }))
@@ -223,7 +220,7 @@ export default function AgentsPage() {
             proOptions={{ hideAttribution: true }}
             style={{ background: 'transparent' }}
           >
-            <Background color="rgba(0, 212, 255, 0.05)" gap={20} />
+            <Background color="rgba(136, 204, 255, 0.05)" gap={20} />
             <Controls className="!bg-charlie-card !border-charlie-border !shadow-none" />
           </ReactFlow>
         </div>

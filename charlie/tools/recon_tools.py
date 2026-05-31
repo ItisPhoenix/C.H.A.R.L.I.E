@@ -303,11 +303,10 @@ def caller_lookup(phone_number: str) -> str:
                 region = f"{country}"
             break
 
-    resolved_name = "Potential Business/Individual"
-    resolved_age = "N/A"
-    resolved_email = "N/A"
+    resolved_name = None
+    resolved_email = None
     resolved_address = f"{region}, {country}" if region != "Unknown Region" else country
-    reported_date = "2026-05-24"
+    has_real_data = False
 
     # DuckDuckGo search for OSINT info
     try:
@@ -320,6 +319,9 @@ def caller_lookup(phone_number: str) -> str:
                 body = r.get("body", "")
                 scraped_info.append(f"Result: {title} | Snippet: {body}")
 
+        if scraped_info:
+            has_real_data = True
+
         scraped_text = " ".join(scraped_info)
         email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', scraped_text)
         if email_match:
@@ -329,15 +331,24 @@ def caller_lookup(phone_number: str) -> str:
             if any(w in result.lower() for w in ["spam", "scam", "telemarketer", "fraud"]):
                 resolved_name = "Reported Telemarketer/Robocall"
                 break
+    except ImportError:
+        pass
     except Exception:
         pass
+
+    # If no real data was found, return an honest unavailable message
+    if not has_real_data and not resolved_name and not resolved_email:
+        return (
+            f"Caller information unavailable for {phone_number} — no real lookup source configured. "
+            f"Regional estimate: {resolved_address}."
+        )
 
     def clean_str(s: str) -> str:
         s_no_html = re.sub(r'<[^>]*>', '', s)
         return html.escape(s_no_html)
 
-    resolved_name = clean_str(resolved_name)
-    resolved_email = clean_str(resolved_email)
+    display_name = clean_str(resolved_name or "Unknown")
+    display_email = clean_str(resolved_email or "Not found")
     resolved_address = clean_str(resolved_address)
 
     # 3. GUI event trigger
@@ -347,12 +358,10 @@ def caller_lookup(phone_number: str) -> str:
         widget_data = {
             "widget": "caller_profile",
             "data": {
-                "name": resolved_name,
-                "age": resolved_age,
+                "name": display_name,
                 "phone": phone_number,
-                "email": resolved_email,
+                "email": display_email,
                 "address": resolved_address,
-                "reported_date": reported_date
             }
         }
         status_q.put_nowait({
@@ -366,12 +375,10 @@ def caller_lookup(phone_number: str) -> str:
 
 | Field | Value |
 | :--- | :--- |
-| **Name** | {resolved_name} |
-| **Age** | {resolved_age} |
+| **Name** | {display_name} |
 | **Phone** | {phone_number} |
-| **Email** | {resolved_email} |
+| **Email** | {display_email} |
 | **Address** | {resolved_address} |
-| **Reported Date** | {reported_date} |
 
 📍 **Maps Link**: [Google Maps Locale]({maps_query})
 """

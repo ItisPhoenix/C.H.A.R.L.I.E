@@ -29,7 +29,7 @@ export function SweepScanLine() {
   if (!visible) return null
 
   const isLight = typeof document !== 'undefined' && document.documentElement.classList.contains('light')
-  const baseColor = isLight ? '100, 116, 139' : '0, 212, 255'
+  const baseColor = isLight ? '100, 116, 139' : '136, 204, 255'
   const intensity = isLight ? 0.3 : 0.6
 
   return (

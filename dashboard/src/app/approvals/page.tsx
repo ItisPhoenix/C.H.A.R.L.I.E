@@ -9,7 +9,6 @@ import { Modal } from '@/components/ui/Modal'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import { ErrorState } from '@/components/ui/ErrorState'
-import { HudCorners } from '@/components/background/HudCorners'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { fetchApprovals, approveAction, denyAction } from '@/lib/api'
 import { riskTierLabel, cn } from '@/lib/utils'
@@ -60,7 +59,9 @@ export default function ApprovalsPage() {
       await approveAction(approval.id)
       setRecentlyApproved((prev) => [approval, ...prev])
       await loadApprovals()
-    } catch {} finally {
+    } catch (e) {
+      console.error('Failed to approve action:', e)
+    } finally {
       setActionLoading(null)
       setConfirmTier3(null)
     }
@@ -72,7 +73,9 @@ export default function ApprovalsPage() {
       await denyAction(approval.id)
       setRecentlyDenied((prev) => [approval, ...prev])
       await loadApprovals()
-    } catch {} finally {
+    } catch (e) {
+      console.error('Failed to deny action:', e)
+    } finally {
       setActionLoading(null)
     }
   }
@@ -260,7 +263,6 @@ function ApprovalCard({ approval, actionLoading, onApprove, onDeny }: ApprovalCa
   })()
 
   return (
-    <HudCorners>
       <GlassCard className="hover:shadow-neon-cyan-sm transition-all">
         <div className="flex items-start justify-between gap-4 mb-2">
           <div className="flex-1 min-w-0">
@@ -304,7 +306,6 @@ function ApprovalCard({ approval, actionLoading, onApprove, onDeny }: ApprovalCa
           </Button>
         </div>
       </GlassCard>
-    </HudCorners>
   )
 }
 

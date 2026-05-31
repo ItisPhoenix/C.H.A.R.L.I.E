@@ -8,7 +8,6 @@ import { Toggle } from '@/components/ui/Toggle'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
-import { HudCorners } from '@/components/background/HudCorners'
 import { fetchMCPServers, toggleMCPServer } from '@/lib/api'
 import { truncate, cn } from '@/lib/utils'
 import type { MCPServer, MCPTool } from '@/lib/types'
@@ -43,7 +42,16 @@ function ServerCard({ server, onToggle }: { server: MCPServer; onToggle: (id: st
       {/* Header */}
       <div
         className="flex items-center justify-between p-4 cursor-pointer"
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
         onClick={() => setExpanded(!expanded)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            setExpanded(!expanded)
+          }
+        }}
       >
         <div className="flex items-center gap-3">
           <StatusDot status={statusDotMap[server.status] || 'idle'} />
@@ -101,8 +109,8 @@ export default function MCPPage() {
     try {
       const data = await fetchMCPServers()
       setServers(data.servers)
-    } catch {
-      // keep existing state
+    } catch (e) {
+      console.error('Failed to load MCP servers:', e)
     } finally {
       setLoading(false)
     }
@@ -116,8 +124,8 @@ export default function MCPPage() {
     try {
       await toggleMCPServer(id)
       await loadServers()
-    } catch {
-      // ignore
+    } catch (e) {
+      console.error('Failed to toggle MCP server:', e)
     }
   }
 

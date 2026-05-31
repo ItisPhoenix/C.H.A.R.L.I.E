@@ -29,6 +29,31 @@ def _fix_dpi():
             logger.debug("dpi_awareness_failed | error={}", e)
 
 
+def _run_doctor():
+    """Run the Doctor self-check and print a human-readable report, then exit."""
+    from charlie.utils.doctor import run_self_check
+
+    report = run_self_check()
+
+    # Header
+    print("\n╔══════════════════════════════════════════════════════════╗")
+    print("║          C.H.A.R.L.I.E. Doctor Self-Check               ║")
+    print("╚══════════════════════════════════════════════════════════╝\n")
+
+    status_icons = {"pass": "✓", "warn": "⚠", "fail": "✗"}
+
+    for check in report.checks:
+        icon = status_icons.get(check.status, "?")
+        print(f"  [{icon}] {check.name:20s} — {check.status.upper():4s} — {check.message}")
+        if check.cause:
+            print(f"      Cause: {check.cause}")
+        if check.remediation:
+            print(f"      Fix:   {check.remediation}")
+
+    print(f"\n  Overall: {report.overall.upper()}")
+    print(f"  Generated at: {report.generated_at:.0f}\n")
+
+
 def main():
     """Main Entry Point for C.H.A.R.L.I.E. Engine."""
     # ── VENV ENFORCEMENT (Hardened) ──
@@ -44,18 +69,33 @@ def main():
         result = subprocess.run([venv_python, script_path] + sys.argv[1:])
         sys.exit(result.returncode)
 
+    # ── DOCTOR SUBCOMMAND ──
+    if "doctor" in sys.argv:
+        _run_doctor()
+        sys.exit(0)
+
     _fix_dpi()
 
     # ── LOAD .ENV BEFORE VALIDATION ──
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
 
-    # We use PhoenixSupervisor to manage all engine sub-processes
-    from charlie.watchdog import PhoenixSupervisor
+    # Select supervisor based on --daemon flag
+    daemon_mode = "--daemon" in sys.argv
+    if daemon_mode:
+        sys.argv.remove("--daemon")
 
     interrupt_event = multiprocessing.Event()
     reboot_event = multiprocessing.Event()
-    supervisor = PhoenixSupervisor(interrupt_event, reboot_event)
+
+    if daemon_mode:
+        from charlie.watchdog.daemon_supervisor import DaemonSupervisor
+        supervisor = DaemonSupervisor(interrupt_event, reboot_event)
+        logger.info("main_entry | mode=daemon")
+    else:
+        from charlie.watchdog import PhoenixSupervisor
+        supervisor = PhoenixSupervisor(interrupt_event, reboot_event)
+        logger.info("main_entry | mode=phoenix")
 
     # ── STARTUP & QUEUE VALIDATION (non-blocking) ──
     # Run in background thread to prevent VCAMDS camera loops and IPC Manager queue checks from blocking main thread

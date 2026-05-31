@@ -15,21 +15,13 @@ import time
 from aiohttp import web
 
 from charlie.utils.logger import get_logger
+from charlie.watchdog.status_events import STATUS_EVENT_MAP
 
 logger = get_logger("ControlServer")
 
-# Message types that get forwarded from status_q to WS clients
-WS_FORWARD_TYPES = {
-    "PHASE", "CHAT_MSG", "VOICE_ACTIVITY", "VRAM",
-    "INTEGRATION_UPDATE", "PHOENIX_ALERT",
-    "RESEARCH_STATUS", "RESEARCH_LOG", "RESEARCH_PARTIAL",
-    "RESEARCH_RESULT", "RESEARCH_FOLLOWUP",
-    "CONFIRM_REQUIRED",
-    "STATUS_UPDATE", "SUBSYSTEM_STATUS",
-    "TOOL_EXECUTION",
-    "TASK_UPDATE", "TASK_COMPLETE", "TASK_FAIL",
-    "VOICE_COMMAND", "USER_TRANSCRIPT",
-}
+# Message types that get forwarded from status_q to WS clients.
+# Imported from the single canonical definition so there is exactly one map.
+WS_FORWARD_TYPES = set(STATUS_EVENT_MAP.keys())
 
 
 class ControlServer:
@@ -58,6 +50,28 @@ class ControlServer:
         self._token = os.environ.get("CONTROL_SERVER_TOKEN") or secrets.token_urlsafe(32)
         self._token_endpoint_added = False  # deferred to first request
 
+        # Cross-process Brain RPC client (Design §D, Reqs 7.1-7.10)
+        self.brain_rpc: "BrainRPCClient | None" = None
+        if daemon is not None:
+            req_q = getattr(daemon, "brain_req_q", None)
+            res_q = getattr(daemon, "brain_res_q", None)
+            if req_q is not None and res_q is not None:
+                from charlie.watchdog.brain_rpc import BrainRPCClient
+                self.brain_rpc = BrainRPCClient(req_q, res_q)
+                self.brain_rpc.start()
+
+                # Probe the Brain RPC server in the background so the first
+                # real request does not race against Brain initialization.
+                # wait_until_ready sends PINGs until the server responds or
+                # a timeout elapses; the result is only logged.
+                import threading as _thr
+                _thr.Thread(
+                    target=self.brain_rpc.wait_until_ready,
+                    kwargs={"timeout": 20.0},
+                    daemon=True,
+                    name="BrainRPCReadyProbe",
+                ).start()
+
     def start(self):
         """Start the control server (blocking, run in thread)."""
         loop = asyncio.new_event_loop()
@@ -68,6 +82,7 @@ class ControlServer:
         except Exception as e:
             logger.error("control_server_start_failed", error=str(e))
 
+    @web.middleware
     async def _rate_limit_middleware(self, request, handler):
         """Simple rate limiting: 100 requests per minute per IP."""
         now = time.time()
@@ -116,21 +131,12 @@ class ControlServer:
                     pass
             return
 
-        # Start status_q → WS forwarding task
-        forward_task = asyncio.create_task(self._forward_status_queue())
-
         # Keep running until stopped
         try:
             while self._running:
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
             pass
-        finally:
-            forward_task.cancel()
-            try:
-                await forward_task
-            except asyncio.CancelledError:
-                pass
 
     async def stop(self):
         """Stop the control server."""
@@ -172,6 +178,15 @@ class ControlServer:
         if request.path == "/api/token":
             return await handler(request)
 
+        # Allow CORS preflight without auth
+        if request.method == "OPTIONS":
+            return await handler(request)
+
+        # Allow dashboard requests from localhost without token
+        remote = request.remote or ""
+        if remote in ("127.0.0.1", "::1", "localhost"):
+            return await handler(request)
+
         # Accept token from header OR query param (for WebSocket)
         token = request.headers.get("X-Control-Token", "")
         if not token:
@@ -194,6 +209,9 @@ class ControlServer:
         self._app.router.add_get("/api/status", self._handle_status)
         self._app.router.add_get("/api/subsystems", self._handle_subsystems)
 
+        # Doctor self-check (read-only, fast)
+        self._app.router.add_get("/api/doctor", self._handle_doctor)
+
         # Subsystem control
         self._app.router.add_post("/api/subsystems/{name}/restart", self._handle_restart_subsystem)
         self._app.router.add_post("/api/subsystems/{name}/stop", self._handle_stop_subsystem)
@@ -210,7 +228,6 @@ class ControlServer:
         # Settings
         self._app.router.add_get("/api/settings", self._handle_get_settings)
         self._app.router.add_post("/api/settings", self._handle_post_settings)
-        self._app.router.add_post("/api/setup", self._handle_setup)
 
         # Unified search
         self._app.router.add_get("/api/search", self._handle_unified_search)
@@ -285,6 +302,18 @@ class ControlServer:
             status = await asyncio.to_thread(self.daemon.get_daemon_status)
             return web.json_response(status.get("subsystems", {}))
         except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_doctor(self, request):
+        """GET /api/doctor — run Doctor self-check and return JSON report."""
+        try:
+            from charlie.utils.doctor import run_self_check
+            from dataclasses import asdict
+
+            report = await asyncio.to_thread(run_self_check)
+            return web.json_response(asdict(report))
+        except Exception as e:
+            logger.error("doctor_endpoint_failed", error=str(e))
             return web.json_response({"error": str(e)}, status=500)
 
     # ── Subsystem control ──
@@ -378,19 +407,39 @@ class ControlServer:
     # ── Control endpoints ──
 
     async def _handle_shutdown(self, request):
-        """POST /api/control/shutdown — graceful daemon shutdown."""
+        """POST /api/control/shutdown — graceful daemon shutdown.
+
+        Routes the shutdown through the supervisor's main monitor thread by
+        setting ``shutdown_event`` instead of calling ``daemon.stop`` directly
+        from this ControlServer thread (Reqs 14.3, 14.4). Falls back to the
+        legacy direct call if the daemon predates the event.
+        """
         try:
             if self.daemon:
-                asyncio.get_running_loop().call_later(0.5, self.daemon.stop)
+                shutdown_event = getattr(self.daemon, "shutdown_event", None)
+                if shutdown_event is not None:
+                    shutdown_event.set()
+                else:
+                    asyncio.get_running_loop().call_later(0.5, self.daemon.stop)
             return web.json_response({"ok": True, "status": "shutting_down"})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
     async def _handle_reboot(self, request):
-        """POST /api/control/reboot — reboot daemon."""
+        """POST /api/control/reboot — reboot daemon.
+
+        Routes the reboot through the supervisor's main monitor thread by
+        setting ``reboot_event`` instead of calling ``daemon.reboot`` directly
+        from this ControlServer thread (Reqs 14.3, 14.4). Falls back to the
+        legacy direct call if the daemon predates the event.
+        """
         try:
             if self.daemon:
-                asyncio.get_running_loop().call_later(0.5, self.daemon.reboot)
+                reboot_event = getattr(self.daemon, "reboot_event", None)
+                if reboot_event is not None:
+                    reboot_event.set()
+                else:
+                    asyncio.get_running_loop().call_later(0.5, self.daemon.reboot)
             return web.json_response({"ok": True, "status": "rebooting"})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
@@ -398,62 +447,28 @@ class ControlServer:
     # ── Settings endpoints ──
 
     async def _handle_get_settings(self, request):
-        """GET /api/settings — read daemon settings."""
-        try:
-            from charlie.config import settings
-            return web.json_response(settings.to_dict() if hasattr(settings, 'to_dict') else {})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        """GET /api/settings — read settings via Brain RPC."""
+        data = {}
+        if self.brain_rpc:
+            resp = await self.brain_rpc.request_async("GET_SETTINGS")
+            if resp.ok:
+                data = resp.data or {}
+            elif resp.error == "brain_rpc_timeout":
+                return web.json_response(
+                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
+                )
+        if not data:
+            try:
+                from charlie.config import settings
+                data = settings.to_dict() if hasattr(settings, 'to_dict') else {}
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+        return web.json_response(data)
 
     async def _handle_post_settings(self, request):
         """POST /api/settings — write daemon settings."""
         return web.json_response({"status": "not_implemented"}, status=501)
 
-    async def _handle_setup(self, request):
-        """POST /api/setup — write setup wizard configuration to charlie_config.json."""
-        try:
-            import json
-            config_path = os.path.join(os.getcwd(), "charlie_config.json")
-            config = {}
-            if os.path.exists(config_path):
-                with open(config_path) as f:
-                    config = json.load(f)
-
-            body = await request.json()
-
-            # Map wizard data to config keys
-            if "llm_api_key" in body:
-                config.setdefault("llm", {})["api_key"] = body["llm_api_key"]
-            if "llm_model" in body:
-                config.setdefault("llm", {})["model"] = body["llm_model"]
-            if "llm_provider" in body:
-                config.setdefault("llm", {})["provider"] = body["llm_provider"]
-            if "voice_enabled" in body:
-                config.setdefault("audio", {})["enabled"] = body["voice_enabled"]
-            if "wake_word" in body:
-                config.setdefault("audio", {})["wake_word"] = body["wake_word"]
-            if "stt_model" in body:
-                config.setdefault("audio", {})["stt_model"] = body["stt_model"]
-            if "tts_model" in body:
-                config.setdefault("audio", {})["tts_model"] = body["tts_model"]
-            if "integrations" in body:
-                config["integrations"] = body["integrations"]
-            if "risk_tier" in body:
-                config.setdefault("security", {})["risk_tier"] = body["risk_tier"]
-            if "guardian_enabled" in body:
-                config.setdefault("security", {})["guardian_enabled"] = body["guardian_enabled"]
-            if "auto_approve_threshold" in body:
-                config.setdefault("security", {})["auto_approve_threshold"] = body["auto_approve_threshold"]
-
-            config["setup_complete"] = body.get("setup_complete", True)
-
-            with open(config_path, "w") as f:
-                json.dump(config, f, indent=2)
-
-            return web.json_response({"status": "ok"})
-        except Exception as e:
-            logger.error("setup_failed | error=%s", e)
-            return web.json_response({"status": "error", "error": str(e)}, status=500)
 
     # ── WebSocket ──
 
@@ -521,14 +536,31 @@ class ControlServer:
     # ── Memory timeline ──
 
     async def _handle_memory_search(self, request):
-        """GET /api/memory/search — search timeline."""
+        """GET /api/memory/search — search timeline via Brain RPC (Req 7.8)."""
         query = request.query.get("q", "")
         if not query.strip():
             return web.json_response({"results": [], "count": 0})
+
+        # Pass all query-string params to the Brain-side SEARCH handler
+        params = dict(request.query)
+        params["query"] = query
+
+        if self.brain_rpc:
+            resp = await self.brain_rpc.request_async("SEARCH", params)
+            if resp.ok:
+                return web.json_response({
+                    "results": resp.data or [],
+                    "count": len(resp.data or []),
+                })
+            if resp.error == "brain_rpc_timeout":
+                return web.json_response(
+                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
+                )
+
+        # Fallback: local timeline search
         try:
             from charlie.intelligence.timeline import TimelineIndexer
             indexer = TimelineIndexer()
-            # Non-blocking async-to-thread database indexing & searching
             await asyncio.to_thread(indexer.build_index)
             results = await asyncio.to_thread(indexer.search, query=query, limit=50)
             return web.json_response({
@@ -541,23 +573,35 @@ class ControlServer:
     # ── Unified search ──
 
     async def _handle_unified_search(self, request):
-        """GET /api/search?q=... — search across chat, memory, tools, and tasks."""
-        query = request.query.get("q", "").strip().lower()
+        """GET /api/search?q=... — search via Brain RPC (Req 7.8: filters preserved)."""
+        query = request.query.get("q", "").strip()
         if not query:
             return web.json_response({"results": []})
 
-        results = []
+        # Pass all query-string params to the Brain-side SEARCH handler
+        params = dict(request.query)
+        params["query"] = query
 
-        # Search chat history
+        if self.brain_rpc:
+            resp = await self.brain_rpc.request_async("SEARCH", params)
+            if resp.ok:
+                return web.json_response({"results": resp.data or [], "count": len(resp.data or [])})
+            if resp.error == "brain_rpc_timeout":
+                return web.json_response(
+                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
+                )
+
+        # Fallback: local search (chat history only, since Brain is unreachable)
+        results = []
         try:
             history_file = os.path.join(os.getcwd(), "scratch", "conversation_history.json")
             if os.path.exists(history_file):
                 with open(history_file) as f:
-                    messages = json.load(f) if os.path.exists(history_file) else []
+                    messages = json.load(f)
                     if isinstance(messages, list):
                         for msg in messages:
                             content = msg.get("content", "")
-                            if query in content.lower():
+                            if query.lower() in content.lower():
                                 results.append({
                                     "source": "chat",
                                     "category": msg.get("role", "message"),
@@ -567,100 +611,25 @@ class ControlServer:
         except Exception:
             pass
 
-        # Search memory/timeline
-        try:
-            from charlie.intelligence.timeline import TimelineIndexer
-            indexer = TimelineIndexer()
-            await asyncio.to_thread(indexer.build_index)
-            memory_results = await asyncio.to_thread(indexer.search, query=query, limit=20)
-            for entry in memory_results:
-                d = entry.to_dict() if hasattr(entry, 'to_dict') else {}
-                results.append({
-                    "source": "memory",
-                    "category": d.get("category", "memory"),
-                    "content": d.get("content", "")[:300],
-                    "timestamp": d.get("timestamp"),
-                })
-        except Exception:
-            pass
-
-        # Search tool executions
-        try:
-            brain = self.daemon
-            if brain and hasattr(brain, "outcome_tracker"):
-                outcomes = brain.outcome_tracker.get_recent_outcomes(limit=100)
-                for o in outcomes:
-                    tool_name = o.get("tool_name", "")
-                    detail = o.get("detail", "")
-                    if query in tool_name.lower() or query in detail.lower():
-                        results.append({
-                            "source": "tools",
-                            "category": tool_name,
-                            "content": detail[:300],
-                            "timestamp": o.get("timestamp"),
-                        })
-        except Exception:
-            pass
-
-        # Search tasks
-        try:
-            brain_obj = getattr(self.daemon, '_brain', None)
-            if brain_obj and hasattr(brain_obj, 'task_manager'):
-                tm = brain_obj.task_manager
-                if hasattr(tm, 'get_all_tasks'):
-                    for task in tm.get_all_tasks():
-                        name = getattr(task, 'name', '') or ''
-                        desc = getattr(task, 'description', '') or ''
-                        if query in name.lower() or query in desc.lower():
-                            td = task.to_dict() if hasattr(task, 'to_dict') else {}
-                            results.append({
-                                "source": "tasks",
-                                "category": name or td.get("id", "task"),
-                                "content": desc[:300] or f"Status: {td.get('status', 'unknown')}",
-                                "timestamp": td.get("timestamp"),
-                            })
-        except Exception:
-            pass
-
         return web.json_response({"results": results, "count": len(results)})
 
     # ── Automation rule toggle ──
 
     async def _handle_toggle_rule(self, request):
-        """POST /api/automation/rules/{name}/toggle — toggle a rule's enabled state."""
+        """POST /api/automation/rules/{name}/toggle — toggle a rule via Brain RPC."""
         name = request.match_info["name"]
-        try:
-            brain = self.daemon
-            if not brain:
-                return web.json_response({"error": "Daemon not available"}, status=503)
-
-            # Find the rule engine
-            rule_engine = None
-            if hasattr(brain, "rule_engine"):
-                rule_engine = brain.rule_engine
-            elif hasattr(brain, "_brain") and hasattr(brain._brain, "rule_engine"):
-                rule_engine = brain._brain.rule_engine
-
-            if not rule_engine:
-                return web.json_response({"error": "Rule engine not available"}, status=503)
-
-            rule = rule_engine.get_rule(name)
-            if not rule:
-                return web.json_response({"error": f"Rule '{name}' not found"}, status=404)
-
-            new_enabled = not rule.enabled
-            rule_engine.update_rule(name, enabled=new_enabled)
-            rule_engine.save_rules()
-
-            logger.info(f"rule_toggled | name={name} | enabled={new_enabled}")
-            return web.json_response({
-                "ok": True,
-                "name": name,
-                "enabled": new_enabled,
-            })
-        except Exception as e:
-            logger.error(f"toggle_rule_failed | {e}")
-            return web.json_response({"error": str(e)}, status=500)
+        if self.brain_rpc:
+            resp = await self.brain_rpc.request_async("TOGGLE_RULE", {"name": name})
+            if resp.ok:
+                data = resp.data or {}
+                logger.info(f"rule_toggled | name={name} | enabled={data.get('enabled')}")
+                return web.json_response({"ok": True, **data})
+            if resp.error == "brain_rpc_timeout":
+                return web.json_response(
+                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
+                )
+            return web.json_response({"error": resp.error or "rpc_failed"}, status=500)
+        return web.json_response({"error": "brain_rpc_not_available"}, status=503)
 
     # ── Integrations ──
 
@@ -688,17 +657,16 @@ class ControlServer:
     # ── Automation ──
 
     async def _handle_get_rules(self, request):
-        """GET /api/automation/rules — list automation rules."""
-        if not self.daemon:
-            return web.json_response({"rules": []})
-        try:
-            brain = getattr(self.daemon, '_brain', None)
-            if brain and hasattr(brain, 'rule_engine'):
-                rules = brain.rule_engine.get_all_rules()
-                return web.json_response({"rules": rules})
-            return web.json_response({"rules": []})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        """GET /api/automation/rules — list automation rules via Brain RPC."""
+        if self.brain_rpc:
+            resp = await self.brain_rpc.request_async("GET_AUTOMATION_RULES")
+            if resp.ok:
+                return web.json_response({"rules": resp.data or []})
+            if resp.error == "brain_rpc_timeout":
+                return web.json_response(
+                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
+                )
+        return web.json_response({"rules": []})
 
     async def _handle_get_token(self, request):
         """Return the server token (no auth required). Used by dashboard to bootstrap."""
@@ -747,6 +715,8 @@ class ControlServer:
         """GET /api/globe/data — all globe data (calendar, memory, workspace, user)."""
         import os
 
+        from charlie.integrations.adapter import call_integration
+
         result = {
             "calendar": [],
             "memory": [],
@@ -767,7 +737,7 @@ class ControlServer:
         try:
             from charlie.integrations.google_calendar import GoogleCalendarIntegration
             cal = GoogleCalendarIntegration()
-            events = await cal.fetch(max_results=20)
+            events = await call_integration(cal.fetch, max_results=20)
             result["calendar"] = [
                 {
                     "id": e.get("id", str(i)),
@@ -806,6 +776,7 @@ class ControlServer:
         """POST /api/globe/refresh — fetch latest data and push to globe WS clients."""
         import os
         from charlie.integrations.google_calendar import GoogleCalendarIntegration
+        from charlie.integrations.adapter import call_integration
         from charlie.intelligence.memory_graph import MemoryGraph
 
         result = {"calendar": [], "memory": [], "workspace": [], "user_position": None}
@@ -822,7 +793,7 @@ class ControlServer:
         # Calendar
         try:
             cal = GoogleCalendarIntegration()
-            events = await cal.fetch(max_results=20)
+            events = await call_integration(cal.fetch, max_results=20)
             result["calendar"] = [
                 {
                     "id": e.get("id", str(i)),
@@ -860,7 +831,25 @@ class ControlServer:
     # ── Agents, skills, tools ──────────────────────────────────────────────────
 
     async def _handle_agents_status(self, request):
-        """GET /api/agents/status — orchestrator status and loaded agent manifests."""
+        """GET /api/agents/status — orchestrator status via Brain RPC."""
+        if self.brain_rpc:
+            resp = await self.brain_rpc.request_async("GET_AGENT_STATUS")
+            if resp.ok:
+                agents = resp.data or []
+                active_count = sum(1 for a in agents if isinstance(a, dict) and a.get("status") == "busy")
+                return web.json_response({
+                    "orchestrator": {
+                        "status": "executing" if active_count > 0 else "idle",
+                        "active_agents": active_count,
+                        "current_plan": "",
+                    },
+                    "agents": agents,
+                })
+            if resp.error == "brain_rpc_timeout":
+                return web.json_response(
+                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
+                )
+        # Fallback: scan agent manifests on disk
         try:
             import json
             import pathlib
@@ -873,39 +862,18 @@ class ControlServer:
                         try:
                             with open(manifest_path) as f:
                                 manifest = json.load(f)
-                            # Check if agent has running tasks via task_manager
                             agent_name = manifest.get("name", agent_path.name)
-                            agent_status = "idle"
-                            current_task = ""
-                            if self.daemon and hasattr(self.daemon, '_brain'):
-                                brain = self.daemon._brain
-                                if hasattr(brain, 'task_manager') and brain.task_manager:
-                                    for task in brain.task_manager.get_all_tasks():
-                                        if hasattr(task, 'agent_id') and task.agent_id == agent_name:
-                                            if task.status in ('running', 'active'):
-                                                agent_status = 'busy'
-                                                current_task = task.name or task.id
-                                                break
                             agents.append({
                                 "id": agent_name,
                                 "name": agent_name,
                                 "role": manifest.get("role", "") or agent_path.name,
-                                "status": agent_status,
-                                "current_task": current_task,
+                                "status": "idle",
+                                "current_task": "",
                             })
                         except Exception:
                             pass
-            # Check orchestrator status
-            orch_status = "idle"
-            active_count = sum(1 for a in agents if a["status"] == "busy")
-            if active_count > 0:
-                orch_status = "executing"
             return web.json_response({
-                "orchestrator": {
-                    "status": orch_status,
-                    "active_agents": active_count,
-                    "current_plan": "",
-                },
+                "orchestrator": {"status": "idle", "active_agents": 0, "current_plan": ""},
                 "agents": agents,
             })
         except Exception as e:
@@ -935,16 +903,17 @@ class ControlServer:
             return web.json_response({"skills": []})
 
     async def _handle_tools_log(self, request):
-        """GET /api/tools/log — recent tool executions from OutcomeTracker."""
-        try:
-            brain = self.daemon
-            if brain and hasattr(brain, "outcome_tracker"):
-                outcomes = brain.outcome_tracker.get_recent_outcomes(limit=50)
-                return web.json_response({"executions": outcomes})
-            return web.json_response({"executions": []})
-        except Exception as e:
-            logger.debug("tools_log_failed | error=%s", e)
-            return web.json_response({"executions": []})
+        """GET /api/tools/log — recent tool executions via Brain RPC."""
+        params = {"limit": int(request.query.get("limit", "50"))}
+        if self.brain_rpc:
+            resp = await self.brain_rpc.request_async("GET_TOOL_LOG", params)
+            if resp.ok:
+                return web.json_response({"executions": resp.data or []})
+            if resp.error == "brain_rpc_timeout":
+                return web.json_response(
+                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
+                )
+        return web.json_response({"executions": []})
 
     async def _handle_logs(self, request):
         """GET /api/logs — recent log entries from all processes."""
@@ -1066,17 +1035,15 @@ class ControlServer:
             return web.json_response({"ok": False, "error": str(e)})
 
     async def _handle_tasks(self, request):
-        """GET /api/tasks — task queue."""
-        try:
-            brain = getattr(self.daemon, '_brain', None)
-            if brain and hasattr(brain, 'task_manager'):
-                tm = brain.task_manager
-                tasks = []
-                if hasattr(tm, 'get_all_tasks'):
-                    tasks = [t.to_dict() if hasattr(t, 'to_dict') else t for t in tm.get_all_tasks()]
-                return web.json_response({"tasks": tasks})
-        except Exception:
-            pass
+        """GET /api/tasks — task queue via Brain RPC."""
+        if self.brain_rpc:
+            resp = await self.brain_rpc.request_async("GET_TASKS")
+            if resp.ok:
+                return web.json_response({"tasks": resp.data or []})
+            if resp.error == "brain_rpc_timeout":
+                return web.json_response(
+                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
+                )
         return web.json_response({"tasks": []})
 
     async def _handle_cancel_task(self, request):
@@ -1146,56 +1113,6 @@ class ControlServer:
         for ws in dead:
             if ws in self._ws_clients:
                 self._ws_clients.remove(ws)
-
-    async def _forward_status_queue(self):
-        """Read from daemon's status_q and forward matching events to WS clients."""
-        if not self.daemon or not hasattr(self.daemon, "status_q"):
-            return
-        while self._running:
-            try:
-                # Non-blocking get with timeout
-                try:
-                    msg = self.daemon.status_q.get(timeout=0.5)
-                except Exception:
-                    await asyncio.sleep(0.5)
-                    continue
-
-                if not isinstance(msg, dict):
-                    continue
-
-                msg_type = msg.get("type", "")
-                if msg_type in WS_FORWARD_TYPES:
-                    # Map internal types to frontend event names
-                    event_map = {
-                        "PHASE": "phase",
-                        "CHAT_MSG": "chat_reply",
-                        "VOICE_ACTIVITY": "voice_activity",
-                        "VRAM": "vram_update",
-                        "INTEGRATION_UPDATE": "integration_update",
-                        "PHOENIX_ALERT": "phoenix_alert",
-                        "RESEARCH_STATUS": "research_status",
-                        "RESEARCH_LOG": "research_log",
-                        "RESEARCH_PARTIAL": "research_partial",
-                        "RESEARCH_RESULT": "research_result",
-                        "RESEARCH_FOLLOWUP": "research_followup",
-                        "CONFIRM_REQUIRED": "confirm_required",
-                        "VOICE_COMMAND": "voice_command",
-                        "USER_TRANSCRIPT": "user_transcript",
-                        "STATUS_UPDATE": "status_update",
-                        "SUBSYSTEM_STATUS": "status_update",
-                        "TOOL_EXECUTION": "tool_execution",
-                        "TASK_UPDATE": "task_update",
-                        "TASK_COMPLETE": "task_update",
-                        "TASK_FAIL": "task_update",
-                    }
-                    ws_type = event_map.get(msg_type, msg_type.lower())
-                    await self._broadcast_ws(ws_type, msg)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.debug("status_q_forward_error | %s", e)
-                await asyncio.sleep(0.5)
 
     def broadcast_sync(self, event_type: str, data: dict):
         """Thread-safe broadcast. Schedules on control server's event loop."""

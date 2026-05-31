@@ -27,23 +27,22 @@ export function LoadingSpinner({ size = 'md', label, className }: LoadingSpinner
           <polygon
             points="50,2 93,25 93,75 50,98 7,75 7,25"
             fill="none"
-            stroke="rgba(0, 212, 255, 0.6)"
-            strokeWidth="4"
-            strokeLinejoin="round"
+            stroke="var(--charlie-border)"
+            strokeWidth="3"
           />
           <polygon
             points="50,2 93,25 93,75 50,98 7,75 7,25"
             fill="none"
-            stroke="rgba(0, 212, 255, 1)"
-            strokeWidth="4"
+            stroke="var(--charlie-text)"
+            strokeWidth="3"
             strokeLinejoin="round"
             strokeDasharray="80 220"
             className="origin-center"
-            style={{ filter: 'drop-shadow(0 0 4px rgba(0, 212, 255, 0.5))' }}
+            style={{ filter: 'drop-shadow(0 0 2px color-mix(in srgb, var(--charlie-cyan) 40%, transparent))' }}
           />
         </svg>
       </div>
-      {label && <span className="text-charlie-dim text-sm font-body">{label}</span>}
+      {label && <span className="text-charlie-dim text-xs font-sans tracking-wide uppercase">{label}</span>}
     </div>
   )
 }

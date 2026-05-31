@@ -8,10 +8,8 @@ import { WSBridge } from '@/components/WSBridge'
 import { ResearchPanel } from '@/components/research/ResearchPanel'
 import { ToastContainer } from '@/components/notifications/ToastContainer'
 import { VoiceCommandRouter } from '@/components/notifications/VoiceCommandRouter'
-import { ParticleNetwork } from '@/components/background/ParticleNetwork'
-import { HexGrid } from '@/components/background/HexGrid'
-import { SweepScanLine } from '@/components/background/SweepScanLine'
 import { CommandPalette } from '@/components/ui/CommandPalette'
+import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
 import { useDashboardStore } from '@/lib/store'
 import { sendMessage, fetchSettings } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -61,6 +59,23 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener('keydown', handler)
   }, [])
 
+  // Global keyboard shortcuts
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.ctrlKey && e.shiftKey && e.key === 'M') {
+        e.preventDefault()
+        router.push('/memory')
+      }
+      if (e.ctrlKey && e.key === '/') {
+        e.preventDefault()
+        // Toggle command palette as help overlay
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }))
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [router])
+
   const isExpanded = !collapsed || hovered
 
   const handleSuggestionClick = useCallback((suggestion: string) => {
@@ -75,10 +90,6 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
 
   return (
     <>
-      {/* Background layers */}
-      <ParticleNetwork />
-      <HexGrid />
-      <SweepScanLine />
 
       <WSBridge />
       <VoiceCommandRouter />
@@ -90,7 +101,9 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
           isExpanded ? 'ml-56' : 'ml-14',
         )}
       >
-        {children}
+        <ErrorBoundary>
+          {children}
+        </ErrorBoundary>
       </main>
       <StatusBar />
       <ResearchPanel

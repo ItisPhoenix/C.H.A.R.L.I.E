@@ -97,6 +97,13 @@ class StreamHandler:
 
     async def emit_thinking(self, content: str, source: str = "local"):
         """Routes partial thinking tokens to the correct channel."""
+        # Second-layer JSON filter: strip any remaining JSON key-value fragments
+        _c = content.strip()
+        if any(k in _c for k in ('"action"', '"action_input"', '"final_answer"', '"thought"')):
+            return  # Suppress JSON leak entirely
+        if _c.startswith('{"') or _c.startswith('"}') or _c == '},':
+            return
+
         if source == "local" or source == "all":
             self.brain._safe_put(self.brain.status_q, {"type": "THINKING_STATUS", "content": content})
         if (source.startswith("telegram") or source == "all") and self.brain.telegram_q:
@@ -136,7 +143,16 @@ class StreamHandler:
                         if "<thought" in content.lower() or "<reasoning" in content.lower():
                             in_thought_block = True
 
-                        is_json_artifact = content.strip() in ["{", "}", '"', ":", ","]
+                        # Filter JSON artifacts from streaming to user channels
+                        _cs = content.strip()
+                        is_json_artifact = (
+                            _cs in ["{", "}", '"', ":", ","]
+                            or '"action"' in _cs
+                            or '"action_input"' in _cs
+                            or '"final_answer"' in _cs
+                            or '"thought"' in _cs
+                            or _cs.startswith('{"')
+                        )
 
                         if not in_thought_block and not is_json_artifact:
                             await self.emit_thinking(content, source)

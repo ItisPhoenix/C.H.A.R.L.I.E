@@ -4,7 +4,9 @@ Server lifecycle management for MCP connections.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -13,17 +15,51 @@ from charlie.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-CONFIG_PATH = Path("charlie_config.json")
+CONFIG_PATH = Path(__file__).parent.parent / "charlie_config.json"
 
 
 class MCPManager:
-    """Manages MCP server lifecycles: start, stop, health checks."""
+    """Manages MCP server lifecycles: start, stop, health checks.
+
+    Owns a persistent asyncio event loop running in a dedicated daemon thread
+    (``self._loop`` / ``self._loop_thread``).  All MCP coroutines must be
+    submitted to this loop via ``asyncio.run_coroutine_threadsafe`` so that the
+    stdio transport's receive loop is driven by a single, always-running loop
+    rather than whatever loop happens to be current in the calling thread.
+    """
 
     def __init__(self):
         self.servers: dict[str, MCPClient] = {}
         self._tool_to_server: dict[str, MCPClient] = {}
         self._config: dict[str, Any] = {}
+
+        # Dedicated event loop for all MCP I/O (Req 9.4)
+        self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+        self._loop_thread: threading.Thread = threading.Thread(
+            target=self._run_loop,
+            name="mcp-event-loop",
+            daemon=True,
+        )
+        self._loop_thread.start()
+
         self._load_config()
+
+    # ── Event-loop thread ────────────────────────────────────────────────────
+
+    def _run_loop(self) -> None:
+        """Run the MCP event loop forever in its own daemon thread."""
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def run_coroutine(self, coro) -> Any:
+        """Submit *coro* to the MCP event loop and block until it completes.
+
+        Raises the coroutine's exception if it fails.  Use this from sync
+        contexts (e.g. ``MCPToolBridge`` wrappers) instead of
+        ``asyncio.get_event_loop()``.
+        """
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result()  # blocks the calling thread
 
     def _load_config(self) -> None:
         """Load MCP server configs from charlie_config.json."""
@@ -35,7 +71,7 @@ class MCPManager:
             else:
                 self._config = {}
         except Exception as e:
-            logger.error(f"mcp_config_load_failed | error={e}")
+            logger.error("mcp_config_load_failed | error=%s", e)
             self._config = {}
 
         # Create MCPClient instances for each configured server
@@ -44,8 +80,9 @@ class MCPManager:
                 self.servers[name] = MCPClient(name, server_config)
 
         logger.info(
-            f"mcp_config_loaded | servers={len(self.servers)} | "
-            f"names={list(self.servers.keys())}"
+            "mcp_config_loaded | servers=%d | names=%s",
+            len(self.servers),
+            list(self.servers.keys()),
         )
 
     async def start_server(self, name: str) -> list[dict]:
@@ -99,6 +136,23 @@ class MCPManager:
         for name in list(self.servers.keys()):
             await self.stop_server(name)
         logger.info("mcp_all_stopped")
+
+    def stop_all_sync(self) -> None:
+        """Synchronous wrapper for ``stop_all`` — safe to call from any thread.
+
+        Submits ``stop_all()`` to the dedicated MCP event loop and waits for
+        completion, then stops the loop and joins the loop thread.  Intended to
+        be called from ``Brain._shutdown_async`` (via a registered shutdown
+        hook) so that MCP sessions are torn down cleanly on Brain exit (Req 9.7).
+        """
+        try:
+            future = asyncio.run_coroutine_threadsafe(self.stop_all(), self._loop)
+            future.result(timeout=15)
+        except Exception as e:
+            logger.warning("mcp_stop_all_sync_error | %s", e)
+        finally:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._loop_thread.join(timeout=5)
 
     def get_client_for_tool(self, tool_name: str) -> MCPClient | None:
         """Find which MCP client owns a given tool."""
@@ -195,13 +249,18 @@ class MCPManager:
             # Build config from current servers
             mcp_config: dict[str, Any] = {}
             for name, client in self.servers.items():
-                mcp_config[name] = {
+                cfg: dict[str, Any] = {
                     "command": client.command,
                     "args": client.args,
                     "env": client.env,
                     "url": client.url,
                     "enabled": client.enabled,
                 }
+                if client.token:
+                    cfg["token"] = client.token
+                if client.headers:
+                    cfg["headers"] = client.headers
+                mcp_config[name] = cfg
 
             existing["mcp_servers"] = mcp_config
 

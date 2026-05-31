@@ -122,17 +122,37 @@ class TrayIcon:
             return False
 
     def _on_restart(self, icon, item):
-        """Restart the daemon."""
+        """Restart the daemon.
+
+        Sets ``reboot_event`` so the supervisor's main monitor thread performs
+        the restart (Reqs 14.3, 14.4) instead of invoking ``daemon.reboot``
+        directly from this tray thread. Falls back to the legacy direct call if
+        the daemon predates the event.
+        """
         if self.on_restart:
             self.on_restart()
         elif self.daemon:
-            self.daemon.reboot()
+            reboot_event = getattr(self.daemon, "reboot_event", None)
+            if reboot_event is not None:
+                reboot_event.set()
+            else:
+                self.daemon.reboot()
 
     def _on_exit(self, icon, item):
-        """Exit the daemon."""
+        """Exit the daemon.
+
+        Sets ``shutdown_event`` so the supervisor's main monitor thread performs
+        the teardown (Reqs 14.3, 14.4) instead of invoking ``daemon.stop``
+        directly from this tray thread. Falls back to the legacy direct call if
+        the daemon predates the event.
+        """
         logger.info("tray_exit_requested")
         if self.daemon:
-            self.daemon.stop()
+            shutdown_event = getattr(self.daemon, "shutdown_event", None)
+            if shutdown_event is not None:
+                shutdown_event.set()
+            else:
+                self.daemon.stop()
         else:
             import sys
             sys.exit(0)

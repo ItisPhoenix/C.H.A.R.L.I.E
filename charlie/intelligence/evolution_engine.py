@@ -195,16 +195,24 @@ class EvolutionEngine:
 
         # Get tool outcomes related to this skill's tools
         if outcome_tracker and hasattr(outcome_tracker, "get_recent_outcomes"):
-            outcomes = outcome_tracker.get_recent_outcomes(limit=50)
-            perf["recent_outcomes"] = len(outcomes)
-            perf["success_rate"] = (
-                sum(1 for o in outcomes if o.get("success")) / max(len(outcomes), 1)
-            )
+            try:
+                outcomes = outcome_tracker.get_recent_outcomes(limit=50)
+                perf["recent_outcomes"] = len(outcomes)
+                perf["success_rate"] = (
+                    sum(1 for o in outcomes if o.outcome_type == "success") / max(len(outcomes), 1)
+                )
+            except Exception as e:
+                logger.warning("gather_performance_outcomes_failed | %s", e)
+                perf["recent_outcomes"] = 0
+                perf["success_rate"] = 0.0
 
         # Get session context
         if session_search and hasattr(session_search, "get_recent"):
-            recent = session_search.get_recent(limit=10)
-            perf["recent_sessions"] = len(recent)
+            try:
+                recent = session_search.get_recent(limit=10)
+                perf["recent_sessions"] = len(recent)
+            except Exception as e:
+                logger.warning("gather_performance_sessions_failed | %s", e)
 
         return perf
 

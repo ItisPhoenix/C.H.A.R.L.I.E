@@ -57,7 +57,7 @@ export function ParticleNetwork() {
 
           if (dist < CONNECTION_DISTANCE) {
             const isLight = document.documentElement.classList.contains('light')
-            const baseColor = isLight ? '100, 116, 139' : '0, 212, 255'
+            const baseColor = isLight ? '100, 116, 139' : '136, 204, 255'
             const opacity = (1 - dist / CONNECTION_DISTANCE) * (isLight ? 0.08 : 0.15)
             ctx!.strokeStyle = `rgba(${baseColor}, ${opacity})`
             ctx!.lineWidth = 0.5
@@ -74,7 +74,7 @@ export function ParticleNetwork() {
         ctx!.beginPath()
         ctx!.arc(p.x, p.y, p.radius, 0, Math.PI * 2)
         const isLight = document.documentElement.classList.contains('light')
-        ctx!.fillStyle = isLight ? 'rgba(100, 116, 139, 0.2)' : 'rgba(0, 212, 255, 0.4)'
+        ctx!.fillStyle = isLight ? 'rgba(100, 116, 139, 0.2)' : 'rgba(136, 204, 255, 0.4)'
         ctx!.fill()
       }
     }
@@ -99,13 +99,15 @@ export function ParticleNetwork() {
     initParticles()
     animate()
 
-    window.addEventListener('resize', () => {
+    const handleResize = () => {
       resize()
       initParticles()
-    })
+    }
+    window.addEventListener('resize', handleResize)
 
     return () => {
       cancelAnimationFrame(animationId)
+      window.removeEventListener('resize', handleResize)
     }
   }, [])
 

@@ -13,8 +13,59 @@ from typing import Optional
 
 from charlie.brain.model_router import LLMResponse, ModelRouter, TaskType
 from charlie.utils.logger import get_logger
+from charlie.utils.system import get_vram_used_mb
 
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Standalone STT fallback utility (Task 14.2)
+# ---------------------------------------------------------------------------
+# This is a standalone function so the AudioEngine (separate process) can call
+# it without needing the full Brain or ModelManager instance.
+
+
+def load_stt_with_fallback(
+    primary_model: str = "distil-large-v3",
+    device: str = "cuda",
+) -> str:
+    """Try to load the configured STT model; fall back on CUDA OOM.
+
+    Returns the model name that was successfully loaded, or an error string
+    prefixed with "Error:" if all attempts fail.
+    """
+    try:
+        import faster_whisper  # noqa: F401 — verify importable
+
+        from faster_whisper import WhisperModel
+
+        logger.info("stt_load_attempt | model=%s | device=%s", primary_model, device)
+        _model = WhisperModel(primary_model, device=device, compute_type="float16")  # noqa: F841
+        logger.info("stt_loaded | model=%s | device=%s", primary_model, device)
+        return primary_model
+    except (RuntimeError, Exception) as exc:
+        exc_str = str(exc)
+        is_oom = "CUDA out of memory" in exc_str or "OutOfMemoryError" in type(exc).__name__
+        if not is_oom:
+            # Not an OOM — propagate as error
+            logger.error("stt_load_failed | model=%s | error=%s", primary_model, exc_str)
+            return f"Error: STT load failed ({exc_str})"
+
+        logger.warning("stt_oom | model=%s | falling_back_to_tiny.en_cpu", primary_model)
+
+    # Fallback: tiny.en on CPU
+    fallback_model = "tiny.en"
+    try:
+        from faster_whisper import WhisperModel
+
+        _model = WhisperModel(fallback_model, device="cpu", compute_type="int8")  # noqa: F841
+        logger.info("stt_fallback_loaded | model=%s | device=cpu", fallback_model)
+        return fallback_model
+    except Exception as exc2:
+        logger.error(
+            "stt_fallback_also_failed | model=%s | error=%s", fallback_model, exc2
+        )
+        return f"Error: STT fallback also failed ({exc2})"
 
 
 class ModelManager:
@@ -57,10 +108,115 @@ class ModelManager:
         self._last_health_check = 0.0
         self._health_cache = False
 
+        # VRAM governor settings (Task 14.1)
+        self._vram_budget_mb: float = getattr(
+            settings.resources, "vram_budget_mb", 7168
+        )
+        self._vram_warning_mb: float = getattr(
+            settings.resources, "vram_warning_mb", 6500
+        )
+        self._model_unload_delay_s: int = getattr(
+            settings.resources, "model_unload_delay_s", 30
+        )
+        self._model_priority: dict = getattr(
+            settings.resources, "model_priority", {"text": "primary", "vision": "on_demand"}
+        )
+
+        # Track loaded on-demand models for unloading
+        self._loaded_models: dict[str, object] = {}  # name → model reference
+        self._vision_last_used: float = 0.0
+
     @property
     def router(self) -> ModelRouter:
         """Direct access to the underlying ModelRouter."""
         return self._router
+
+    # ------------------------------------------------------------------
+    # VRAM Governor (Task 14.1)
+    # ------------------------------------------------------------------
+
+    def check_vram_budget(self, model_size_mb: float) -> bool:
+        """Check if loading a model of *model_size_mb* fits within the VRAM budget.
+
+        If projected usage would exceed the budget, attempts to unload
+        lower-priority on-demand models (e.g. vision) first. Returns True if
+        the load can proceed, False if still over budget after unloading.
+        """
+        current_used = get_vram_used_mb()
+        projected = current_used + model_size_mb
+
+        if projected <= self._vram_budget_mb:
+            return True
+
+        # Attempt to free VRAM by unloading on-demand models
+        logger.warning(
+            "vram_over_budget | current=%.0f | model_size=%.0f | budget=%.0f | attempting_unload",
+            current_used,
+            model_size_mb,
+            self._vram_budget_mb,
+        )
+
+        # Unload on-demand models (vision first)
+        on_demand_models = [
+            name
+            for name, priority in self._model_priority.items()
+            if priority == "on_demand" and name in self._loaded_models
+        ]
+        for model_name in on_demand_models:
+            self.unload_model(model_name)
+
+        # Re-check after unloading
+        current_used = get_vram_used_mb()
+        projected = current_used + model_size_mb
+        if projected <= self._vram_budget_mb:
+            logger.info(
+                "vram_freed | current=%.0f | projected=%.0f | budget=%.0f",
+                current_used,
+                projected,
+                self._vram_budget_mb,
+            )
+            return True
+
+        logger.error(
+            "vram_still_over_budget | current=%.0f | projected=%.0f | budget=%.0f",
+            current_used,
+            projected,
+            self._vram_budget_mb,
+        )
+        return False
+
+    def unload_model(self, model_name: str) -> None:
+        """Release a model's GPU memory.
+
+        Sets the reference to None and calls torch.cuda.empty_cache() if
+        available. STT/TTS models (priority "primary") are never unloaded.
+        """
+        # Guard: never unload primary models
+        priority = self._model_priority.get(model_name, "on_demand")
+        if priority == "primary":
+            logger.debug("unload_skipped | model=%s | reason=primary_priority", model_name)
+            return
+
+        if model_name in self._loaded_models:
+            logger.info("unloading_model | name=%s", model_name)
+            self._loaded_models[model_name] = None
+            del self._loaded_models[model_name]
+
+        # Also clear the current_model state if it matches
+        if self.current_model == model_name:
+            self.current_model = None
+
+        # Release GPU cache
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.debug("torch_cuda_cache_cleared | after_unload=%s", model_name)
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug("cuda_empty_cache_failed | %s", e)
 
     # ------------------------------------------------------------------
     # Public API — backward compatible

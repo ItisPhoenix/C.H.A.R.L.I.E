@@ -1,4 +1,8 @@
-"""Voice reply module for Telegram — Kokoro TTS + ffmpeg OGG/OPUS conversion."""
+"""Voice reply module for Telegram — Kokoro TTS + ffmpeg OGG/OPUS conversion.
+
+Uses the same Kokoro ONNX model and voice settings as the main audio pipeline
+for consistent voice across all output channels.
+"""
 
 import logging
 import os
@@ -15,7 +19,8 @@ MAX_TEXT_LENGTH = 4000  # Truncate very long responses
 def text_to_telegram_voice(text: str) -> str | None:
     """Convert text to Telegram voice note (OGG/OPUS). Returns file path or None.
 
-    Pipeline: text → Kokoro TTS (WAV) → ffmpeg (OGG/OPUS) → file path
+    Pipeline: text -> Kokoro ONNX TTS (WAV) -> ffmpeg (OGG/OPUS) -> file path
+    Uses the same voice settings as the main audio pipeline for consistency.
     """
     if not text or not text.strip():
         return None
@@ -25,7 +30,7 @@ def text_to_telegram_voice(text: str) -> str | None:
         text = text[:MAX_TEXT_LENGTH] + "..."
 
     try:
-        # Step 1: Generate WAV using Kokoro TTS
+        # Step 1: Generate WAV using Kokoro ONNX (same model as audio pipeline)
         wav_path = _generate_kokoro_tts(text)
         if not wav_path:
             return None
@@ -47,34 +52,54 @@ def text_to_telegram_voice(text: str) -> str | None:
 
 
 def _generate_kokoro_tts(text: str) -> str | None:
-    """Generate WAV audio using Kokoro TTS. Returns WAV path or None."""
-    try:
-        # Try importing kokoro
-        from charlie.audio.tts_engine import TTSEngine
-        engine = TTSEngine()
-        if hasattr(engine, 'synthesize'):
-            wav_path = os.path.join(tempfile.gettempdir(), f"charlie_tts_{int(time.time())}.wav")
-            engine.synthesize(text, wav_path)
-            if os.path.exists(wav_path) and os.path.getsize(wav_path) > 0:
-                return wav_path
-    except Exception as e:
-        logger.debug(f"kokoro_tts_err | {e}")
+    """Generate WAV audio using Kokoro ONNX TTS. Returns WAV path or None.
 
-    # Fallback: try direct kokoro import
+    Uses the same model, voice, and settings as the main audio pipeline
+    so the Telegram voice sounds identical to the speaker output.
+    """
     try:
-        import kokoro
+        from charlie.config import settings
+
+        # Get voice settings from config (same as audio_proc.py)
+        voice = getattr(settings.audio, "kokoro_voice", "af_heart")
+        speed = getattr(settings.audio, "kokoro_speed", 1.0)
+        lang = getattr(settings.audio, "kokoro_lang", "en-us")
+
+        # Load Kokoro ONNX model (same as audio pipeline)
+        from kokoro_onnx import Kokoro
+        kokoro_model = os.getenv("KOKORO_MODEL_PATH", "charlie/models/kokoro-v1.0.onnx")
+        kokoro_voices = os.getenv("KOKORO_VOICES_PATH", "charlie/models/voices-v1.0.bin")
+
+        # Try GPU first, fall back to CPU
+        try:
+            import onnxruntime as ort
+            opts = ort.SessionOptions()
+            opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            sess = ort.InferenceSession(
+                kokoro_model, opts,
+                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            )
+            engine = Kokoro.from_session(sess, kokoro_voices)
+        except Exception:
+            engine = Kokoro(kokoro_model, kokoro_voices)
+
+        # Generate audio
+        samples, sr = engine.create(text, voice=voice, speed=speed, lang=lang)
+
+        # Write WAV
+        import numpy as np
+        import soundfile as sf
+        audio = np.array(samples, dtype=np.float32)
         wav_path = os.path.join(tempfile.gettempdir(), f"charlie_tts_{int(time.time())}.wav")
-        # kokoro.generate returns audio data
-        audio = kokoro.generate(text)
-        if audio is not None:
-            import soundfile as sf
-            sf.write(wav_path, audio, 24000)
-            if os.path.exists(wav_path) and os.path.getsize(wav_path) > 0:
-                return wav_path
-    except Exception as e:
-        logger.debug(f"kokoro_direct_err | {e}")
+        sf.write(wav_path, audio, sr)
 
-    logger.warning("tts_unavailable | no TTS engine could generate audio")
+        if os.path.exists(wav_path) and os.path.getsize(wav_path) > 0:
+            return wav_path
+
+    except Exception as e:
+        logger.error(f"kokoro_tts_err | {e}")
+
+    logger.warning("tts_unavailable | kokoro_onnx could not generate audio")
     return None
 
 

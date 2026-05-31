@@ -19,12 +19,12 @@ from typing import Any, Optional
 
 import aiohttp
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-HISTORY_MESSAGE_LIMIT = 50  # Max messages persisted to disk
-
 from charlie.config import settings
 from charlie.utils.logger import get_logger
 from charlie.utils.system import get_vram_percent, get_vram_used_mb
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+HISTORY_MESSAGE_LIMIT = 50  # Max messages persisted to disk
 
 logger = get_logger(__name__)
 
@@ -42,6 +42,8 @@ class Brain:
         heartbeat: Any = None,
         interrupt_event: Any = None,
         reboot_event: Any = None,
+        brain_req_q: Optional[Queue] = None,
+        brain_res_q: Optional[Queue] = None,
     ) -> None:
         # ── IPC Queues & Events ───────────────────────────────────────────
         self.brain_task_q = brain_task_q
@@ -54,6 +56,8 @@ class Brain:
         self.heartbeat = heartbeat
         self.interrupt_event = interrupt_event
         self.reboot_event = reboot_event
+        self.brain_req_q = brain_req_q
+        self.brain_res_q = brain_res_q
 
         # Register queues in global bridge
         from charlie.utils import queue_bridge
@@ -64,10 +68,10 @@ class Brain:
 
         # ── Dependency Groups (lazy imports inside each) ──────────────────
         self._init_core_handlers()
+        self._init_state()
         self._init_mcp()
         self._init_personality()
         self._init_security()
-        self._init_state()
         self._init_intelligence()
         self._init_automation()
         self._init_external_controllers()
@@ -243,30 +247,71 @@ class Brain:
         source: str = "local",
         skip_guardian: bool = False,
     ) -> str:
-        """Execute a tool call. Tries ToolRegistry first, falls back to ToolHandler."""
+        """Execute a tool call through the unified Tool_Catalog.
+
+        The unified ``tool_registry`` is the authoritative execution path: every
+        Pattern A ``@tool`` function and every Pattern B ``_tool_*`` method (the
+        latter via ``register_from_handler``) lives in it, so the catalog gates
+        the tool with the correct Risk_Tier and executes it. A genuinely unknown
+        tool returns a clear not-found error rather than being silently
+        delegated. MCP lazy wrappers (``mcp_<server>``) are — until Phase 3 task
+        9.4 registers them into the catalog — only present in the legacy
+        ``ToolHandler.registry`` dict, so they are the one documented last-resort
+        delegation below. The legacy handler runs a single guardian gate of its
+        own; there is no double-prompt because the catalog path returns before
+        reaching the fallback for any tool the catalog knows.
+        """
         tool_name = tool_data.get("tool", "") if tool_data else ""
         args = tool_data.get("args", {}) if tool_data else {}
 
+        def _record_decision(decision: str, outcome: str | None = None, tier=None) -> None:
+            """Append a single gate/execution decision to the tool exec log.
+
+            Guarded so a missing/partial OutcomeTracker never crashes execution.
+            """
+            tracker = getattr(self, "outcome_tracker", None)
+            if tracker is None or not hasattr(tracker, "record_tool_decision"):
+                return
+            try:
+                tracker.record_tool_decision(tool_name, tier, decision, outcome=outcome)
+            except Exception as e:  # pragma: no cover - logging only
+                logger.debug("record_tool_decision_failed | tool=%s | %s", tool_name, e)
+
+        def _record_outcome(success: bool, elapsed_ms: float) -> None:
+            """Record a tool-call outcome, guarded against a missing tracker."""
+            tracker = getattr(self, "outcome_tracker", None)
+            if tracker is None or not hasattr(tracker, "record_tool"):
+                return
+            try:
+                tracker.record_tool(
+                    tool_name,
+                    success=success,
+                    details={"elapsed_ms": round(elapsed_ms, 1), "source": source},
+                )
+            except Exception as e:  # pragma: no cover - logging only
+                logger.debug("record_tool_failed | tool=%s | %s", tool_name, e)
+
         with self.tool_execution_lock:
-            # Try ToolRegistry first (for @tool decorated functions)
+            # Authoritative path: resolve every tool via the unified catalog.
             if tool_name and hasattr(self, "tool_registry"):
                 entry = self.tool_registry.get(tool_name)
                 if entry:
                     tool_func = entry.handler
+                    catalog_tier = self.tool_registry.get_tier(tool_name)
 
-                    # Guardian verification for Pattern A tools
+                    # Guardian verification using the catalog's authoritative tier
                     if not skip_guardian:
-                        from charlie.security.tiers import CONFIRMATION_PENDING, get_tool_tier, RiskTier
+                        from charlie.security.tiers import CONFIRMATION_PENDING, RiskTier
 
                         allowed, reason = self.guardian.verify_tool(
-                            tool_name, args, sir_input, tool_func=tool_func
+                            tool_name, args, sir_input, tool_func=tool_func, tier=catalog_tier
                         )
 
-                        if get_tool_tier(tool_func) == RiskTier.TIER_0:
+                        if catalog_tier == RiskTier.TIER_0:
                             allowed = True
 
                         if allowed == CONFIRMATION_PENDING:
-                            tier = get_tool_tier(tool_func)
+                            tier = catalog_tier
                             self.awaiting_confirmation = {
                                 "tool": tool_name,
                                 "args": args,
@@ -284,7 +329,7 @@ class Brain:
                                 "type": "CONFIRM_REQUIRED",
                                 "content": {
                                     "desc": reason,
-                                    "tier": get_tool_tier(tool_func).value,
+                                    "tier": catalog_tier.value,
                                 },
                             }
 
@@ -299,17 +344,37 @@ class Brain:
                             ) and self.telegram_q:
                                 self._safe_put(self.telegram_q, payload)
 
+                            _record_decision("gated", tier=catalog_tier)
                             return CONFIRMATION_PENDING
 
                         if not allowed:
+                            _record_decision("cancelled", tier=catalog_tier)
                             return reason
 
-                    return self.tool_registry.execute(tool_name, args)
+                    # Execute through the catalog, timing and recording outcome.
+                    start = time.perf_counter()
+                    result = self.tool_registry.execute(tool_name, args)
+                    elapsed_ms = (time.perf_counter() - start) * 1000
+                    success = not str(result).startswith("Error")
+                    _record_outcome(success, elapsed_ms)
+                    _record_decision(
+                        "executed",
+                        outcome="success" if success else "failure",
+                        tier=catalog_tier,
+                    )
+                    return result
 
-            # Fallback to ToolHandler (legacy _tool_* methods with Guardian gate)
-            return self.tool_handler.execute_tools(
-                tool_data, sir_input, source, skip_guardian
-            )
+            # Last-resort delegation: only for tools that exist in the legacy
+            # ToolHandler registry but not the unified catalog (MCP lazy wrappers
+            # until Phase 3 task 9.4). The legacy handler gates and records on its
+            # own path. Genuinely unknown tools return a clear not-found error.
+            legacy_registry = getattr(self.tool_handler, "registry", {})
+            if tool_name and tool_name in legacy_registry:
+                return self.tool_handler.execute_tools(
+                    tool_data, sir_input, source, skip_guardian
+                )
+
+            return f"Error: Tool '{tool_name}' not found."
 
     # ── RUN / SHUTDOWN LIFECYCLE ────────────────────────────────────────────
 
@@ -319,6 +384,13 @@ class Brain:
 
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
+
+        # Start cross-process Brain RPC server (Design §D, Reqs 7.1-7.10)
+        if self.brain_req_q is not None and self.brain_res_q is not None:
+            from charlie.watchdog.brain_rpc import BrainRPCServer
+            self._rpc_server = BrainRPCServer(self, self.brain_req_q, self.brain_res_q)
+            self._rpc_server.start()
+            logger.info("brain_rpc_server_thread_started")
 
         threading.Thread(
             target=self.vision_handler.peripheral_vision_loop, daemon=True
@@ -455,9 +527,30 @@ class Brain:
     def _telemetry_monitor(self):
         while not self._stop_event.is_set():
             try:
+                used_mb = get_vram_used_mb()
+                budget_mb = getattr(settings.resources, "vram_budget_mb", 7168)
+                percent = min(100.0, (used_mb / budget_mb) * 100) if budget_mb > 0 else 0.0
                 self._safe_put(
-                    self.status_q, {"type": "VRAM", "content": get_vram_percent()}
+                    self.status_q,
+                    {
+                        "type": "VRAM",
+                        "content": {
+                            "used_mb": round(used_mb, 1),
+                            "budget_mb": budget_mb,
+                            "percent": round(percent, 1),
+                        },
+                    },
                 )
+                # Emit warning if above the warning threshold
+                vram_warning_mb = getattr(settings.resources, "vram_warning_mb", 6500)
+                if used_mb > vram_warning_mb:
+                    self._safe_put(
+                        self.status_q,
+                        {
+                            "type": "PHOENIX_ALERT",
+                            "content": "VRAM usage above warning threshold",
+                        },
+                    )
                 self._stop_event.wait(2)
             except Exception:
                 self._stop_event.wait(10)

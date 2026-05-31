@@ -13,19 +13,17 @@ import {
   Zap,
   Settings,
   MessageSquare,
-  FileText,
   ListTodo,
   Server,
   Users,
   Globe,
   Terminal,
-  Mic,
-  Search as SearchIcon,
   BarChart3,
   Sparkles,
   History,
   ScrollText,
   Database,
+  TrendingUp,
 } from 'lucide-react'
 import { searchMemory, fetchTasks, fetchChatHistory } from '@/lib/api'
 
@@ -33,33 +31,23 @@ interface PaletteItem {
   id: string
   label: string
   description: string
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  icon: React.ComponentType<any>
+  icon: LucideIcon
   href?: string
   action?: () => void
   group: string
 }
 
 const pages: PaletteItem[] = [
-  { id: 'voice', label: 'Voice', description: 'Voice cockpit (home)', icon: Mic, href: '/', group: 'Pages' },
-  { id: 'status', label: 'Status', description: 'System status dashboard', icon: Activity, href: '/status', group: 'Pages' },
-  { id: 'chat', label: 'Chat', description: 'AI conversation', icon: MessageSquare, href: '/chat', group: 'Pages' },
-  { id: 'tasks', label: 'Tasks', description: 'Task queue', icon: ListTodo, href: '/tasks', group: 'Pages' },
-  { id: 'memory', label: 'Memory', description: 'Knowledge graph', icon: Brain, href: '/memory', group: 'Pages' },
-  { id: 'briefing', label: 'Briefing', description: 'Daily briefing', icon: FileText, href: '/briefing', group: 'Pages' },
-  { id: 'agents', label: 'Agents', description: 'Agent orchestrator', icon: Users, href: '/agents', group: 'Pages' },
-  { id: 'search', label: 'Search', description: 'Unified search', icon: SearchIcon, href: '/search', group: 'Pages' },
-  { id: 'tools', label: 'Tools', description: 'Tool execution log', icon: Terminal, href: '/tools', group: 'Pages' },
-  { id: 'mcp', label: 'MCP', description: 'MCP server management', icon: Server, href: '/mcp', group: 'Pages' },
-  { id: 'integrations', label: 'Integrations', description: 'Integration health', icon: Puzzle, href: '/integrations', group: 'Pages' },
-  { id: 'automation', label: 'Automation', description: 'Automation rules', icon: Zap, href: '/automation', group: 'Pages' },
-  { id: 'skills', label: 'Skills', description: 'Skill management', icon: Sparkles, href: '/skills', group: 'Pages' },
-  { id: 'evolution', label: 'Evolution', description: 'Evolution history', icon: History, href: '/evolution', group: 'Pages' },
-  { id: 'approvals', label: 'Approvals', description: 'Pending approvals', icon: Shield, href: '/approvals', group: 'Pages' },
-  { id: 'settings', label: 'Settings', description: 'Daemon settings', icon: Settings, href: '/settings', group: 'Pages' },
-  { id: 'globe', label: 'Globe', description: '3D globe view', icon: Globe, href: '/globe', group: 'Pages' },
-  { id: 'logs', label: 'Logs', description: 'System logs', icon: ScrollText, href: '/logs', group: 'Pages' },
-  { id: 'analytics', label: 'Analytics', description: 'Usage analytics', icon: BarChart3, href: '/analytics', group: 'Pages' },
+  { id: 'status', label: 'Status', description: 'System health and metrics', icon: Activity, href: '/status', group: 'Pages' },
+  { id: 'briefing', label: 'Briefing', description: 'Daily intelligent summary', icon: Sparkles, href: '/briefing', group: 'Pages' },
+  { id: 'chat', label: 'Conversation', description: 'Talk to Charlie', icon: MessageSquare, href: '/chat', group: 'Pages' },
+  { id: 'tasks', label: 'Tasks', description: 'Active and pending operations', icon: ListTodo, href: '/tasks', group: 'Pages' },
+  { id: 'approvals', label: 'Approvals', description: 'Review pending risk actions', icon: Shield, href: '/approvals', group: 'Pages' },
+  { id: 'memory', label: 'Knowledge', description: 'System memory and facts', icon: History, href: '/memory', group: 'Pages' },
+  { id: 'evolution', label: 'Evolution', description: 'Learning and drift logs', icon: TrendingUp, href: '/evolution', group: 'Pages' },
+  { id: 'automation', label: 'Automation', description: 'Managed workflows', icon: Zap, href: '/automation', group: 'Pages' },
+  { id: 'tools', label: 'Tools', description: 'Registered engine capabilities', icon: Terminal, href: '/tools', group: 'Pages' },
+  { id: 'settings', label: 'Settings', description: 'Dashboard configuration', icon: Settings, href: '/settings', group: 'Pages' },
 ]
 
 interface CommandPaletteProps {
@@ -70,112 +58,75 @@ interface CommandPaletteProps {
 export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   const router = useRouter()
   const [query, setQuery] = useState('')
-  const [selectedIndex, setSelectedIndex] = useState(0)
-  const [dataResults, setDataResults] = useState<PaletteItem[]>([])
+  const [results, setResults] = useState<PaletteItem[]>([])
   const [searching, setSearching] = useState(false)
+  const [selectedIndex, setSelectedIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
-  // Filter pages by query
-  const pageResults = query.length === 0
-    ? pages
-    : pages.filter(
-        (p) =>
-          p.label.toLowerCase().includes(query.toLowerCase()) ||
-          p.description.toLowerCase().includes(query.toLowerCase()),
-      )
-
-  // Search across data sources when query is long enough
-  useEffect(() => {
-    if (query.length < 2) {
-      setDataResults([])
-      return
-    }
-
-    setSearching(true)
-    const timer = setTimeout(async () => {
-      const results: PaletteItem[] = []
-
-      try {
-        // Search memory
-        const memData = await searchMemory(query)
-        for (const entry of (memData.results || []).slice(0, 3)) {
-          results.push({
-            id: `mem-${entry.timestamp}-${results.length}`,
-            label: entry.content?.slice(0, 60) || 'Memory entry',
-            description: `Memory · ${entry.source || 'unknown'}`,
-            icon: Database,
-            href: '/memory',
-            group: 'Memory',
-          })
-        }
-      } catch {}
-
-      try {
-        // Search tasks
-        const taskData = await fetchTasks()
-        const q = query.toLowerCase()
-        for (const task of (taskData.tasks || []).filter(
-          (t) => t.name?.toLowerCase().includes(q) || t.result?.toLowerCase().includes(q)
-        ).slice(0, 3)) {
-          results.push({
-            id: `task-${task.id}`,
-            label: task.name || task.id,
-            description: `Task · ${task.status || 'unknown'}`,
-            icon: ListTodo,
-            href: '/tasks',
-            group: 'Tasks',
-          })
-        }
-      } catch {}
-
-      try {
-        // Search chat history
-        const chatData = await fetchChatHistory()
-        const q = query.toLowerCase()
-        for (const msg of (chatData.messages || []).filter(
-          (m) => m.content?.toLowerCase().includes(q)
-        ).slice(0, 3)) {
-          results.push({
-            id: `chat-${msg.id}`,
-            label: msg.content?.slice(0, 60) || 'Message',
-            description: `Chat · ${msg.role || 'unknown'}`,
-            icon: MessageSquare,
-            href: '/chat',
-            group: 'Chat',
-          })
-        }
-      } catch {}
-
-      setDataResults(results)
-      setSearching(false)
-    }, 300) // debounce
-
-    return () => clearTimeout(timer)
-  }, [query])
-
-  const allResults = [...pageResults, ...dataResults]
-
-  const executeItem = useCallback(
-    (item: PaletteItem) => {
-      if (item.href) {
-        router.push(item.href)
-      } else if (item.action) {
-        item.action()
-      }
-      onClose()
-    },
-    [router, onClose],
+  const filteredPages = pages.filter(p => 
+    p.label.toLowerCase().includes(query.toLowerCase()) || 
+    p.description.toLowerCase().includes(query.toLowerCase())
   )
+
+  const executeItem = useCallback((item: PaletteItem) => {
+    if (item.href) {
+      router.push(item.href)
+    } else if (item.action) {
+      item.action()
+    }
+    onClose()
+  }, [router, onClose])
 
   useEffect(() => {
     if (open) {
+      setTimeout(() => inputRef.current?.focus(), 10)
       setQuery('')
-      setSelectedIndex(0)
-      setDataResults([])
-      setTimeout(() => inputRef.current?.focus(), 50)
     }
   }, [open])
+
+  useEffect(() => {
+    if (query.length < 3) {
+      setResults([])
+      return
+    }
+
+    const timer = setTimeout(async () => {
+      setSearching(true)
+      try {
+        const memResults = await searchMemory(query)
+        const chatResults = await fetchChatHistory() // Simple mock logic for searching
+        
+        const mappedResults: PaletteItem[] = [
+          ...memResults.results.map((m, i) => ({
+            id: `mem-${i}`,
+            label: m.content.slice(0, 40),
+            description: 'Memory Entry',
+            icon: Database,
+            group: 'Knowledge',
+            action: () => router.push(`/memory?t=${m.timestamp}`)
+          })),
+          ...chatResults.messages.filter(c => c.content.toLowerCase().includes(query.toLowerCase())).map(c => ({
+            id: `chat-${c.id}`,
+            label: c.content.slice(0, 40),
+            description: 'Chat Message',
+            icon: MessageSquare,
+            group: 'History',
+            href: '/chat'
+          }))
+        ]
+        setResults(mappedResults)
+      } catch (e) {
+        console.error('Search error:', e)
+      } finally {
+        setSearching(false)
+      }
+    }, 300)
+
+    return () => clearTimeout(timer)
+  }, [query, router])
+
+  const allResults = [...filteredPages, ...results]
 
   useEffect(() => {
     if (!open) return
@@ -200,7 +151,6 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     setSelectedIndex(0)
   }, [query])
 
-  // Scroll selected item into view
   useEffect(() => {
     if (!listRef.current) return
     const selected = listRef.current.children[selectedIndex] as HTMLElement
@@ -213,51 +163,45 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     <AnimatePresence>
       {open && (
         <>
-          {/* Backdrop */}
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
-            className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[200]"
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200]"
             onClick={onClose}
           />
 
-          {/* Palette */}
           <motion.div
-            initial={{ opacity: 0, scale: 0.96, y: -20 }}
+            initial={{ opacity: 0, scale: 0.98, y: -10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.96, y: -20 }}
-            transition={{ duration: 0.2, ease: 'easeOut' }}
-            className="fixed top-[20%] left-1/2 -translate-x-1/2 w-full max-w-lg z-[201]"
+            exit={{ opacity: 0, scale: 0.98, y: -10 }}
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+            className="fixed top-[15%] left-1/2 -translate-x-1/2 w-full max-w-lg z-[201]"
           >
-            <div
-              className="glass-card rounded-2xl overflow-hidden"
-              style={{ boxShadow: '0 0 40px rgba(0, 212, 255, 0.15), 0 20px 60px rgba(0, 0, 0, 0.5)' }}
-            >
-              {/* Search input */}
-              <div className="flex items-center gap-3 px-4 py-3 border-b border-charlie-border">
+            <div className="premium-card overflow-hidden shadow-premium">
+              <div className="flex items-center gap-3 px-5 py-4 border-b border-charlie-border">
                 <Search size={18} className="text-charlie-dim flex-shrink-0" />
                 <input
                   ref={inputRef}
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search pages, tasks, memory, chat..."
-                  className="flex-1 bg-transparent text-charlie-text text-sm outline-none placeholder-charlie-dim font-body"
+                  placeholder="Search pages, knowledge, actions..."
+                  aria-label="Search commands and resources"
+                  className="flex-1 bg-transparent text-charlie-text text-sm outline-none placeholder-charlie-dim font-sans"
                 />
                 {searching && (
-                  <div className="w-4 h-4 border-2 border-charlie-cyan/30 border-t-charlie-cyan rounded-full animate-spin" />
+                  <div className="w-4 h-4 border-2 border-charlie-border border-t-charlie-text rounded-full animate-spin" />
                 )}
-                <button onClick={onClose} className="text-charlie-dim hover:text-charlie-text cursor-pointer" aria-label="Close command palette">
+                <button onClick={onClose} className="text-charlie-dim hover:text-charlie-text transition-colors" aria-label="Close command palette">
                   <X size={16} />
                 </button>
               </div>
 
-              {/* Results */}
-              <div ref={listRef} className="max-h-80 overflow-y-auto py-2">
+              <div ref={listRef} className="max-h-[400px] overflow-y-auto py-2">
                 {allResults.length === 0 && !searching && (
-                  <div className="px-4 py-8 text-center text-charlie-dim text-sm">
-                    No results found
+                  <div className="px-5 py-12 text-center text-charlie-dim text-sm">
+                    No results found for &quot;{query}&quot;
                   </div>
                 )}
                 {allResults.map((item, i) => {
@@ -267,7 +211,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
                   return (
                     <div key={item.id}>
                       {showGroup && (
-                        <div className="px-4 pt-3 pb-1 text-[10px] font-semibold tracking-[0.15em] uppercase text-charlie-dim/60">
+                        <div className="px-5 pt-3 pb-1 text-[10px] font-semibold tracking-widest uppercase text-charlie-dim">
                           {item.group}
                         </div>
                       )}
@@ -275,10 +219,10 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
                         onClick={() => executeItem(item)}
                         onMouseEnter={() => setSelectedIndex(i)}
                         className={cn(
-                          'w-full flex items-center gap-3 px-4 py-2 text-left transition-colors cursor-pointer',
+                          'w-full flex items-center gap-3 px-5 py-2.5 text-left transition-all duration-200 cursor-pointer',
                           i === selectedIndex
-                            ? 'bg-charlie-cyan/10 text-charlie-text'
-                            : 'text-charlie-dim hover:text-charlie-text',
+                            ? 'bg-charlie-text/10 text-charlie-text'
+                            : 'text-charlie-dim hover:text-charlie-text hover:bg-charlie-text/5',
                         )}
                       >
                         <Icon size={16} className="flex-shrink-0" />
@@ -287,7 +231,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
                           <div className="text-xs text-charlie-dim truncate">{item.description}</div>
                         </div>
                         {i === selectedIndex && (
-                          <kbd className="text-[10px] text-charlie-dim bg-charlie-card px-1.5 py-0.5 rounded border border-charlie-border">
+                          <kbd className="text-[10px] text-charlie-dim bg-charlie-text/5 px-1.5 py-0.5 rounded border border-charlie-border font-sans">
                             Enter
                           </kbd>
                         )}
@@ -297,11 +241,10 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
                 })}
               </div>
 
-              {/* Footer */}
-              <div className="px-4 py-2 border-t border-charlie-border flex items-center gap-4 text-[10px] text-charlie-dim">
-                <span><kbd className="bg-charlie-card px-1 rounded border border-charlie-border">↑↓</kbd> Navigate</span>
-                <span><kbd className="bg-charlie-card px-1 rounded border border-charlie-border">Enter</kbd> Select</span>
-                <span><kbd className="bg-charlie-card px-1 rounded border border-charlie-border">Esc</kbd> Close</span>
+              <div className="px-5 py-3 border-t border-charlie-border flex items-center gap-6 text-[10px] text-charlie-dim">
+                <span className="flex items-center gap-1.5"><kbd className="bg-charlie-text/5 px-1.5 py-0.5 rounded border border-charlie-border">↑↓</kbd> Navigate</span>
+                <span className="flex items-center gap-1.5"><kbd className="bg-charlie-text/5 px-1.5 py-0.5 rounded border border-charlie-border">Enter</kbd> Select</span>
+                <span className="flex items-center gap-1.5"><kbd className="bg-charlie-text/5 px-1.5 py-0.5 rounded border border-charlie-border">Esc</kbd> Close</span>
               </div>
             </div>
           </motion.div>

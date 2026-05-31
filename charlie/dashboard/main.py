@@ -1,192 +1,204 @@
 """
-charlie/dashboard/main.py
+charlie/dashboard/main.py — FastAPI reverse-proxy for the Charlie Dashboard.
 
-FastAPI dashboard server — serves vanilla JS/CSS SPA, proxies API + WebSocket to ControlServer.
-All browser traffic routes through here so the ControlServer token stays server-side.
+Sits between the Next.js dashboard (browser on :3000) and the internal
+ControlServer (aiohttp on :8090).
+
+- Proxies every ``/api/*`` REST request to the ControlServer, injecting the
+  control token so the browser never sees it.
+- WebSocket connections go directly from the browser to :8090 (localhost bypass
+  in the control server's auth middleware handles this).
+
+Req 6.3 / 6.4 — all browser REST traffic routes through this proxy.
 """
+from __future__ import annotations
 
-import asyncio
 import logging
+import asyncio
 import os
-from typing import Optional
 
-from fastapi import FastAPI, Response, HTTPException, Request, WebSocket
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, RedirectResponse
 import httpx
-import uvicorn
-import websockets
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 
-logger = logging.getLogger("charlie.dashboard")
+logger = logging.getLogger("DashboardProxy")
 
-app = FastAPI(title="CHARLIE Dashboard", version="1.0.0")
+# ── Configuration ────────────────────────────────────────────────────────────
+CONTROL_HOST = os.getenv("CHARLIE_CONTROL_HOST", "127.0.0.1")
+CONTROL_PORT = int(os.getenv("CHARLIE_CONTROL_PORT", "8090"))
+CONTROL_BASE = f"http://{CONTROL_HOST}:{CONTROL_PORT}"
 
-# ── CORS ─────────────────────────────────────────────────────────────────────
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-        # Local network access (phone/tablet on same WiFi)
-        "http://192.168.0.1:3000",
-        "http://192.168.1.1:3000",
-    ],
-    allow_origin_regex=r"https?://192\.168\.\d+\.\d+:\d+",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ── FastAPI app ──────────────────────────────────────────────────────────────
+app = FastAPI(title="Charlie Dashboard Proxy", docs_url=None, redoc_url=None)
 
-# ── Static files ──────────────────────────────────────────────────────────────
-_dashboard_dir = os.path.join(os.path.dirname(__file__))
-app.mount("/static", StaticFiles(directory=_dashboard_dir), name="static")
-
-# ── Root → index.html ─────────────────────────────────────────────────────────
-@app.get("/")
-async def root():
-    return RedirectResponse(url="/static/index.html")
-
-# ── API proxy to ControlServer on 8090 ────────────────────────────────────────
-CONTROL_URL = "http://localhost:8090"
-
-_proxy_client: Optional[httpx.AsyncClient] = None
-_server_token: Optional[str] = None
+# Reusable async HTTP client (connection-pooled).
+_client: httpx.AsyncClient | None = None
+_control_token: str = ""
 
 
-async def get_client() -> httpx.AsyncClient:
-    global _proxy_client
-    if _proxy_client is None or _proxy_client.is_closed:
-        _proxy_client = httpx.AsyncClient(timeout=10.0)
-    return _proxy_client
-
-
-@app.on_event("startup")
-async def _fetch_server_token():
-    """Fetch auth token from ControlServer on startup. Retries if ControlServer isn't ready yet."""
-    global _server_token
-    for attempt in range(5):
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{CONTROL_URL}/api/token")
-                if resp.status_code == 200:
-                    _server_token = resp.json().get("token")
-                    if _server_token:
-                        logger.info("dashboard_token_acquired")
-                        return
-        except Exception:
-            pass
-        logger.warning(f"dashboard_token_retry | attempt={attempt + 1}")
-        await asyncio.sleep(2)
-    logger.error("dashboard_token_failed | proxy will return 503 for API requests")
-
-
-async def _proxy(request: Request, path: str) -> Response:
-    """Forward request to ControlServer injecting server-side token."""
-    if not _server_token:
-        raise HTTPException(status_code=503, detail="ControlServer token not available")
-    client = await get_client()
-    url = f"{CONTROL_URL}/api/{path}"
+async def _fetch_token() -> str:
+    """Fetch the control server token from the unauthenticated /api/token endpoint."""
+    global _control_token
+    if _control_token:
+        return _control_token
     try:
-        body = await request.body()
-        fwd_headers = {
-            "Content-Type": request.headers.get("content-type", "application/json"),
-            "X-Control-Token": _server_token,
-        }
-        resp = await client.request(
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            resp = await c.get(f"{CONTROL_BASE}/api/token")
+            if resp.status_code == 200:
+                _control_token = resp.json().get("token", "")
+                logger.info("control_token_fetched")
+    except Exception as exc:
+        logger.warning("control_token_fetch_failed | error=%s", exc)
+    return _control_token
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(
+            base_url=CONTROL_BASE,
+            timeout=httpx.Timeout(30.0, connect=5.0),
+            follow_redirects=True,
+        )
+    return _client
+
+
+# ── Startup: fetch control token ─────────────────────────────────────────────
+@app.on_event("startup")
+async def _startup():
+    await _fetch_token()
+
+
+# ── Health ───────────────────────────────────────────────────────────────────
+@app.get("/health")
+async def health():
+    return {"status": "ok", "proxy": True, "backend": CONTROL_BASE}
+
+
+# ── CORS headers ─────────────────────────────────────────────────────────────
+_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+    "Access-Control-Allow-Credentials": "true",
+}
+
+
+# ── Catch-all proxy for /api/* ───────────────────────────────────────────────
+@app.api_route(
+    "/api/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+)
+async def proxy_api(path: str, request: Request) -> Response:
+    """Forward every /api/* request to the ControlServer."""
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=_CORS_HEADERS)
+
+    client = _get_client()
+    url = f"/api/{path}"
+    if request.url.query:
+        url = f"{url}?{request.url.query}"
+
+    headers = {
+        k: v
+        for k, v in request.headers.items()
+        if k.lower() not in ("host", "connection", "keep-alive")
+    }
+    token = _control_token or await _fetch_token()
+    if token:
+        headers["X-Control-Token"] = token
+    body = await request.body()
+
+    try:
+        upstream = await client.request(
             method=request.method,
             url=url,
+            headers=headers,
             content=body,
-            headers=fwd_headers,
         )
-        return Response(content=resp.content, media_type="application/json", status_code=resp.status_code)
+        resp_headers = {
+            k: v
+            for k, v in upstream.headers.items()
+            if k.lower()
+            not in ("transfer-encoding", "connection", "keep-alive", "content-encoding")
+        }
+        resp_headers.update(_CORS_HEADERS)
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            headers=resp_headers,
+        )
     except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="ControlServer unavailable")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        return JSONResponse(
+            {"error": "control_server_unavailable", "backend": CONTROL_BASE},
+            status_code=502,
+            headers=_CORS_HEADERS,
+        )
+    except Exception as exc:
+        logger.error("proxy_error | path=%s | error=%s", path, exc)
+        return JSONResponse({"error": str(exc)}, status_code=502, headers=_CORS_HEADERS)
 
 
-# ── Generic proxy (catch-all for /api/*) ──────────────────────────────────────
-@app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
-async def proxy_api(request: Request, path: str):
-    """Proxy all /api/* requests to ControlServer."""
-    return await _proxy(request, path)
-
-
-# ── Chat history + message ─────────────────────────────────────────────────────
-@app.get("/api/chat/history")
-async def chat_history(request: Request):
-    return await _proxy(request, "chat/history")
-
-
-@app.post("/api/chat/message")
-async def chat_message(request: Request):
-    return await _proxy(request, "chat/message")
-
-
-@app.post("/api/chat/send")
-async def chat_send(request: Request):
-    return await _proxy(request, "chat/send")
-
-
-@app.get("/api/status")
-async def status(request: Request):
-    return await _proxy(request, "status")
-
-
-# ── WebSocket proxy to ControlServer ──────────────────────────────────────────
+# ── WebSocket proxy for /ws/events ──────────────────────────────────────────
 @app.websocket("/ws/events")
-async def websocket_proxy(ws: WebSocket):
-    """Proxy WebSocket connections to ControlServer. Token stays server-side."""
-    await ws.accept()
-    if not _server_token:
-        await ws.close(code=1013, reason="ControlServer token not available")
-        return
+async def proxy_ws(websocket):
+    """Proxy the dashboard WebSocket to the ControlServer.
 
+    Uses ``websockets`` library for the upstream connection.
+    """
     try:
-        async with websockets.connect(
-            f"{CONTROL_URL}/ws/events?token={_server_token}",
-            ping_interval=20,
-            ping_timeout=10,
-        ) as backend_ws:
+        from starlette.websockets import WebSocketState
 
-            async def forward_to_backend():
+        await websocket.accept()
+
+        import websockets
+
+        token = _control_token or await _fetch_token()
+        upstream_url = f"ws://{CONTROL_HOST}:{CONTROL_PORT}/ws/events"
+        if token:
+            upstream_url = f"{upstream_url}?token={token}"
+        async with websockets.connect(upstream_url) as upstream:
+
+            async def forward_to_upstream():
+                """Browser → ControlServer."""
                 try:
                     while True:
-                        data = await ws.receive_text()
-                        await backend_ws.send(data)
+                        data = await websocket.receive_text()
+                        await upstream.send(data)
                 except Exception:
                     pass
 
-            async def forward_to_client():
+            async def forward_to_browser():
+                """ControlServer → Browser."""
                 try:
-                    async for message in backend_ws:
-                        await ws.send_text(message)
+                    async for msg in upstream:
+                        if websocket.client_state == WebSocketState.CONNECTED:
+                            await websocket.send_text(msg)
+                        else:
+                            break
                 except Exception:
                     pass
 
             await asyncio.gather(
-                forward_to_backend(),
-                forward_to_client(),
+                forward_to_upstream(),
+                forward_to_browser(),
                 return_exceptions=True,
             )
-    except Exception as e:
-        logger.error(f"ws_proxy_error | {e}")
-    finally:
+    except ImportError:
+        logger.error("ws_proxy_requires_websockets_package")
+        await websocket.close(code=1013, reason="proxy dependency missing")
+    except Exception as exc:
+        logger.error("ws_proxy_error | error=%s", exc)
         try:
-            await ws.close()
+            await websocket.close(code=1011, reason=str(exc))
         except Exception:
             pass
 
 
-# ── Landing page redirect for root ────────────────────────────────────────────
-@app.get("/index.html")
-async def index_html():
-    return FileResponse(os.path.join(_dashboard_dir, "index.html"))
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=3005)
+# ── Shutdown hook ────────────────────────────────────────────────────────────
+@app.on_event("shutdown")
+async def _shutdown():
+    global _client
+    if _client and not _client.is_closed:
+        await _client.aclose()
+        _client = None

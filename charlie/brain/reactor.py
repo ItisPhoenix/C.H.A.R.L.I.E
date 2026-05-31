@@ -384,10 +384,21 @@ class Reactor:
                             self.brain._safe_put(self.brain.telegram_q, {"type": "CLEAR_CONFIRMATION"})
 
                 # ── 2. Queue Polling ──
+                # NOTE: multiprocessing Manager proxy queues can raise
+                # ConnectionError, BrokenPipeError, OSError (not just
+                # queue.Empty) when the Manager process is under stress or
+                # restarting.  An uncaught exception here hits the outer
+                # except (line 518) which kills the Brain process.  Catch
+                # all transient proxy errors and treat them like an empty
+                # queue so the main loop survives.
                 try:
                     task = self.brain.brain_task_q.get_nowait()
                 except queue.Empty:
                     await asyncio.sleep(0.01)
+                    continue
+                except (ConnectionError, BrokenPipeError, OSError, EOFError) as qe:
+                    logger.warning("brain_task_q_proxy_error | %s: %s", type(qe).__name__, qe)
+                    await asyncio.sleep(0.1)
                     continue
 
                 # ── 3. Task Dispatching ──

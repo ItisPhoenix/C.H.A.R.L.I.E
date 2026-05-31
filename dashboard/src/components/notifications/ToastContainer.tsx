@@ -8,6 +8,7 @@ import { useWSEvent } from '@/lib/ws'
 interface Toast {
   id: string
   type: 'info' | 'success' | 'warning' | 'error'
+  title?: string
   message: string
 }
 
@@ -55,13 +56,18 @@ export function ToastContainer() {
           return (
             <motion.div
               key={toast.id}
-              initial={{ opacity: 0, x: 100 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 100 }}
-              className={`glass-card p-3 flex items-start gap-2 border ${colors[toast.type]}`}
+              initial={{ opacity: 0, x: 20, scale: 0.95 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: 20, scale: 0.95 }}
+              className={`glass-card p-4 flex items-start gap-3 border shadow-neon-glow rounded-xl ${colors[toast.type]}`}
             >
               <Icon size={16} className="mt-0.5 flex-shrink-0" />
-              <span className="text-sm font-body text-charlie-text flex-1">{toast.message}</span>
+              <div className="flex-1 min-w-0">
+                {toast.title && (
+                  <p className="text-sm font-display font-semibold text-charlie-text mb-0.5">{toast.title}</p>
+                )}
+                <span className="text-sm font-body text-charlie-text">{toast.message}</span>
+              </div>
               <button onClick={() => setToasts((prev) => prev.filter((t) => t.id !== toast.id))} className="text-charlie-dim hover:text-charlie-text cursor-pointer" aria-label="Dismiss notification">
                 <X size={14} />
               </button>
