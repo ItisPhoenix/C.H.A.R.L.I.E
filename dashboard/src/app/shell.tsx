@@ -13,24 +13,60 @@ import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
 import { useDashboardStore } from '@/lib/store'
 import { sendMessage, fetchSettings } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/Button'
+import { AlertTriangle, X } from 'lucide-react'
+
+function BrainDisconnectedBanner() {
+  const brainDisconnected = useDashboardStore((s) => s.brainDisconnected)
+  const dismissed = useDashboardStore((s) => s.brainBannerDismissed)
+  const setDismissed = useDashboardStore((s) => s.setBrainBannerDismissed)
+  const collapsed = useDashboardStore((s) => s.sidebarCollapsed)
+  if (!brainDisconnected || dismissed) return null
+
+  const isExpanded = !collapsed
+
+  return (
+    <div
+      className={cn(
+        'fixed top-0 right-0 z-40 flex items-center justify-between gap-3 px-4 py-2.5',
+        'bg-amber-950/90 backdrop-blur-sm border-b border-amber-500/30 text-amber-200 text-sm',
+        'transition-all duration-300',
+        isExpanded ? 'left-56' : 'left-14',
+      )}
+    >
+      <div className="flex items-center gap-2">
+        <AlertTriangle size={16} className="text-amber-400 flex-shrink-0" />
+        <span className="font-medium">Brain Disconnected</span>
+        <span className="text-amber-300/70 hidden sm:inline">-- some features unavailable</span>
+      </div>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => setDismissed(true)}
+        className="!p-0.5 !text-amber-400 hover:!text-amber-200"
+        aria-label="Dismiss banner"
+      >
+        <X size={16} />
+      </Button>
+    </div>
+  )
+}
 
 export function DashboardShell({ children }: { children: React.ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const router = useRouter()
   const pathname = usePathname()
   const collapsed = useDashboardStore((s) => s.sidebarCollapsed)
-  const hovered = useDashboardStore((s) => s.sidebarHovered)
-  const theme = useDashboardStore((s) => s.theme)
   const researchResult = useDashboardStore((s) => s.researchResult)
   const researchFollowup = useDashboardStore((s) => s.researchFollowup)
   const researchPanelOpen = useDashboardStore((s) => s.researchPanelOpen)
   const setResearchPanelOpen = useDashboardStore((s) => s.setResearchPanelOpen)
 
-  // Apply theme class on mount and changes
+  // Dark mode only
   useEffect(() => {
-    document.documentElement.classList.toggle('light', theme === 'light')
-    document.documentElement.classList.toggle('dark', theme === 'dark')
-  }, [theme])
+    document.documentElement.classList.remove('light')
+    document.documentElement.classList.add('dark')
+  }, [])
 
   // Auto-redirect to /setup if not configured
   useEffect(() => {
@@ -76,7 +112,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [router])
 
-  const isExpanded = !collapsed || hovered
+  const isExpanded = !collapsed
 
   const handleSuggestionClick = useCallback((suggestion: string) => {
     sendMessage(suggestion).catch(() => {})
@@ -95,9 +131,10 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
       <VoiceCommandRouter />
       <ToastContainer />
       <Sidebar />
+      <BrainDisconnectedBanner />
       <main
         className={cn(
-          'pt-4 px-6 pb-16 transition-all duration-300 ease-out relative z-10',
+          'pt-4 px-6 pb-24 transition-all duration-300 ease-out relative z-10',
           isExpanded ? 'ml-56' : 'ml-14',
         )}
       >

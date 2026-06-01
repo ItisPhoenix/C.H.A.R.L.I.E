@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { ErrorState } from '@/components/ui/ErrorState'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { fetchBriefing, runBriefing } from '@/lib/api'
 import { formatTimestamp } from '@/lib/utils'
@@ -46,7 +47,7 @@ export default function BriefingPage() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-4">
+    <div className="max-w-4xl mx-auto space-y-6">
       <PageHeader
         title="Daily Briefing"
         subtitle={
@@ -67,20 +68,11 @@ export default function BriefingPage() {
       />
 
       {loading ? (
-        <GlassCard>
-          <div className="flex justify-center py-8">
-            <LoadingSpinner label="Loading briefing..." />
-          </div>
-        </GlassCard>
+        <div className="flex items-center justify-center h-[60vh]">
+          <LoadingSpinner label="Loading briefing..." />
+        </div>
       ) : error ? (
-        <GlassCard>
-          <p className="text-charlie-red text-sm text-center py-4">{error}</p>
-          <div className="text-center mt-2">
-            <Button variant="ghost" size="sm" onClick={loadBriefing}>
-              Retry
-            </Button>
-          </div>
-        </GlassCard>
+        <ErrorState error={error} onRetry={loadBriefing} />
       ) : generating ? (
         <GlassCard>
           <div className="flex justify-center py-8">
@@ -204,7 +196,7 @@ function ContextSection({ context }: { context: BriefingData['context'] }) {
     <GlassCard>
       <h3 className="text-sm font-semibold text-charlie-cyan mb-3 font-display tracking-[0.1em] uppercase">Context</h3>
       {world ? (
-        <div className="grid grid-cols-3 gap-3 text-sm mb-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-sm mb-3">
           <div>
             <span className="text-charlie-dim block text-xs">Active App</span>
             <span className="text-charlie-text">{world.active_app || 'Unknown'}</span>
@@ -220,7 +212,7 @@ function ContextSection({ context }: { context: BriefingData['context'] }) {
                 world.frustration > 0.7 ? 'red' : world.frustration > 0.3 ? 'amber' : 'green'
               }
             >
-              {(world.frustration * 100).toFixed(0)}%
+              {((world.frustration ?? 0) * 100).toFixed(0)}%
             </Badge>
           </div>
         </div>

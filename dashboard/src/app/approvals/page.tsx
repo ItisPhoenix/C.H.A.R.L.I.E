@@ -41,7 +41,7 @@ export default function ApprovalsPage() {
 
   useEffect(() => {
     loadApprovals()
-    const interval = setInterval(loadApprovals, 3000)
+    const interval = setInterval(loadApprovals, 1000)
     return () => clearInterval(interval)
   }, [loadApprovals])
 
@@ -84,7 +84,7 @@ export default function ApprovalsPage() {
     return (
       <div className="max-w-6xl mx-auto space-y-4">
         <PageHeader title="Approvals" subtitle="Loading..." />
-        <div className="flex items-center justify-center h-64">
+        <div className="flex items-center justify-center h-[60vh]">
           <LoadingSpinner size="lg" label="Fetching pending approvals..." />
         </div>
       </div>
@@ -215,12 +215,12 @@ function KanbanColumn<T>({
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between pb-2 border-b border-charlie-border">
-        <h3 className="font-display text-sm tracking-wide text-charlie-cyan uppercase">{title}</h3>
+        <h3 className="font-display text-sm tracking-[0.1em] text-charlie-cyan uppercase">{title}</h3>
         <Badge variant={color}>{count}</Badge>
       </div>
       {items.length === 0 ? (
         <GlassCard className="!p-4">
-          <p className="text-charlie-dim text-sm text-center font-body">{emptyText}</p>
+          <EmptyState terminal title={emptyText} />
         </GlassCard>
       ) : (
         <div className="space-y-3">

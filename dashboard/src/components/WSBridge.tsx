@@ -3,6 +3,7 @@
 import { useEffect } from 'react'
 import { wsManager } from '@/lib/ws'
 import { useDashboardStore } from '@/lib/store'
+import { checkBrainStatus } from '@/lib/api'
 import { addToast } from '@/components/notifications/ToastContainer'
 
 export function WSBridge() {
@@ -20,9 +21,23 @@ export function WSBridge() {
       setConnectionStatus(wsManager.connected ? 'connected' : 'disconnected')
     }, 1000)
 
-    // Subscribe to WS events
-    // Backend lowercases WS_FORWARD_TYPES: PHASE→phase, VOICE_ACTIVITY→voice_activity, etc.
-    const unsubPhase = wsManager.subscribe('phase', (data) => {
+    // Brain status polling (every 10s)
+    const brainInterval = setInterval(async () => {
+      const ok = await checkBrainStatus()
+      const prev = useDashboardStore.getState().brainDisconnected
+      useDashboardStore.getState().setBrainDisconnected(!ok)
+      // When brain reconnects, un-dismiss the banner so it disappears
+      if (ok && prev) {
+        useDashboardStore.getState().setBrainBannerDismissed(false)
+      }
+    }, 10000)
+    // Also check immediately on mount
+    checkBrainStatus().then((ok) => {
+      useDashboardStore.getState().setBrainDisconnected(!ok)
+    })
+
+    // Subscribe to WS events (must match STATUS_EVENT_MAP in charlie/watchdog/status_events.py)
+    const unsubPhase = wsManager.subscribe('phase_change', (data) => {
       setCurrentPhase((data.phase as string) || (data.type as string) || 'idle')
     })
 
@@ -46,7 +61,7 @@ export function WSBridge() {
       })
     })
 
-    const unsubPhoenixAlert = wsManager.subscribe('phoenix_alert', (data) => {
+    const unsubPhoenixAlert = wsManager.subscribe('subsystem_failure', (data) => {
       // Forward to notification system
       const event = new CustomEvent('charlie-notification', {
         detail: { type: 'alert', title: 'System Alert', message: data.content || 'Alert' },
@@ -106,6 +121,7 @@ export function WSBridge() {
 
     return () => {
       clearInterval(connInterval)
+      clearInterval(brainInterval)
       unsubPhase()
       unsubApproval()
       unsubApprovalResolved()

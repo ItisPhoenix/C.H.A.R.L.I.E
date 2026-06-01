@@ -1,12 +1,13 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { GlassCard } from '@/components/ui/GlassCard'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
+import { ErrorState } from '@/components/ui/ErrorState'
 import { History, TrendingUp } from 'lucide-react'
 import { fetchEvolution } from '@/lib/api'
 
@@ -24,26 +25,31 @@ interface EvolutionEntry {
 export default function EvolutionPage() {
   const [entries, setEntries] = useState<EvolutionEntry[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
-  useEffect(() => {
-    async function loadEvolution() {
-      try {
-        const data = await fetchEvolution()
-        setEntries(data.entries || [])
-      } catch (e) {
-        console.error('Failed to load evolution:', e)
-      } finally {
-        setLoading(false)
-      }
+  const loadEvolution = useCallback(async () => {
+    try {
+      setError(null)
+      setLoading(true)
+      const data = await fetchEvolution()
+      setEntries(data.entries || [])
+    } catch (e) {
+      console.error('Failed to load evolution:', e)
+      setError('Failed to load evolution history')
+    } finally {
+      setLoading(false)
     }
-    loadEvolution()
   }, [])
+
+  useEffect(() => {
+    loadEvolution()
+  }, [loadEvolution])
 
   const pendingCount = entries.filter((e) => e.status === 'pending').length
 
   return (
-    <div>
+    <div className="max-w-6xl mx-auto space-y-6">
       <PageHeader
         title="Evolution"
         subtitle="Self-evolution history and skill improvements"
@@ -68,9 +74,11 @@ export default function EvolutionPage() {
       </div>
 
       {loading ? (
-        <div className="flex justify-center py-12">
+        <div className="flex items-center justify-center h-[60vh]">
           <LoadingSpinner label="Loading evolution history..." />
         </div>
+      ) : error ? (
+        <ErrorState error={error} onRetry={loadEvolution} />
       ) : entries.length > 0 ? (
         <div className="space-y-3">
           {entries.map((entry) => (
@@ -95,7 +103,7 @@ export default function EvolutionPage() {
                   </div>
                   <div className="text-right text-xs text-charlie-dim">
                     <div>{entry.timestamp}</div>
-                    <div className="mt-1">Confidence: {Math.round(entry.confidence * 100)}%</div>
+                    <div className="mt-1">Confidence: {Math.round((entry.confidence ?? 0) * 100)}%</div>
                   </div>
                 </div>
 

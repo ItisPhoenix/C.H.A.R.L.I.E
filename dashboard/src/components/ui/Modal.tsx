@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react'
 import { cn } from '@/lib/utils'
+import { X } from 'lucide-react'
 
 interface ModalProps {
   open: boolean
@@ -49,9 +50,7 @@ export function Modal({ open, onClose, title, children, className }: ModalProps)
             className="text-charlie-dim hover:text-charlie-text transition-colors cursor-pointer"
             aria-label="Close modal"
           >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X size={20} />
           </button>
         </div>
         {children}

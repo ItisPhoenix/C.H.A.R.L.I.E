@@ -433,46 +433,13 @@ class BrainRPCServer:
         return results
 
     def _handle_get_settings(self, params: dict) -> dict:
-        """GET_SETTINGS → JSON-safe subset of key settings, built defensively."""
+        """GET_SETTINGS → full JSON-safe config from settings.to_dict()."""
         try:
             from charlie.config import settings
+            return settings.to_dict()
         except Exception as e:
             logger.warning("brain_rpc_settings_import_failed | %s", e)
             return {}
-
-        def g(root: Any, *path: str, default: Any = None) -> Any:
-            cur = root
-            for attr in path:
-                cur = getattr(cur, attr, None)
-                if cur is None:
-                    return default
-            return cur
-
-        return {
-            "llm": {
-                "primary_model": g(settings, "llm", "primary_model"),
-            },
-            "audio": {
-                "voice_mode": g(settings, "audio", "voice_mode"),
-            },
-            "security": {
-                "self_modify_enabled": g(
-                    settings, "security", "self_modify_enabled", default=False
-                ),
-                "auto_patcher_enabled": g(
-                    settings, "security", "auto_patcher_enabled", default=False
-                ),
-                "require_confirmation_tier1": g(
-                    settings, "security", "require_confirmation_tier1", default=True
-                ),
-            },
-            "resources": {
-                "vram_budget_mb": g(settings, "resources", "vram_budget_mb"),
-            },
-            "persona": {
-                "address_user_as": g(settings, "persona", "address_user_as"),
-            },
-        }
 
 
 # ── Client (daemon / ControlServer process) ───────────────────────────────────

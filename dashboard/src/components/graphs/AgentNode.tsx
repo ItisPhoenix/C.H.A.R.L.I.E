@@ -9,6 +9,8 @@ interface AgentNodeData {
   role: string
   status: 'running' | 'idle' | 'error'
   currentTask?: string
+  toolsCount?: number
+  skillsCount?: number
 }
 
 const statusMap = {
@@ -31,6 +33,13 @@ export function AgentNode({ data }: { data: AgentNodeData }) {
         <span className="font-display text-sm text-charlie-text tracking-wide">{data.label}</span>
       </div>
       <div className="text-[10px] text-charlie-dim font-mono uppercase">{data.role}</div>
+      {(data.toolsCount != null || data.skillsCount != null) && (
+        <div className="text-[10px] text-charlie-dim/70 font-mono mt-0.5">
+          {data.toolsCount != null && <span>{data.toolsCount} tools</span>}
+          {data.toolsCount != null && data.skillsCount != null && data.skillsCount > 0 && <span> · </span>}
+          {data.skillsCount != null && data.skillsCount > 0 && <span>{data.skillsCount} skills</span>}
+        </div>
+      )}
       {data.currentTask && (
         <div className="text-xs text-charlie-cyan mt-1 font-body line-clamp-1">{data.currentTask}</div>
       )}

@@ -15,7 +15,7 @@ from charlie.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-CONFIG_PATH = Path(__file__).parent.parent / "charlie_config.json"
+CONFIG_PATH = Path(__file__).parent.parent.parent / "charlie_config.json"
 
 
 class MCPManager:
@@ -130,6 +130,39 @@ class MCPManager:
             for k in to_remove:
                 del self._tool_to_server[k]
             await client.disconnect()
+
+    def toggle_server(self, name: str) -> bool:
+        """Toggle a server's enabled state. Returns new enabled state."""
+        if name not in self.servers:
+            # Try toggling in config file
+            try:
+                if CONFIG_PATH.exists():
+                    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    mcp = data.get("mcp_servers", {})
+                    if name in mcp:
+                        mcp[name]["enabled"] = not mcp[name].get("enabled", True)
+                        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                            json.dump(data, f, indent=2)
+                        return mcp[name]["enabled"]
+            except Exception:
+                pass
+            return False
+        client = self.servers[name]
+        client.enabled = not client.enabled
+        # Also persist to config
+        try:
+            if CONFIG_PATH.exists():
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                mcp = data.get("mcp_servers", {})
+                if name in mcp:
+                    mcp[name]["enabled"] = client.enabled
+                    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2)
+        except Exception:
+            pass
+        return client.enabled
 
     async def stop_all(self) -> None:
         """Disconnect all MCP servers."""

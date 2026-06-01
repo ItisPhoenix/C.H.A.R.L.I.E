@@ -41,6 +41,7 @@ class AutomationRule:
     risk_tier: RiskTier = RiskTier.TIER_0
     enabled: bool = True
     description: str = ""
+    priority: str = "auto"  # auto, low, medium, high, critical
 
     def to_dict(self) -> dict:
         return {
@@ -52,6 +53,7 @@ class AutomationRule:
             "risk_tier": self.risk_tier.value,
             "enabled": self.enabled,
             "description": self.description,
+            "priority": self.priority,
         }
 
     @classmethod
@@ -65,6 +67,7 @@ class AutomationRule:
             risk_tier=RiskTier(d.get("risk_tier", 0)),
             enabled=d.get("enabled", True),
             description=d.get("description", ""),
+            priority=d.get("priority", "auto"),
         )
 
 

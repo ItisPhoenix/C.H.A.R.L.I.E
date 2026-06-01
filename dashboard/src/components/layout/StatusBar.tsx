@@ -1,12 +1,12 @@
 'use client'
 
+import { useState } from 'react'
 import { useDashboardStore } from '@/lib/store'
 import { formatUptime } from '@/lib/utils'
 import { ConnectionBadge } from './ConnectionBadge'
-import { Mic, MicOff } from 'lucide-react'
+import { Mic, MicOff, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
-// Mini waveform bars for status bar
 function MiniWaveform({ active, color }: { active: boolean; color: string }) {
   if (!active) return null
   return (
@@ -27,6 +27,7 @@ function MiniWaveform({ active, color }: { active: boolean; color: string }) {
 }
 
 export function StatusBar() {
+  const [expanded, setExpanded] = useState(false)
   const daemon = useDashboardStore((s) => s.daemonStatus)
   const phase = useDashboardStore((s) => s.currentPhase)
   const voice = useDashboardStore((s) => s.voiceActivity)
@@ -42,10 +43,26 @@ export function StatusBar() {
   else if (isProcessing) { voiceColorVar = 'var(--voice-processing)'; voiceLabel = 'Processing' }
   else if (isListening) { voiceColorVar = 'var(--voice-listening)'; voiceLabel = 'Listening' }
 
+  // Collapsed: just a small pill with connection + voice status
+  if (!expanded) {
+    return (
+      <button
+        onClick={() => setExpanded(true)}
+        aria-label="Expand status bar"
+        className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-mono premium-card cursor-pointer hover:scale-105 transition-transform"
+      >
+        <ConnectionBadge />
+        <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: voiceColorVar }} />
+        <span className="text-charlie-dim">{phase}</span>
+        <ChevronDown size={12} className="text-charlie-dim" />
+      </button>
+    )
+  }
+
   return (
     <div
       aria-label="Status bar"
-      className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center flex-wrap justify-center gap-3 sm:gap-6 px-3 sm:px-6 py-2.5 rounded-xl text-xs font-mono premium-card"
+      className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 flex items-center flex-wrap justify-center gap-3 sm:gap-6 px-3 sm:px-6 py-2.5 rounded-xl text-xs font-mono premium-card"
     >
       <ConnectionBadge />
 
@@ -72,6 +89,14 @@ export function StatusBar() {
         <span className="text-charlie-dim">Phase</span>
         <span className="text-charlie-cyan capitalize font-semibold">{phase}</span>
       </div>
+
+      <button
+        onClick={() => setExpanded(false)}
+        aria-label="Collapse status bar"
+        className="text-charlie-dim hover:text-charlie-text cursor-pointer transition-colors"
+      >
+        <ChevronDown size={12} className="rotate-180" />
+      </button>
     </div>
   )
 }

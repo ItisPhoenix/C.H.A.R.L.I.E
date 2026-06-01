@@ -11,6 +11,7 @@ import json
 import os
 import secrets
 import time
+from pathlib import Path
 
 from aiohttp import web
 
@@ -47,8 +48,13 @@ class ControlServer:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._pending_approvals: dict = {}
         self._last_briefing: dict = {}
+        self._approvals_path = Path(__file__).parent.parent.parent / "scratch" / "approvals.json"
         self._token = os.environ.get("CONTROL_SERVER_TOKEN") or secrets.token_urlsafe(32)
         self._token_endpoint_added = False  # deferred to first request
+
+        # Shared MCP manager (lazy-initialized singleton so connections persist
+        # across requests — previously each handler created a fresh instance)
+        self._mcp_manager = None
 
         # Cross-process Brain RPC client (Design §D, Reqs 7.1-7.10)
         self.brain_rpc: "BrainRPCClient | None" = None
@@ -84,9 +90,12 @@ class ControlServer:
 
     @web.middleware
     async def _rate_limit_middleware(self, request, handler):
-        """Simple rate limiting: 100 requests per minute per IP."""
-        now = time.time()
+        """Simple rate limiting: 300 requests per minute per IP.
+        Exempts localhost (dashboard) since it polls frequently."""
         remote = request.remote or "unknown"
+        if remote in ("127.0.0.1", "::1"):
+            return await handler(request)
+        now = time.time()
         if not hasattr(self, '_rate_limits'):
             self._rate_limits = {}
         # Clean old entries
@@ -95,8 +104,8 @@ class ControlServer:
             self._rate_limits[remote] = []
         self._rate_limits[remote].append(now)
         # Keep only last 100 timestamps
-        self._rate_limits[remote] = self._rate_limits[remote][-100:]
-        if len(self._rate_limits[remote]) >= 100:
+        self._rate_limits[remote] = self._rate_limits[remote][-300:]
+        if len(self._rate_limits[remote]) >= 300:
             oldest = self._rate_limits[remote][0]
             if now - oldest < 60:
                 return web.json_response({"error": "Rate limit exceeded"}, status=429)
@@ -106,6 +115,7 @@ class ControlServer:
         """Async startup."""
         self._app = web.Application(middlewares=[self._rate_limit_middleware, self._token_auth_middleware, self._cors_middleware])
         self._setup_routes()
+        self._load_approvals()
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -127,8 +137,8 @@ class ControlServer:
                         "type": "PHOENIX_ALERT",
                         "content": f"ControlServer bind failed on port {self.port}. Is another instance running?"
                     })
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("phoenix_alert_push_failed | %s", e)
             return
 
         # Keep running until stopped
@@ -243,6 +253,9 @@ class ControlServer:
 
         # Automation
         self._app.router.add_get("/api/automation/rules", self._handle_get_rules)
+        self._app.router.add_post("/api/automation/rules", self._handle_create_rule)
+        self._app.router.add_put("/api/automation/rules/{name}", self._handle_update_rule)
+        self._app.router.add_delete("/api/automation/rules/{name}", self._handle_delete_rule)
 
         # Briefing
         self._app.router.add_get("/api/briefing", self._handle_get_briefing)
@@ -262,7 +275,13 @@ class ControlServer:
 
         # Agents, skills, tools
         self._app.router.add_get("/api/agents/status", self._handle_agents_status)
+        self._app.router.add_post("/api/agents", self._handle_create_agent)
+        self._app.router.add_put("/api/agents/{name}", self._handle_update_agent)
+        self._app.router.add_delete("/api/agents/{name}", self._handle_delete_agent)
         self._app.router.add_get("/api/skills", self._handle_skills)
+        self._app.router.add_post("/api/skills", self._handle_create_skill)
+        self._app.router.add_put("/api/skills/{name}", self._handle_update_skill)
+        self._app.router.add_delete("/api/skills/{name}", self._handle_delete_skill)
         self._app.router.add_get("/api/tools/log", self._handle_tools_log)
         self._app.router.add_get("/api/logs", self._handle_logs)
         self._app.router.add_get("/api/evolution", self._handle_evolution)
@@ -274,7 +293,17 @@ class ControlServer:
         self._app.router.add_get("/api/tasks", self._handle_tasks)
         self._app.router.add_post("/api/tasks/{task_id}/cancel", self._handle_cancel_task)
         self._app.router.add_get("/api/mcp/servers", self._handle_mcp_servers)
+        self._app.router.add_post("/api/mcp/servers", self._handle_mcp_add_server)
         self._app.router.add_post("/api/mcp/{server_id}/toggle", self._handle_toggle_mcp)
+        self._app.router.add_post("/api/mcp/{server_id}/connect", self._handle_mcp_connect)
+        self._app.router.add_post("/api/mcp/{server_id}/disconnect", self._handle_mcp_disconnect)
+        self._app.router.add_post("/api/mcp/{server_id}/tools/{tool_name}/call", self._handle_mcp_call_tool)
+        self._app.router.add_delete("/api/mcp/{server_id}", self._handle_mcp_delete_server)
+
+        # Orchestrator endpoints
+        self._app.router.add_post("/api/orchestrator/plan", self._handle_orchestrator_plan)
+        self._app.router.add_get("/api/orchestrator/learning", self._handle_orchestrator_learning)
+        self._app.router.add_post("/api/orchestrator/execute", self._handle_orchestrator_execute)
 
         # WebSocket
         self._app.router.add_get("/ws/events", self._handle_ws)
@@ -466,8 +495,25 @@ class ControlServer:
         return web.json_response(data)
 
     async def _handle_post_settings(self, request):
-        """POST /api/settings — write daemon settings."""
-        return web.json_response({"status": "not_implemented"}, status=501)
+        """POST /api/settings — write daemon settings to charlie_config.json."""
+        try:
+            config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
+            body = await request.json()
+            if not config_path.exists():
+                return web.json_response({"ok": False, "error": "config_not_found"}, status=404)
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            # Merge top-level sections
+            for section, values in body.items():
+                if isinstance(values, dict) and section in config and isinstance(config[section], dict):
+                    config[section].update(values)
+                else:
+                    config[section] = values
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
     # ── WebSocket ──
@@ -640,13 +686,16 @@ class ControlServer:
         try:
             from charlie.integrations.health_tracker import IntegrationHealthTracker
             tracker = IntegrationHealthTracker()
-            # Register known integrations if brain has them
-            brain = getattr(self.daemon, '_brain', None)
-            if brain:
-                for attr in ('gmail', 'github', 'calendar', 'notion'):
-                    integration = getattr(brain, attr, None)
-                    if integration:
-                        tracker.register(integration)
+            # Register known integrations via Brain RPC agent status
+            if self.brain_rpc:
+                resp = await self.brain_rpc.request_async("GET_AGENT_STATUS")
+                if resp.ok and isinstance(resp.data, list):
+                    for agent_info in resp.data:
+                        if isinstance(agent_info, dict):
+                            tracker.register(type("Integration", (), {
+                                "name": agent_info.get("name", "unknown"),
+                                "status": agent_info.get("status", "idle"),
+                            })())
             health = tracker.get_all_health()
             return web.json_response({
                 "integrations": [h.to_dict() for h in health],
@@ -657,15 +706,21 @@ class ControlServer:
     # ── Automation ──
 
     async def _handle_get_rules(self, request):
-        """GET /api/automation/rules — list automation rules via Brain RPC."""
+        """GET /api/automation/rules — list automation rules via Brain RPC with local fallback."""
         if self.brain_rpc:
             resp = await self.brain_rpc.request_async("GET_AUTOMATION_RULES")
             if resp.ok:
                 return web.json_response({"rules": resp.data or []})
-            if resp.error == "brain_rpc_timeout":
-                return web.json_response(
-                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
-                )
+        # Fallback: read automation_rules from charlie_config.json
+        try:
+            config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                rules = data.get("automation_rules", [])
+                return web.json_response({"rules": rules if isinstance(rules, list) else []})
+        except Exception:
+            pass
         return web.json_response({"rules": []})
 
     async def _handle_get_token(self, request):
@@ -682,6 +737,15 @@ class ControlServer:
                 with open(history_file) as f:
                     data = json.load(f)
                     messages = data if isinstance(data, list) else []
+                    # Ensure every message has a valid timestamp and id
+                    now = time.time()
+                    for i, msg in enumerate(messages):
+                        ts = msg.get("timestamp")
+                        if ts is None or not isinstance(ts, (int, float)):
+                            # Spread messages 30s apart, most recent near now
+                            msg["timestamp"] = now - (len(messages) - 1 - i) * 30
+                        if not msg.get("id"):
+                            msg["id"] = f"hist-{i}-{hash(msg.get('content', '')[:32]) & 0xFFFFFFFF:08x}"
                     return web.json_response({"messages": messages})
             return web.json_response({"messages": []})
         except Exception as e:
@@ -903,16 +967,22 @@ class ControlServer:
             return web.json_response({"skills": []})
 
     async def _handle_tools_log(self, request):
-        """GET /api/tools/log — recent tool executions via Brain RPC."""
+        """GET /api/tools/log — recent tool executions via Brain RPC with local fallback."""
         params = {"limit": int(request.query.get("limit", "50"))}
         if self.brain_rpc:
             resp = await self.brain_rpc.request_async("GET_TOOL_LOG", params)
             if resp.ok:
                 return web.json_response({"executions": resp.data or []})
-            if resp.error == "brain_rpc_timeout":
-                return web.json_response(
-                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
-                )
+        # Fallback: read from scratch/tool_log.json
+        try:
+            log_file = os.path.join(os.getcwd(), "scratch", "tool_log.json")
+            if os.path.exists(log_file):
+                with open(log_file, "r", encoding="utf-8") as f:
+                    log = json.load(f)
+                    limit = params["limit"]
+                    return web.json_response({"executions": (log if isinstance(log, list) else [])[:limit]})
+        except Exception:
+            pass
         return web.json_response({"executions": []})
 
     async def _handle_logs(self, request):
@@ -960,15 +1030,16 @@ class ControlServer:
         return web.json_response({"logs": logs[:limit]})
 
     async def _handle_evolution(self, request):
-        """GET /api/evolution — self-evolution history from EvolutionEngine."""
+        """GET /api/evolution — self-evolution history from evolution log."""
         try:
-            from charlie.intelligence.evolution_engine import EvolutionEngine
-            engine = EvolutionEngine()
-            entries = engine._runs if hasattr(engine, "_runs") else []
-            return web.json_response({"entries": entries})
+            log_file = os.path.join(os.getcwd(), "scratch", "evolution_log.json")
+            if os.path.exists(log_file):
+                with open(log_file, "r", encoding="utf-8") as f:
+                    entries = json.load(f)
+                    return web.json_response({"entries": entries if isinstance(entries, list) else []})
         except Exception as e:
             logger.debug("evolution_load_failed | error=%s", e)
-            return web.json_response({"entries": []})
+        return web.json_response({"entries": []})
 
     async def _handle_get_briefing(self, request):
         """GET /api/briefing — get latest briefing."""
@@ -978,8 +1049,7 @@ class ControlServer:
         """POST /api/briefing/run — generate new briefing."""
         try:
             from charlie.intelligence.briefing import BriefingAssembler
-            brain = getattr(self.daemon, '_brain', None)
-            assembler = BriefingAssembler(brain=brain)
+            assembler = BriefingAssembler(brain=None)
             briefing = await assembler.assemble()
             self._last_briefing = briefing.to_dict()
             return web.json_response({"briefing": self._last_briefing})
@@ -989,18 +1059,26 @@ class ControlServer:
     async def _handle_voice_status(self, request):
         """GET /api/voice/status — voice pipeline status."""
         try:
-            brain = getattr(self.daemon, '_brain', None)
-            if brain:
-                voice_state = getattr(brain, 'voice_state', {})
-                return web.json_response({
-                    "stt_model": getattr(brain, 'stt_model', 'unknown'),
-                    "tts_model": getattr(brain, 'tts_model', 'unknown'),
-                    "tts_speed": getattr(brain, 'tts_speed', 1.0),
-                    "is_listening": voice_state.get('is_listening', False),
-                    "is_speaking": voice_state.get('is_speaking', False),
-                })
-        except Exception:
-            pass
+            from charlie.config import settings
+            # Check if Audio subsystem is running via daemon
+            audio_running = False
+            if self.daemon:
+                try:
+                    status = await asyncio.to_thread(self.daemon.get_daemon_status)
+                    audio_status = status.get("subsystems", {}).get("Audio", {})
+                    audio_running = audio_status.get("status") == "running"
+                except Exception as e:
+                    logger.warning("voice_status_audio_check_failed | %s", e)
+            return web.json_response({
+                "stt_model": getattr(settings.audio, 'stt_model', 'unknown'),
+                "tts_model": "kokoro",
+                "tts_speed": getattr(settings.audio, 'kokoro_speed', 1.0),
+                "voice_mode": getattr(settings.audio, 'voice_mode', 'local'),
+                "is_listening": audio_running,
+                "is_speaking": False,
+            })
+        except Exception as e:
+            logger.error("voice_status_error | %s", e)
         return web.json_response({
             "stt_model": "unknown", "tts_model": "unknown", "tts_speed": 1.0,
             "is_listening": False, "is_speaking": False,
@@ -1021,81 +1099,453 @@ class ControlServer:
         return web.json_response({"running": running, "port": port})
 
     async def _handle_globe_launch(self, request):
-        """POST /api/control/globe/launch — start globe server."""
+        """POST /api/control/globe/launch — start globe server on port 8089."""
         try:
+            import sys
             import subprocess
+            globe_script = os.path.join(os.getcwd(), "charlie", "browser", "globe_server.py")
+            if not os.path.exists(globe_script):
+                return web.json_response({"ok": False, "error": "globe_server.py not found"}, status=404)
+            # Check if already running
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            result = sock.connect_ex(('127.0.0.1', 8089))
+            sock.close()
+            if result == 0:
+                return web.json_response({"ok": True, "already_running": True})
+            # Start globe server using current Python interpreter
             subprocess.Popen(
-                ['uv', 'run', 'python', 'charlie/browser/headless_browser.py', '--globe'],
+                [sys.executable, globe_script],
                 cwd=os.getcwd(),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
             )
             return web.json_response({"ok": True})
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)})
 
     async def _handle_tasks(self, request):
-        """GET /api/tasks — task queue via Brain RPC."""
+        """GET /api/tasks — task queue via Brain RPC with local fallback."""
         if self.brain_rpc:
             resp = await self.brain_rpc.request_async("GET_TASKS")
             if resp.ok:
                 return web.json_response({"tasks": resp.data or []})
-            if resp.error == "brain_rpc_timeout":
-                return web.json_response(
-                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
-                )
+        # Fallback: read from scratch/tasks.json
+        try:
+            tasks_file = os.path.join(os.getcwd(), "scratch", "tasks.json")
+            if os.path.exists(tasks_file):
+                with open(tasks_file, "r", encoding="utf-8") as f:
+                    tasks = json.load(f)
+                    return web.json_response({"tasks": tasks if isinstance(tasks, list) else []})
+        except Exception:
+            pass
         return web.json_response({"tasks": []})
 
     async def _handle_cancel_task(self, request):
         """POST /api/tasks/{task_id}/cancel — cancel a task."""
         task_id = request.match_info['task_id']
-        try:
-            brain = getattr(self.daemon, '_brain', None)
-            if brain and hasattr(brain, 'task_manager'):
-                tm = brain.task_manager
-                if hasattr(tm, 'cancel_task'):
-                    await tm.cancel_task(task_id)
-                    return web.json_response({"ok": True})
-        except Exception:
-            pass
+        # Forward cancellation to Brain via task queue
+        if self.daemon and hasattr(self.daemon, 'brain_task_q'):
+            try:
+                self.daemon.brain_task_q.put({
+                    "type": "CANCEL_TASK",
+                    "task_id": task_id,
+                })
+                return web.json_response({"ok": True})
+            except Exception:
+                pass
         return web.json_response({"ok": False})
+
+    # ── MCP helpers ─────────────────────────────────────────────────────────────
+
+    def _get_mcp_manager(self):
+        """Return the shared MCPManager, creating it on first call.
+
+        This ensures that connected state and discovered tools persist across
+        HTTP requests. Previously each handler created a fresh MCPManager(),
+        so connections were silently lost between page refreshes.
+        """
+        if self._mcp_manager is None:
+            from charlie.mcp.manager import MCPManager
+            self._mcp_manager = MCPManager()
+        return self._mcp_manager
+
+    # ── Skills CRUD ───────────────────────────────────────────────
+    async def _handle_create_skill(self, request):
+        """POST /api/skills — create a new skill."""
+        try:
+            body = await request.json()
+            name = body.get("name", "").strip()
+            if not name:
+                return web.json_response({"ok": False, "error": "Name required"}, status=400)
+            skills_dir = Path(__file__).parent.parent / "charlie" / "skills" / name
+            if skills_dir.exists():
+                return web.json_response({"ok": False, "error": "Skill already exists"}, status=409)
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            # Write SKILL.md
+            (skills_dir / "SKILL.md").write_text(f"# {name}\n\n{body.get('description', '')}\n", encoding="utf-8")
+            # Write manifest if provided
+            if body.get("manifest"):
+                (skills_dir / "manifest.json").write_text(json.dumps(body["manifest"], indent=2), encoding="utf-8")
+            return web.json_response({"ok": True, "skill": {"name": name}})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_update_skill(self, request):
+        """PUT /api/skills/{name} — update a skill."""
+        try:
+            name = request.match_info["name"]
+            body = await request.json()
+            skills_dir = Path(__file__).parent.parent / "charlie" / "skills" / name
+            if not skills_dir.exists():
+                return web.json_response({"ok": False, "error": "Skill not found"}, status=404)
+            if body.get("description"):
+                (skills_dir / "SKILL.md").write_text(f"# {name}\n\n{body['description']}\n", encoding="utf-8")
+            if body.get("manifest"):
+                (skills_dir / "manifest.json").write_text(json.dumps(body["manifest"], indent=2), encoding="utf-8")
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_delete_skill(self, request):
+        """DELETE /api/skills/{name} — delete a skill."""
+        try:
+            name = request.match_info["name"]
+            skills_dir = Path(__file__).parent.parent / "charlie" / "skills" / name
+            if not skills_dir.exists():
+                return web.json_response({"ok": False, "error": "Skill not found"}, status=404)
+            import shutil
+            shutil.rmtree(skills_dir)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    # ── Agents CRUD ───────────────────────────────────────────────
+    async def _handle_create_agent(self, request):
+        """POST /api/agents — create a new agent manifest."""
+        try:
+            body = await request.json()
+            name = body.get("name", "").strip()
+            if not name:
+                return web.json_response({"ok": False, "error": "Name required"}, status=400)
+            agent_dir = Path(__file__).parent.parent / "charlie" / "agents" / name
+            if agent_dir.exists():
+                return web.json_response({"ok": False, "error": "Agent already exists"}, status=409)
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            manifest = {
+                "name": name,
+                "description": body.get("description", ""),
+                "prompt": body.get("prompt", ""),
+                "model": body.get("model", "nim/primary"),
+                "risk_tier": body.get("risk_tier", 0),
+                "auto_approve": body.get("auto_approve", False),
+                "tools": body.get("tools", []),
+                "skills": body.get("skills", []),
+            }
+            (agent_dir / "agent.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+            return web.json_response({"ok": True, "agent": manifest})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_update_agent(self, request):
+        """PUT /api/agents/{name} — update an agent manifest."""
+        try:
+            name = request.match_info["name"]
+            body = await request.json()
+            agent_dir = Path(__file__).parent.parent / "charlie" / "agents" / name
+            manifest_file = agent_dir / "agent.json"
+            if not manifest_file.exists():
+                return web.json_response({"ok": False, "error": "Agent not found"}, status=404)
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+            manifest.update({k: v for k, v in body.items() if v is not None})
+            manifest_file.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+            return web.json_response({"ok": True, "agent": manifest})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_delete_agent(self, request):
+        """DELETE /api/agents/{name} — delete an agent."""
+        try:
+            name = request.match_info["name"]
+            agent_dir = Path(__file__).parent.parent / "charlie" / "agents" / name
+            if not agent_dir.exists():
+                return web.json_response({"ok": False, "error": "Agent not found"}, status=404)
+            import shutil
+            shutil.rmtree(agent_dir)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    # ── Automation Rules CRUD ─────────────────────────────────────
+    async def _handle_create_rule(self, request):
+        """POST /api/automation/rules — add a new rule."""
+        try:
+            body = await request.json()
+            from charlie.automation.models import AutomationRule
+            rule = AutomationRule.from_dict(body)
+            config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
+            data = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+            rules = data.get("automation_rules", [])
+            if any(r.get("name") == rule.name for r in rules):
+                return web.json_response({"ok": False, "error": "Rule already exists"}, status=409)
+            rules.append(rule.to_dict())
+            data["automation_rules"] = rules
+            config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            return web.json_response({"ok": True, "rule": rule.to_dict()})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_update_rule(self, request):
+        """PUT /api/automation/rules/{name} — update a rule."""
+        try:
+            name = request.match_info["name"]
+            body = await request.json()
+            config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
+            data = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+            rules = data.get("automation_rules", [])
+            idx = next((i for i, r in enumerate(rules) if r.get("name") == name), None)
+            if idx is None:
+                return web.json_response({"ok": False, "error": "Rule not found"}, status=404)
+            rules[idx].update({k: v for k, v in body.items() if v is not None})
+            data["automation_rules"] = rules
+            config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            return web.json_response({"ok": True, "rule": rules[idx]})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_delete_rule(self, request):
+        """DELETE /api/automation/rules/{name} — delete a rule."""
+        try:
+            name = request.match_info["name"]
+            config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
+            data = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+            rules = data.get("automation_rules", [])
+            new_rules = [r for r in rules if r.get("name") != name]
+            if len(new_rules) == len(rules):
+                return web.json_response({"ok": False, "error": "Rule not found"}, status=404)
+            data["automation_rules"] = new_rules
+            config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    # ── MCP endpoints ───────────────────────────────────────────────────────────
 
     async def _handle_mcp_servers(self, request):
         """GET /api/mcp/servers — MCP server list."""
         try:
-            from charlie.mcp.manager import MCPManager
-            manager = MCPManager()
+            config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
             servers = []
-            if hasattr(manager, 'get_servers'):
-                servers = manager.get_servers()
-            elif hasattr(manager, '_servers'):
-                servers = [
-                    {
-                        "id": s.get('name', 'unknown'),
-                        "name": s.get('name', 'unknown'),
-                        "status": "connected" if s.get('enabled', True) else "disconnected",
-                        "enabled": s.get('enabled', True),
-                        "tools": s.get('tools', []),
-                        "config": s.get('config', {}),
-                    }
-                    for s in manager._servers
-                ]
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                mcp_config = data.get("mcp_servers", {})
+                for name, cfg in mcp_config.items():
+                    if isinstance(cfg, dict):
+                        servers.append({
+                            "id": name,
+                            "name": name,
+                            "status": "configured" if cfg.get("enabled", True) else "disabled",
+                            "enabled": cfg.get("enabled", True),
+                            "tools": [],
+                            "config": {k: v for k, v in cfg.items() if k not in ("token",)},
+                        })
+            # Also try live manager for connected servers
+            try:
+                manager = self._get_mcp_manager()
+                for name, client in manager.servers.items():
+                    # Update existing or add new
+                    existing = next((s for s in servers if s["id"] == name), None)
+                    if existing:
+                        existing["status"] = "connected" if client.connected else existing["status"]
+                        existing["tools"] = client.tools if client.connected else []
+                    else:
+                        servers.append({
+                            "id": name,
+                            "name": name,
+                            "status": "connected" if client.connected else "disconnected",
+                            "enabled": client.enabled,
+                            "tools": client.tools if client.connected else [],
+                            "config": getattr(client, 'config', {}),
+                        })
+            except Exception:
+                pass  # Config-based list is still valid
             return web.json_response({"servers": servers})
         except Exception:
             return web.json_response({"servers": []})
 
     async def _handle_toggle_mcp(self, request):
-        """POST /api/mcp/{server_id}/toggle — toggle MCP server."""
+        """POST /api/mcp/{server_id}/toggle — toggle MCP server enabled state."""
         server_id = request.match_info['server_id']
         try:
-            from charlie.mcp.manager import MCPManager
-            manager = MCPManager()
-            if hasattr(manager, 'toggle_server'):
-                manager.toggle_server(server_id)
-                return web.json_response({"ok": True})
+            manager = self._get_mcp_manager()
+            new_state = manager.toggle_server(server_id)
+            return web.json_response({"ok": True, "enabled": new_state})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)})
+
+    async def _handle_mcp_connect(self, request):
+        """POST /api/mcp/{server_id}/connect — connect to MCP server and discover tools."""
+        server_id = request.match_info['server_id']
+        try:
+            manager = self._get_mcp_manager()
+            tools = await manager.start_server(server_id)
+            return web.json_response({"ok": True, "connected": True, "tools": tools})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)})
+
+    async def _handle_mcp_disconnect(self, request):
+        """POST /api/mcp/{server_id}/disconnect — disconnect from MCP server."""
+        server_id = request.match_info['server_id']
+        try:
+            manager = self._get_mcp_manager()
+            await manager.stop_server(server_id)
+            return web.json_response({"ok": True, "connected": False})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)})
+
+    async def _handle_mcp_call_tool(self, request):
+        """POST /api/mcp/{server_id}/tools/{tool_name}/call — call an MCP tool."""
+        server_id = request.match_info['server_id']
+        tool_name = request.match_info['tool_name']
+        try:
+            body = await request.json()
         except Exception:
-            pass
-        return web.json_response({"ok": False})
+            body = {}
+        try:
+            manager = self._get_mcp_manager()
+            if server_id not in manager.servers:
+                return web.json_response({"ok": False, "error": "Server not found"}, status=404)
+            client = manager.servers[server_id]
+            if not client.connected:
+                return web.json_response({"ok": False, "error": "Server not connected"}, status=400)
+            result = await client.call_tool(tool_name, body.get("arguments", {}))
+            return web.json_response({"ok": True, "result": result})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)})
+
+    async def _handle_mcp_add_server(self, request):
+        """POST /api/mcp/servers — add a new MCP server to config."""
+        try:
+            body = await request.json()
+            name = body.get("name", "").strip()
+            if not name:
+                return web.json_response({"ok": False, "error": "Name required"}, status=400)
+            config = body.get("config", {})
+            config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
+            data = {}
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            mcp = data.get("mcp_servers", {})
+            mcp[name] = {"enabled": True, **config}
+            data["mcp_servers"] = mcp
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            # Reload config into the shared manager
+            manager = self._get_mcp_manager()
+            manager.reload_config()
+            return web.json_response({"ok": True, "server": {"id": name, "name": name, "status": "configured", "enabled": True}})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)})
+
+    async def _handle_mcp_delete_server(self, request):
+        """DELETE /api/mcp/{server_id} — remove MCP server from config."""
+        server_id = request.match_info['server_id']
+        try:
+            config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
+            data = {}
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            mcp = data.get("mcp_servers", {})
+            if server_id in mcp:
+                del mcp[server_id]
+                data["mcp_servers"] = mcp
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+            # Remove from the shared manager
+            manager = self._get_mcp_manager()
+            if server_id in manager.servers:
+                await manager.remove_server(server_id)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)})
+
+    # ── Orchestrator endpoints ──
+
+    def _get_orchestrator(self):
+        """Get or create orchestrator singleton."""
+        if not hasattr(self, '_orchestrator'):
+            from charlie.brain.learning import AgentLearningTracker
+            from charlie.brain.orchestrator import Orchestrator
+            learning = AgentLearningTracker()
+            brain = getattr(self.daemon, '_brain', None) if self.daemon else None
+            self._orchestrator = Orchestrator(brain=brain, learning_tracker=learning)
+        return self._orchestrator
+
+    async def _handle_orchestrator_plan(self, request):
+        """POST /api/orchestrator/plan — decompose a goal into subtasks."""
+        try:
+            body = await request.json()
+            goal = body.get("goal", "").strip()
+            if not goal:
+                return web.json_response({"ok": False, "error": "No goal provided"}, status=400)
+            orchestrator = self._get_orchestrator()
+            agents = list(orchestrator.planner._pick_agent.__code__.co_consts) if False else ["research", "coding", "writer", "comms", "system", "vision", "redteam"]
+            subtasks = await orchestrator.plan(goal, agents)
+            return web.json_response({
+                "ok": True,
+                "subtasks": [
+                    {
+                        "id": t.id,
+                        "description": t.description,
+                        "suggested_agent": t.suggested_agent,
+                        "dependencies": t.dependencies,
+                        "required_tools": t.required_tools,
+                        "status": t.status.value,
+                    }
+                    for t in subtasks
+                ],
+            })
+        except Exception as e:
+            logger.error("orchestrator_plan_error | %s", e)
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_orchestrator_learning(self, request):
+        """GET /api/orchestrator/learning — get learning data."""
+        try:
+            orchestrator = self._get_orchestrator()
+            stats = orchestrator.learning.get_stats()
+            history = orchestrator.learning.get_history(limit=50)
+            return web.json_response({"ok": True, "stats": stats, "history": history})
+        except Exception as e:
+            logger.error("orchestrator_learning_error | %s", e)
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_orchestrator_execute(self, request):
+        """POST /api/orchestrator/execute — plan and execute a goal."""
+        try:
+            body = await request.json()
+            goal = body.get("goal", "").strip()
+            if not goal:
+                return web.json_response({"ok": False, "error": "No goal provided"}, status=400)
+            orchestrator = self._get_orchestrator()
+            agents = ["research", "coding", "writer", "comms", "system", "vision", "redteam"]
+            subtasks = await orchestrator.plan(goal, agents)
+            # Get agent registry from brain if available
+            agent_registry = None
+            if self.daemon and hasattr(self.daemon, '_brain'):
+                brain = self.daemon._brain
+                if hasattr(brain, 'agent_registry'):
+                    agent_registry = brain.agent_registry
+            results = await orchestrator.execute_plan(subtasks, agent_registry)
+            return web.json_response({"ok": True, "results": results})
+        except Exception as e:
+            logger.error("orchestrator_execute_error | %s", e)
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
 
     async def _broadcast_ws(self, event_type: str, data: dict):
         """Push event to all connected WS clients."""
@@ -1127,6 +1577,25 @@ class ControlServer:
 
     # ── Approval queue management ──
 
+    def _load_approvals(self):
+        """Load persisted approvals from disk."""
+        try:
+            if self._approvals_path.exists():
+                with open(self._approvals_path, "r", encoding="utf-8") as f:
+                    self._pending_approvals = json.load(f)
+                logger.info("approvals_loaded | count=%d", len(self._pending_approvals))
+        except Exception as e:
+            logger.warning("approvals_load_failed | %s", e)
+
+    def _save_approvals(self):
+        """Persist approvals to disk."""
+        try:
+            self._approvals_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._approvals_path, "w", encoding="utf-8") as f:
+                json.dump(self._pending_approvals, f, indent=2)
+        except Exception as e:
+            logger.warning("approvals_save_failed | %s", e)
+
     def add_pending_approval(self, approval_id: str, approval_data: dict):
         """Add a pending approval to the queue."""
         self._pending_approvals[approval_id] = {
@@ -1134,6 +1603,7 @@ class ControlServer:
             "status": "pending",
             "timestamp": time.time(),
         }
+        self._save_approvals()
         self.broadcast_sync("approval_pending", {
             "id": approval_id,
             **approval_data,
@@ -1143,6 +1613,7 @@ class ControlServer:
         """Resolve a pending approval."""
         if approval_id in self._pending_approvals:
             self._pending_approvals[approval_id]["status"] = decision
+            self._save_approvals()
             self.broadcast_sync("approval_resolved", {
                 "id": approval_id,
                 "decision": decision,

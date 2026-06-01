@@ -3,23 +3,20 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { GlassCard } from '@/components/ui/GlassCard'
 import { Badge } from '@/components/ui/Badge'
+import { FilterBar } from '@/components/ui/FilterBar'
+import { Toggle } from '@/components/ui/Toggle'
 import { SearchInput } from '@/components/ui/SearchInput'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { ErrorState } from '@/components/ui/ErrorState'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import * as api from '@/lib/api'
 import { formatTimestamp, cn, createVisibilityAwareInterval } from '@/lib/utils'
 import { useWSEvent } from '@/lib/ws'
+import { ChevronDown } from 'lucide-react'
 import type { ToolExecution } from '@/lib/types'
 
 type StatusFilter = 'all' | 'success' | 'error' | 'running'
-
-const STATUS_TABS: { key: StatusFilter; label: string }[] = [
-  { key: 'all', label: 'All' },
-  { key: 'success', label: 'Success' },
-  { key: 'error', label: 'Error' },
-  { key: 'running', label: 'Running' },
-]
 
 const statusVariant: Record<string, 'cyan' | 'green' | 'red' | 'dim'> = {
   running: 'cyan',
@@ -75,17 +72,7 @@ function ToolRow({ exec }: { exec: ToolExecution }) {
             <span className="text-xs text-charlie-dim font-mono">
               {formatTimestamp(exec.started_at)}
             </span>
-            <svg
-              className={cn(
-                'w-3.5 h-3.5 text-charlie-dim transition-transform',
-                expanded && 'rotate-180',
-              )}
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
+            <ChevronDown size={14} className={cn('text-charlie-dim transition-transform', expanded && 'rotate-180')} />
           </div>
         </div>
 
@@ -95,7 +82,7 @@ function ToolRow({ exec }: { exec: ToolExecution }) {
             {exec.input && Object.keys(exec.input).length > 0 && (
               <div className="terminal-block">
                 <div className="terminal-header">
-                  <div className="dot" style={{ background: '#88ccff' }} />
+                  <div className="dot bg-charlie-cyan" />
                   <span className="text-charlie-dim text-xs">input</span>
                 </div>
                 <pre className="terminal-content text-xs overflow-x-auto">
@@ -107,7 +94,7 @@ function ToolRow({ exec }: { exec: ToolExecution }) {
             {exec.output && (
               <div className="terminal-block">
                 <div className="terminal-header">
-                  <div className="dot" style={{ background: '#22C55E' }} />
+                  <div className="dot bg-charlie-green" />
                   <span className="text-charlie-dim text-xs">output</span>
                 </div>
                 <pre className="terminal-content text-xs overflow-x-auto max-h-40 overflow-y-auto">
@@ -119,7 +106,7 @@ function ToolRow({ exec }: { exec: ToolExecution }) {
             {exec.error && (
               <div className="terminal-block">
                 <div className="terminal-header">
-                  <div className="dot" style={{ background: '#EF4444' }} />
+                  <div className="dot bg-charlie-red" />
                   <span className="text-charlie-red text-xs">error</span>
                 </div>
                 <pre className="terminal-content text-xs text-charlie-red/80 overflow-x-auto">
@@ -142,6 +129,7 @@ function ToolRow({ exec }: { exec: ToolExecution }) {
 export default function ToolLogPage() {
   const [executions, setExecutions] = useState<ToolExecution[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [autoScroll, setAutoScroll] = useState(true)
@@ -149,10 +137,12 @@ export default function ToolLogPage() {
 
   const loadLog = useCallback(async () => {
     try {
+      setError(null)
       const data = await api.fetchToolLog()
-      setExecutions(data.executions)
+      setExecutions(data.executions || [])
     } catch (e) {
       console.error('Failed to load tool log:', e)
+      setError('Failed to load tool log')
     } finally {
       setLoading(false)
     }
@@ -160,7 +150,7 @@ export default function ToolLogPage() {
 
   useEffect(() => {
     loadLog()
-    return createVisibilityAwareInterval(loadLog, 3000)
+    return createVisibilityAwareInterval(loadLog, 1000)
   }, [loadLog])
 
   // Real-time WS updates for new tool executions
@@ -201,23 +191,22 @@ export default function ToolLogPage() {
     )
   }
 
+  if (error) {
+    return (
+      <div className="max-w-5xl mx-auto space-y-6">
+        <PageHeader title="Tool Log" />
+        <ErrorState error={error} onRetry={loadLog} />
+      </div>
+    )
+  }
+
   return (
     <div className="max-w-5xl mx-auto space-y-6">
       <PageHeader
         title="Tool Log"
         subtitle={`${executions.length} executions`}
         actions={
-          <button
-            onClick={() => setAutoScroll(!autoScroll)}
-            className={cn(
-              'px-3 py-1.5 text-xs rounded-lg border transition-colors cursor-pointer',
-              autoScroll
-                ? 'bg-charlie-cyan/10 text-charlie-cyan border-charlie-cyan/30'
-                : 'text-charlie-dim border-charlie-border hover:text-charlie-text',
-            )}
-          >
-            {autoScroll ? 'Auto-scroll ON' : 'Auto-scroll OFF'}
-          </button>
+          <Toggle enabled={autoScroll} onChange={setAutoScroll} label="Auto-scroll" />
         }
       />
 
@@ -229,22 +218,11 @@ export default function ToolLogPage() {
           placeholder="Filter by tool name..."
           className="flex-1"
         />
-        <div className="flex items-center gap-1">
-          {STATUS_TABS.map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setStatusFilter(tab.key)}
-              className={cn(
-                'px-2.5 py-1.5 text-xs rounded-lg border transition-colors cursor-pointer',
-                statusFilter === tab.key
-                  ? 'bg-charlie-cyan/10 text-charlie-cyan border-charlie-cyan/30'
-                  : 'text-charlie-dim border-charlie-border hover:text-charlie-text',
-              )}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
+        <FilterBar
+          options={['all', 'success', 'error', 'running'] as const}
+          value={statusFilter}
+          onChange={setStatusFilter}
+        />
       </div>
 
       {/* Execution feed */}
@@ -254,7 +232,7 @@ export default function ToolLogPage() {
           description={search ? 'No tools match your filter' : 'No tool executions recorded yet'}
         />
       ) : (
-        <div ref={scrollRef} className="overflow-y-auto pr-1" style={{ maxHeight: '70vh' }}>
+        <div ref={scrollRef} className="overflow-y-auto pr-1 max-h-[70vh]">
           {filtered.map((exec) => (
             <ToolRow key={exec.id} exec={exec} />
           ))}

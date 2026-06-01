@@ -12,8 +12,8 @@ interface StatusDotProps {
 }
 
 const sizeMap = {
-  sm: 'w-2 h-2',
-  md: 'w-2 h-2',
+  sm: 'w-1.5 h-1.5',
+  md: 'w-2.5 h-2.5',
   lg: 'w-3 h-3',
 }
 

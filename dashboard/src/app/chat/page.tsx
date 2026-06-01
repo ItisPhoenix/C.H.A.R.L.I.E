@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { StatusDot } from '@/components/ui/StatusDot'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
+import { ErrorState } from '@/components/ui/ErrorState'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { useWSEvent } from '@/lib/ws'
 import { useDashboardStore } from '@/lib/store'
@@ -69,18 +70,20 @@ function ContextPanel({ collapsed, onToggle, onQuickAction, mobile }: { collapse
       }
     }
     loadContext()
-    return createVisibilityAwareInterval(loadContext, 15000)
+    return createVisibilityAwareInterval(loadContext, 1000)
   }, [])
 
   if (collapsed && !mobile) {
     return (
-      <button
+      <Button
+        variant="ghost"
+        size="sm"
         onClick={onToggle}
-        className="hidden lg:flex w-10 items-center justify-center border-l border-charlie-border hover:bg-charlie-card/50 transition-colors cursor-pointer"
+        className="hidden lg:flex w-10 items-center justify-center border-l border-charlie-border"
         title="Show context panel"
       >
         <ChevronLeft size={16} className="text-charlie-dim" />
-      </button>
+      </Button>
     )
   }
 
@@ -88,9 +91,9 @@ function ContextPanel({ collapsed, onToggle, onQuickAction, mobile }: { collapse
     <div className={`w-80 border-l border-charlie-border flex flex-col overflow-hidden ${mobile ? '' : 'hidden lg:flex'}`}>
       <div className="flex items-center justify-between px-4 py-3 border-b border-charlie-border">
         <span className="font-display text-xs tracking-[0.1em] text-charlie-cyan uppercase">Context</span>
-        <button onClick={onToggle} className="text-charlie-dim hover:text-charlie-text cursor-pointer">
+        <Button variant="ghost" size="sm" onClick={onToggle} className="!p-1">
           <ChevronRight size={16} />
-        </button>
+        </Button>
       </div>
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
         <ContextSection icon={<Zap size={14} />} title="Current Task" color="cyan">
@@ -182,13 +185,15 @@ function ContextPanel({ collapsed, onToggle, onQuickAction, mobile }: { collapse
               { label: 'Search memory', prompt: 'Search my memory for ' },
               { label: 'Create skill', prompt: 'Create a new skill that ' },
             ].map((action) => (
-              <button
+              <Button
                 key={action.label}
+                variant="ghost"
+                size="xs"
                 onClick={() => onQuickAction?.(action.prompt)}
-                className="px-2 py-1 text-xs rounded bg-charlie-cyan/10 text-charlie-cyan border border-charlie-cyan/20 hover:bg-charlie-cyan/20 transition-colors cursor-pointer"
+                className="!bg-charlie-cyan/10 !text-charlie-cyan !border-charlie-cyan/20 hover:!bg-charlie-cyan/20"
               >
                 {action.label}
-              </button>
+              </Button>
             ))}
           </div>
         </ContextSection>
@@ -219,11 +224,11 @@ function ContextSection({ icon, title, color, children }: { icon: React.ReactNod
   )
 }
 
-// ==================== VOICE INPUT ====================
+// ==================== VOICE MIC BUTTON ====================
 
-function VoiceInput({ onTranscript }: { onTranscript?: (text: string) => void }) {
+function VoiceMicButton({ onTranscript, onInterim }: { onTranscript?: (text: string) => void; onInterim?: (text: string) => void }) {
   const voice = useDashboardStore((s) => s.voiceActivity)
-  const isListening = voice?.is_listening ?? false
+  const isCharlieSpeaking = voice?.is_speaking ?? false
   const [isRecording, setIsRecording] = useState(false)
   const recognitionRef = useRef<any>(null)
 
@@ -237,7 +242,7 @@ function VoiceInput({ onTranscript }: { onTranscript?: (text: string) => void })
     }
   }, [])
 
-  function startPushToTalk() {
+  function startListening() {
     const win = window as unknown as { SpeechRecognition: unknown; webkitSpeechRecognition: unknown }
     const SpeechRecognition = (win.SpeechRecognition || win.webkitSpeechRecognition) as { new(): unknown; prototype: unknown } | undefined
     if (!SpeechRecognition) {
@@ -254,26 +259,51 @@ function VoiceInput({ onTranscript }: { onTranscript?: (text: string) => void })
       onerror: () => void;
       start: () => void;
     }
-    recognition.continuous = false
-    recognition.interimResults = false
+    recognition.continuous = true
+    recognition.interimResults = true
     recognition.lang = 'en-US'
 
     recognition.onresult = (event: unknown) => {
-      const e = event as { results: { transcript: string }[][] }
-      const transcript = e.results[0]?.[0]?.transcript
-      if (transcript && onTranscript) {
-        onTranscript(transcript)
+      const e = event as { results: Array<Array<{ transcript: string; isFinal: boolean }>> }
+      let interimText = ''
+      let finalText = ''
+      for (let i = 0; i < e.results.length; i++) {
+        const result = e.results[i]
+        if (result[0].isFinal) {
+          finalText += result[0].transcript
+        } else {
+          interimText += result[0].transcript
+        }
+      }
+      if (onInterim) {
+        onInterim(interimText)
+      }
+      if (finalText && onTranscript) {
+        onTranscript(finalText.trim())
       }
     }
 
     recognition.onend = () => {
-      setIsRecording(false)
-      recognitionRef.current = null
+      // Auto-restart if user hasn't manually stopped (continuous listening mode)
+      if (recognitionRef.current) {
+        try {
+          recognition.start()
+        } catch {
+          setIsRecording(false)
+          recognitionRef.current = null
+          onInterim?.('')
+        }
+      }
     }
 
-    recognition.onerror = () => {
-      setIsRecording(false)
-      recognitionRef.current = null
+    // @ts-expect-error — SpeechRecognition.onerror signature varies across browsers
+    recognition.onerror = (event) => {
+      // Only stop on fatal errors; "no-speech" and "aborted" are recoverable
+      if (event?.error === 'not-allowed' || event?.error === 'service-not-allowed') {
+        setIsRecording(false)
+        recognitionRef.current = null
+        onInterim?.('')
+      }
     }
 
     recognitionRef.current = recognition
@@ -281,65 +311,58 @@ function VoiceInput({ onTranscript }: { onTranscript?: (text: string) => void })
     setIsRecording(true)
   }
 
-  function stopPushToTalk() {
+  function stopListening() {
     if (recognitionRef.current) {
       recognitionRef.current.stop()
       recognitionRef.current = null
     }
     setIsRecording(false)
+    onInterim?.('')
   }
 
-  const active = isListening || isRecording
-
   return (
-    <div className="flex items-center gap-3 px-4 py-3 border-b border-charlie-border bg-charlie-card/30">
-      <button
-        className={cn(
-          'w-10 h-10 rounded-full flex items-center justify-center transition-all cursor-pointer',
-          active
-            ? 'bg-charlie-cyan/20 shadow-neon-cyan animate-pulse'
+    <button
+      className={cn(
+        'relative w-10 h-10 rounded-full flex items-center justify-center transition-all flex-shrink-0 cursor-pointer',
+        isRecording
+          ? 'bg-charlie-cyan/25 shadow-neon-cyan'
+          : isCharlieSpeaking
+            ? 'bg-charlie-amber/20 border border-charlie-amber/40'
             : 'bg-charlie-card border border-charlie-border hover:border-charlie-cyan/30',
-        )}
-        title={active ? 'Listening...' : 'Click to speak'}
-        aria-label={active ? 'Listening...' : 'Click to speak'}
-        onClick={() => {
-          if (isRecording) {
-            stopPushToTalk()
-          } else {
-            startPushToTalk()
-          }
-        }}
-      >
-        {active ? (
-          <Mic size={18} className="text-charlie-cyan" />
-        ) : (
-          <MicOff size={18} className="text-charlie-dim" />
-        )}
-      </button>
-      <div className="flex-1">
-        {active ? (
-          <div className="flex items-center gap-2">
-            <div className="flex items-end gap-0.5 h-4">
-              {[0, 1, 2, 3, 4].map((i) => (
-                <div
-                  key={i}
-                  className="w-1 bg-charlie-cyan rounded-full"
-                  style={{
-                    '--wave-height': `${10 + i * 3}px`,
-                    animation: `waveform 0.6s ease-in-out ${i * 0.1}s infinite`,
-                  } as React.CSSProperties}
-                />
-              ))}
-            </div>
-            <span className="text-charlie-cyan text-sm font-body">
-              {isRecording ? 'Recording... click mic to stop' : 'Listening...'}
-            </span>
-          </div>
-        ) : (
-          <span className="text-charlie-dim text-sm font-body">Press mic to speak, or type below</span>
-        )}
-      </div>
-    </div>
+      )}
+      title={isRecording ? 'Listening... click to stop' : isCharlieSpeaking ? 'Charlie is speaking...' : 'Start voice input'}
+      aria-label={isRecording ? 'Stop listening' : 'Start voice input'}
+      onClick={() => {
+        if (isRecording) {
+          stopListening()
+        } else {
+          startListening()
+        }
+      }}
+    >
+      {isRecording ? (
+        <>
+          {/* Pulsing ring when actively listening */}
+          <span className="absolute inset-0 rounded-full bg-charlie-cyan/20 animate-ping" />
+          <Mic size={18} className="text-charlie-cyan relative z-10" />
+        </>
+      ) : isCharlieSpeaking ? (
+        /* Waveform bars when Charlie is speaking */
+        <div className="flex items-end gap-0.5 h-4">
+          {[0, 1, 2, 3].map((i) => (
+            <div
+              key={i}
+              className="w-0.5 bg-charlie-amber rounded-full"
+              style={{
+                animation: `waveform 0.5s ease-in-out ${i * 0.1}s infinite`,
+              } as React.CSSProperties}
+            />
+          ))}
+        </div>
+      ) : (
+        <MicOff size={18} className="text-charlie-dim" />
+      )}
+    </button>
   )
 }
 
@@ -354,7 +377,7 @@ function ToolResultCard({ metadata }: { metadata: Record<string, unknown> }) {
   return (
     <div className="mt-2 terminal-block">
       <div className="terminal-header">
-        <div className="dot" style={{ background: status === 'success' ? '#22C55E' : status === 'error' ? '#EF4444' : '#F59E0B' }} />
+        <div className={cn('dot', status === 'success' ? 'bg-charlie-green' : status === 'error' ? 'bg-charlie-red' : 'bg-charlie-amber')} />
         <span className="text-charlie-cyan text-xs font-mono">{toolName}</span>
         {duration !== undefined && <span className="text-charlie-dim text-xs ml-auto">{duration}ms</span>}
       </div>
@@ -412,10 +435,16 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
   const [contextCollapsed, setContextCollapsed] = useState(false)
   const [showMobileContext, setShowMobileContext] = useState(false)
+  const [interimText, setInterimText] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  const voice = useDashboardStore((s) => s.voiceActivity)
+  const isCharlieSpeaking = voice?.is_speaking ?? false
+  const charlieTranscript = voice?.current_transcript
 
   useEffect(() => {
     loadHistory()
@@ -449,13 +478,16 @@ export default function ChatPage() {
   async function loadHistory() {
     setLoading(true)
     try {
+      setError(null)
       const data = await fetchChatHistory()
       setMessages(data.messages || [])
     } catch (e) {
       console.error('Failed to load chat history:', e)
+      setError('Failed to load chat history')
       setMessages([])
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   async function handleSend() {
@@ -470,12 +502,17 @@ export default function ChatPage() {
     }
     setMessages((prev) => [...prev, userMsg])
     setInput('')
+    setInterimText('')
     setSending(true)
+
+    // Safety timeout: reset sending state if no reply arrives within 30s
+    const sendingTimeout = setTimeout(() => setSending(false), 30000)
 
     try {
       await sendMessage(content)
     } catch (e) {
       console.error('Failed to send message:', e)
+      clearTimeout(sendingTimeout)
       setSending(false)
     }
   }
@@ -487,6 +524,8 @@ export default function ChatPage() {
     }
   }
 
+  const hasInterim = interimText.length > 0
+
   return (
     <div className="flex h-[calc(100vh-8rem)]">
       {/* Main chat area */}
@@ -495,40 +534,29 @@ export default function ChatPage() {
           title="Chat"
           subtitle="Voice-first conversation with CHARLIE"
           actions={
-            <button
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setShowMobileContext(!showMobileContext)}
-              className="lg:hidden flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-charlie-border text-charlie-dim hover:text-charlie-text hover:border-charlie-cyan/30 transition-colors cursor-pointer"
+              className="lg:hidden flex items-center gap-1.5"
               title="Toggle context panel"
             >
               <PanelRightOpen size={14} />
               Context
-            </button>
+            </Button>
           }
         />
 
         <GlassCard className="flex-1 flex flex-col min-h-0 !p-0 overflow-hidden">
-          {/* Voice input */}
-          <VoiceInput onTranscript={async (text) => {
-            const userMsg: ChatMessage = {
-              id: `voice-${Date.now()}`,
-              role: 'user',
-              content: text,
-              timestamp: Date.now() / 1000,
-            }
-            setMessages((prev) => [...prev, userMsg])
-            setSending(true)
-            try {
-              await sendMessage(text)
-            } catch (e) {
-              console.error('Failed to send voice message:', e)
-            }
-          }} />
-
           {/* Message list */}
           <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-3">
             {loading ? (
-              <div className="flex items-center justify-center py-12">
+              <div className="flex items-center justify-center h-[60vh]">
                 <LoadingSpinner label="Loading history..." />
+              </div>
+            ) : error ? (
+              <div className="flex items-center justify-center h-[60vh]">
+                <ErrorState error={error} onRetry={loadHistory} />
               </div>
             ) : messages.length === 0 ? (
               <div className="flex items-center justify-center py-12">
@@ -541,7 +569,29 @@ export default function ChatPage() {
               messages.map((msg) => <MessageBubble key={msg.id} message={msg} />)
             )}
 
-            {sending && (
+            {/* Charlie speaking indicator */}
+            {isCharlieSpeaking && (
+              <div className="flex justify-start">
+                <div className="bg-charlie-amber/10 border border-charlie-amber/25 rounded-lg px-4 py-2.5 text-sm">
+                  <span className="inline-flex items-center gap-2 text-charlie-amber font-body">
+                    <div className="flex items-end gap-0.5 h-3.5">
+                      {[0, 1, 2, 3, 4].map((i) => (
+                        <div
+                          key={i}
+                          className="w-0.5 bg-charlie-amber rounded-full"
+                          style={{
+                            animation: `waveform 0.5s ease-in-out ${i * 0.1}s infinite`,
+                          } as React.CSSProperties}
+                        />
+                      ))}
+                    </div>
+                    Charlie is speaking{charlieTranscript ? `: "${charlieTranscript}"` : '...'}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {sending && !isCharlieSpeaking && (
               <div className="flex justify-start">
                 <div className="bg-charlie-card border border-charlie-border rounded-lg px-4 py-2.5 text-sm">
                   <span className="inline-flex items-center gap-1.5 text-charlie-dim font-body">
@@ -553,27 +603,63 @@ export default function ChatPage() {
             )}
           </div>
 
-          {/* Text input (fallback) */}
-          <div className="border-t border-charlie-border p-3 flex gap-2">
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Type a message (or use voice above)..."
-              disabled={sending}
-              aria-label="Chat message input"
-              className="flex-1 bg-charlie-card border border-charlie-border rounded-lg px-4 py-2 text-sm text-charlie-text placeholder-charlie-dim focus:outline-none focus:border-charlie-cyan/50 focus:shadow-neon-cyan-sm transition-all disabled:opacity-50 font-body"
-            />
-            <Button
-              variant="primary"
-              size="md"
-              loading={sending}
-              onClick={handleSend}
-              disabled={!input.trim()}
-            >
-              <Send size={16} />
-            </Button>
+          {/* Input area with inline mic button */}
+          <div className="border-t border-charlie-border p-3">
+            {/* Interim transcription preview */}
+            {hasInterim && (
+              <div className="mb-2 px-1">
+                <span className="text-xs text-charlie-cyan/70 font-body italic">Transcribing: {interimText}</span>
+              </div>
+            )}
+            <div className="flex gap-2 items-center">
+              <VoiceMicButton
+                onTranscript={(text) => {
+                  // Final transcript: send as a message
+                  const userMsg: ChatMessage = {
+                    id: `voice-${Date.now()}`,
+                    role: 'user',
+                    content: text,
+                    timestamp: Date.now() / 1000,
+                  }
+                  setMessages((prev) => [...prev, userMsg])
+                  setSending(true)
+                  // Safety timeout: reset sending state if no reply arrives within 30s
+                  setTimeout(() => setSending(false), 30000)
+                  sendMessage(text).catch((e) => {
+                    console.error('Failed to send voice message:', e)
+                    setSending(false)
+                  })
+                  setInterimText('')
+                }}
+                onInterim={setInterimText}
+              />
+              <input
+                type="text"
+                value={hasInterim ? interimText : input}
+                onChange={(e) => {
+                  if (!hasInterim) setInput(e.target.value)
+                }}
+                onKeyDown={handleKeyDown}
+                placeholder={hasInterim ? 'Listening...' : 'Type a message or press mic...'}
+                disabled={sending || hasInterim}
+                aria-label="Chat message input"
+                className={cn(
+                  'flex-1 bg-charlie-card border rounded-lg px-4 py-2 text-sm text-charlie-text placeholder-charlie-dim focus:outline-none focus:shadow-neon-cyan-sm transition-all disabled:opacity-50 font-body',
+                  hasInterim
+                    ? 'border-charlie-cyan/40 bg-charlie-cyan/5'
+                    : 'border-charlie-border focus:border-charlie-cyan/50',
+                )}
+              />
+              <Button
+                variant="primary"
+                size="md"
+                loading={sending}
+                onClick={handleSend}
+                disabled={!input.trim() || hasInterim}
+              >
+                <Send size={16} />
+              </Button>
+            </div>
           </div>
         </GlassCard>
       </div>

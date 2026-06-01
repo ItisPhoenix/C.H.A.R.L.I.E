@@ -34,12 +34,12 @@ class AgentResult:
 class AgentRegistry:
     """Manifest-driven agent registry. Loads agents from charlie/agents/."""
 
-    def __init__(self, agents_dir: str = "charlie/agents"):
+    def __init__(self, agents_dir: str = "charlie/agents", brain=None, learning_tracker=None):
         from charlie.brain.agent_loader import AgentLoader
         from charlie.brain.agent_router import AgentRouter
 
         self.loader = AgentLoader(agents_dir=agents_dir)
-        self.router = AgentRouter()
+        self.router = AgentRouter(brain=brain, learning_tracker=learning_tracker)
         self._specs: dict = {}
         self._load()
 
@@ -100,7 +100,7 @@ class Orchestrator:
 
     def __init__(self, brain, agent_registry: AgentRegistry | None = None):
         self.brain = brain
-        self.registry = agent_registry or AgentRegistry()
+        self.registry = agent_registry or AgentRegistry(brain=brain)
 
     async def route_goal(self, goal: str) -> str:
         """Route a goal to the best agent or decompose if complex."""

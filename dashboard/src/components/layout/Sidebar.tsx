@@ -25,10 +25,11 @@ import {
   Sparkles,
   History,
   ScrollText,
-  Sun,
-  Moon,
   Bell,
   TrendingUp,
+  ChevronDown,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react'
 
 import type { LucideIcon } from 'lucide-react'
@@ -83,6 +84,7 @@ const navGroups: NavGroup[] = [
     label: 'Interface',
     items: [
       { label: 'Conversation', href: '/chat', icon: MessageSquare },
+      { label: 'Search', href: '/search', icon: Search },
       { label: 'Voice Control', href: '/voice', icon: Mic },
       { label: 'Logs', href: '/logs', icon: ScrollText },
       { label: 'Settings', href: '/settings', icon: Settings },
@@ -106,7 +108,7 @@ function SidebarTranscript() {
         <div
           key={i}
           className={cn(
-            'text-[10px] font-body truncate',
+            'text-xs font-body truncate',
             i === lines.length - 1 ? 'text-charlie-text' : 'text-charlie-dim/60',
           )}
         >
@@ -171,7 +173,7 @@ function SidebarVoiceOrb({ expanded }: { expanded: boolean }) {
           )}
         </div>
         {expanded && (
-          <span className="font-sans text-[10px] tracking-[0.1em] uppercase font-semibold" style={{ color: orbColorVar }}>
+          <span className="font-sans text-xs tracking-[0.1em] uppercase font-semibold" style={{ color: orbColorVar }}>
             {label}
           </span>
         )}
@@ -183,13 +185,10 @@ function SidebarVoiceOrb({ expanded }: { expanded: boolean }) {
 export function Sidebar() {
   const pathname = usePathname()
   const collapsed = useDashboardStore((s) => s.sidebarCollapsed)
-  const hovered = useDashboardStore((s) => s.sidebarHovered)
-  const setHovered = useDashboardStore((s) => s.setSidebarHovered)
   const pendingApprovals = useDashboardStore((s) => s.pendingApprovals)
-  const theme = useDashboardStore((s) => s.theme)
-  const toggleTheme = useDashboardStore((s) => s.toggleTheme)
 
-  const isExpanded = !collapsed || hovered
+  const isExpanded = !collapsed
+  const toggleSidebar = useDashboardStore((s) => s.toggleSidebar)
 
   return (
     <aside
@@ -199,12 +198,10 @@ export function Sidebar() {
         'transition-all duration-300 ease-out',
         isExpanded ? 'w-56' : 'w-14',
       )}
-      onMouseEnter={() => collapsed && setHovered(true)}
-      onMouseLeave={() => collapsed && setHovered(false)}
     >
-      {/* Logo */}
+      {/* Logo + Toggle */}
       <div className="h-14 flex items-center px-4 border-b border-charlie-border flex-shrink-0">
-        <div className="flex items-center gap-2 overflow-hidden">
+        <div className="flex items-center gap-2 overflow-hidden flex-1">
           <div className="w-2 h-2 bg-charlie-text flex-shrink-0" />
           {isExpanded && (
             <span className="font-sans text-charlie-text font-semibold text-sm tracking-widest whitespace-nowrap">
@@ -212,6 +209,13 @@ export function Sidebar() {
             </span>
           )}
         </div>
+        <button
+          onClick={toggleSidebar}
+          aria-label={isExpanded ? 'Collapse sidebar' : 'Expand sidebar'}
+          className="text-charlie-dim hover:text-charlie-text cursor-pointer transition-colors p-1"
+        >
+          {isExpanded ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
+        </button>
       </div>
 
       {/* Voice Orb Indicator — State-dependent colors */}
@@ -225,7 +229,7 @@ export function Sidebar() {
         {navGroups.map((group) => (
           <div key={group.label} className="mb-1">
             {isExpanded && (
-              <div className="px-4 pt-3 pb-1 text-[10px] font-semibold tracking-[0.15em] uppercase text-charlie-dim">
+              <div className="px-4 pt-3 pb-1 text-xs font-semibold tracking-[0.15em] uppercase text-charlie-dim">
                 {group.label}
               </div>
             )}
@@ -258,7 +262,7 @@ export function Sidebar() {
                   {item.href === '/approvals' && pendingApprovals > 0 && (
                     <span
                       className={cn(
-                        'bg-charlie-red text-charlie-dark text-[10px] w-5 h-5 rounded flex items-center justify-center font-medium',
+                        'bg-charlie-red text-charlie-dark text-xs w-5 h-5 rounded flex items-center justify-center font-medium',
                         isExpanded ? 'absolute right-3' : 'absolute -top-1 -right-1 w-4 h-4 text-[9px]',
                       )}
                     >
@@ -277,7 +281,7 @@ export function Sidebar() {
         {/* Notification bell */}
         <div
           className={cn(
-            'w-full flex items-center gap-3 px-4 py-2 text-charlie-dim hover:text-charlie-text hover:bg-charlie-text/5 transition-all duration-200 rounded-md mx-2 w-[calc(100%-16px)] mb-1',
+            'w-full flex items-center gap-3 px-4 py-2 text-charlie-dim hover:text-charlie-text hover:bg-charlie-text/5 transition-all duration-200 cursor-pointer rounded-md mx-2 w-[calc(100%-16px)] mb-1',
             !isExpanded && 'justify-center px-0 mx-0 w-full rounded-none',
           )}
         >
@@ -285,21 +289,6 @@ export function Sidebar() {
           {isExpanded && <span className="text-sm text-inherit">Notifications</span>}
         </div>
 
-        {/* Theme toggle */}
-        <button
-          onClick={toggleTheme}
-          className={cn(
-            'w-full flex items-center gap-3 px-4 py-2 text-charlie-dim hover:text-charlie-text hover:bg-charlie-text/5 transition-all duration-200 cursor-pointer rounded-md mx-2 w-[calc(100%-16px)] mb-2',
-            !isExpanded && 'justify-center px-0 mx-0 w-full rounded-none',
-          )}
-          title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-          aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-        >
-          {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-          {isExpanded && (
-            <span className="text-sm text-inherit">{theme === 'dark' ? 'Light Mode' : 'Dark Mode'}</span>
-          )}
-        </button>
       </div>
     </aside>
   )

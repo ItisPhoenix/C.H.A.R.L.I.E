@@ -9,16 +9,11 @@ import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import { ErrorState } from '@/components/ui/ErrorState'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { fetchIntegrations } from '@/lib/api'
-import { formatTimestamp, cn, createVisibilityAwareInterval } from '@/lib/utils'
+import { formatTimestamp, createVisibilityAwareInterval } from '@/lib/utils'
+import { FilterBar } from '@/components/ui/FilterBar'
 import type { IntegrationHealth } from '@/lib/types'
 
 type StatusFilter = 'all' | 'connected' | 'error'
-
-const STATUS_FILTERS: { key: StatusFilter; label: string }[] = [
-  { key: 'all', label: 'All' },
-  { key: 'connected', label: 'Connected' },
-  { key: 'error', label: 'Error' },
-]
 
 const STATUS_BADGE_VARIANT: Record<string, 'green' | 'dim' | 'red' | 'amber'> = {
   connected: 'green',
@@ -54,7 +49,7 @@ export default function IntegrationsPage() {
 
   useEffect(() => {
     loadIntegrations()
-    return createVisibilityAwareInterval(loadIntegrations, 10000)
+    return createVisibilityAwareInterval(loadIntegrations, 5000)
   }, [loadIntegrations])
 
   const filtered = integrations.filter((int) => {
@@ -65,9 +60,9 @@ export default function IntegrationsPage() {
 
   if (loading) {
     return (
-      <div className="max-w-6xl mx-auto space-y-4">
+      <div className="max-w-6xl mx-auto space-y-6">
         <PageHeader title="Integrations" subtitle="Loading..." />
-        <div className="flex items-center justify-center h-64">
+        <div className="flex items-center justify-center h-[60vh]">
           <LoadingSpinner size="lg" label="Fetching integrations..." />
         </div>
       </div>
@@ -76,7 +71,7 @@ export default function IntegrationsPage() {
 
   if (error) {
     return (
-      <div className="max-w-6xl mx-auto space-y-4">
+      <div className="max-w-6xl mx-auto space-y-6">
         <PageHeader title="Integrations" />
         <GlassCard>
           <ErrorState error={error} onRetry={loadIntegrations} />
@@ -86,39 +81,27 @@ export default function IntegrationsPage() {
   }
 
   return (
-    <div className="max-w-6xl mx-auto space-y-4">
+    <div className="max-w-6xl mx-auto space-y-6">
       <PageHeader
         title="Integrations"
         subtitle={`${integrations.length} registered`}
       />
 
       {/* Status filter tabs */}
-      <div className="flex gap-2 flex-wrap">
-        {STATUS_FILTERS.map((filter) => {
-          const count = filter.key === 'all'
+      <FilterBar
+        options={['all', 'connected', 'error'] as const}
+        value={statusFilter}
+        onChange={setStatusFilter}
+        badge={(key) =>
+          key === 'all'
             ? integrations.length
             : integrations.filter((i) =>
-                filter.key === 'connected'
+                key === 'connected'
                   ? i.status === 'connected'
                   : i.status === 'error' || i.status === 'auth_expired'
               ).length
-
-          return (
-            <button
-              key={filter.key}
-              onClick={() => setStatusFilter(filter.key)}
-              className={cn(
-                'px-3 py-1 text-xs rounded-full border transition-colors cursor-pointer',
-                statusFilter === filter.key
-                  ? 'bg-charlie-cyan/20 text-charlie-cyan border-charlie-cyan/30'
-                  : 'bg-transparent text-charlie-dim border-charlie-border hover:border-charlie-cyan/30 hover:text-charlie-text',
-              )}
-            >
-              {filter.label} ({count})
-            </button>
-          )
-        })}
-      </div>
+        }
+      />
 
       {filtered.length === 0 ? (
         <GlassCard>

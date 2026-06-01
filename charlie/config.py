@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -154,9 +155,23 @@ class Settings:
         }
 
 
+def resolve_env_vars(obj):
+    """Replace $ENV_VAR references with actual environment variable values."""
+    if isinstance(obj, str):
+        def replace_var(m):
+            var_name = m.group(1)
+            return os.environ.get(var_name, m.group(0))
+        return re.sub(r'\$([A-Z_][A-Z0-9_]*)', replace_var, obj)
+    elif isinstance(obj, dict):
+        return {k: resolve_env_vars(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [resolve_env_vars(v) for v in obj]
+    return obj
+
+
 def load_json_overrides():
     """Reads charlie_config.json and overrides default settings."""
-    config_path = Path(__file__).parent.parent / "charlie_config.json"
+    config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
     if not config_path.exists():
         return
 
@@ -225,7 +240,7 @@ def load_json_overrides():
 
         # Providers (LLM model routing — values may reference $ENV_VAR)
         if "providers" in data:
-            settings.providers = data["providers"]
+            settings.providers = resolve_env_vars(data["providers"])
 
         # Resources (VRAM budget, model priority)
         if "resources" in data:
@@ -239,6 +254,42 @@ def load_json_overrides():
                 settings.resources.model_unload_delay = int(r["model_unload_delay_s"])
             if "model_priority" in r:
                 settings.resources.model_priority = r["model_priority"]
+
+        # LLM overrides
+        if "llm" in data:
+            l = data["llm"]
+            if "api_key" in l and l["api_key"]:
+                settings.llm.nim_api_key = l["api_key"]
+            if "model" in l and l["model"]:
+                settings.llm.primary_model = l["model"]
+            if "provider" in l:
+                settings.integrations["llm_provider"] = l["provider"]
+
+        # Audio overrides (distinct from "voice" which controls TTS/kokoro)
+        if "audio" in data:
+            a = data["audio"]
+            if "stt_model" in a:
+                settings.audio.stt_model = a["stt_model"]
+            if "wake_word" in a:
+                settings.integrations["wake_word"] = a["wake_word"]
+
+        # Integrations
+        if "integrations" in data:
+            settings.integrations.update(data["integrations"])
+
+        # Features
+        if "features" in data:
+            settings.integrations["features"] = data["features"]
+
+        # Security overrides (distinct from "safety" which controls self-mod flags)
+        if "security" in data:
+            sec = data["security"]
+            if "risk_tier" in sec:
+                settings.integrations["risk_tier"] = sec["risk_tier"]
+            if "guardian_enabled" in sec:
+                settings.integrations["guardian_enabled"] = sec["guardian_enabled"]
+            if "auto_approve_threshold" in sec:
+                settings.integrations["auto_approve_threshold"] = sec["auto_approve_threshold"]
 
         # MCP Servers
         if "mcp_servers" in data:
@@ -260,7 +311,7 @@ def persist_safety_flags() -> None:
     existing ``safety`` keys are preserved. Tolerates the file not existing by
     creating it.
     """
-    config_path = Path(__file__).parent.parent / "charlie_config.json"
+    config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
 
     data = {}
     if config_path.exists():

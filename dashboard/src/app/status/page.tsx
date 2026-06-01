@@ -8,7 +8,7 @@ import { StatusDot } from '@/components/ui/StatusDot'
 import { Metric } from '@/components/ui/Metric'
 import { Modal } from '@/components/ui/Modal'
 import { ErrorState } from '@/components/ui/ErrorState'
-import { SkeletonCard } from '@/components/ui/SkeletonCard'
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import { ResourceBar } from '@/components/charts/ResourceBar'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { useWebSocket } from '@/lib/ws'
@@ -54,7 +54,7 @@ export default function StatusPage() {
 
   useEffect(() => {
     loadStatus()
-    const interval = setInterval(loadStatus, 5000)
+    const interval = setInterval(loadStatus, 1000)
     return () => clearInterval(interval)
   }, [loadStatus])
 
@@ -102,28 +102,8 @@ export default function StatusPage() {
 
   if (loading) {
     return (
-      <div className="max-w-6xl mx-auto space-y-6">
-        <PageHeader title="System Status" subtitle="Loading..." />
-
-        {/* System Resources skeleton */}
-        <div className="glass-card p-6">
-          <div className="flex items-center gap-6 mb-4">
-            <div className="skeleton h-4 w-24 rounded" />
-            <div className="skeleton h-4 w-20 rounded" />
-            <div className="skeleton h-4 w-20 rounded" />
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="skeleton h-6 w-full rounded" />
-            <div className="skeleton h-6 w-full rounded" />
-          </div>
-        </div>
-
-        {/* Subsystem cards skeleton */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          <SkeletonCard lines={4} />
-          <SkeletonCard lines={4} />
-          <SkeletonCard lines={4} />
-        </div>
+      <div className="flex items-center justify-center h-[60vh]">
+        <LoadingSpinner label="Loading status..." />
       </div>
     )
   }
@@ -199,19 +179,6 @@ export default function StatusPage() {
         ))}
       </div>
 
-      {/* Quick Actions */}
-      <GlassCard>
-        <h3 className="text-sm font-display font-semibold text-charlie-cyan mb-4 tracking-wide">Quick Actions</h3>
-        <div className="flex flex-wrap gap-3">
-          <Button variant="danger" onClick={() => setShutdownModal(true)}>
-            Shutdown Daemon
-          </Button>
-          <Button variant="ghost" onClick={() => setRebootModal(true)}>
-            Reboot Daemon
-          </Button>
-        </div>
-      </GlassCard>
-
       {/* Shutdown Modal */}
       <Modal open={shutdownModal} onClose={() => setShutdownModal(false)} title="Confirm Shutdown">
         <p className="text-charlie-dim text-sm mb-4">
@@ -236,7 +203,7 @@ export default function StatusPage() {
           <Button variant="ghost" size="sm" onClick={() => setRebootModal(false)}>
             Cancel
           </Button>
-          <Button variant="primary" size="sm" onClick={handleReboot}>
+          <Button variant="danger" size="sm" onClick={handleReboot}>
             Reboot
           </Button>
         </div>
@@ -260,25 +227,25 @@ function SubsystemCard({ name, sub, actionLoading, onRestart, onStop }: Subsyste
   const dotStatus = subsystemDotStatus(sub.status)
 
   return (
-    <GlassCard>
+    <GlassCard className="flex flex-col">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <StatusDot status={dotStatus} pulse={isRunning} />
-          <span className="font-display font-semibold text-sm capitalize tracking-wide">{name}</span>
+          <span className="font-display font-semibold text-sm uppercase tracking-[0.1em]">{name}</span>
         </div>
         <Badge variant={isRunning ? 'green' : 'dim'}>
           {sub.status}
         </Badge>
       </div>
 
-      <div className="grid grid-cols-2 gap-y-2 gap-x-4 text-xs mb-3">
+      <div className="grid grid-cols-2 gap-y-2 gap-x-4 text-xs mb-4">
         <Metric label="PID" value={sub.pid > 0 ? String(sub.pid) : '--'} />
-        <Metric label="CPU" value={`${sub.cpu.toFixed(1)}%`} />
+        <Metric label="CPU" value={`${(sub.cpu ?? 0).toFixed(1)}%`} />
         <Metric label="RAM" value={formatBytes(sub.ram_mb)} />
         <Metric label="Restarts" value={String(sub.restarts)} />
       </div>
 
-      <div className="flex gap-2 pt-2 border-t border-charlie-border">
+      <div className="flex gap-2 pt-3 pb-2 border-t border-charlie-border mt-auto">
         <Button
           variant="ghost"
           size="sm"

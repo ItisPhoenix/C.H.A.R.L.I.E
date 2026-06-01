@@ -680,14 +680,27 @@ class ToolHandler:
         priority_str = args.get("priority", "NORMAL").upper()
         priority = TaskPriority[priority_str] if priority_str in TaskPriority.__members__ else TaskPriority.NORMAL
 
-        async def _noop_handler(ctx):
-            return f"Background task placeholder: {description}"
+        brain_ref = self.brain
+
+        async def _background_task_handler(ctx):
+            """Execute background task using the brain's LLM."""
+            try:
+                if hasattr(brain_ref, 'call_llm'):
+                    result = await brain_ref.call_llm(
+                        f"Complete this task: {description}",
+                        system="You are a background task executor. Complete the task concisely.",
+                    )
+                    return result or f"Background task completed: {description}"
+                return f"Background task completed (no LLM): {description}"
+            except Exception as e:
+                logger.error("background_task_failed | %s | %s", description, e)
+                return f"Background task failed: {e}"
 
         spec = TaskSpec(
             id=make_task_id(),
             description=description,
             priority=priority,
-            handler=_noop_handler,
+            handler=_background_task_handler,
         )
         task_id = self.brain.task_mgr.submit(spec)
         return f"Background task submitted: {task_id} ({description})"

@@ -9,22 +9,113 @@ import { Toggle } from '@/components/ui/Toggle'
 import { SearchInput } from '@/components/ui/SearchInput'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
+import { ErrorState } from '@/components/ui/ErrorState'
 import { PageHeader } from '@/components/layout/PageHeader'
+import { Modal } from '@/components/ui/Modal'
+import { FilterBar } from '@/components/ui/FilterBar'
 import { FlowNode } from '@/components/graphs/FlowNode'
 import { useAutoLayout } from '@/components/graphs/useAutoLayout'
-import { fetchAutomationRules, toggleAutomationRule } from '@/lib/api'
+import { fetchAutomationRules, toggleAutomationRule, createAutomationRule, deleteAutomationRule } from '@/lib/api'
 import { riskTierLabel, cn } from '@/lib/utils'
+import { Button } from '@/components/ui/Button'
+import { ChevronDown, Plus, Trash2 } from 'lucide-react'
 import type { AutomationRule } from '@/lib/types'
 import type { Node, Edge } from '@xyflow/react'
 
 const nodeTypes = { flow: FlowNode }
 
+function CreateRuleModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const [name, setName] = useState('')
+  const [trigger, setTrigger] = useState('')
+  const [condition, setCondition] = useState('')
+  const [action, setAction] = useState('')
+  const [riskTier, setRiskTier] = useState(0)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSave = async () => {
+    if (!name.trim()) { setError('Name required'); return }
+    if (!trigger.trim()) { setError('Trigger required'); return }
+    if (!action.trim()) { setError('Action required'); return }
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await createAutomationRule({
+        name: name.trim(),
+        trigger: trigger.trim(),
+        condition: condition.trim(),
+        action: action.trim(),
+        risk_tier: riskTier,
+      })
+      if (res.ok) { onCreated(); onClose() }
+      else { setError(res.error || 'Failed to create rule') }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to create rule')
+    } finally { setSaving(false) }
+  }
+
+  return (
+    <Modal open onClose={onClose} title="Create Automation Rule">
+      <div className="space-y-4">
+        {error && <p className="text-sm text-charlie-red">{error}</p>}
+        <div>
+          <label className="text-xs text-charlie-dim mb-1 block">Name</label>
+          <input value={name} onChange={(e) => setName(e.target.value)}
+            className="w-full bg-charlie-dark border border-charlie-border rounded-lg p-2 text-sm text-charlie-text focus:border-charlie-cyan focus:outline-none"
+            placeholder="my-rule" />
+        </div>
+        <div>
+          <label className="text-xs text-charlie-dim mb-1 block">Trigger</label>
+          <input value={trigger} onChange={(e) => setTrigger(e.target.value)}
+            className="w-full bg-charlie-dark border border-charlie-border rounded-lg p-2 text-sm text-charlie-text focus:border-charlie-cyan focus:outline-none"
+            placeholder="file_changed, schedule, webhook..." />
+        </div>
+        <div>
+          <label className="text-xs text-charlie-dim mb-1 block">Condition</label>
+          <input value={condition} onChange={(e) => setCondition(e.target.value)}
+            className="w-full bg-charlie-dark border border-charlie-border rounded-lg p-2 text-sm text-charlie-text focus:border-charlie-cyan focus:outline-none"
+            placeholder="Optional condition expression" />
+        </div>
+        <div>
+          <label className="text-xs text-charlie-dim mb-1 block">Action</label>
+          <input value={action} onChange={(e) => setAction(e.target.value)}
+            className="w-full bg-charlie-dark border border-charlie-border rounded-lg p-2 text-sm text-charlie-text focus:border-charlie-cyan focus:outline-none"
+            placeholder="notify, run_command, deploy..." />
+        </div>
+        <div>
+          <label className="text-xs text-charlie-dim mb-1 block">Risk Tier (0-3)</label>
+          <div className="flex gap-2">
+            {[0, 1, 2, 3].map((tier) => (
+              <button key={tier} type="button" onClick={() => setRiskTier(tier)}
+                className={cn(
+                  'px-3 py-1.5 rounded-lg text-xs font-mono border transition-all cursor-pointer',
+                  riskTier === tier
+                    ? 'bg-charlie-cyan/20 border-charlie-cyan/40 text-charlie-cyan'
+                    : 'bg-charlie-dark border-charlie-border text-charlie-dim hover:text-charlie-text',
+                )}>
+                {tier}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="flex gap-2 justify-end">
+          <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+          <Button size="sm" loading={saving} onClick={handleSave}>Create</Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
 export default function AutomationPage() {
   const [rules, setRules] = useState<AutomationRule[]>([])
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [view, setView] = useState<'list' | 'flow'>('list')
+  const [showCreate, setShowCreate] = useState(false)
+  const [deleting, setDeleting] = useState<string | null>(null)
   const layout = useAutoLayout()
 
   useEffect(() => {
@@ -33,14 +124,17 @@ export default function AutomationPage() {
 
   async function loadRules() {
     setLoading(true)
+    setError(null)
     try {
       const data = await fetchAutomationRules()
       setRules(data.rules || [])
     } catch (e) {
       console.error('Failed to load automation rules:', e)
+      setError('Failed to load automation rules')
       setRules([])
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   function toggleExpand(name: string) {
@@ -75,6 +169,16 @@ export default function AutomationPage() {
         ),
       )
     }
+  }
+
+  async function handleDeleteRule(name: string) {
+    setDeleting(name)
+    try {
+      await deleteAutomationRule(name)
+      await loadRules()
+    } catch (e) {
+      console.error('Failed to delete automation rule:', e)
+    } finally { setDeleting(null) }
   }
 
   const filtered = rules.filter((r) => {
@@ -117,13 +221,13 @@ export default function AutomationPage() {
         id: `e-${rule.name}-tc`,
         source: `${rule.name}-trigger`,
         target: `${rule.name}-condition`,
-        style: { stroke: rule.enabled ? 'rgba(136, 204, 255, 0.3)' : 'rgba(100, 116, 139, 0.2)', strokeWidth: 1.5 },
+        style: { stroke: rule.enabled ? 'color-mix(in srgb, var(--charlie-cyan) 30%, transparent)' : 'color-mix(in srgb, var(--charlie-dim) 20%, transparent)', strokeWidth: 1.5 },
       })
       graphEdges.push({
         id: `e-${rule.name}-ca`,
         source: `${rule.name}-condition`,
         target: `${rule.name}-action`,
-        style: { stroke: rule.enabled ? 'rgba(136, 204, 255, 0.3)' : 'rgba(100, 116, 139, 0.2)', strokeWidth: 1.5 },
+        style: { stroke: rule.enabled ? 'color-mix(in srgb, var(--charlie-cyan) 30%, transparent)' : 'color-mix(in srgb, var(--charlie-dim) 20%, transparent)', strokeWidth: 1.5 },
       })
     })
 
@@ -131,40 +235,30 @@ export default function AutomationPage() {
   }, [filtered, layout])
 
   return (
-    <div className="space-y-4">
+    <div className="max-w-6xl mx-auto space-y-6">
       <PageHeader
         title="Automation Rules"
         subtitle={`${rules.length} rules configured`}
         actions={
           <div className="flex items-center gap-3">
+            <Button size="sm" onClick={() => setShowCreate(true)}><Plus size={14} className="mr-1" />Create Rule</Button>
             <SearchInput
               value={search}
               onChange={setSearch}
               placeholder="Filter by name or trigger..."
               className="w-64"
             />
-            <div className="flex gap-1 bg-charlie-card rounded-lg p-0.5 border border-charlie-border">
-              <button
-                onClick={() => setView('list')}
-                className={`px-3 py-1 rounded text-xs cursor-pointer transition-colors ${view === 'list' ? 'bg-charlie-cyan/15 text-charlie-cyan' : 'text-charlie-dim hover:text-charlie-text'}`}
-              >
-                List
-              </button>
-              <button
-                onClick={() => setView('flow')}
-                className={`px-3 py-1 rounded text-xs cursor-pointer transition-colors ${view === 'flow' ? 'bg-charlie-cyan/15 text-charlie-cyan' : 'text-charlie-dim hover:text-charlie-text'}`}
-              >
-                Flow
-              </button>
-            </div>
+            <FilterBar options={['list', 'flow'] as const} value={view} onChange={(v) => setView(v as typeof view)} />
           </div>
         }
       />
 
       {loading ? (
-        <div className="flex items-center justify-center py-12">
-          <LoadingSpinner size="lg" label="Loading automation rules..." />
+        <div className="flex items-center justify-center h-[60vh]">
+          <LoadingSpinner label="Loading automation rules..." />
         </div>
+      ) : error ? (
+        <ErrorState error={error} onRetry={loadRules} />
       ) : filtered.length === 0 ? (
         <EmptyState
           title="No automation rules"
@@ -180,7 +274,7 @@ export default function AutomationPage() {
             proOptions={{ hideAttribution: true }}
             style={{ background: 'transparent' }}
           >
-            <Background color="rgba(136, 204, 255, 0.05)" gap={20} />
+            <Background color="color-mix(in srgb, var(--charlie-cyan) 5%, transparent)" gap={20} />
             <Controls className="!bg-charlie-card !border-charlie-border !shadow-none" />
           </ReactFlow>
         </div>
@@ -212,26 +306,26 @@ export default function AutomationPage() {
                         <Badge variant={tier.color as 'cyan' | 'amber' | 'orange' | 'red' | 'dim'}>
                           {tier.label}
                         </Badge>
-                        <button
-                          onClick={() => toggleExpand(rule.name)}
-                          aria-expanded={isOpen}
-                          aria-label={isOpen ? 'Collapse rule details' : 'Expand rule details'}
-                          className="text-charlie-dim hover:text-charlie-text transition-colors p-1 cursor-pointer"
+                        <Button
+                          variant="danger"
+                          size="xs"
+                          loading={deleting === rule.name}
+                          onClick={() => handleDeleteRule(rule.name)}
+                          title="Delete rule"
                         >
-                          <svg
-                            className={cn('h-4 w-4 transition-transform', isOpen && 'rotate-180')}
-                            fill="none"
-                            viewBox="0 0 24 24"
-                            stroke="currentColor"
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth={2}
-                              d="M19 9l-7 7-7-7"
-                            />
-                          </svg>
-                        </button>
+                          <Trash2 size={12} />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          onClick={() => toggleExpand(rule.name)}
+                          title={isOpen ? 'Collapse rule details' : 'Expand rule details'}
+                          aria-label={isOpen ? 'Collapse rule details' : 'Expand rule details'}
+                          aria-expanded={isOpen}
+                          className="!p-1"
+                        >
+                          <ChevronDown size={16} className={cn('transition-transform', isOpen && 'rotate-180')} />
+                        </Button>
                       </div>
                     </div>
 
@@ -244,6 +338,10 @@ export default function AutomationPage() {
                         Action:{' '}
                         <span className="text-charlie-text font-mono">{rule.action}</span>
                       </div>
+                      <div>
+                        Priority:{' '}
+                        <span className="text-charlie-text font-mono">{rule.priority ?? 0}</span>
+                      </div>
                     </div>
                   </div>
 
@@ -252,6 +350,10 @@ export default function AutomationPage() {
                       <div>
                         <span className="text-charlie-dim">Condition: </span>
                         <span className="text-charlie-text font-mono">{rule.condition}</span>
+                      </div>
+                      <div>
+                        <span className="text-charlie-dim">Priority: </span>
+                        <span className="text-charlie-text font-mono">{rule.priority ?? 0}</span>
                       </div>
                       {rule.action_args && Object.keys(rule.action_args).length > 0 && (
                         <div>
@@ -268,6 +370,40 @@ export default function AutomationPage() {
           })}
         </div>
       )}
+
+      {showCreate && <CreateRuleModal onClose={() => setShowCreate(false)} onCreated={loadRules} />}
     </div>
+  )
+}
+
+const PRIORITY_LEVELS = ['auto', 'low', 'medium', 'high', 'critical'] as const
+const PRIORITY_COLORS: Record<string, string> = {
+  auto: 'text-charlie-dim',
+  low: 'text-charlie-green',
+  medium: 'text-charlie-amber',
+  high: 'text-charlie-orange',
+  critical: 'text-charlie-red',
+}
+
+function PriorityToggle({ ruleName, value }: { ruleName: string; value: string }) {
+  const [current, setCurrent] = useState(value)
+  const idx = PRIORITY_LEVELS.indexOf(current as typeof PRIORITY_LEVELS[number])
+
+  function cycle() {
+    const next = PRIORITY_LEVELS[(idx + 1) % PRIORITY_LEVELS.length]
+    setCurrent(next)
+    // TODO: persist to backend when priority endpoint is available
+  }
+
+  return (
+    <Button
+      variant="ghost"
+      size="xs"
+      onClick={cycle}
+      className={cn('font-mono', PRIORITY_COLORS[current] || 'text-charlie-dim')}
+      title="Click to cycle priority"
+    >
+      {current}
+    </Button>
   )
 }

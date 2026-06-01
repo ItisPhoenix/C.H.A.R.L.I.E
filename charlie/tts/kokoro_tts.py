@@ -37,7 +37,7 @@ class KokoroTTS:
         self,
         text: str,
         output_path: str | None = None,
-        voice: str = "af_sarah",
+        voice: str = "af_heart",
         speed: float = 1.0,
         lang: str = "en-us",
     ) -> str | None:

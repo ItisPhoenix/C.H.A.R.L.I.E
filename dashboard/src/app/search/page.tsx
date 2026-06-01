@@ -6,7 +6,9 @@ import { GlassCard } from '@/components/ui/GlassCard'
 import { SearchInput } from '@/components/ui/SearchInput'
 import { Badge } from '@/components/ui/Badge'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { ErrorState } from '@/components/ui/ErrorState'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
+import { FilterBar } from '@/components/ui/FilterBar'
 import { Search, MessageSquare, Brain, Terminal, ListTodo } from 'lucide-react'
 import { searchAll } from '@/lib/api'
 
@@ -37,7 +39,8 @@ export default function SearchPage() {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
   const [loading, setLoading] = useState(false)
-  const [activeSource, setActiveSource] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [activeSource, setActiveSource] = useState<'all' | 'chat' | 'memory' | 'tools' | 'tasks'>('all')
 
   const handleSearch = useCallback(async (q: string) => {
     if (!q.trim()) {
@@ -45,6 +48,7 @@ export default function SearchPage() {
       return
     }
     setLoading(true)
+    setError(null)
     try {
       const data = await searchAll(q)
       const mapped = (data.results || []).map((r, i) => ({
@@ -58,13 +62,14 @@ export default function SearchPage() {
       setResults(mapped)
     } catch (e) {
       console.error('Failed to search:', e)
+      setError('Search failed. The brain may be disconnected.')
       setResults([])
     } finally {
       setLoading(false)
     }
   }, [])
 
-  const filteredResults = activeSource
+  const filteredResults = activeSource !== 'all'
     ? results.filter((r) => r.source === activeSource)
     : results
 
@@ -77,7 +82,7 @@ export default function SearchPage() {
   )
 
   return (
-    <div>
+    <div className="max-w-6xl mx-auto space-y-6">
       <PageHeader title="Search" subtitle="Unified search across chat, memory, tools, and tasks" />
 
       <div className="mb-6">
@@ -91,22 +96,13 @@ export default function SearchPage() {
 
       {/* Source filters */}
       {results.length > 0 && (
-        <div className="flex gap-2 mb-4">
-          <FilterTab
-            label="All"
-            count={results.length}
-            active={activeSource === null}
-            onClick={() => setActiveSource(null)}
+        <div className="mb-4">
+          <FilterBar
+            options={['all', 'chat', 'memory', 'tools', 'tasks'] as const}
+            value={activeSource}
+            onChange={setActiveSource}
+            badge={(key) => key === 'all' ? results.length : (sourceCounts[key] || 0)}
           />
-          {(['chat', 'memory', 'tools', 'tasks'] as const).map((source) => (
-            <FilterTab
-              key={source}
-              label={source.charAt(0).toUpperCase() + source.slice(1)}
-              count={sourceCounts[source] || 0}
-              active={activeSource === source}
-              onClick={() => setActiveSource(source)}
-            />
-          ))}
         </div>
       )}
 
@@ -114,6 +110,8 @@ export default function SearchPage() {
         <div className="flex justify-center py-12">
           <LoadingSpinner label="Searching..." />
         </div>
+      ) : error ? (
+        <ErrorState error={error} onRetry={() => handleSearch(query)} />
       ) : filteredResults.length > 0 ? (
         <div className="space-y-3">
           {filteredResults.map((result) => {
@@ -152,33 +150,5 @@ export default function SearchPage() {
         />
       )}
     </div>
-  )
-}
-
-function FilterTab({
-  label,
-  count,
-  active,
-  onClick,
-}: {
-  label: string
-  count: number
-  active: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`px-3 py-1.5 rounded-lg text-sm transition-colors cursor-pointer ${
-        active
-          ? 'bg-charlie-cyan/15 text-charlie-cyan border border-charlie-cyan/30'
-          : 'bg-charlie-card/50 text-charlie-dim border border-charlie-border hover:text-charlie-text'
-      }`}
-    >
-      {label}
-      {count > 0 && (
-        <span className="ml-1.5 text-xs opacity-70">({count})</span>
-      )}
-    </button>
   )
 }

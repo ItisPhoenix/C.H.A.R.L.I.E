@@ -7,9 +7,11 @@ import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
+import { ErrorState } from '@/components/ui/ErrorState'
 import { fetchTasks, cancelTask } from '@/lib/api'
 import { useWSEvent } from '@/lib/ws'
-import { formatTimestamp, cn } from '@/lib/utils'
+import { formatTimestamp, cn, createVisibilityAwareInterval } from '@/lib/utils'
+import { ChevronDown } from 'lucide-react'
 import type { Task } from '@/lib/types'
 
 type KanbanColumn = 'pending' | 'active' | 'completed' | 'failed'
@@ -40,15 +42,18 @@ function getTaskColumn(task: Task): KanbanColumn {
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [cancelling, setCancelling] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const loadTasks = useCallback(async () => {
     try {
+      setError(null)
       const data = await fetchTasks()
       setTasks(data.tasks)
     } catch (e) {
       console.error('Failed to load tasks:', e)
+      setError('Failed to load tasks')
     } finally {
       setLoading(false)
     }
@@ -56,6 +61,7 @@ export default function TasksPage() {
 
   useEffect(() => {
     loadTasks()
+    return createVisibilityAwareInterval(loadTasks, 1000)
   }, [loadTasks])
 
   const taskUpdate = useWSEvent('task_update')
@@ -94,17 +100,18 @@ export default function TasksPage() {
 
   if (loading) {
     return (
-      <div className="space-y-4">
-        <PageHeader title="Tasks" subtitle="Loading..." />
-        <div className="flex items-center justify-center h-64">
-          <LoadingSpinner size="lg" label="Loading tasks..." />
-        </div>
+      <div className="flex items-center justify-center h-[60vh]">
+        <LoadingSpinner label="Loading tasks..." />
       </div>
     )
   }
 
+  if (error) {
+    return <ErrorState error={error} onRetry={loadTasks} />
+  }
+
   return (
-    <div className="space-y-6">
+    <div className="max-w-6xl mx-auto space-y-6">
       <PageHeader title="Tasks" subtitle={`${tasks.length} total tasks`} />
 
       {/* Kanban columns */}
@@ -115,7 +122,7 @@ export default function TasksPage() {
             <div key={col.key} className="space-y-3">
               {/* Column header */}
               <div className="flex items-center justify-between pb-2 border-b border-charlie-border">
-                <h3 className="font-display text-sm tracking-wide text-charlie-cyan uppercase">
+                <h3 className="font-display text-sm tracking-[0.1em] text-charlie-cyan uppercase">
                   {col.label}
                 </h3>
                 <Badge variant={col.color}>{items.length}</Badge>
@@ -124,9 +131,7 @@ export default function TasksPage() {
               {/* Column items */}
               {items.length === 0 ? (
                 <GlassCard className="!p-4">
-                  <p className="text-charlie-dim text-sm text-center font-body">
-                    No {col.label.toLowerCase()} tasks
-                  </p>
+                  <EmptyState terminal title={`No ${col.label.toLowerCase()} tasks`} />
                 </GlassCard>
               ) : (
                 items.map((task) => (
@@ -186,9 +191,9 @@ function TaskCard({ task, cancelling, expanded, onToggle, onCancel }: TaskCardPr
               </div>
               {task.dependencies.length > 0 && (
                 <div className="mt-2 flex items-center gap-1 flex-wrap">
-                  <span className="text-[10px] text-charlie-dim">Deps:</span>
+                  <span className="text-xs text-charlie-dim">Deps:</span>
                   {task.dependencies.map((dep) => (
-                    <Badge key={dep} variant="dim" className="text-[10px]">{dep}</Badge>
+                    <Badge key={dep} variant="dim" className="text-xs">{dep}</Badge>
                   ))}
                 </div>
               )}
@@ -205,12 +210,7 @@ function TaskCard({ task, cancelling, expanded, onToggle, onCancel }: TaskCardPr
                 </Button>
               )}
               {hasDetail && (
-                <svg
-                  className={cn('w-4 h-4 text-charlie-dim transition-transform shrink-0', expanded && 'rotate-180')}
-                  fill="none" viewBox="0 0 24 24" stroke="currentColor"
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
+                <ChevronDown size={16} className={cn('text-charlie-dim transition-transform shrink-0', expanded && 'rotate-180')} />
               )}
             </div>
           </div>
@@ -220,7 +220,7 @@ function TaskCard({ task, cancelling, expanded, onToggle, onCancel }: TaskCardPr
           <div className="px-4 pb-4 border-t border-charlie-border/30 pt-3">
             {task.result && (
               <div className="mb-2">
-                <span className="text-xs text-charlie-dim block mb-1 font-display tracking-wide">Result</span>
+                <span className="text-xs text-charlie-dim block mb-1 font-display tracking-[0.1em] uppercase">Result</span>
                 <p className="text-xs text-charlie-green/80 whitespace-pre-wrap break-words font-mono">
                   {task.result}
                 </p>
@@ -228,7 +228,7 @@ function TaskCard({ task, cancelling, expanded, onToggle, onCancel }: TaskCardPr
             )}
             {task.error && (
               <div>
-                <span className="text-xs text-charlie-dim block mb-1 font-display tracking-wide">Error</span>
+                <span className="text-xs text-charlie-dim block mb-1 font-display tracking-[0.1em] uppercase">Error</span>
                 <p className="text-xs text-charlie-red/80 whitespace-pre-wrap break-words font-mono">
                   {task.error}
                 </p>

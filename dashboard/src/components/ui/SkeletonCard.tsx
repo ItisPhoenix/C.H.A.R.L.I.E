@@ -1,13 +1,15 @@
 'use client'
 
+import { cn } from '@/lib/utils'
+
 interface SkeletonCardProps {
   lines?: number
   className?: string
 }
 
-export function SkeletonCard({ lines = 3, className = '' }: SkeletonCardProps) {
+export function SkeletonCard({ lines = 3, className }: SkeletonCardProps) {
   return (
-    <div className={`glass-card p-6 ${className}`}>
+    <div className={cn('glass-card p-6', className)}>
       <div className="skeleton h-5 w-1/3 mb-4 rounded" />
       {Array.from({ length: lines }).map((_, i) => (
         <div

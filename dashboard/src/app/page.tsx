@@ -10,6 +10,9 @@ import { formatUptime, createVisibilityAwareInterval } from '@/lib/utils'
 import { fetchTasks, fetchToolLog, fetchStatus } from '@/lib/api'
 import type { Task, ToolExecution } from '@/lib/types'
 import { Mic, MicOff, Activity, Zap, Brain } from 'lucide-react'
+import { ErrorState } from '@/components/ui/ErrorState'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 
 // Voice Orb Component
 function VoiceOrb() {
@@ -196,7 +199,7 @@ function KeyMetrics() {
 
   useEffect(() => {
     loadMetrics()
-    return createVisibilityAwareInterval(loadMetrics, 10000)
+    return createVisibilityAwareInterval(loadMetrics, 5000)
   }, [loadMetrics])
 
   return (
@@ -213,7 +216,7 @@ function KeyMetrics() {
               <Badge variant="cyan">{currentTask.status || 'active'}</Badge>
             </>
           ) : (
-            <div className="text-charlie-dim text-sm font-body">No active tasks</div>
+            <EmptyState terminal title="No active tasks" />
           )}
         </GlassCard>
 
@@ -233,7 +236,7 @@ function KeyMetrics() {
                 </div>
               </div>
             )) : (
-              <div className="text-charlie-dim text-xs">No recent activity</div>
+              <EmptyState terminal title="No recent activity" />
             )}
           </div>
         </GlassCard>
@@ -293,18 +296,26 @@ function KeyMetrics() {
 
 // Main Voice Home Page
 export default function VoiceHomePage() {
+  const [error, setError] = useState<string | null>(null)
+
   return (
-    <div className="flex flex-col items-center justify-center min-h-[calc(100vh-120px)]">
-      {/* Voice Orb — Hero */}
-      <VoiceOrb />
+    <div className="max-w-6xl mx-auto space-y-6">
+      {error ? (
+        <ErrorState error={error} onRetry={() => setError(null)} />
+      ) : (
+        <div className="flex flex-col items-center justify-center min-h-[calc(100vh-120px)]">
+          {/* Voice Orb — Hero */}
+          <VoiceOrb />
 
-      {/* Live Transcript */}
-      <div className="w-full mt-6 mb-8">
-        <TranscriptDisplay />
-      </div>
+          {/* Live Transcript */}
+          <div className="w-full mt-6 mb-8">
+            <TranscriptDisplay />
+          </div>
 
-      {/* Key Metrics */}
-      <KeyMetrics />
+          {/* Key Metrics */}
+          <KeyMetrics />
+        </div>
+      )}
     </div>
   )
 }

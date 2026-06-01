@@ -208,9 +208,28 @@ class SelfHealer:
                 sanitized.append(line)
         return '\n'.join(sanitized[:100])  # Limit length
 
+    def _check_local_server(self) -> bool:
+        """Check if the local LLM server is reachable before attempting self-repair."""
+        try:
+            url = settings.llm.llm_url.rstrip("/")
+            # Try a lightweight health endpoint first
+            resp = requests.get(f"{url}/v1/models", timeout=3)
+            if resp.status_code == 200:
+                return True
+            # Fallback: try the Ollama-style tags endpoint
+            resp = requests.get(f"{url}/api/tags", timeout=3)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
     def attempt_patch(self, traceback):
         """Generates a fix proposal and saves it to hotpatches."""
         logger.info("self_repair_initiated")
+
+        # Verify local LLM server is available before attempting repair
+        if not self._check_local_server():
+            logger.warning("self_repair_skipped | local_llm_server_unavailable | url=%s", settings.llm.llm_url)
+            return False
 
         # Sanitize traceback to prevent prompt injection
         traceback = self._sanitize_traceback(traceback)

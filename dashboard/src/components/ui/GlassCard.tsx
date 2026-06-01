@@ -10,11 +10,11 @@ interface GlassCardProps {
   onClick?: () => void
 }
 
-export function GlassCard({ children, className, glow, hover = true, onClick }: GlassCardProps) {
+export function GlassCard({ children, className, glow, hover = false, onClick }: GlassCardProps) {
   return (
     <div
       className={cn(
-        'glass-card p-4 transition-all duration-300 ease-in-out',
+        'glass-card flex flex-col overflow-hidden p-4 transition-all duration-300 ease-in-out',
         glow && 'glow-cyan',
         hover && 'hover:border-charlie-cyan/40 hover:shadow-neon-glow',
         onClick && 'cursor-pointer',

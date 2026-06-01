@@ -6,9 +6,11 @@ import { StatusDot } from '@/components/ui/StatusDot'
 import { WaveformVisualizer } from '@/components/charts/WaveformVisualizer'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
+import { ErrorState } from '@/components/ui/ErrorState'
+import { EmptyState } from '@/components/ui/EmptyState'
 import * as api from '@/lib/api'
 import { useWSEvent } from '@/lib/ws'
-import { cn } from '@/lib/utils'
+import { cn, createVisibilityAwareInterval } from '@/lib/utils'
 import type { VoiceActivity } from '@/lib/types'
 
 interface VoiceStatusInfo {
@@ -40,6 +42,7 @@ export default function VoicePage() {
   const transcriptEvent = useWSEvent<{ content?: string }>('user_transcript')
   const [voiceInfo, setVoiceInfo] = useState<VoiceStatusInfo | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([])
   const transcriptRef = useRef<HTMLDivElement>(null)
 
@@ -62,6 +65,7 @@ export default function VoicePage() {
 
   const loadVoiceInfo = useCallback(async () => {
     try {
+      setError(null)
       const data = await api.fetchVoiceStatus()
       setVoiceInfo({
         stt_model: data.stt_model,
@@ -70,6 +74,7 @@ export default function VoicePage() {
       })
     } catch (e) {
       console.error('Failed to load voice status:', e)
+      setError('Failed to load voice status')
     } finally {
       setLoading(false)
     }
@@ -77,6 +82,7 @@ export default function VoicePage() {
 
   useEffect(() => {
     loadVoiceInfo()
+    return createVisibilityAwareInterval(loadVoiceInfo, 1000)
   }, [loadVoiceInfo])
 
   const { label, status, active } = getVoiceState(voiceActivity)
@@ -86,6 +92,15 @@ export default function VoicePage() {
     return (
       <div className="flex items-center justify-center h-[60vh]">
         <LoadingSpinner label="Loading voice status..." />
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="max-w-3xl mx-auto space-y-6">
+        <PageHeader title="Voice" />
+        <ErrorState error={error} onRetry={loadVoiceInfo} />
       </div>
     )
   }
@@ -102,20 +117,19 @@ export default function VoicePage() {
             {/* Outer glow ring */}
             <div
               className={cn(
-                'absolute w-32 h-32 rounded-full transition-opacity duration-500',
+                'absolute w-32 h-32 rounded-full transition-opacity duration-500 blur-[20px]',
                 active ? 'opacity-60 animate-voice-pulse' : 'opacity-0',
                 label === 'Speaking' ? 'bg-charlie-cyan/20' : 'bg-charlie-green/20',
               )}
-              style={{ filter: 'blur(20px)' }}
             />
             {/* Mid glow ring */}
             <div
               className={cn(
-                'absolute w-24 h-24 rounded-full transition-opacity duration-500',
+                'absolute w-24 h-24 rounded-full transition-opacity duration-500 blur-[10px]',
                 active ? 'opacity-80 animate-voice-pulse' : 'opacity-0',
                 label === 'Speaking' ? 'bg-charlie-cyan/30' : 'bg-charlie-green/30',
               )}
-              style={{ filter: 'blur(10px)', animationDelay: '0.2s' }}
+              style={{ animationDelay: '0.2s' }}
             />
             {/* Core circle */}
             <div
@@ -181,7 +195,7 @@ export default function VoicePage() {
           {/* Current transcript */}
           {voiceActivity?.current_transcript && (
             <div className="w-full max-w-md mt-4 p-4 rounded-lg bg-charlie-dark/60 border border-charlie-border/30">
-              <span className="text-[10px] text-charlie-dim uppercase font-medium block mb-2">
+              <span className="text-xs text-charlie-dim uppercase font-medium block mb-2">
                 Transcript
               </span>
               <p className="text-sm text-charlie-text">
@@ -197,21 +211,21 @@ export default function VoicePage() {
         <h3 className="text-sm font-semibold text-charlie-text mb-3 font-display tracking-[0.1em] uppercase">Voice Models</h3>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div className="p-3 rounded-lg bg-charlie-dark/40 border border-charlie-border/30">
-            <span className="text-[10px] text-charlie-dim uppercase block mb-1">STT Model</span>
+            <span className="text-xs text-charlie-dim uppercase block mb-1">STT Model</span>
             <span className="text-sm text-charlie-text font-mono">
               {voiceInfo?.stt_model ?? 'Unknown'}
             </span>
           </div>
           <div className="p-3 rounded-lg bg-charlie-dark/40 border border-charlie-border/30">
-            <span className="text-[10px] text-charlie-dim uppercase block mb-1">TTS Model</span>
+            <span className="text-xs text-charlie-dim uppercase block mb-1">TTS Model</span>
             <span className="text-sm text-charlie-text font-mono">
               {voiceInfo?.tts_model ?? 'Unknown'}
             </span>
           </div>
           <div className="p-3 rounded-lg bg-charlie-dark/40 border border-charlie-border/30">
-            <span className="text-[10px] text-charlie-dim uppercase block mb-1">TTS Speed</span>
+            <span className="text-xs text-charlie-dim uppercase block mb-1">TTS Speed</span>
             <span className="text-sm text-charlie-text font-mono">
-              {voiceInfo?.tts_speed?.toFixed(1) ?? '1.0'}x
+              {(voiceInfo?.tts_speed ?? 1.0).toFixed(1)}x
             </span>
           </div>
         </div>
@@ -254,9 +268,7 @@ export default function VoicePage() {
           Transcript Log
         </h3>
         {transcript.length === 0 ? (
-          <p className="text-xs text-charlie-dim py-4 text-center">
-            No voice transcripts yet. Start speaking to see them here.
-          </p>
+          <EmptyState terminal title="No voice transcripts yet" description="Start speaking to see them here." />
         ) : (
           <div ref={transcriptRef} className="max-h-64 overflow-y-auto space-y-2 scrollbar-thin">
             {transcript.map((entry) => (
@@ -264,7 +276,7 @@ export default function VoicePage() {
                 key={entry.id}
                 className="flex gap-3 p-2 rounded-lg bg-charlie-dark/30 border border-charlie-border/20"
               >
-                <span className="text-[10px] text-charlie-dim whitespace-nowrap mt-0.5 font-mono">
+                <span className="text-xs text-charlie-dim whitespace-nowrap mt-0.5 font-mono">
                   {entry.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                 </span>
                 <p className="text-sm text-charlie-text flex-1">{entry.content}</p>

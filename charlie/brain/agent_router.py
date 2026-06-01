@@ -30,8 +30,9 @@ Reply with ONLY a comma-separated list of agent names (e.g. "research,system"). 
 class AgentRouter:
     """Routes user queries to the best-fit agent using LLM or keyword matching."""
 
-    def __init__(self, brain: Any = None):
+    def __init__(self, brain: Any = None, learning_tracker: Any = None):
         self.brain = brain
+        self.learning = learning_tracker
         self._cache: dict[str, tuple[list[str], float]] = {}  # query -> (agent_names, timestamp)
         self._cache_ttl = 300  # 5 minutes
 
@@ -153,9 +154,10 @@ class AgentRouter:
     # ------------------------------------------------------------------
 
     def _keyword_route(self, query: str, available_agents: list) -> list[str]:
-        """Fallback: match query keywords against agent trigger keywords."""
+        """Fallback: match query keywords against agent trigger keywords.
+        Uses learning scores to rank agents when multiple match."""
         query_lower = query.lower()
-        matches: list[str] = []
+        matches: list[tuple[str, float]] = []
 
         for agent in available_agents:
             name = agent.name if hasattr(agent, "name") else str(agent)
@@ -163,9 +165,19 @@ class AgentRouter:
             if hasattr(agent, "triggers") and isinstance(agent.triggers, dict):
                 keywords = agent.triggers.get("keywords", [])
             if any(kw.lower() in query_lower for kw in keywords):
-                matches.append(name)
+                # Get learning score if available
+                score = 0.5
+                if self.learning:
+                    query_keywords = query_lower.split()[:5]
+                    score = self.learning.get_score(name, query_keywords)
+                matches.append((name, score))
 
-        return matches if matches else ["system"]
+        if not matches:
+            return ["system"]
+
+        # Sort by learning score (highest first)
+        matches.sort(key=lambda x: x[1], reverse=True)
+        return [name for name, _ in matches[:2]]
 
     # ------------------------------------------------------------------
     # Cache
