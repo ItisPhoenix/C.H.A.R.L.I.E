@@ -13,10 +13,9 @@ import { ErrorState } from '@/components/ui/ErrorState'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { useWSEvent } from '@/lib/ws'
 import { useDashboardStore } from '@/lib/store'
-import { formatTimestamp, cn } from '@/lib/utils'
+import { formatTimestamp, cn, createVisibilityAwareInterval } from '@/lib/utils'
 import type { ChatMessage } from '@/lib/types'
 import { Mic, MicOff, Send, ChevronRight, ChevronLeft, Brain, Terminal, Users, Activity, Zap, Puzzle, PanelRightOpen } from 'lucide-react'
-import { createVisibilityAwareInterval } from '@/lib/utils'
 
 // ==================== CONTEXT PANEL ====================
 
