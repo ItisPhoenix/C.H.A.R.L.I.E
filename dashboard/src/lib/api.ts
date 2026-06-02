@@ -217,6 +217,19 @@ export function deleteMCPServer(id: string): Promise<{ ok: boolean }> {
   return apiFetch(`/api/mcp/${id}`, { method: 'DELETE' })
 }
 
+// Docker MCP gateway lifecycle (manual start/stop)
+export function fetchDockerGatewayStatus(): Promise<{ ok: boolean; reachable: boolean; managed_here: boolean; container_id?: string; port: number }> {
+  return safeFetch('/api/control/docker/gateway/status', { ok: true, reachable: false, managed_here: false, port: 8080 })
+}
+
+export function startDockerGateway(): Promise<{ ok: boolean; reachable?: boolean; container_id?: string; already_running?: boolean; error?: string }> {
+  return safeFetch('/api/control/docker/gateway/start', { ok: false }, { method: 'POST' })
+}
+
+export function stopDockerGateway(): Promise<{ ok: boolean; warning?: string; error?: string }> {
+  return safeFetch('/api/control/docker/gateway/stop', { ok: false }, { method: 'POST' })
+}
+
 // Skills CRUD
 export function createSkill(name: string, description: string, manifest?: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> {
   return safeFetch('/api/skills', { ok: false }, { method: 'POST', body: JSON.stringify({ name, description, manifest }) })

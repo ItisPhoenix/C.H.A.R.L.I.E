@@ -39,6 +39,57 @@ const statusMap: Record<string, 'online' | 'error' | 'idle'> = {
   error: 'error',
 }
 
+function DockerGatewayBanner({
+  gateway,
+  busy,
+  onAction,
+}: {
+  gateway: { reachable: boolean; managed_here: boolean; container_id?: string }
+  busy: boolean
+  onAction: (action: 'start' | 'stop') => void
+}) {
+  // Only show the banner when the docker-mcp-gateway server is configured
+  // in charlie_config.json. We detect it from the doc-string context: the
+  // page already knows about configured servers. Here we just render based
+  // on probe state — the banner is informational and small.
+  if (gateway.reachable) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-charlie-border bg-charlie-darker/40 text-xs">
+        <span className="w-2 h-2 rounded-full bg-emerald-400" />
+        <span className="text-charlie-text">Docker MCP Gateway reachable on :8080</span>
+        {gateway.managed_here && (
+          <Button
+            variant="ghost"
+            size="xs"
+            disabled={busy}
+            onClick={() => onAction('stop')}
+            className="ml-auto"
+          >
+            {busy ? 'Stopping...' : 'Stop Gateway'}
+          </Button>
+        )}
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-center gap-3 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-500/5 text-xs">
+      <span className="w-2 h-2 rounded-full bg-amber-400" />
+      <span className="text-charlie-text">
+        Docker MCP Gateway not reachable on localhost:8080
+      </span>
+      <Button
+        variant="primary"
+        size="xs"
+        disabled={busy}
+        onClick={() => onAction('start')}
+        className="ml-auto"
+      >
+        {busy ? 'Starting...' : 'Start Gateway'}
+      </Button>
+    </div>
+  )
+}
+
 function ToolTester({ serverId, tool, onClose }: { serverId: string; tool: MCPTool; onClose: () => void }) {
   const [args, setArgs] = useState('{}')
   const [result, setResult] = useState<string | null>(null)
@@ -339,6 +390,12 @@ export default function MCPPage() {
   const [error, setError] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [autoConnecting, setAutoConnecting] = useState(false)
+  const [gateway, setGateway] = useState<{
+    reachable: boolean
+    managed_here: boolean
+    container_id?: string
+  }>({ reachable: false, managed_here: false })
+  const [gatewayBusy, setGatewayBusy] = useState(false)
   const autoConnectDone = useRef(false)
 
   const loadServers = useCallback(async () => {
@@ -355,6 +412,34 @@ export default function MCPPage() {
       setLoading(false)
     }
   }, [])
+
+  const refreshGateway = useCallback(async () => {
+    try {
+      const s = await api.fetchDockerGatewayStatus()
+      setGateway({
+        reachable: s.reachable,
+        managed_here: s.managed_here,
+        container_id: s.container_id,
+      })
+    } catch {
+      // Backend unavailable — leave as-is
+    }
+  }, [])
+
+  const handleGatewayAction = useCallback(async (action: 'start' | 'stop') => {
+    setGatewayBusy(true)
+    try {
+      if (action === 'start') {
+        await api.startDockerGateway()
+      } else {
+        await api.stopDockerGateway()
+      }
+      await refreshGateway()
+      await loadServers()
+    } finally {
+      setGatewayBusy(false)
+    }
+  }, [refreshGateway, loadServers])
 
   // Auto-connect to enabled servers that are not yet connected.
   // Runs once after the initial fetch completes.
@@ -390,8 +475,10 @@ export default function MCPPage() {
         autoConnect(serverList)
       }
     })()
-    return () => { cancelled = true }
-  }, [loadServers, autoConnect])
+    refreshGateway()
+    const probe = setInterval(refreshGateway, 10000)
+    return () => { cancelled = true; clearInterval(probe) }
+  }, [loadServers, autoConnect, refreshGateway])
 
   if (loading) {
     return (
@@ -423,6 +510,12 @@ export default function MCPPage() {
             </Button>
           </div>
         }
+      />
+
+      <DockerGatewayBanner
+        gateway={gateway}
+        busy={gatewayBusy}
+        onAction={handleGatewayAction}
       />
 
       {servers.length === 0 ? (

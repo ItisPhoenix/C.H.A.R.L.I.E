@@ -55,6 +55,12 @@ class ControlServer:
         # across requests — previously each handler created a fresh instance)
         self._mcp_manager = None
 
+        # Docker MCP gateway container tracking. If the user starts the gateway
+        # via POST /api/control/docker/gateway/start, the container ID is stored
+        # here so /api/control/docker/gateway/stop can clean it up. None means
+        # the gateway is either not running or was started out-of-band.
+        self._docker_gateway_container_id: str | None = None
+
         # Cross-process Brain RPC client (Design §D, Reqs 7.1-7.10)
         self.brain_rpc: "BrainRPCClient | None" = None
         if daemon is not None:
@@ -233,6 +239,10 @@ class ControlServer:
         # Control endpoints
         self._app.router.add_post("/api/control/shutdown", self._handle_shutdown)
         self._app.router.add_post("/api/control/reboot", self._handle_reboot)
+        # Docker MCP gateway lifecycle (manual user-initiated start/stop)
+        self._app.router.add_get("/api/control/docker/gateway/status", self._handle_docker_gateway_status)
+        self._app.router.add_post("/api/control/docker/gateway/start", self._handle_docker_gateway_start)
+        self._app.router.add_post("/api/control/docker/gateway/stop", self._handle_docker_gateway_stop)
 
         # Settings
         self._app.router.add_get("/api/settings", self._handle_get_settings)
@@ -465,6 +475,167 @@ class ControlServer:
             return web.json_response({"ok": True, "status": "rebooting"})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
+
+    # ── Docker MCP Gateway lifecycle (manual start/stop) ────────────────
+
+    @staticmethod
+    def _docker_gateway_probe(url: str = "http://127.0.0.1:8080/sse", timeout: float = 0.5) -> bool:
+        """True if the Docker MCP gateway SSE endpoint is accepting connections."""
+        import socket
+        try:
+            # urlparse to get host/port
+            from urllib.parse import urlparse
+            u = urlparse(url)
+            host = u.hostname or "127.0.0.1"
+            port = u.port or 80
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(timeout)
+                return sock.connect_ex((host, port)) == 0
+        except Exception:
+            return False
+
+    async def _handle_docker_gateway_status(self, request):
+        """GET /api/control/docker/gateway/status — is the gateway reachable?
+
+        Reports:
+          - reachable: bool (port 8080 is open)
+          - managed_here: bool (we started it via /start, so /stop will work)
+          - container_id: str | None (only set if we started it)
+        """
+        reachable = await asyncio.to_thread(self._docker_gateway_probe)
+        return web.json_response({
+            "ok": True,
+            "reachable": reachable,
+            "managed_here": self._docker_gateway_container_id is not None,
+            "container_id": self._docker_gateway_container_id,
+            "port": 8080,
+        })
+
+    async def _handle_docker_gateway_start(self, request):
+        """POST /api/control/docker/gateway/start — start the gateway container.
+
+        Shells out to ``docker run -d --rm -p 8080:8080 ...``. Records the
+        container ID so /stop can clean up. No-op with a clear error if
+        Docker is unavailable or the container fails to start.
+        """
+        # If already reachable, don't double-start
+        if await asyncio.to_thread(self._docker_gateway_probe):
+            return web.json_response({
+                "ok": True,
+                "already_running": True,
+                "reachable": True,
+            })
+
+        # Pull the token from charlie_config.json so the gateway's auth matches
+        # what MCPClient sends. Fall back to a placeholder if not configured.
+        token = ""
+        try:
+            cfg_path = Path(__file__).parent.parent.parent / "charlie_config.json"
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            token = (
+                cfg.get("mcp_servers", {})
+                .get("docker-mcp-gateway", {})
+                .get("token", "")
+            )
+        except Exception as e:
+            logger.warning("docker_gateway_token_lookup_failed | %s", e)
+
+        # Best-effort image — pin a recent version but allow override via env.
+        image = os.environ.get("CHARLIE_DOCKER_MCP_IMAGE", "docker/mcp-gateway:latest")
+        # Container listens on :8080 by default; --rm so it cleans up on stop.
+        cmd = [
+            "docker", "run", "-d", "--rm",
+            "-p", "8080:8080",
+        ]
+        if token:
+            cmd.extend(["-e", f"MCP_GATEWAY_TOKEN={token}"])
+        cmd.append(image)
+        # Command to run inside the container (gateway runs SSE on :8080)
+        cmd.extend(["--transport", "sse", "--port", "8080"])
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            return web.json_response(
+                {"ok": False, "error": "docker_cli_not_found"},
+                status=503,
+            )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=15)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return web.json_response(
+                {"ok": False, "error": "docker_run_timeout"},
+                status=504,
+            )
+        if proc.returncode != 0:
+            err = (stderr_b or b"").decode("utf-8", errors="replace").strip()
+            return web.json_response(
+                {"ok": False, "error": err or "docker_run_failed", "exit_code": proc.returncode},
+                status=500,
+            )
+        container_id = (stdout_b or b"").decode("utf-8", errors="replace").strip()
+        if not container_id:
+            return web.json_response(
+                {"ok": False, "error": "no_container_id_returned"},
+                status=500,
+            )
+        # Strip Docker's default 12-char prefix if present
+        self._docker_gateway_container_id = container_id[:64]
+
+        # Give the container a moment to bind the port, then probe.
+        await asyncio.sleep(2)
+        reachable = await asyncio.to_thread(self._docker_gateway_probe)
+        return web.json_response({
+            "ok": True,
+            "reachable": reachable,
+            "container_id": self._docker_gateway_container_id,
+            "port": 8080,
+        })
+
+    async def _handle_docker_gateway_stop(self, request):
+        """POST /api/control/docker/gateway/stop — stop a gateway we started."""
+        cid = self._docker_gateway_container_id
+        if not cid:
+            return web.json_response(
+                {"ok": False, "error": "not_managed_here"},
+                status=400,
+            )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "rm", "-f", cid,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except FileNotFoundError:
+            return web.json_response(
+                {"ok": False, "error": "docker_cli_not_found"},
+                status=503,
+            )
+        except asyncio.TimeoutError:
+            return web.json_response(
+                {"ok": False, "error": "docker_rm_timeout"},
+                status=504,
+            )
+        self._docker_gateway_container_id = None
+        if proc.returncode != 0:
+            err = (stderr_b or b"").decode("utf-8", errors="replace").strip()
+            # Don't fail on "no such container" — could have died on its own
+            if "no such container" in err.lower():
+                return web.json_response({"ok": True, "warning": "already_gone"})
+            return web.json_response(
+                {"ok": False, "error": err or "docker_rm_failed"},
+                status=500,
+            )
+        return web.json_response({"ok": True})
 
     # ── Settings endpoints ──
 
