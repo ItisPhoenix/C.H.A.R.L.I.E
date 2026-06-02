@@ -118,8 +118,9 @@ In `charlie/browser/headless_browser.py:141-155` (`_main_loop`):
   3. If the window has < 5 entries, continue (same as today).
 - A successful heartbeat (no exception for 60s) clears the window.
 
-The 5-in-60s threshold is a starting point. Once the project is
-running, dial it in.
+The 5-in-60s threshold is the agreed knob for the first cut. If it
+flaps or under-reports in practice, the plan will surface a follow-up
+to revisit.
 
 ### C. Add `SUBSYSTEM_STATUS` boot gate in Phoenix
 
@@ -154,9 +155,12 @@ In `charlie/watchdog/phoenix.py:105-116` (`run_telegram`):
     "state": "disabled", "reason": "no_token"})`
   - Touch `heartbeat.value = time.time()` so the supervisor sees a
     live process.
-  - Block on a `multiprocessing.Event` (`telegram_re_enable_event`)
-    that the operator can set from the dashboard to retry.
-  - Return.
+  - Return cleanly with exit code 0. The supervisor's gate (C) sees
+    the `SUBSYSTEM_STATUS: disabled` payload and stops flapping.
+  - **No in-process re-enable event.** When the operator adds a
+    token via the settings page, the change is persisted to `.env`
+    and `charlie_config.json` (existing code path) and picked up on
+    the next daemon restart.
 
 The Telegram subsystem still reports a heartbeat. The supervisor's
 new gate (C) sees the `SUBSYSTEM_STATUS: disabled` payload and stops
@@ -174,7 +178,20 @@ In `charlie/audio_proc.py` (`AudioEngine.__init__` or its boot path):
 - A periodic re-probe (every 30s) lets a hot-plugged mic come back
   online without a daemon restart.
 
-### F. Dashboard `/doctor` page reflects disabled state
+### F. Telegram / Audio recovery: full daemon restart
+
+Telegram does not auto-recover. When the operator saves a new
+`telegram_token` or `telegram_chat_id` in the settings page, the
+change is persisted to `.env` and `charlie_config.json` (existing
+code path), but the running Telegram child stays blocked on its
+re-enable event. The operator triggers a daemon restart from
+`start-charlie.ps1` (or the dashboard's Restart button, when
+implemented) to pick up the new token.
+
+Audio: a hot-plugged mic is picked up on the next 30s re-probe
+without restart.
+
+### G. Dashboard `/doctor` page reflects disabled state
 
 `/doctor` shows the new state shape. A child marked `disabled` renders
 as a grey chip with the reason (`no token`, `mic not found`). The
@@ -189,7 +206,7 @@ either `ok` or `disabled`.
 | `charlie/browser/headless_browser.py` | Section B |
 | `charlie/watchdog/phoenix.py` | Sections C, D |
 | `charlie/audio_proc.py` | Section E |
-| `dashboard/src/app/doctor/page.tsx` | Section F (read-only consumer) |
+| `dashboard/src/app/doctor/page.tsx` | Section G (read-only consumer) |
 | `dashboard/src/lib/api.ts` | If the `/api/doctor` response shape changes (it will — add `state` and `reason` per child) |
 
 ## Success criteria (observable)
@@ -214,14 +231,9 @@ After running `start-charlie.ps1`:
 5. Dashboard `/doctor` page renders without errors. Required children
    show green or grey; vision shows "skipped".
 
-## Open questions (to confirm before implementation)
+## Resolved decisions
 
-1. **5-in-60s threshold for browser respawn.** Is 5 errors in 60s the
-   right cap, or do you want a tighter/larger window?
-2. **Audio re-probe cadence.** 30s feels right but it is a fixed
-   number. If you want the operator to be able to trigger a re-probe
-   from the dashboard, the design grows by one more wire.
-3. **Telegram re-enable event.** If Telegram is disabled and the
-   operator adds a token via the settings page, should the dashboard
-   have a "retry now" button, or do we wait for a full daemon
-   restart?
+- Browser respawn threshold: 5 errors in 60s.
+- Telegram recovery: full daemon restart picks up the new token; no
+  in-process retry path.
+- Plan scope: A–G in one implementation plan (no split).
