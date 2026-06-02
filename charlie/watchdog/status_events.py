@@ -92,6 +92,8 @@ def extract_ws_data(msg: dict) -> dict:
             "level": peak,
             "active": peak > 0.01,
             "waveform": msg.get("waveform", []),
+            "is_speaking": bool(msg.get("is_speaking", False)),
+            "is_listening": bool(msg.get("is_listening", False)),
         }
 
     content = msg.get("content", {})

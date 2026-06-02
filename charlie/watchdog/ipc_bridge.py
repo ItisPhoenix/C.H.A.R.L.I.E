@@ -36,6 +36,22 @@ class IPCBridge:
             "messages_dropped": 0,
             "last_forward_time": 0,
         }
+        # Latest voice booleans captured from VOICE_ACTIVITY events. Stale
+        # entries are ignored (see get_voice_state) so the REST endpoint can
+        # report real TTS/STT state instead of a hardcoded False.
+        self._voice_state = {
+            "is_speaking": False,
+            "is_listening": False,
+            "updated_at": 0.0,
+        }
+        self._voice_lock = threading.Lock()
+
+    def get_voice_state(self, max_age: float = 1.5):
+        """Return (is_speaking, is_listening) booleans, treating stale as False."""
+        with self._voice_lock:
+            if time.time() - self._voice_state["updated_at"] > max_age:
+                return False, False
+            return self._voice_state["is_speaking"], self._voice_state["is_listening"]
 
     def start(self):
         """Start the bridge in a background thread."""
@@ -82,6 +98,12 @@ class IPCBridge:
             return
 
         ws_data = extract_ws_data(msg)
+
+        if msg_type == "VOICE_ACTIVITY":
+            with self._voice_lock:
+                self._voice_state["is_speaking"] = bool(ws_data.get("is_speaking", False))
+                self._voice_state["is_listening"] = bool(ws_data.get("is_listening", False))
+                self._voice_state["updated_at"] = time.time()
 
         try:
             self.control_server.broadcast_sync(ws_event_type, ws_data)

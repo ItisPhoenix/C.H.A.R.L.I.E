@@ -942,13 +942,22 @@ class ControlServer:
                     audio_running = audio_status.get("status") == "running"
                 except Exception as e:
                     logger.warning("voice_status_audio_check_failed | %s", e)
+            # Read real TTS/STT booleans from the IPC bridge's voice cache.
+            # Falls back to False if no recent VOICE_ACTIVITY event.
+            is_speaking = False
+            is_listening = audio_running
+            ipc_bridge = getattr(self.daemon, "_ipc_bridge", None) if self.daemon else None
+            if ipc_bridge is not None:
+                ipc_speaking, ipc_listening = ipc_bridge.get_voice_state()
+                is_speaking = ipc_speaking
+                is_listening = is_listening and ipc_listening
             return web.json_response({
                 "stt_model": getattr(settings.audio, 'stt_model', 'unknown'),
                 "tts_model": "kokoro",
                 "tts_speed": getattr(settings.audio, 'kokoro_speed', 1.0),
                 "voice_mode": getattr(settings.audio, 'voice_mode', 'local'),
-                "is_listening": audio_running,
-                "is_speaking": False,
+                "is_listening": is_listening,
+                "is_speaking": is_speaking,
             })
         except Exception as e:
             logger.error("voice_status_error | %s", e)

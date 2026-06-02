@@ -448,7 +448,14 @@ class AudioEngine:
 
                 if (val > 0.005 or self.conversation_active) and not self.standby_mode:
                     self.status_q.put(
-                        {"type": "VOICE_ACTIVITY", "peak": val, "waveform": waveform}, block=False
+                        {
+                            "type": "VOICE_ACTIVITY",
+                            "peak": val,
+                            "waveform": waveform,
+                            "is_speaking": False,
+                            "is_listening": True,
+                        },
+                        block=False,
                     )
                 self._last_telemetry_time = now
 
@@ -1055,7 +1062,9 @@ class AudioEngine:
                                             "type": "VOICE_ACTIVITY",
                                             "peak": float(np.max(np.abs(sub_block))),
                                             "waveform": waveform,
-                                            "source": "speaker"
+                                            "source": "speaker",
+                                            "is_speaking": True,
+                                            "is_listening": True,
                                         }, block=False)
 
                                         # Send to playback process
