@@ -162,6 +162,7 @@ class BrainRPCServer:
         self._handlers: dict[str, Callable[[dict], Any]] = {
             "PING": self._handle_ping,
             "GET_TASKS": self._handle_get_tasks,
+            "CANCEL_TASK": self._handle_cancel_task,
             "GET_TOOL_LOG": self._handle_get_tool_log,
             "GET_AUTOMATION_RULES": self._handle_get_automation_rules,
             "TOGGLE_RULE": self._handle_toggle_rule,
@@ -269,6 +270,27 @@ class BrainRPCServer:
         for t in tm.get_all_tasks() or []:
             tasks.append(t.to_dict() if hasattr(t, "to_dict") else t)
         return tasks
+
+    def _handle_cancel_task(self, params: dict) -> dict:
+        """CANCEL_TASK → call AsyncTaskManager.cancel, report outcome.
+
+        Returns {"ok": bool, "task_id": str}. ok is True only when the task
+        was actually found and marked for cancellation (not already terminal,
+        not missing).
+        """
+        brain = self.brain
+        tm = getattr(brain, "task_mgr", None) or getattr(brain, "task_manager", None)
+        task_id = params.get("task_id") if isinstance(params, dict) else None
+        if not task_id or not isinstance(task_id, str):
+            return {"ok": False, "error": "missing task_id"}
+        if tm is None or not hasattr(tm, "cancel"):
+            return {"ok": False, "task_id": task_id, "error": "task_manager_unavailable"}
+        try:
+            cancelled = bool(tm.cancel(task_id))
+        except Exception as e:
+            logger.error("rpc_cancel_task_failed | id=%s | %s", task_id, e)
+            return {"ok": False, "task_id": task_id, "error": str(e)}
+        return {"ok": cancelled, "task_id": task_id}
 
     def _handle_get_tool_log(self, params: dict) -> list:
         """GET_TOOL_LOG → brain.outcome_tracker.get_tool_exec_log(limit=...)."""

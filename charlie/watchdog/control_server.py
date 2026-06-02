@@ -984,19 +984,30 @@ class ControlServer:
         return web.json_response({"tasks": []})
 
     async def _handle_cancel_task(self, request):
-        """POST /api/tasks/{task_id}/cancel — cancel a task."""
+        """POST /api/tasks/{task_id}/cancel — cancel a task.
+
+        Routes through BrainRPCClient.request_async so the HTTP response
+        reflects the actual outcome of AsyncTaskManager.cancel, not just
+        that the request was queued.
+        """
         task_id = request.match_info['task_id']
-        # Forward cancellation to Brain via task queue
-        if self.daemon and hasattr(self.daemon, 'brain_task_q'):
-            try:
-                self.daemon.brain_task_q.put({
-                    "type": "CANCEL_TASK",
-                    "task_id": task_id,
-                })
-                return web.json_response({"ok": True})
-            except Exception:
-                pass
-        return web.json_response({"ok": False})
+        if not self.brain_rpc:
+            return web.json_response(
+                {"ok": False, "error": "brain_rpc_unavailable"}, status=503
+            )
+        try:
+            resp = await self.brain_rpc.request_async(
+                "CANCEL_TASK", {"task_id": task_id}
+            )
+        except Exception as e:
+            logger.error("cancel_task_rpc_failed | %s", e)
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+        if resp.error:
+            return web.json_response(
+                {"ok": False, "task_id": task_id, "error": resp.error},
+                status=503,
+            )
+        return web.json_response(resp.data or {"ok": False, "error": "no_data"})
 
     # ── MCP helpers ─────────────────────────────────────────────────────────────
 
