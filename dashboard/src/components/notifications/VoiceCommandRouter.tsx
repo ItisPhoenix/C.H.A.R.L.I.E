@@ -28,7 +28,6 @@ const routeMap: Record<string, string> = {
   automation: '/automation',
   settings: '/settings',
   mcp: '/mcp',
-  globe: '/globe',
   search: '/search',
   logs: '/logs',
   analytics: '/analytics',

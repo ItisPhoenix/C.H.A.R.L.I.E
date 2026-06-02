@@ -2,7 +2,7 @@
 charlie/watchdog/control_server.py
 
 ControlServer — HTTP REST API + WebSocket for daemon control.
-Runs on localhost:8090 (separate from globe's 8089).
+Runs on localhost:8090.
 Binds to 127.0.0.1 only — no external exposure.
 """
 
@@ -23,7 +23,6 @@ logger = get_logger("ControlServer")
 # Message types that get forwarded from status_q to WS clients.
 # Imported from the single canonical definition so there is exactly one map.
 WS_FORWARD_TYPES = set(STATUS_EVENT_MAP.keys())
-
 
 class ControlServer:
     """
@@ -269,10 +268,6 @@ class ControlServer:
         self._app.router.add_post("/api/chat/message", self._handle_chat_message)
         self._app.router.add_post("/api/chat/send", self._handle_chat_message)  # alias for dashboard
 
-        # Globe data
-        self._app.router.add_get("/api/globe/data", self._handle_globe_data)
-        self._app.router.add_post("/api/globe/refresh", self._handle_globe_refresh)
-
         # Agents, skills, tools
         self._app.router.add_get("/api/agents/status", self._handle_agents_status)
         self._app.router.add_post("/api/agents", self._handle_create_agent)
@@ -286,10 +281,8 @@ class ControlServer:
         self._app.router.add_get("/api/logs", self._handle_logs)
         self._app.router.add_get("/api/evolution", self._handle_evolution)
 
-        # Voice, globe, tasks, MCP
+        # Voice, tasks, MCP
         self._app.router.add_get("/api/voice/status", self._handle_voice_status)
-        self._app.router.add_get("/api/globe/status", self._handle_globe_status)
-        self._app.router.add_post("/api/control/globe/launch", self._handle_globe_launch)
         self._app.router.add_get("/api/tasks", self._handle_tasks)
         self._app.router.add_post("/api/tasks/{task_id}/cancel", self._handle_cancel_task)
         self._app.router.add_get("/api/mcp/servers", self._handle_mcp_servers)
@@ -514,7 +507,6 @@ class ControlServer:
             return web.json_response({"ok": True})
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
-
 
     # ── WebSocket ──
 
@@ -773,125 +765,6 @@ class ControlServer:
             logger.error("chat_message_failed", error=str(e))
             return web.json_response({"error": str(e)}, status=500)
 
-    # ── Globe data ───────────────────────────────────────────────────────────────
-
-    async def _handle_globe_data(self, request):
-        """GET /api/globe/data — all globe data (calendar, memory, workspace, user)."""
-        import os
-
-        from charlie.integrations.adapter import call_integration
-
-        result = {
-            "calendar": [],
-            "memory": [],
-            "workspace": [],
-            "user_position": {"lat": 40.7128, "lng": -74.0060, "label": "New York"},
-        }
-
-        # User position from env vars (fallback to hardcoded NYC)
-        try:
-            lat = float(os.getenv("CHARLIE_GLOBE_LAT", "40.7128"))
-            lng = float(os.getenv("CHARLIE_GLOBE_LNG", "-74.0060"))
-            label = os.getenv("CHARLIE_GLOBE_LABEL", "Home")
-            result["user_position"] = {"lat": lat, "lng": lng, "label": label}
-        except Exception:
-            pass
-
-        # Calendar events via Google Calendar integration
-        try:
-            from charlie.integrations.google_calendar import GoogleCalendarIntegration
-            cal = GoogleCalendarIntegration()
-            events = await call_integration(cal.fetch, max_results=20)
-            result["calendar"] = [
-                {
-                    "id": e.get("id", str(i)),
-                    "title": e.get("summary", "Untitled"),
-                    "start": e.get("start", None),
-                    "location": e.get("location", ""),
-                    "lat": e.get("lat", None),
-                    "lng": e.get("lng", None),
-                    "color": "#00d4ff",
-                }
-                for i, e in enumerate(events) if e.get("lat")
-            ]
-        except Exception as e:
-            logger.debug("globe_calendar_failed", error=str(e))
-
-        # Memory nodes with location
-        try:
-            from charlie.intelligence.memory_graph import MemoryGraph
-            mg = MemoryGraph()
-            nodes = mg.get_nodes_with_location()
-            result["memory"] = [
-                {
-                    "id": n.get("id", str(i)),
-                    "content": n.get("content", "")[:200],
-                    "lat": n.get("lat"),
-                    "lng": n.get("lng"),
-                }
-                for i, n in enumerate(nodes) if n.get("lat") and n.get("lng")
-            ]
-        except Exception as e:
-            logger.debug("globe_memory_failed", error=str(e))
-
-        return web.json_response(result)
-
-    async def _handle_globe_refresh(self, request):
-        """POST /api/globe/refresh — fetch latest data and push to globe WS clients."""
-        import os
-        from charlie.integrations.google_calendar import GoogleCalendarIntegration
-        from charlie.integrations.adapter import call_integration
-        from charlie.intelligence.memory_graph import MemoryGraph
-
-        result = {"calendar": [], "memory": [], "workspace": [], "user_position": None}
-
-        # User position
-        try:
-            lat = float(os.getenv("CHARLIE_GLOBE_LAT", "40.7128"))
-            lng = float(os.getenv("CHARLIE_GLOBE_LNG", "-74.0060"))
-            label = os.getenv("CHARLIE_GLOBE_LABEL", "Home")
-            result["user_position"] = {"lat": lat, "lng": lng, "label": label}
-        except Exception:
-            pass
-
-        # Calendar
-        try:
-            cal = GoogleCalendarIntegration()
-            events = await call_integration(cal.fetch, max_results=20)
-            result["calendar"] = [
-                {
-                    "id": e.get("id", str(i)),
-                    "title": e.get("summary", "Untitled"),
-                    "start": e.get("start", None),
-                    "location": e.get("location", ""),
-                    "lat": e.get("lat", None),
-                    "lng": e.get("lng", None),
-                }
-                for i, e in enumerate(events) if e.get("lat")
-            ]
-        except Exception:
-            pass
-
-        # Memory
-        try:
-            mg = MemoryGraph()
-            nodes = mg.get_nodes_with_location()
-            result["memory"] = [
-                {
-                    "id": n.get("id", str(i)),
-                    "content": n.get("content", "")[:200],
-                    "lat": n.get("lat"),
-                    "lng": n.get("lng"),
-                }
-                for i, n in enumerate(nodes) if n.get("lat") and n.get("lng")
-            ]
-        except Exception:
-            pass
-
-        # Broadcast to globe WS clients
-        await self._broadcast_ws("globe_data", result)
-        return web.json_response({"status": "ok", "refreshed": True})
-
     # ── Agents, skills, tools ──────────────────────────────────────────────────
 
     async def _handle_agents_status(self, request):
@@ -1083,48 +956,6 @@ class ControlServer:
             "stt_model": "unknown", "tts_model": "unknown", "tts_speed": 1.0,
             "is_listening": False, "is_speaking": False,
         })
-
-    async def _handle_globe_status(self, request):
-        """GET /api/globe/status — globe server status."""
-        import socket
-        port = 8089
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(0.5)
-            result = sock.connect_ex(('127.0.0.1', port))
-            sock.close()
-            running = result == 0
-        except Exception:
-            running = False
-        return web.json_response({"running": running, "port": port})
-
-    async def _handle_globe_launch(self, request):
-        """POST /api/control/globe/launch — start globe server on port 8089."""
-        try:
-            import sys
-            import subprocess
-            globe_script = os.path.join(os.getcwd(), "charlie", "browser", "globe_server.py")
-            if not os.path.exists(globe_script):
-                return web.json_response({"ok": False, "error": "globe_server.py not found"}, status=404)
-            # Check if already running
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(0.5)
-            result = sock.connect_ex(('127.0.0.1', 8089))
-            sock.close()
-            if result == 0:
-                return web.json_response({"ok": True, "already_running": True})
-            # Start globe server using current Python interpreter
-            subprocess.Popen(
-                [sys.executable, globe_script],
-                cwd=os.getcwd(),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
-            )
-            return web.json_response({"ok": True})
-        except Exception as e:
-            return web.json_response({"ok": False, "error": str(e)})
 
     async def _handle_tasks(self, request):
         """GET /api/tasks — task queue via Brain RPC with local fallback."""

@@ -641,18 +641,6 @@ class Brain:
                     f"rule_executed | {rule.name} | result={str(result)[:100]}"
                 )
 
-                # Auto-focus globe on breaking events
-                if rule.name in (
-                    "earthquake_alert",
-                    "news_notify",
-                ) and hasattr(self, "globe_server"):
-                    lat = event.data.get("lat")
-                    lng = event.data.get("lng")
-                    if lat is not None and lng is not None:
-                        self.globe_server.focus_location(
-                            lat, lng, event.data.get("title", "")
-                        )
-
             except Exception as e:
                 self.learning_tracker.record(
                     Outcome(
@@ -857,18 +845,6 @@ class Brain:
         if now - self._last_service_poll > 300:
             self._last_service_poll = now
             threading.Thread(target=self._poll_ambient_services, daemon=True).start()
-
-        # 4. Push data to Globe WebSocket (every 5 minutes, aligned with service poll)
-        if (
-            now - self._last_service_poll < 10
-            and hasattr(self, "globe_server")
-            and self.globe_server
-        ):
-            try:
-                data = self.globe_server.data_provider.get_all_data()
-                self.globe_server.push_update_sync("refresh", data)
-            except Exception:
-                pass
 
     def _poll_ambient_services(self):
         """Background thread for integration polling to avoid blocking brain loop."""

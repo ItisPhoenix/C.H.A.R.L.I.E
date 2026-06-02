@@ -176,7 +176,6 @@ Charlie runs as a supervised multi-process system:
 | `/mcp` | MCP server management |
 | `/briefing` | Daily briefing |
 | `/settings` | Configuration viewer |
-| `/setup` | Setup wizard |
 
 ---
 

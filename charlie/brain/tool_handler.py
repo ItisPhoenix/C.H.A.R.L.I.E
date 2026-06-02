@@ -170,7 +170,6 @@ class ToolHandler:
         from charlie.utils.system import get_system_vitals
         v = get_system_vitals()
 
-
         return f"CPU Usage: {v['cpu']:.1f}%. RAM Usage: {v['ram']:.1f}%. VRAM Usage: {v['vram_pct']:.1f}% ({v['vram_mb']:.0f}MB / {v['vram_limit']}MB)."
 
     @risk_tier(RiskTier.TIER_0)
@@ -982,86 +981,6 @@ class ToolHandler:
         for agent in agents:
             lines.append(f"  {agent.name}: {agent.description} | Tools: {', '.join(agent.tools[:5])}...")
         return "Agents:\n" + "\n".join(lines)
-
-    @risk_tier(RiskTier.TIER_0)
-    def _tool_open_globe(self, args: dict[str, Any]) -> str:
-        """Open the 3D World Map globe in the browser. Shows news, earthquakes, weather, calendar, and more."""
-        try:
-            if hasattr(self.brain, 'globe_server') and self.brain.globe_server:
-                if not self.brain.globe_server.is_running:
-                    # Start the server
-                    import asyncio
-                    loop = self.brain.loop
-                    if loop and loop.is_running():
-                        asyncio.run_coroutine_threadsafe(
-                            self.brain.globe_server.start(), loop
-                        )
-                    else:
-                        asyncio.run(self.brain.globe_server.start())
-                # Open browser
-                self.brain.globe_server.open_browser()
-                return "Opening 3D World Map, Sir. The globe will load at http://localhost:8089"
-            else:
-                return "Globe server not initialized."
-        except Exception as e:
-            return f"Failed to open globe: {e}"
-
-    @risk_tier(RiskTier.TIER_0)
-    def _tool_globe_status(self, args: dict[str, Any]) -> str:
-        """Get the current status of the 3D World Map globe."""
-        try:
-            if hasattr(self.brain, 'globe_server') and self.brain.globe_server:
-                gs = self.brain.globe_server
-                status = "Running" if gs.is_running else "Stopped"
-                clients = len(gs._ws_clients) if hasattr(gs, '_ws_clients') else 0
-                data = gs.data_provider.get_all_data()
-                counts = {k: len(v) for k, v in data.items() if isinstance(v, list)}
-                return (
-                    f"Globe Status: {status}\n"
-                    f"WebSocket Clients: {clients}\n"
-                    f"Data Layers: {counts}\n"
-                    f"URL: http://localhost:{gs.port}"
-                )
-            return "Globe server not initialized."
-        except Exception as e:
-            return f"Globe status error: {e}"
-
-    @risk_tier(RiskTier.TIER_0)
-    def _tool_refresh_globe(self, args: dict[str, Any]) -> str:
-        """Refresh the 3D World Map globe data (calendar, memory, workspace) and push to connected browsers."""
-        try:
-            import aiohttp
-            import asyncio
-
-            async def _do_refresh():
-                async with aiohttp.ClientSession() as session:
-                    # Trigger data refresh + WS broadcast
-                    async with session.post("http://localhost:8090/api/globe/refresh", timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                        if not resp.ok:
-                            return f"Refresh failed: HTTP {resp.status}"
-                    # Fetch current data to report accurate counts
-                    async with session.get("http://localhost:8090/api/globe/data", timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                        if resp.ok:
-                            data = await resp.json()
-                            cal = len(data.get("calendar", []))
-                            mem = len(data.get("memory", []))
-                            return f"Globe data refreshed. Calendar: {cal} events, Memory: {mem} nodes."
-                        return "Globe refresh complete."
-
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                return asyncio.run(_do_refresh())
-
-            future = asyncio.run_coroutine_threadsafe(_do_refresh(), loop)
-            try:
-                result = future.result(timeout=GLOBE_REFRESH_TIMEOUT)
-            except TimeoutError:
-                return "Globe refresh timed out."
-            return result if result else "Globe refresh complete."
-
-        except Exception as e:
-            return f"Failed to refresh globe: {e}"
 
     @risk_tier(RiskTier.TIER_0)
     def _tool_browser_control(self, args: dict[str, Any]) -> str:

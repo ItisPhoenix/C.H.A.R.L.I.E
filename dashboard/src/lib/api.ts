@@ -280,14 +280,6 @@ export function fetchToolLog(): Promise<{ executions: ToolExecution[] }> {
   return safeFetch('/api/tools/log', { executions: [] })
 }
 
-export function fetchGlobeStatus(): Promise<{ running: boolean; port: number }> {
-  return safeFetch('/api/globe/status', { running: false, port: 8089 })
-}
-
-export function launchGlobe(): Promise<{ ok: boolean }> {
-  return safeFetch('/api/control/globe/launch', { ok: false }, { method: 'POST' })
-}
-
 export function fetchLogs(processFilter?: string, levelFilter?: string): Promise<{ logs: Array<{ timestamp: string; process: string; level: string; message: string }> }> {
   const params = new URLSearchParams()
   if (processFilter) params.set('process', processFilter)

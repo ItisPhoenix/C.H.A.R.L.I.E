@@ -16,7 +16,7 @@ import {
   ListTodo,
   Server,
   Users,
-  Globe,
+  Plug,
   Terminal,
   Mic,
   MicOff,
@@ -76,7 +76,7 @@ const navGroups: NavGroup[] = [
     items: [
       { label: 'MCP Servers', href: '/mcp', icon: Server },
       { label: 'Skills', href: '/skills', icon: Puzzle },
-      { label: 'Integrations', href: '/integrations', icon: Globe },
+      { label: 'Integrations', href: '/integrations', icon: Plug },
       { label: 'Tools', href: '/tools', icon: Terminal },
     ],
   },

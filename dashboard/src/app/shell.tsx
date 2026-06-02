@@ -68,21 +68,6 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
     document.documentElement.classList.add('dark')
   }, [])
 
-  // Auto-redirect to /setup if not configured
-  useEffect(() => {
-    if (pathname === '/setup') return
-    fetchSettings()
-      .then((settings) => {
-        const s = settings as Record<string, unknown>
-        if (s.setup_complete === false) {
-          router.push('/setup')
-        }
-      })
-      .catch(() => {
-        // Can't reach daemon — don't redirect, let user proceed
-      })
-  }, [pathname, router])
-
   // Global Ctrl+K handler for command palette
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {

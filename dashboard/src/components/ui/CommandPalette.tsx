@@ -16,7 +16,6 @@ import {
   ListTodo,
   Server,
   Users,
-  Globe,
   Terminal,
   BarChart3,
   Sparkles,

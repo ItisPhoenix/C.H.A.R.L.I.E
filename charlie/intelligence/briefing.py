@@ -224,19 +224,6 @@ class BriefingAssembler:
         """News, weather, integration updates."""
         news = []
 
-        if self.brain:
-            try:
-                if hasattr(self.brain, 'globe_server') and self.brain.globe_server:
-                    data = self.brain.globe_server.data_provider.get_all_data()
-                    if data:
-                        news_items = data.get("news", [])
-                        news = [
-                            {"title": n.get("title", ""), "source": n.get("source", "")}
-                            for n in news_items[:5]
-                        ]
-            except Exception:
-                pass
-
         return {"news": news}
 
     def _gather_context(self) -> dict:

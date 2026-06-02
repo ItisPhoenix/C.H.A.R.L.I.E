@@ -38,7 +38,7 @@
 - **Memory**: Working, episodic, semantic, procedural memory with ChromaDB (charlie/memory/).
 
 ## 6. Dashboard (Cyberpunk Command Center)
-- **20 pages**: Home, Status, Chat, Voice, Automation, Integrations, Tools, Tasks, Agents, Skills, Evolution, Memory, Search, Analytics, Logs, MCP, Globe, Briefing, Settings, Setup
+- **18 pages**: Home, Status, Chat, Voice, Automation, Integrations, Tools, Tasks, Agents, Skills, Evolution, Memory, Search, Analytics, Logs, MCP, Briefing, Settings
 - **Real-time sync**: WebSocket for voice activity, chat, tool execution, task updates
 - **Voice-first**: Voice orb on home page, push-to-talk in chat, persistent transcript
 - **Aesthetic**: Orbitron + Exo 2 fonts, particle network, HUD corners, scanlines
