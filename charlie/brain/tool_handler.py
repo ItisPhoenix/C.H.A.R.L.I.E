@@ -1,4 +1,4 @@
-import ast
+﻿import ast
 import asyncio
 import json
 import logging
@@ -439,7 +439,7 @@ class ToolHandler:
     def _tool_get_system_manifest(self, args: dict[str, Any]) -> str:
         from charlie.utils.state_reflector import state_reflector
         caps = state_reflector.get_current_capabilities()
-        return f"### C.H.A.R.L.I.E. ENGINE MANIFEST\nCAPABILITIES:\n{caps}\n\nROADMAP: All 12 phases complete"
+        return f"### C.H.A.R.L.I.E. ENGINE MANIFEST\nCAPABILITIES:\n{caps}\n\nROADMAP: Active"
 
     @risk_tier(RiskTier.TIER_0)
     def _tool_analyze_screen(self, args: dict[str, Any]) -> str:
@@ -1194,3 +1194,23 @@ class ToolHandler:
             output.append(f"{i}. [{ts_str}] **{role}**: {content}")
 
         return "\n".join(output)
+    @risk_tier(RiskTier.TIER_1)
+    def _tool_scaffold_skill(self, args: dict[str, Any]) -> str:
+        """Create a new skill. args: {name: str, description: str}."""
+        name = args.get("name")
+        description = args.get("description", "")
+        if not name:
+            return "Skill name is required."
+        import re as _re
+        safe = _re.sub(r"[^a-z0-9-]", "", name.lower().strip().replace(" ", "-"))[:64]
+        if not safe:
+            return f"Invalid skill name: {name}. Use kebab-case."
+        d = Path("charlie/skills") / safe
+        if d.exists():
+            return f"Skill {safe} already exists."
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {safe}\ndescription: {description}\n---\n",
+            encoding="utf-8",
+        )
+        return f"Skill scaffolded at charlie/skills/{safe}/SKILL.md, Sir."

@@ -85,9 +85,9 @@ class StartupValidator:
 
         # Required for core LLM functionality (no defaults in config.py)
         required = {
-            "NIM_PRIMARY_MODEL": "Primary LLM model identifier",
-            "VISION_MODEL": "Vision model identifier",
-            "EMBEDDING_MODEL": "Embedding model identifier",
+            "LLM_URL": "Universal LLM endpoint (any OpenAI-compatible URL)",
+            "LLM_MODEL": "LLM model name (served by LLM_URL)",
+            "LLM_API_KEY": "Bearer token for LLM endpoint (empty for local servers)",
         }
 
         # Optional but recommended for Telegram integration

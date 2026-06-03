@@ -112,11 +112,7 @@ def init_state(brain: "Brain") -> None:
     )
     brain._load_history()
 
-    # Seen trackers for proactive notifications
-    from collections import deque
-    brain._seen_gmail_ids: deque = deque(maxlen=500)
-    brain._seen_github_ids: deque = deque(maxlen=500)
-    brain._seen_notion_ids: deque = deque(maxlen=500)
+    # Seen trackers for proactive notifications (now in ProceduralMemory.seen_ids)
     brain._last_service_poll: float = 0.0
 
     brain._last_frustration_alert: float = 0.0
@@ -247,7 +243,7 @@ def init_model(brain: "Brain") -> None:
     from charlie.brain.model_manager import ModelManager
 
     brain.model_manager = ModelManager(settings)
-    brain.model = settings.llm.primary_model
+    brain.model = settings.llm.llm_model
     brain.async_llm_lock = asyncio.Lock()
     brain.tool_execution_lock = threading.Lock()
 

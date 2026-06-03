@@ -217,6 +217,8 @@ class OutcomeTracker:
         entries.reverse()
         return entries
 
+
+
     # --- Queries ---
 
     def get_tool_success_rate(self, tool_name: str, since_hours: int = 168) -> float:

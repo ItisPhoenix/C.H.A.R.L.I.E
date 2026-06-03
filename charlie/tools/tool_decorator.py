@@ -17,6 +17,7 @@ def tool(
     risk_tier: RiskTier = RiskTier.TIER_0,
     category: str = "general",
     timeout: int = 30,
+    calling_convention: str = "KWARGS",
 ):
     """Decorator to register a function as a CHARLIE tool.
 
@@ -74,6 +75,11 @@ def tool(
         # Extract integer value from RiskTier enum for compatibility
         tier_value = risk_tier.value if hasattr(risk_tier, 'value') else int(risk_tier)
 
+        # If caller explicitly passed a convention, use it. Otherwise auto-detect.
+        effective_convention = calling_convention
+        if calling_convention == "KWARGS" and variadic_param:
+            effective_convention = "VARIADIC"
+
         func._tool_meta = {
             "name": tool_name,
             "description": tool_desc,
@@ -82,7 +88,7 @@ def tool(
             "category": category,
             "timeout": timeout,
             "handler": func,
-            "calling_convention": "VARIADIC" if variadic_param else "KWARGS",
+            "calling_convention": effective_convention,
             "variadic_param": variadic_param,
         }
         # Also set _risk_tier so get_tool_tier() from security/tiers.py can find it

@@ -46,7 +46,7 @@ cd dashboard && npm install && cd ..
 
 # Configure environment
 cp .env.example .env
-# Edit .env with your API keys (NIM_API_KEY, GEMINI_API_KEY, etc.)
+# Edit .env with your LLM_URL and LLM_API_KEY (and optional LLM_VISION_*)
 ```
 
 ---
@@ -59,6 +59,9 @@ uv run python main.py
 
 # Daemon mode (background supervisor with dashboard + control server)
 uv run python main.py --daemon
+
+# One-click launcher (double-click)
+start-charlie.bat
 ```
 
 Dashboard: `http://localhost:3000/`  
@@ -88,43 +91,16 @@ Each check reports pass/warn/fail with actionable remediation on failure. The sa
 
 ## VRAM Budget
 
-Charlie manages GPU memory to avoid OOM crashes. Configure in `charlie_config.json`:
+Charlie auto-detects GPU VRAM via nvidia-smi and calculates a budget after fixed costs (STT ~2500MB, TTS ~1000MB, headroom 500MB). Configure overrides in `charlie_config.json`:
 
 ```json
 {
   "resources": {
-    "vram_budget_mb": 7168,
-    "vram_warning_mb": 6500,
-    "model_unload_delay_s": 30,
-    "model_priority": { "text": "primary", "vision": "on_demand" }
+    "vram_budget_mb": 4188,
+    "vram_warning_mb": 3500
   }
 }
 ```
-
-- `vram_budget_mb` — hard ceiling; models are unloaded if loading would exceed this
-- `vram_warning_mb` — threshold for dashboard warnings
-- `model_unload_delay_s` — seconds before on-demand models (vision) are unloaded after use
-- `model_priority` — which models stay resident vs. load on demand
-
----
-
-## Self-Modify & Auto-Patcher
-
-Both capabilities default to **disabled** for safety:
-
-```json
-{
-  "safety": {
-    "self_modify_enabled": false,
-    "auto_patcher_enabled": false
-  }
-}
-```
-
-- **self_modify_enabled** — when `false`, any tool that would alter Charlie's own source code is refused with a clear message. Enable only if you understand the risks.
-- **auto_patcher_enabled** — when `false`, the watchdog supervisor will only restart and quarantine failing processes (no source patches). Enable to allow the self-healer to attempt code fixes on crash.
-
-Changes to these flags in `charlie_config.json` take effect on next startup and are persisted back on toggle via the dashboard.
 
 ---
 
@@ -133,30 +109,36 @@ Changes to these flags in `charlie_config.json` take effect on next startup and 
 | Layer | Component | Description |
 |-------|-----------|-------------|
 | **Core** | `charlie/brain/` | Brain, Reactor, Chain Executor, Tool Handler, Model Router, Stream Handler |
-| **Intelligence** | `charlie/intelligence/` | Frustration Detector, Pattern Tracker, Suggestion Engine, Briefing, Outcome Tracker, Calendar Intel |
-| **Memory** | `charlie/memory/` | Working, Episodic (ChromaDB), Semantic (SQLite+ChromaDB), Procedural, RAG Indexer |
-| **Automation** | `charlie/automation/` | Rule Engine, Autonomy Loop, Event Router, Risk Gate, Learning Tracker, Proactivity Engine |
-| **Tools** | `charlie/tools/` | ~80 tools: system, web, media, file, coding, comms, research, security, dynamic builder |
-| **Agents** | `charlie/agents/` | 7 agent manifests: research, writer, system, comms, vision, coding, redteam |
-| **Integrations** | `charlie/integrations/` | Gmail, Google Calendar, GitHub, Notion, health tracker |
+| **Agents** | `charlie/agents/` | 7 manifest-driven agents with coordinator pattern, LLM goal decomposition, parallel execution |
+| **Intelligence** | `charlie/intelligence/` | Skill Nudge, Evolution Engine, Pattern Tracker, Suggestion Engine, Outcome Tracker |
+| **Memory** | `charlie/memory/` | Working, Episodic (ChromaDB), Semantic (SQLite+ChromaDB), Procedural (seen_ids), RAG Indexer |
+| **Automation** | `charlie/automation/` | Rule Engine, Autonomy Loop, Event Router, Risk Gate, Learning Tracker |
+| **Tools** | `charlie/tools/` | 87 tools: system, web, media, file, coding, comms, research, security, browser |
+| **Skills** | `charlie/skills/` | 6 skills in SKILL.md format (agentskills.io spec) |
 | **MCP** | `charlie/mcp/` | Model Context Protocol client, manager, bridge (stdio + SSE transport) |
 | **Dashboard** | `dashboard/` | Next.js 15 cyberpunk dashboard with ~20 pages, real-time WebSocket sync |
 | **Watchdog** | `charlie/watchdog/` | Phoenix Supervisor, Daemon Supervisor, Control Server, IPC Bridge |
 
-*Note: Metrics (tool count, page count) are approximate and may drift as development continues.*
-
 ### Multi-Process Architecture
 
 Charlie runs as a supervised multi-process system:
-- **Audio** — Wake word detection (WebRTC VAD), STT (Whisper), TTS (Kokoro), Gemini Live API streaming
-- **Brain** — LLM reasoning, tool execution, conversation management
-- **Browser** — Headless Chromium for web automation
+- **Audio** — Wake word detection (WebRTC VAD), STT (Whisper), TTS (Kokoro), barge-in with playback lock
+- **Brain** — LLM reasoning, tool execution, conversation management, agent orchestration
+- **Browser** — Headless Chromium via CloakBrowser for web automation
 - **Vision** — Screen analysis, OCR, visual understanding
 - **Dashboard** — Next.js web UI on port 3000 (proxies to Control Server on 8090)
 
+### Agent Coordination
+
+Charlie uses a coordinator pattern for complex goals:
+1. **Decompose** — LLM breaks complex goals into sub-tasks
+2. **Route** — Each sub-task dispatched to the best-fit specialist agent
+3. **Execute** — Agents run in parallel via asyncio.gather
+4. **Merge** — Results combined into a unified response via LLM
+
 ---
 
-## Dashboard Pages (approximate)
+## Dashboard Pages
 
 | Page | Description |
 |------|-------------|
@@ -165,11 +147,12 @@ Charlie runs as a supervised multi-process system:
 | `/chat` | Chat interface with push-to-talk |
 | `/voice` | Voice activity monitor, STT/TTS status |
 | `/automation` | Rule engine visualization, toggle rules |
-| `/integrations` | Gmail, Calendar, GitHub, Notion health |
+| `/integrations` | Gmail, Calendar, GitHub, Notion health (live WS updates) |
 | `/tools` | Live tool execution feed |
 | `/tasks` | Task management |
-| `/agents` | Agent network view |
-| `/memory` | Memory search across all types |
+| `/agents` | Agent network view with orchestrator feed |
+| `/memory` | Memory search + stats (live WS updates) |
+| `/evolution` | Self-evolution history (live WS updates) |
 | `/search` | Unified search across chat, memory, tools, tasks |
 | `/analytics` | Tool usage charts, response times |
 | `/logs` | Live log viewer with filtering |
@@ -182,8 +165,8 @@ Charlie runs as a supervised multi-process system:
 ## Testing
 
 ```bash
-# Run all tests
-uv run pytest tests/ -q
+# Run all tests (59 tests)
+uv run pytest tests/ -v
 
 # Lint
 uv run ruff check charlie/
@@ -200,12 +183,12 @@ Primary configuration via `.env` file. Runtime overrides via `charlie_config.jso
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `NIM_API_KEY` | Yes | NVIDIA NIM API key (primary reasoning) |
-| `NIM_BASE_URL` | No | NIM API endpoint (default: integrate.api.nvidia.com) |
-| `GEMINI_API_KEY` | No | Google Gemini API key (voice streaming, fallback) |
-| `VISION_MODEL` | No | Vision model name |
-| `EMBEDDING_MODEL` | No | Embedding model name |
-| `EMBEDDING_URL` | No | Embedding API endpoint |
+| `LLM_URL` | Yes | Full URL of any OpenAI-compatible LLM endpoint (LM Studio, NIM, OpenRouter, Ollama, vLLM, etc.) |
+| `LLM_API_KEY` | No | Bearer token for the LLM endpoint (empty for local servers like LM Studio) |
+| `LLM_MODEL` | Yes | Model name served by `LLM_URL` |
+| `LLM_VISION_URL` | No | Full URL of an OpenAI-compatible vision endpoint (leave empty to disable vision) |
+| `LLM_VISION_API_KEY` | No | Bearer token for the vision endpoint |
+| `LLM_VISION_MODEL` | No | Vision model name served by `LLM_VISION_URL` |
 | `TELEGRAM_TOKEN` | No | Telegram bot token (alerts) |
 | `TELEGRAM_CHAT_ID` | No | Telegram chat ID |
 | `GITHUB_TOKEN` | No | GitHub integration |

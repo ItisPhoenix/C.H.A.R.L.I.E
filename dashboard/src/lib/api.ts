@@ -308,6 +308,41 @@ export function fetchSkills(): Promise<{ skills: Array<{ name: string; descripti
   return safeFetch('/api/skills', { skills: [] })
 }
 
+// === Doctor self-check (Task 8 / Core Loop) ===
+// New response shape from /api/doctor adds per-child state + reason.
+// See docs/superpowers/specs/2026-06-03-core-loop-design.md Section G.
+
+export type ChildState = "ok" | "disabled" | "down"
+
+export interface DoctorChild {
+  name: string
+  state: ChildState
+  reason?: string
+  last_heartbeat?: number
+  crash_count?: number
+}
+
+export interface DoctorLLMHealth {
+  healthy: boolean
+  status?: number
+  error?: string
+}
+
+export interface DoctorState {
+  ok: boolean
+  children: Record<string, DoctorChild>
+  llm: DoctorLLMHealth
+  last_check?: string
+}
+
+export function fetchDoctor(): Promise<DoctorState> {
+  return safeFetch<DoctorState>('/api/doctor', {
+    ok: false,
+    children: {},
+    llm: { healthy: false },
+  })
+}
+
 export interface VoiceStatus {
   stt_model: string
   tts_model: string

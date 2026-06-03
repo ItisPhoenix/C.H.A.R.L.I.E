@@ -254,8 +254,8 @@ class ContextBuilder:
         if session_ctx:
             prompt += f"\n\n{session_ctx}"
 
-        # Vision capability
-        if settings.llm.vision_model:
+        # Vision capability (universal LLM endpoint handles vision if model is multimodal)
+        if settings.llm.llm_url and settings.llm.llm_model:
             prompt += (
                 "\n\n## Vision Capability"
                 "\nYou have eyes. Use these tools when visual information would help:"
@@ -466,8 +466,8 @@ class ContextBuilder:
         target = threshold_override if threshold_override is not None else 95
         if pct > target:
             if not silent and self.brain.status_q:
-                self.brain._safe_put(self.brain.status_q, {"type": "VRAM_ALERT", "pct": pct})
+                self.brain._safe_put(self.brain.status_q, {"type": "VRAM", "content": {"pct": pct, "used_mb": used, "budget_mb": settings.resources.vram_budget_mb, "total_mb": settings.resources.vram_total_mb}})
             return False
         if pct > 90 and self.brain.status_q:
-            self.brain._safe_put(self.brain.status_q, {"type": "VRAM_WARN", "pct": pct})
+            self.brain._safe_put(self.brain.status_q, {"type": "VRAM", "content": {"pct": pct, "used_mb": used, "budget_mb": settings.resources.vram_budget_mb, "total_mb": settings.resources.vram_total_mb}})
         return True

@@ -1,10 +1,9 @@
-"""
+﻿"""
 charlie/tools/dynamic_builder.py
 
 Dynamic tool builder for creating and registering tools at runtime.
 Enables CHARLIE to extend its own capabilities based on user needs.
 
-Phase D.1 of CHARLIE Autonomy Evolution Plan
 """
 
 import json

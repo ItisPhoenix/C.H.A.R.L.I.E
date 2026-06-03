@@ -1,9 +1,7 @@
-"""
+﻿"""
 charlie/intelligence/decomposer.py
 
 Goal Decomposition Engine — breaks complex goals into executable task graphs.
-
-Part of Phase A.2 — Core Autonomy Loops (Foundation)
 
 The decomposer takes a complex user goal and uses the LLM to generate
 a TaskGraph with properly ordered subtasks and dependencies.

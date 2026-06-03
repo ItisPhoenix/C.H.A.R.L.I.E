@@ -76,13 +76,9 @@ class ModelManager:
     can keep using nim_chat() and it just works through the router.
 
     .env / settings keys consumed:
-        NIM_BASE_URL        → settings.llm.nim_base_url
-        NIM_API_KEY         → settings.llm.nim_api_key
-        NIM_PRIMARY_MODEL   → settings.llm.primary_model
-        VISION_MODEL        → settings.llm.vision_model
-        VISION_LLM_URL      → settings.llm.vision_url
-        EMBEDDING_URL       → settings.llm.embedding_url
-        EMBEDDING_MODEL     → settings.llm.embedding_model
+        LLM_URL             → settings.llm.llm_url
+        LLM_API_KEY         → settings.llm.llm_api_key
+        LLM_MODEL           → settings.llm.llm_model
         VRAM_THRESHOLD_MB   → settings.resources.vram_threshold_mb
     """
 
@@ -91,15 +87,12 @@ class ModelManager:
         self._router = ModelRouter.from_settings(settings)
 
         # Expose for callers that need direct access
-        self.nim_base_url: str = settings.llm.nim_base_url.rstrip("/")
-        self.nim_api_key: str = getattr(settings.llm, "nim_api_key", "")
-        self.primary_model: str = settings.llm.primary_model
-        self.vision_model: str = settings.llm.vision_model
-        self.vision_url: str = getattr(settings.llm, "vision_url", "")
-        self.embedding_url: str = getattr(
-            settings.llm, "embedding_url", "http://127.0.0.1:1234/api/embeddings"
-        )
-        self.embedding_model: str = getattr(settings.llm, "embedding_model", "")
+        self.llm_url: str = settings.llm.llm_url.rstrip("/")
+        self.llm_api_key: str = getattr(settings.llm, "llm_api_key", "")
+        self.llm_model: str = settings.llm.llm_model
+        self.llm_vision_url: str = getattr(settings.llm, "llm_vision_url", "").rstrip("/")
+        self.llm_vision_api_key: str = getattr(settings.llm, "llm_vision_api_key", "")
+        self.llm_vision_model: str = getattr(settings.llm, "llm_vision_model", "")
 
         self.current_model: Optional[str] = None
         self._lock = asyncio.Lock()
@@ -280,7 +273,7 @@ class ModelManager:
         Send chat/completions request via ModelRouter.
         Returns raw JSON response dict (backward compatible).
         """
-        logger.info("nim_chat | model=%s | msgs=%d", self.primary_model, len(messages))
+        logger.info("llm_chat | model=%s | msgs=%d", self.llm_model, len(messages))
         try:
             response = await self._router.complete(
                 messages,
@@ -369,22 +362,22 @@ class ModelManager:
         """Mark NIM primary as active; verify endpoint if switching from vision."""
         prev = self.current_model
         logger.info(
-            f"activating_nim | from={prev} | model={self.primary_model} | endpoint={self.nim_base_url}"
+            f"activating_llm | from={prev} | model={self.llm_model} | endpoint={self.llm_url}"
         )
         healthy = await self.nim_health()
         if not healthy:
-            logger.error("nim_endpoint_unreachable | check NIM_BASE_URL in .env")
+            logger.error("llm_endpoint_unreachable | check LLM_URL in .env")
             return
         self.current_model = "text"
-        logger.info("nim_active | model=%s", self.primary_model)
+        logger.info("llm_active | model=%s", self.llm_model)
 
     async def _activate_vision(self):
-        """Switch to vision model on separate endpoint."""
+        """Switch to the vision model on its own endpoint."""
         logger.info(
-            f"activating_vision | from={self.current_model} | model={self.vision_model}"
+            f"activating_vision | from={self.current_model} | model={self.llm_vision_model}"
         )
-        if not self.vision_url:
-            logger.error("vision_url_not_set | set VISION_LLM_URL in .env")
+        if not self.llm_vision_url:
+            logger.error("vision_url_not_set | set LLM_VISION_URL in .env")
             return
         self.current_model = "vision"
 

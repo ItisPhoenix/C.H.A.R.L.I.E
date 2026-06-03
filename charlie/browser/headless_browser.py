@@ -20,6 +20,27 @@ from charlie.utils.logger import get_logger
 
 logger = get_logger("Browser")
 
+# ── Error-cap state ─────────────────────────────────────────────────────────
+# Module-level so tests can reset it and so the sliding window survives
+# the entire lifetime of the browser process.
+_err_window: list[float] = []
+_ERR_WINDOW_SECONDS = 60
+_ERR_WINDOW_THRESHOLD = 5
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def _send_heartbeat() -> None:
+    """Module-level no-op heartbeat stub.
+
+    The actual per-iteration heartbeat is set inline on
+    ``self.heartbeat.value = time.time()`` in :py:meth:`HeadlessBrowserProcess._main_loop`.
+    This stub exists so callers and tests can patch a single importable name
+    without reaching into instance attributes.
+    """
+    return None
+# ────────────────────────────────────────────────────────────────────────────
+
+
 
 class HeadlessBrowserProcess(multiprocessing.Process):
     """
@@ -145,13 +166,38 @@ class HeadlessBrowserProcess(multiprocessing.Process):
                     if not self.req_q.empty():
                         req = self.req_q.get_nowait()
                         await self._handle_request(req)
-                except (EOFError, ConnectionResetError, BrokenPipeError):
-                    logger.error("browser_ipc_disconnected")
+                    _err_window.clear()
+                except (EOFError, ConnectionResetError, BrokenPipeError) as e:
+                    logger.info(f"browser_loop_closed | {type(e).__name__}: {e}")
+                    _err_window.clear()
                     return
                 except Exception as e:
-                    logger.error(f"browser_loop_err | {e}")
-                    if "closed" in str(e).lower() or "pipe" in str(e).lower():
+                    now = time.time()
+                    _err_window.append(now)
+                    # Slide the window: drop entries older than 60s
+                    while _err_window and _err_window[0] < now - _ERR_WINDOW_SECONDS:
+                        _err_window.pop(0)
+
+                    err_str = f"{type(e).__name__}: {e}"
+                    if "closed" in err_str.lower() or "pipe" in err_str.lower():
+                        logger.info(f"browser_loop_closed | {err_str}")
+                        _err_window.clear()
                         return
+
+                    if len(_err_window) >= _ERR_WINDOW_THRESHOLD:
+                        logger.error(
+                            f"browser_loop_fatal | errs_in_60s={len(_err_window)}"
+                            f" | exiting_for_respawn"
+                        )
+                        # Raise so the outer run() exits with non-zero and the
+                        # supervisor respawns the process.
+                        raise RuntimeError(
+                            f"browser_loop_fatal: {len(_err_window)} errors in "
+                            f"{_ERR_WINDOW_SECONDS}s"
+                        )
+
+                    logger.error(f"browser_loop_err | {err_str}")
+                    _send_heartbeat()
                 await asyncio.sleep(0.5)
         finally:
             await self.context.close()

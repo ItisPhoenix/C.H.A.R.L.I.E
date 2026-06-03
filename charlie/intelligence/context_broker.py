@@ -1,10 +1,9 @@
-"""
+﻿"""
 charlie/intelligence/context_broker.py
 
 Cross-modal context broker for unified context management across all interaction channels.
 Maintains conversation history, entity resolution, and context fusion from multiple sources.
 
-Phase C.1 of CHARLIE Autonomy Evolution Plan
 """
 
 import json

@@ -448,59 +448,8 @@ class ToolRegistry:
         return count
 
     def register_from_handler(self, handler_obj) -> int:
-        """Register tools from an existing ToolHandler object (backward compat).
-
-        Scans for _tool_* methods and registers them with proper risk tiers.
-
-        Pattern B ``_tool_*`` methods take a single positional ``dict`` of
-        arguments, so they are registered with ``calling_convention="ARGS_DICT"``.
-        The wrapper used to register them preserves the resolved tier
-        (``wrapper._risk_tier = tier.value``) so that a later
-        ``get_tool_tier(entry.handler)`` still resolves to the correct tier
-        rather than failing closed to TIER_3 (the original bug).
-        """
-        count = 0
-        for attr_name in dir(handler_obj):
-            if not attr_name.startswith("_tool_"):
-                continue
-            method = getattr(handler_obj, attr_name)
-            if not callable(method):
-                continue
-
-            tool_name = attr_name[6:]  # Remove _tool_ prefix
-            doc = method.__doc__ or f"Tool: {tool_name}"
-
-            # Resolve the bound method's tier via the canonical helper.
-            tier = get_tool_tier(method)
-
-            # Pattern B methods take a single positional dict. Build a wrapper
-            # that forwards a dict positionally, and preserve the tier on the
-            # wrapper so any later get_tool_tier(entry.handler) still resolves.
-            def _make_wrapper(m):
-                def wrapper(args):
-                    return m(args)
-                return wrapper
-
-            wrapper = _make_wrapper(method)
-            # Preserve both the enum (for get_tool_tier lookups) and the
-            # int value (for backward-compat callers that expect an int).
-            wrapper._risk_tier = tier
-            wrapper._risk_tier_value = tier.value
-
-            self.register(
-                name=tool_name,
-                description=doc.strip().split("\n")[0],
-                parameters={"type": "object", "properties": {}},
-                handler=wrapper,
-                risk_tier=tier,
-                source="native",
-                calling_convention="ARGS_DICT",
-            )
-            count += 1
-
-        logger.info("registered_from_handler | tools=%d", count)
-        return count
-
+        """DEPRECATED."""
+        return 0
 
 def _discover_module_tools(module) -> list[dict]:
     """Discover @tool decorated functions in a module."""

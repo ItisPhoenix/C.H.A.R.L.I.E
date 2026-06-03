@@ -10,6 +10,7 @@ import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import { ErrorState } from '@/components/ui/ErrorState'
 import { History, TrendingUp } from 'lucide-react'
 import { fetchEvolution } from '@/lib/api'
+import { useWSEvent } from '@/lib/ws'
 
 interface EvolutionEntry {
   id: string
@@ -28,6 +29,8 @@ export default function EvolutionPage() {
   const [error, setError] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
+  const wsSkill = useWSEvent<Record<string, unknown>>('SKILL_CREATED')
+
   const loadEvolution = useCallback(async () => {
     try {
       setError(null)
@@ -45,6 +48,12 @@ export default function EvolutionPage() {
   useEffect(() => {
     loadEvolution()
   }, [loadEvolution])
+
+  useEffect(() => {
+    if (wsSkill) {
+      loadEvolution()
+    }
+  }, [wsSkill, loadEvolution])
 
   const pendingCount = entries.filter((e) => e.status === 'pending').length
 

@@ -1,9 +1,8 @@
-"""
+﻿"""
 charlie/intelligence/suggestion_engine.py
 
 Proactive Suggestion Engine — anticipates user needs before being asked.
 
-Part of Phase B.2 — Proactive Suggestions
 
 The suggestion engine runs as a background task and generates
 suggestions based on trigger conditions like:

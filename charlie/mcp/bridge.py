@@ -180,17 +180,32 @@ class MCPToolBridge:
 
         This is synchronous — no connection is made. Tools connect when invoked.
         Used during Brain._discover_tools() for lazy initialization.
+
+        Registers BOTH into tool_handler.registry (for backward compat during
+        transition) AND into the unified catalog.
         """
         count = 0
         for name, client in self.manager.servers.items():
             if not client.enabled:
                 continue
 
-            # We don't know tool names yet (not connected), so register a
-            # dynamic dispatcher that discovers tools on first call
             wrapper = self._create_lazy_dispatcher(client, tool_handler)
             prefixed = f"mcp_{name}"
             tool_handler.registry[prefixed] = wrapper
+
+            if self._tool_registry is not None:
+                from charlie.security.tiers import RiskTier
+                self._tool_registry.register(
+                    name=prefixed,
+                    description=f"MCP server dispatcher: {name} (lazy — connects on first call)",
+                    parameters={"type": "object", "properties": {}},
+                    handler=wrapper,
+                    risk_tier=RiskTier.TIER_2,
+                    category="mcp",
+                    source=f"mcp:{name}",
+                    calling_convention="ARGS_DICT",
+                )
+
             count += 1
 
         if count > 0:
@@ -242,10 +257,12 @@ class MCPToolBridge:
                 "source": f"mcp:{client.name}",
             }
 
-        # Remove the lazy dispatcher entry
+        # Remove the lazy dispatcher entry from both legacy registry and unified catalog
         lazy_key = f"mcp_{client.name}"
         if lazy_key in tool_handler.registry:
             del tool_handler.registry[lazy_key]
+        if self._tool_registry is not None:
+            self._tool_registry.unregister(lazy_key)
 
     async def unregister_all(self, tool_handler: ToolHandler) -> None:
         """Remove all MCP tools from the registry."""

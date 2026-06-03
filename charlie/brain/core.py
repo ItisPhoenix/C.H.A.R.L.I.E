@@ -22,6 +22,7 @@ import aiohttp
 from charlie.config import settings
 from charlie.utils.logger import get_logger
 from charlie.utils.system import get_vram_percent, get_vram_used_mb
+from charlie.utils.vram import detect_total_vram_mb, calculate_budget_mb
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 HISTORY_MESSAGE_LIMIT = 50  # Max messages persisted to disk
@@ -233,9 +234,20 @@ class Brain:
         except Exception as e:
             logger.warning("tool_discovery_failed | error=%s", e)
 
-        # Register Pattern B tools (_tool_* methods from ToolHandler) into unified registry
+        # Register Pattern B tools directly into unified catalog (single source of truth)
         try:
-            pattern_b_count = self.tool_registry.register_from_handler(self.tool_handler)
+            from charlie.security.tiers import get_tool_tier
+            pattern_b_count = 0
+            for tool_name, tool_fn in self.tool_handler.registry.items():
+                tier = get_tool_tier(tool_fn)
+                desc = (tool_fn.__doc__ or f"Tool: {tool_name}").strip().split("\n")[0]
+                self.tool_registry.register(
+                    name=tool_name, description=desc,
+                    parameters={"type": "object", "properties": {}},
+                    handler=tool_fn, risk_tier=tier, source="native",
+                    calling_convention="ARGS_DICT",
+                )
+                pattern_b_count += 1
             logger.info("pattern_b_registered | count=%d", pattern_b_count)
         except Exception as e:
             logger.warning("pattern_b_registration_failed | error=%s", e)
@@ -247,20 +259,7 @@ class Brain:
         source: str = "local",
         skip_guardian: bool = False,
     ) -> str:
-        """Execute a tool call through the unified Tool_Catalog.
-
-        The unified ``tool_registry`` is the authoritative execution path: every
-        Pattern A ``@tool`` function and every Pattern B ``_tool_*`` method (the
-        latter via ``register_from_handler``) lives in it, so the catalog gates
-        the tool with the correct Risk_Tier and executes it. A genuinely unknown
-        tool returns a clear not-found error rather than being silently
-        delegated. MCP lazy wrappers (``mcp_<server>``) are — until Phase 3 task
-        9.4 registers them into the catalog — only present in the legacy
-        ``ToolHandler.registry`` dict, so they are the one documented last-resort
-        delegation below. The legacy handler runs a single guardian gate of its
-        own; there is no double-prompt because the catalog path returns before
-        reaching the fallback for any tool the catalog knows.
-        """
+        """Execute a tool call through the unified catalog. Single execution path."""
         tool_name = tool_data.get("tool", "") if tool_data else ""
         args = tool_data.get("args", {}) if tool_data else {}
 
@@ -363,16 +362,6 @@ class Brain:
                         tier=catalog_tier,
                     )
                     return result
-
-            # Last-resort delegation: only for tools that exist in the legacy
-            # ToolHandler registry but not the unified catalog (MCP lazy wrappers
-            # until Phase 3 task 9.4). The legacy handler gates and records on its
-            # own path. Genuinely unknown tools return a clear not-found error.
-            legacy_registry = getattr(self.tool_handler, "registry", {})
-            if tool_name and tool_name in legacy_registry:
-                return self.tool_handler.execute_tools(
-                    tool_data, sir_input, source, skip_guardian
-                )
 
             return f"Error: Tool '{tool_name}' not found."
 
@@ -552,7 +541,8 @@ class Brain:
                         },
                     )
                 self._stop_event.wait(2)
-            except Exception:
+            except Exception as e:
+                logger.debug("telemetry_monitor_iteration_failed | %s", e)
                 self._stop_event.wait(10)
 
     def _heartbeat_monitor(self):
@@ -563,6 +553,12 @@ class Brain:
 
     def _get_vram_used_mb(self) -> float:
         return get_vram_used_mb()
+
+    def _get_vram_budget_mb(self) -> int:
+        try:
+            return calculate_budget_mb(detect_total_vram_mb())
+        except Exception:
+            return getattr(settings.resources, "vram_budget_mb", 4096)
 
     def _init_bg_tasks(self):
         """Initializes baseline background maintenance tasks."""
@@ -592,11 +588,28 @@ class Brain:
                             os.remove(fpath)
                             cleaned += 1
                     except Exception:
-                        pass
+                        logger.debug("bg_task | cleanup_temp | remove_failed | path=%s", fpath)
             if cleaned:
                 logger.info("bg_task | cleanup_temp | cleaned=%d", cleaned)
 
         self.task_queue.add_task("Temp Cleanup", cleanup_temp, priority=50)
+
+    def _on_conversation_close(self, steps: list = None):
+        try:
+            nudge = getattr(self, "skill_nudge", None)
+            if not nudge or not steps:
+                return
+            if not nudge.should_nudge(len(steps)):
+                return
+            llm = getattr(self, "llm_client", None)
+            data = {"steps": steps, "tools_used": list(set(s.get("tool", "?") for s in steps))}
+            result = nudge.review_session(data, llm_client=llm)
+            if result and result.get("create_skill"):
+                path = nudge.create_skill(result)
+                self._safe_put(self.status_q, {"type": "SKILL_CREATED", "content": {"name": result.get("name", "?"), "path": str(path)}})
+                logger.info("skill_nudge_created | %s", result.get("name"))
+        except Exception as e:
+            logger.debug("skill_nudge_quiet_fail | %s", e)
 
     # ── AUTOMATION ──────────────────────────────────────────────────────────
 
@@ -678,7 +691,8 @@ class Brain:
         # Fallback: try as a direct tool call
         try:
             return self.execute_tools({"tool": action, "args": rule.action_args})
-        except Exception:
+        except Exception as e:
+            logger.debug("automation_action_dispatch_failed | action=%s | %s", action, e)
             return f"Unknown action: {action}"
 
     def _action_send_reminder(self, data: dict, rule) -> str:
@@ -859,8 +873,9 @@ class Brain:
                     self._gmail_poller = GmailIntegration()
                 msgs = self._gmail_poller.fetch(max_results=3)
                 for m in msgs:
-                    if m["id"] not in self._seen_gmail_ids:
-                        self._seen_gmail_ids.append(m["id"])
+                    seen = self.memory.procedural.is_seen(m["id"], "gmail")
+                    if not seen:
+                        self.memory.procedural.mark_seen(m["id"], "gmail")
                         self._safe_put(
                             self.status_q,
                             {
@@ -885,8 +900,8 @@ class Brain:
                 activity = self._github_poller.fetch(repo_name="alerts", limit=3)
                 for item in activity:
                     item_id = item.get("title") or item.get("url")
-                    if item_id and item_id not in self._seen_github_ids:
-                        self._seen_github_ids.append(item_id)
+                    if item_id and not self.memory.procedural.is_seen(item_id, "github"):
+                        self.memory.procedural.mark_seen(item_id, "github")
                         self._safe_put(
                             self.status_q,
                             {
@@ -912,8 +927,8 @@ class Brain:
                     self._notion_poller = NotionIntegration()
                 pages = self._notion_poller.fetch(limit=3)
                 for p in pages:
-                    if p["id"] not in self._seen_notion_ids:
-                        self._seen_notion_ids.append(p["id"])
+                    if not self.memory.procedural.is_seen(p["id"], "notion"):
+                        self.memory.procedural.mark_seen(p["id"], "notion")
                         self._safe_put(
                             self.status_q,
                             {

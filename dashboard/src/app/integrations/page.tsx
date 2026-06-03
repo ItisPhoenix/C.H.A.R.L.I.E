@@ -11,6 +11,7 @@ import { PageHeader } from '@/components/layout/PageHeader'
 import { fetchIntegrations } from '@/lib/api'
 import { formatTimestamp, createVisibilityAwareInterval } from '@/lib/utils'
 import { FilterBar } from '@/components/ui/FilterBar'
+import { useWSEvent } from '@/lib/ws'
 import type { IntegrationHealth } from '@/lib/types'
 
 type StatusFilter = 'all' | 'connected' | 'error'
@@ -35,6 +36,8 @@ export default function IntegrationsPage() {
   const [error, setError] = useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
 
+  const wsIntegration = useWSEvent<Record<string, unknown>>('INTEGRATION_UPDATE')
+
   const loadIntegrations = useCallback(async () => {
     try {
       const data = await fetchIntegrations()
@@ -51,6 +54,14 @@ export default function IntegrationsPage() {
     loadIntegrations()
     return createVisibilityAwareInterval(loadIntegrations, 5000)
   }, [loadIntegrations])
+
+  useEffect(() => {
+    if (wsIntegration) {
+      setIntegrations(prev => prev.map(int =>
+        int.name === (wsIntegration.name as string) ? { ...int, ...wsIntegration } : int
+      ))
+    }
+  }, [wsIntegration])
 
   const filtered = integrations.filter((int) => {
     if (statusFilter === 'all') return true

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Agent Loader — Scans charlie/agents/ for agent.json manifests.
 
 Walks the agents directory, parses each subfolder's agent.json into an
@@ -76,9 +76,9 @@ class AgentLoader:
             if not entry.is_dir() or entry.name.startswith("_"):
                 continue
 
-            manifest = entry / "agent.json"
+            manifest = entry / "AGENT.md"
             if not manifest.is_file():
-                logger.debug("No agent.json in %s — skipping", entry.name)
+                logger.debug("No AGENT.md in %s — skipping", entry.name)
                 continue
 
             spec = self.load_single(entry)
@@ -95,19 +95,65 @@ class AgentLoader:
         Returns ``None`` if the manifest is missing, malformed, or invalid.
         """
         agent_path = Path(agent_path)
-        manifest = agent_path / "agent.json"
+        manifest = agent_path / "AGENT.md"
 
         if not manifest.is_file():
             logger.warning("agent.json not found at %s", manifest)
             return None
 
-        # -- Parse JSON --------------------------------------------------
+        # -- Parse YAML frontmatter from AGENT.md -------------------------
         try:
-            with open(manifest, encoding="utf-8") as fh:
-                data: dict[str, Any] = json.load(fh)
-        except json.JSONDecodeError as exc:
-            logger.error("Invalid JSON in %s: %s", manifest, exc)
-            return None
+            raw = manifest.read_text(encoding="utf-8")
+            data: dict[str, Any] = {}
+            if raw.startswith("---"):
+                parts = raw.split("---", 2)
+                if len(parts) >= 3:
+                    lines = parts[1].strip().split("\n")
+                    current_key = None
+                    current_sub: dict = {}
+                    for line in lines:
+                        stripped = line.strip()
+                        if not stripped or stripped.startswith("#"):
+                            continue
+                        # Detect indented sub-keys (2+ spaces)
+                        if line.startswith("  ") and ":" in stripped and current_key:
+                            sk, sv = stripped.split(":", 1)
+                            sk, sv = sk.strip(), sv.strip()
+                            if sv.startswith("[") and sv.endswith("]"):
+                                try: sv = json.loads(sv)
+                                except (json.JSONDecodeError, ValueError): pass
+                            elif sv.lower() == "true": sv = True
+                            elif sv.lower() == "false": sv = False
+                            elif sv.startswith('"') and sv.endswith('"'): sv = sv[1:-1]
+                            current_sub[sk] = sv
+                            continue
+                        # Flush previous sub-dict
+                        if current_key and current_sub:
+                            data[current_key] = current_sub
+                        elif current_key and current_key not in data:
+                            data[current_key] = ""
+                        current_key = None
+                        current_sub = {}
+                        # Top-level key: value
+                        if ":" in stripped:
+                            k, v = stripped.split(":", 1)
+                            k, v = k.strip(), v.strip()
+                            if not v:
+                                current_key = k
+                                current_sub = {}
+                                continue
+                            if v.startswith("[") and v.endswith("]"):
+                                try: v = json.loads(v)
+                                except (json.JSONDecodeError, ValueError): pass
+                            elif v.lower() == "true": v = True
+                            elif v.lower() == "false": v = False
+                            elif v.startswith('"') and v.endswith('"'): v = v[1:-1]
+                            data[k] = v
+                    # Flush last sub-dict
+                    if current_key and current_sub:
+                        data[current_key] = current_sub
+            if "system_prompt" not in data and raw.startswith("---"):
+                data["system_prompt"] = raw.split("---", 2)[-1].strip()
         except OSError as exc:
             logger.error("Cannot read %s: %s", manifest, exc)
             return None
@@ -135,7 +181,7 @@ class AgentLoader:
         return spec
 
     def validate_manifest(self, data: dict, path: str) -> bool:
-        """Validate required fields in an ``agent.json`` dict.
+        """Validate required fields from AGENT.md dict.
 
         Returns ``True`` when all required fields are present and
         have the expected types.

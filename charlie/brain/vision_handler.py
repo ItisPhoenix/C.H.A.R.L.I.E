@@ -17,6 +17,16 @@ class VisionHandler:
         self.brain = brain
         self.last_sentinel_scan = 0.0
         self.last_sentinel_report = ""
+        self._last_vision_use = 0.0
+        self._vram_lock = __import__("threading").Lock()
+
+    def _mark_vision_use(self):
+        with self._vram_lock:
+            self._last_vision_use = time.time()
+
+    def _vision_idle_seconds(self) -> float:
+        with self._vram_lock:
+            return time.time() - self._last_vision_use if self._last_vision_use > 0 else 0
 
     def capture_screen(self, for_vision=False, region: tuple | None = None) -> str:
         """Captures primary monitor (or a region), returns base64 PNG string.
@@ -76,6 +86,7 @@ class VisionHandler:
             return base64.b64encode(buf.getvalue()).decode("utf-8")
 
     async def ask_vision(self, query: str, region: tuple | None = None) -> str:
+        self._mark_vision_use()
         """Vision request grounded in current OS window context.
 
         Args:
@@ -134,7 +145,7 @@ class VisionHandler:
         import aiohttp
         try:
             payload = {
-                "model": self.brain.model_manager.vision_model,
+                "model": self.brain.model_manager.llm_vision_model,
                 "messages": [
                     {
                         "role": "user",
@@ -148,7 +159,7 @@ class VisionHandler:
             }
 
             async with self.brain.session.post(
-                    f"{self.brain.model_manager.vision_url}/chat/completions",
+                    f"{self.brain.model_manager.llm_vision_url}/chat/completions",
                     json=payload,
                     timeout=aiohttp.ClientTimeout(total=40),
                 ) as r:
@@ -165,6 +176,7 @@ class VisionHandler:
             return "Vision failed."
 
     async def analyze_image(self, image_path: str, query: str = "Describe this image.") -> str:
+        self._mark_vision_use()
         """Analyze an arbitrary image file with the vision model."""
         if not self.brain.context_builder.vram_warning_check():
             return "Vision unavailable — VRAM too high, Sir."
@@ -220,7 +232,7 @@ class VisionHandler:
         import aiohttp
         try:
             payload = {
-                "model": self.brain.model_manager.vision_model,
+                "model": self.brain.model_manager.llm_vision_model,
                 "messages": [
                     {
                         "role": "user",
@@ -234,7 +246,7 @@ class VisionHandler:
             }
 
             async with self.brain.session.post(
-                f"{self.brain.model_manager.vision_url}/chat/completions",
+                f"{self.brain.model_manager.llm_vision_url}/chat/completions",
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=40),
             ) as r:
@@ -284,22 +296,11 @@ class VisionHandler:
             logger.error(f"sentinel_scan_failed | {e}")
 
     def peripheral_vision_loop(self) -> None:
-        """Legacy background loop for sentinel scanning."""
+        """Legacy background loop for peripheral vision (sentinel scan removed — see LLMSettings)."""
         while True:
             try:
                 # active_window now updated by ACE in world_model
                 self.brain.active_window = self.brain.world.active_app
-
-                if settings.llm.sentinel_enabled and not self.brain.conversation_active:
-                    from charlie.utils.system_state import is_system_active
-                    if not is_system_active(300):
-                        time.sleep(5)
-                        continue
-
-                    now = time.time()
-                    if now - self.last_sentinel_scan > settings.llm.sentinel_interval:
-                        self.run_sentinel_scan()
-                        self.last_sentinel_scan = now
             except Exception as e:
                 logger.error(f"peripheral_vision_err | {e}")
             time.sleep(2)

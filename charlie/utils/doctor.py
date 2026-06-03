@@ -1,5 +1,7 @@
 import gc
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -125,17 +127,62 @@ class Doctor:
             return "Unknown Process"
 
     def check_llm_health(self) -> bool:
-        """Pings NIM (NVIDIA) LLM service for model availability."""
-        try:
-            # Check NIM endpoint instead of LM Studio
-            nim_url = getattr(
-                self.settings.llm, "nim_base_url", "https://integrate.api.nvidia.com"
-            )
-            r = requests.get(f"{nim_url.rstrip('/')}/v1/models", timeout=5)
-            return r.status_code == 200
-        except Exception as e:
-            logger.debug(f"llm_health_check_failed | error={e}")
+        """Pings the universal LLM endpoint for model availability.
+
+        Behaviour (Task 1 of Core Loop plan):
+        - If LLM_API_KEY is empty, do NOT send an Authorization header
+          (sending ``Authorization: Bearer `` (empty value) makes NIM and
+          other OpenAI-compatible gateways return 401, which previously
+          caused a 30-second "CRITICAL_LLM" false-positive loop).
+        - 200-299  -> healthy, log ``llm_health_ok | status=<n>``
+        - 401/403  -> healthy, log ``llm_health_unauth | status=<n>``
+                       (server reachable, auth applied at chat time)
+        - 404      -> healthy, log ``llm_health_no_models_endpoint``
+        - 5xx      -> unhealthy, log ``llm_health_down | status=<n>``
+        - network  -> unhealthy, log ``llm_health_down | error=<str>``
+        """
+        llm_url = getattr(self.settings.llm, "llm_url", "")
+        if not llm_url:
+            logger.debug("llm_health_down | error=no_url")
             return False
+
+        llm_api_key = getattr(self.settings.llm, "llm_api_key", "") or ""
+        url = f"{llm_url.rstrip('/')}/v1/models"
+
+        # Build headers conditionally — omit Authorization when the key is empty.
+        if llm_api_key:
+            headers = {
+                "Accept": "application/json",
+                "Authorization": f"Bearer {llm_api_key}",
+            }
+        else:
+            headers = {"Accept": "application/json"}
+
+        try:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                status = getattr(resp, "status", 200)
+        except urllib.error.HTTPError as e:
+            status = e.code
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            logger.debug(f"llm_health_down | error={e}")
+            return False
+        except Exception as e:
+            logger.debug(f"llm_health_down | error={e}")
+            return False
+
+        if 200 <= status < 300:
+            logger.info(f"llm_health_ok | status={status}")
+            return True
+        if status in (401, 403):
+            logger.info(f"llm_health_unauth | status={status}")
+            return True
+        if status == 404:
+            logger.info("llm_health_no_models_endpoint")
+            return True
+
+        logger.warning(f"llm_health_down | status={status}")
+        return False
 
     def track_restart(self):
         """Registers a restart and checks for flood conditions."""
@@ -209,7 +256,7 @@ def run_self_check() -> DoctorReport:
     checks: list[DoctorCheck] = []
 
     # ── 1. NIM reachability ──
-    checks.append(_check_nim_reachability())
+    checks.append(_check_llm_reachability())
 
     # ── 2. STT model file ──
     checks.append(_check_file_exists(
@@ -253,60 +300,60 @@ def run_self_check() -> DoctorReport:
     )
 
 
-def _check_nim_reachability() -> DoctorCheck:
-    """Probe NIM base URL with a short timeout."""
-    nim_url = getattr(settings.llm, "nim_base_url", "")
-    if not nim_url:
+def _check_llm_reachability() -> DoctorCheck:
+    """Probe LLM endpoint with a short timeout."""
+    llm_url = getattr(settings.llm, "llm_url", "")
+    if not llm_url:
         return DoctorCheck(
-            name="nim_reachability",
+            name="llm_reachability",
             status="fail",
-            message="NIM base URL is not configured.",
-            cause="settings.llm.nim_base_url is empty",
-            remediation="Set NIM_BASE_URL in .env or charlie_config.json providers block.",
+            message="LLM URL is not configured.",
+            cause="settings.llm.llm_url is empty",
+            remediation="Set LLM_URL in .env to any OpenAI-compatible endpoint.",
         )
     try:
         r = requests.get(
-            f"{nim_url.rstrip('/')}/v1/models",
+            f"{llm_url.rstrip('/')}/v1/models",
             timeout=5,
-            headers={"Authorization": f"Bearer {settings.llm.nim_api_key or ''}"},
+            headers={"Authorization": f"Bearer {getattr(settings.llm, 'llm_api_key', '') or ''}"},
         )
         if r.status_code < 400:
             return DoctorCheck(
-                name="nim_reachability",
+                name="llm_reachability",
                 status="pass",
-                message=f"NIM endpoint reachable (HTTP {r.status_code}).",
+                message=f"LLM endpoint reachable (HTTP {r.status_code}).",
             )
         else:
             return DoctorCheck(
-                name="nim_reachability",
+                name="llm_reachability",
                 status="warn",
-                message=f"NIM endpoint returned HTTP {r.status_code}.",
+                message=f"LLM endpoint returned HTTP {r.status_code}.",
                 cause=f"Server responded with status {r.status_code}",
-                remediation="Check NIM_API_KEY and NIM_BASE_URL in .env.",
+                remediation="Check LLM_API_KEY and LLM_URL in .env.",
             )
     except requests.exceptions.Timeout:
         return DoctorCheck(
-            name="nim_reachability",
+            name="llm_reachability",
             status="fail",
-            message="NIM endpoint timed out (5s).",
-            cause="Network timeout reaching NIM API",
-            remediation="Verify NIM_BASE_URL is correct and the service is running.",
+            message="LLM endpoint timed out (5s).",
+            cause="Network timeout reaching LLM API",
+            remediation="Verify LLM_URL is correct and the service is running.",
         )
     except requests.exceptions.ConnectionError:
         return DoctorCheck(
-            name="nim_reachability",
+            name="llm_reachability",
             status="fail",
-            message="NIM endpoint connection refused.",
-            cause="Cannot connect to NIM API",
-            remediation="Verify NIM_BASE_URL is correct and the service is running.",
+            message="LLM endpoint connection refused.",
+            cause="Cannot connect to LLM API",
+            remediation="Verify LLM_URL is correct and the service is running.",
         )
     except Exception as e:
         return DoctorCheck(
-            name="nim_reachability",
+            name="llm_reachability",
             status="fail",
-            message=f"NIM check failed: {e}",
+            message=f"LLM check failed: {e}",
             cause=str(e),
-            remediation="Check network connectivity and NIM configuration.",
+            remediation="Check network connectivity and LLM configuration.",
         )
 
 

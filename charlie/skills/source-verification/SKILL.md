@@ -1,3 +1,14 @@
+---
+name: source-verification
+description: Fact-checking workflow, bias detection, credibility scoring for research sources
+metadata:
+  version: "1.0.0"
+  author: "system"
+  icon: "✅"
+  inject_mode: "on_demand"
+  tags: ["fact-checking", "verification", "credibility", "bias"]
+---
+
 # Source Verification Steps
 
 ## Purpose

@@ -256,6 +256,7 @@ class ControlServer:
 
         # Memory timeline
         self._app.router.add_get("/api/memory/search", self._handle_memory_search)
+        self._app.router.add_get("/api/memory/stats", self._handle_memory_stats)
 
         # Integrations
         self._app.router.add_get("/api/integrations", self._handle_get_integrations)
@@ -743,6 +744,17 @@ class ControlServer:
             await ws.send_json({"error": f"unknown_action: {action}"})
 
     # ── Memory timeline ──
+
+    async def _handle_memory_stats(self, request):
+        """GET /api/memory/stats — memory layer statistics."""
+        try:
+            if self.brain_rpc:
+                resp = await self.brain_rpc.request_async("GET_MEMORY_STATS", {})
+                if resp.ok and resp.data:
+                    return web.json_response(resp.data)
+        except Exception:
+            pass
+        return web.json_response({"working_turns": 0, "episodic": {}, "semantic": {}, "procedural": {}})
 
     async def _handle_memory_search(self, request):
         """GET /api/memory/search — search timeline via Brain RPC (Req 7.8)."""

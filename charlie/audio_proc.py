@@ -69,13 +69,14 @@ def _playback_worker(audio_q: multiprocessing.Queue, device_index: int, sample_r
                     continue
                 except EOFError:
                     break
-                except Exception:
+                except Exception as exc:
+                    logger.warning("audio_playback_chunk_failed | %s", exc)
                     continue
 
             if playback_active is not None:
                 playback_active.value = 0
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error("audio_playback_worker_crashed | %s", exc)
 
 
 class LocalTransport:
@@ -132,6 +133,7 @@ class AudioEngine:
         self.silence_limit = settings.audio.silence_limit
         self.silence_frames = 0
         self.active_idle_frames = 0
+        self._stt_min_frames = 10
         self.max_silence = int(self.silence_limit * 1000 / self.frame_duration)
 
         self.vad = webrtcvad.Vad(settings.audio.vad_mode)
@@ -156,7 +158,8 @@ class AudioEngine:
         self.ww_model = None
         self.tts_model = None
         self.input_q = queue.Queue()
-        self._ww_inference_chunks = 3  # Increase chunks for better cadence capture
+        self._ww_inference_chunks = 3
+        self._wake_confidence = getattr(settings.audio, "wake_confidence", 0.5)  # Increase chunks for better cadence capture
         self._stt_task_q = queue.Queue()  # Persistent STT worker queue (replaces thread-per-call)
         # SPEED: Pre-compute resample decision at init time — not on every frame
         self._needs_resample = self.input_rate != self.target_rate
@@ -177,6 +180,7 @@ class AudioEngine:
         # New: Multiprocessing Audio Playback
         self._playback_q = multiprocessing.Queue(maxsize=50)
         self._playback_active = multiprocessing.Value('i', 0)
+        self._playback_lock = threading.Lock()
         # Attach to queue for easy passing to worker
         self._playback_q.playback_active = self._playback_active
         self._playback_proc = None
@@ -204,7 +208,8 @@ class AudioEngine:
             try:
                 domain = urlparse(url).netloc
                 return domain
-            except Exception:
+            except Exception as exc:
+                logger.warning("audio_stream_read_failed | %s", exc)
                 return ""
         text = re.sub(r'https?://\S+', url_repl, text)
 
@@ -247,11 +252,63 @@ class AudioEngine:
 
     def run(self):
         pythoncom.CoInitialize()
+
+        # Probe the mic before loading any models. If the device is
+        # missing, post SUBSYSTEM_STATUS: disabled so the supervisor's
+        # gate (see charlie/watchdog/phoenix.py) skips heartbeat checks
+        # for this child. Re-probe every 30s so a hot-plugged mic
+        # comes back without a daemon restart.
+        if not self._probe_mic(self.device_index):
+            self._post_disabled(
+                reason=f"mic_index={self.device_index} not found"
+            )
+            import time as _time
+            self.heartbeat.value = _time.time()
+            stop = getattr(self, "stop_event", None) or self.interrupt_event
+            if stop is None:
+                logger.error("audio_disabled_no_stop_signal | exiting")
+                return 0
+            while not stop.is_set():
+                stop.wait(timeout=30)
+                if stop.is_set():
+                    break
+                if self._probe_mic(self.device_index):
+                    self.status_q.put_nowait({
+                        "type": "SUBSYSTEM_STATUS",
+                        "name": "audio",
+                        "state": "ok",
+                    })
+                    logger.info("audio_recovered | mic now available")
+                    return 0
+            return 0
+
         self.load_models()
         logger.info("audio_engine_ignition")
 
         self.transport = LocalTransport(self)
         self.transport.start_local_loop()
+
+    @staticmethod
+    def _probe_mic(mic_index: int) -> bool:
+        """Return True if the configured mic is openable. Wrap in try/except
+        so a missing device doesn't crash the boot path."""
+        try:
+            sd.query_devices(mic_index)
+            return True
+        except Exception as e:
+            logger.warning(f"audio_probe_failed | mic_index={mic_index} | error={e}")
+            return False
+
+    def _post_disabled(self, reason: str) -> None:
+        """Post a SUBSYSTEM_STATUS: disabled payload to the status queue."""
+        if self.status_q is None:
+            return
+        self.status_q.put_nowait({
+            "type": "SUBSYSTEM_STATUS",
+            "name": "audio",
+            "state": "disabled",
+            "reason": reason,
+        })
 
     def load_models(self):
         logger.info("audio_models_loading")
@@ -486,7 +543,9 @@ class AudioEngine:
                 self._speech_hysteresis -= 1
 
             # EFFECTIVE SPEAKING STATE: Logical speaking OR physical playback
-            effective_speaking = self.is_speaking or (self._playback_active.value == 1)
+            with self._playback_lock:
+                playback_on = self._playback_active.value == 1
+            effective_speaking = self.is_speaking or playback_on
 
             if effective_speaking:
                 # TOUGH INTERRUPT: Configurable sensitivity for barge-in
@@ -1046,7 +1105,8 @@ class AudioEngine:
                                             while not self.tts_q.empty():
                                                 try:
                                                     self.tts_q.get_nowait()
-                                                except Exception:
+                                                except Exception as exc:
+                                                    logger.warning("tts_split_failed | %s", exc)
                                                     break
                                             break
 
@@ -1097,7 +1157,8 @@ class AudioEngine:
 
                         if current_task is None:
                             break
-                    except Exception:
+                    except Exception as exc:
+                        logger.warning("tts_engine_step_failed | %s", exc)
                         break
                 self.is_speaking = False
                 self.volume.unduck()
@@ -1120,7 +1181,8 @@ class AudioEngine:
                         self.is_thinking = False
             except queue.Empty:
                 continue
-            except Exception:
+            except Exception as exc:
+                logger.warning("tts_main_loop_failed | %s", exc)
                 break
 
     def _thinking_hum_worker(self):
@@ -1142,8 +1204,8 @@ class AudioEngine:
 
                 try:
                     self._playback_q.put(samples)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("stt_transcribe_failed | %s", exc)
 
                 t += chunk_size
                 time.sleep(chunk_size / sample_rate)

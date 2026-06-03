@@ -1,10 +1,9 @@
-"""
+﻿"""
 charlie/intelligence/task_state.py
 
 Persistent task state management using SQLite.
 Enables task survival across crashes/restarts and recovery of interrupted work.
 
-Part of Phase A.1 — Core Autonomy Loops (Foundation)
 """
 
 import json

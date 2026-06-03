@@ -1,7 +1,6 @@
-"""
+﻿"""
 charlie/utils/cleanup.py
 
-Deletion Plan generator for the v0.1 hardening cleanup phase.
 Scans for legacy/stale/committed artifacts and produces a plan
 that requires explicit owner approval before any deletion occurs.
 """

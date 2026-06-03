@@ -1,11 +1,11 @@
-<#
+﻿<#
     start-charlie.ps1 - One-shot launcher for Charlie v0.1
 
     Brings up the entire stack:
-      1. Pre-flight checks (.env, NIM_API_KEY, uv, node)
+      1. Pre-flight checks (.env, LLM_URL, LLM_API_KEY, uv, node)
       2. Ensures Python deps (uv sync) and dashboard deps (npm install)
       3. Launches the Python daemon  (Brain, Audio, Vision, Browser, Telegram,
-         Control Server :8090, FastAPI backend :3005, tray)
+         Control Server :8090, tray)
       4. Launches the Next.js dashboard UI on :3000
       5. Opens the dashboard in your browser
 
@@ -58,21 +58,26 @@ if (-not (Test-Path $envPath)) {
         Write-Host "      Created .env from .env.example. Edit it to add your keys." -ForegroundColor Gray
     } else {
         New-Item -ItemType File -Path $envPath | Out-Null
-        Write-Host "      Created a blank .env. Add NIM_API_KEY=... to it." -ForegroundColor Gray
+        Write-Host "      Created a blank .env. Add LLM_URL and LLM_API_KEY to it." -ForegroundColor Gray
     }
 }
 
-# NIM_API_KEY set?
+# LLM_URL / LLM_API_KEY set?
 $envText = if (Test-Path $envPath) { Get-Content $envPath -Raw } else { "" }
-$nimSet = $envText -match "(?m)^\s*NIM_API_KEY\s*=\s*\S+"
-if (-not $nimSet) {
-    Write-Warn "NIM_API_KEY is not set in .env."
+$llmUrlSet = $envText -match "(?m)^\s*LLM_URL\s*=\s*\S+"
+$llmKeySet = $envText -match "(?m)^\s*LLM_API_KEY\s*=\s*\S+"
+if (-not $llmUrlSet) {
+    Write-Warn "LLM_URL is not set in .env."
     Write-Host "      Charlie's reasoning (the Brain) needs it. Add this line to .env:" -ForegroundColor Gray
-    Write-Host "          NIM_API_KEY=nvapi-xxxxxxxxxxxxxxxx" -ForegroundColor White
-    Write-Host "      Get a free key at https://build.nvidia.com/ (or set GEMINI_API_KEY as fallback)." -ForegroundColor Gray
-    Write-Host "      Launching anyway so you can explore the dashboard - the Brain will report the missing key." -ForegroundColor Gray
-} else {
-    Write-Ok "NIM_API_KEY present"
+    Write-Host "          LLM_URL=https://your-openai-compatible-endpoint/v1" -ForegroundColor White
+    Write-Host "      Any OpenAI-compatible server works (LM Studio, Ollama, NIM, OpenRouter, vLLM, etc.)." -ForegroundColor Gray
+}
+if (-not $llmKeySet) {
+    Write-Warn "LLM_API_KEY is not set. Some endpoints (NIM, OpenRouter) require it; local servers (LM Studio) do not."
+}
+if ($llmUrlSet) {
+    Write-Ok "LLM_URL present"
+    if ($llmKeySet) { Write-Ok "LLM_API_KEY present" }
 }
 
 # -----------------------------------------------------------------------------
@@ -131,7 +136,7 @@ Write-Host ""
 # -----------------------------------------------------------------------------
 # 5. LAUNCH
 # -----------------------------------------------------------------------------
-Write-Step "Launching Charlie daemon (Brain, Audio, Vision, Browser, Control Server :8090, backend :3005)"
+Write-Step "Launching Charlie daemon (Brain, Audio, Vision, Browser, Control Server :8090)"
 Start-Process -FilePath "uv" -ArgumentList "run","python","main.py","--daemon" `
     -WorkingDirectory $root -WindowStyle Normal
 Write-Ok "Daemon starting in its own window"

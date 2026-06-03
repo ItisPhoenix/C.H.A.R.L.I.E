@@ -13,38 +13,43 @@ load_dotenv(override=True)
 
 
 class LLMSettings:
+    """Universal LLM endpoints. Any OpenAI-compatible server (LM Studio, Ollama, NIM, OpenRouter, vLLM, etc.).
+
+    No defaults — the user MUST set LLM_URL in .env. Charlie will not start without it.
+    Vision is optional: if LLM_VISION_URL is empty, vision features are disabled with a warning.
+    Embeddings are computed on-device (no env vars for that).
+    """
+
     def __init__(self):
-        # --- Primary LLM (OpenAI-compatible, e.g. LM Studio / Ollama) ---
-        self.llm_url = os.getenv("LLM_URL", "http://localhost:1234")
-        # --- NIM (primary chat model) ---
-        self.nim_base_url = os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com")
-        self.nim_api_key = os.getenv("NIM_API_KEY")
-        self.primary_model = os.getenv("NIM_PRIMARY_MODEL", "meta/llama-3.3-70b-instruct")
-        # --- Vision (non-NIM, separate endpoint, e.g. LM Studio) ---
-        self.vision_model = os.getenv("VISION_MODEL")
-        self.vision_url = os.getenv("VISION_LLM_URL", "http://127.0.0.1:1234/v1")
-        # --- Embeddings ---
-        self.embedding_url = os.getenv("EMBEDDING_URL", "http://127.0.0.1:1234/api/embeddings")
-        self.embedding_model = os.getenv("EMBEDDING_MODEL")
-        # --- Gemini (optional, for Gemini Live voice mode and Gemini provider) ---
-        self.gemini_api_key = os.getenv("GEMINI_API_KEY")
-        # --- Shared inference params ---
-        self.keep_alive = -1
-        self.sentinel_enabled = False
-        self.sentinel_interval = 60
-        self.vram_limit_mb = 7168
-        self.context_window = 8192
-        self.temperature = 0.2
+        # --- Primary chat (any OpenAI-compatible server) ---
+        self.llm_url: str = os.getenv("LLM_URL", "").rstrip("/")
+        self.llm_api_key: str = os.getenv("LLM_API_KEY", "")
+        self.llm_model: str = os.getenv("LLM_MODEL", "")
+        # --- Vision (separate endpoint, optional) ---
+        self.llm_vision_url: str = os.getenv("LLM_VISION_URL", "").rstrip("/")
+        self.llm_vision_api_key: str = os.getenv("LLM_VISION_API_KEY", "")
+        self.llm_vision_model: str = os.getenv("LLM_VISION_MODEL", "")
+
+    def validate(self) -> list[str]:
+        """Return a list of human-readable problems. Empty list = OK."""
+        problems = []
+        if not self.llm_url:
+            problems.append("LLM_URL is empty. Set it in .env to any OpenAI-compatible endpoint.")
+        if not self.llm_model:
+            problems.append("LLM_MODEL is empty. Set it in .env to a model name served by LLM_URL.")
+        if not problems and self.llm_vision_url and not self.llm_vision_model:
+            problems.append("LLM_VISION_URL is set but LLM_VISION_MODEL is empty.")
+        return problems
 
 
 class ResourceSettings:
     def __init__(self):
-        self.vram_budget_mb = 7168
-        self.vram_warning_mb = 6500
-        self.vram_threshold_mb = 6500  # kept for backward compat
+        from charlie.utils.vram import detect_total_vram_mb, calculate_budget_mb
+        total = detect_total_vram_mb()
+        self.vram_total_mb = total
+        self.vram_budget_mb = calculate_budget_mb(total)
         self.model_priority = {"text": "primary", "vision": "on_demand"}
         self.model_unload_delay_s = 30
-        self.model_unload_delay = 30  # kept for backward compat
         self.max_context_tokens = 4096
 
 
@@ -52,23 +57,15 @@ class AudioSettings:
     def __init__(self):
         self.wakeword_models = ["charlie/models/charlie.onnx"]
         self.stt_model = "distil-large-v3"
-        self.stt_device = "cuda"
-        self.stt_initial_prompt = "Charlie, C.H.A.R.L.I.E., Phoenix protocol, system commands, code, terminal."
-        self.stt_language = "en"
-        self.kokoro_voice = "af_heart"
-        self.kokoro_speed = 1.0
-        self.kokoro_lang = "en-us"
-        self.voice_mode = "local"
-        self.wake_threshold = 0.02
         self.mic_index = int(os.getenv("MIC_INDEX", "1"))
         self.output_index = int(os.getenv("OUTPUT_INDEX", "4"))
         self.sample_rate = 16000
         self.target_rate = 16000
         self.conversation_timeout = 300
-        self.barge_in_sensitivity = 0.3
         self.silence_limit = 0.4
         self.vad_mode = 3
         self.duck_steps = 8
+        self.wake_confidence = float(os.getenv("WAKE_CONFIDENCE", "0.5"))
 
 
 class WatchdogSettings:
@@ -76,11 +73,6 @@ class WatchdogSettings:
         self.telegram_token = os.getenv("TELEGRAM_TOKEN")
         self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.reports_path = "charlie/reports"
-        self.patch_timeout = 60
-        # Deprecated: kept for backward compatibility only. The authoritative
-        # auto-patcher flag is now ``settings.security.auto_patcher_enabled``
-        # (default False). Do not read this attribute for gating decisions.
-        self.auto_patch = False
 
 
 class SecuritySettings:
@@ -93,7 +85,6 @@ class SecuritySettings:
         # canonical feature flags; the Operator may enable them via
         # charlie_config.json ("safety" block) and changes are persisted back.
         self.self_modify_enabled = False
-        self.auto_patcher_enabled = False
 
 
 class AuditSettings:
@@ -107,16 +98,12 @@ class AuditSettings:
 
 class StartupSettings:
     def __init__(self):
-        self.run_news_sweep = False
         self.play_music = False
-        self.speak_welcome = True
 
 
 class PersonaSettings:
     def __init__(self):
-        self.address_user_as = "Sir"
-        self.response_style = "formal"
-        self.verbosity = "concise"
+        pass
 
 
 class Settings:
@@ -147,7 +134,6 @@ class Settings:
             "security": _obj_to_dict(self.security),
             "audit": _obj_to_dict(self.audit),
             "startup": _obj_to_dict(self.startup),
-            "persona": _obj_to_dict(self.persona),
             "resources": _obj_to_dict(self.resources),
             "integrations": self.integrations,
             "providers": self.providers,
@@ -171,7 +157,7 @@ def resolve_env_vars(obj):
 
 def load_json_overrides():
     """Reads charlie_config.json and overrides default settings."""
-    config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
+    config_path = Path(__file__).parent.parent / "charlie_config.json"
     if not config_path.exists():
         return
 
@@ -179,25 +165,13 @@ def load_json_overrides():
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # Voice / Audio
+        # Audio
         if "voice" in data:
             v = data["voice"]
-            if "tts_speed" in v:
-                settings.audio.kokoro_speed = v["tts_speed"]
-            if "kokoro_voice" in v:
-                settings.audio.kokoro_voice = v["kokoro_voice"]
-            if "voice_mode" in v:
-                settings.audio.voice_mode = v["voice_mode"]
             if "mic_index" in v:
                 settings.audio.mic_index = int(v["mic_index"])
             if "output_index" in v:
                 settings.audio.output_index = int(v["output_index"])
-            if "wake_word_sensitivity" in v:
-                sens = float(v["wake_word_sensitivity"])
-                settings.audio.wake_threshold = max(0.01, round((1.0 - sens) ** 2, 4))
-                logger.debug(
-                    f"Applied dynamic wake_threshold: {settings.audio.wake_threshold} (from sensitivity {sens})"
-                )
 
         # Safety / Self-mod
         if "safety" in data:
@@ -208,35 +182,12 @@ def load_json_overrides():
                 ]
             if "self_modify_enabled" in s:
                 settings.security.self_modify_enabled = s["self_modify_enabled"]
-            if "auto_patcher_enabled" in s:
-                settings.security.auto_patcher_enabled = s["auto_patcher_enabled"]
 
         # Startup
         if "startup" in data:
             st = data["startup"]
-            if "run_news_sweep" in st:
-                settings.startup.run_news_sweep = st["run_news_sweep"]
             if "play_music" in st:
                 settings.startup.play_music = st["play_music"]
-            if "speak_welcome" in st:
-                settings.startup.speak_welcome = st["speak_welcome"]
-
-        # Personality
-        if "personality" in data:
-            p = data["personality"]
-            if "address_user_as" in p:
-                settings.persona.address_user_as = p["address_user_as"]
-            if "response_style" in p:
-                settings.persona.response_style = p["response_style"]
-            if "verbosity" in p:
-                settings.persona.verbosity = p["verbosity"]
-        # Vision / Sentinel
-        if "vision" in data:
-            v = data["vision"]
-            if "sentinel_enabled" in v:
-                settings.llm.sentinel_enabled = v["sentinel_enabled"]
-            if "sentinel_interval" in v:
-                settings.llm.sentinel_interval = int(v["sentinel_interval"])
 
         # Providers (LLM model routing — values may reference $ENV_VAR)
         if "providers" in data:
@@ -247,23 +198,20 @@ def load_json_overrides():
             r = data["resources"]
             if "vram_budget_mb" in r:
                 settings.resources.vram_budget_mb = int(r["vram_budget_mb"])
-            if "vram_warning_mb" in r:
-                settings.resources.vram_warning_mb = int(r["vram_warning_mb"])
             if "model_unload_delay_s" in r:
                 settings.resources.model_unload_delay_s = int(r["model_unload_delay_s"])
-                settings.resources.model_unload_delay = int(r["model_unload_delay_s"])
             if "model_priority" in r:
                 settings.resources.model_priority = r["model_priority"]
 
         # LLM overrides
         if "llm" in data:
             l = data["llm"]
+            if "url" in l and l["url"]:
+                settings.llm.llm_url = l["url"].rstrip("/")
             if "api_key" in l and l["api_key"]:
-                settings.llm.nim_api_key = l["api_key"]
+                settings.llm.llm_api_key = l["api_key"]
             if "model" in l and l["model"]:
-                settings.llm.primary_model = l["model"]
-            if "provider" in l:
-                settings.integrations["llm_provider"] = l["provider"]
+                settings.llm.llm_model = l["model"]
 
         # Audio overrides (distinct from "voice" which controls TTS/kokoro)
         if "audio" in data:
@@ -306,12 +254,12 @@ def persist_safety_flags() -> None:
     """Persist the current safety feature flags back to charlie_config.json (Req 17.6).
 
     Merges the live ``settings.security`` safety flags (``self_modify_enabled``,
-    ``auto_patcher_enabled``, ``require_confirmation_tier1``) into the file's
+    ``require_confirmation_tier1``) into the file's
     ``"safety"`` object so changes survive a restart. Other top-level keys and
     existing ``safety`` keys are preserved. Tolerates the file not existing by
     creating it.
     """
-    config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
+    config_path = Path(__file__).parent.parent / "charlie_config.json"
 
     data = {}
     if config_path.exists():
@@ -328,7 +276,6 @@ def persist_safety_flags() -> None:
     if not isinstance(safety, dict):
         safety = {}
     safety["self_modify_enabled"] = settings.security.self_modify_enabled
-    safety["auto_patcher_enabled"] = settings.security.auto_patcher_enabled
     safety["require_confirmation_tier1"] = settings.security.require_confirmation_tier1
     data["safety"] = safety
 
@@ -360,7 +307,7 @@ def setup_windows_vault():
     class DATA_BLOB(ctypes.Structure):
         _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
 
-    entropy = "CHARLIE_ENTROPY_KEY"
+    entropy = ""
 
     def encrypt_dpapi(data: str) -> bytes:
         data_bytes = data.encode('utf-8')
@@ -408,8 +355,7 @@ def setup_windows_vault():
 
     service_name = "charlie_credentials"
     keys_to_migrate = {
-        "NIM_API_KEY": "nim_api_key",
-        "OPENROUTER_API_KEY": "openrouter_api_key",
+        "LLM_API_KEY": "llm_api_key",
         "TELEGRAM_TOKEN": "telegram_token",
         "TELEGRAM_CHAT_ID": "telegram_chat_id",
     }
@@ -439,8 +385,8 @@ def setup_windows_vault():
             # 3. Populate back to environment variable and LLM / Watchdog Settings
             if decrypted_val:
                 os.environ[env_var] = decrypted_val
-                if env_var == "NIM_API_KEY":
-                    settings.llm.nim_api_key = decrypted_val
+                if env_var == "LLM_API_KEY":
+                    settings.llm.llm_api_key = decrypted_val
                 elif env_var == "TELEGRAM_TOKEN":
                     settings.supervisor.telegram_token = decrypted_val
                 elif env_var == "TELEGRAM_CHAT_ID":

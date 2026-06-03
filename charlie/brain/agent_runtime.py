@@ -74,15 +74,60 @@ class AgentRuntime:
     # ------------------------------------------------------------------
 
     async def execute(
-        self, agent_spec: Any, task: str, context: str = ""
+        self, agent_spec: Any, task: str, context: str = "",
+        task_chain: list = None,
     ) -> AgentResult:
         """Execute a task using the agent's spec.
 
         1. Build system prompt from agent_spec.system_prompt + skill content
         2. Build tool subset from agent_spec.tools
-        3. Run ReAct loop: Think -> Act (tool call) -> Observe -> ... until done
-        4. Return AgentResult with summary and tool calls
+        3. If task_chain provided, execute each step sequentially via ReAct loop
+        4. Otherwise run single ReAct loop: Think -> Act -> Observe -> ... until done
+        5. Return AgentResult with summary and tool calls
         """
+        # Sequential task chain execution
+        if task_chain and len(task_chain) > 1:
+            return await self._execute_chain(agent_spec, task, task_chain, context)
+
+        return await self._run_react_loop(agent_spec, task, context)
+
+    async def _execute_chain(
+        self, agent_spec: Any, goal: str, task_chain: list, context: str = ""
+    ) -> AgentResult:
+        """Execute a chain of sub-tasks sequentially, feeding results forward."""
+        start_time = time.time()
+        agent_name = getattr(agent_spec, "name", "unknown")
+        all_tool_calls = []
+        step_results = []
+
+        for i, step in enumerate(task_chain):
+            step_desc = step.get("description", step.get("tool", f"step {i+1}"))
+            logger.info("chain_step | agent=%s | step=%d/%d | desc=%s",
+                        agent_name, i+1, len(task_chain), step_desc[:60])
+
+            # Feed previous results into context
+            prev_context = "\n".join(step_results[-3:]) if step_results else ""
+            step_context = f"{context}\nPrevious results:\n{prev_context}" if prev_context else context
+
+            result = await self._run_react_loop(agent_spec, step_desc, step_context)
+            all_tool_calls.extend(result.tool_calls)
+            step_results.append(result.summary)
+
+            if not result.success:
+                logger.warning("chain_step_failed | step=%d | agent=%s", i+1, agent_name)
+
+        return AgentResult(
+            success=True,
+            task=goal,
+            agent_name=agent_name,
+            summary="\n\n".join(step_results),
+            tool_calls=all_tool_calls,
+        )
+
+    async def _run_react_loop(
+        self, agent_spec: Any, task: str, context: str = ""
+    ) -> AgentResult:
+        """Single ReAct loop execution."""
         start_time = time.time()
         agent_name = getattr(agent_spec, "name", "unknown")
         task_id = f"{agent_name}_{int(start_time)}"
@@ -137,6 +182,7 @@ class AgentRuntime:
         tools: list[str],
         agent_spec: Any,
         ctx: AgentTaskContext,
+        step_timeout: int = 30,
     ) -> AgentResult:
         """Run the ReAct loop for an agent.
 
@@ -175,6 +221,18 @@ class AgentRuntime:
                     summary="Timeout",
                     tool_calls=tool_calls_made,
                 )
+
+            # Per-step timeout
+            elapsed = time.time() - start_time
+            if elapsed > step_timeout:
+                logger.warning(f"agent_step_timeout | agent={ctx.agent_name}")
+                return AgentResult(success=False, task=ctx.task_id, agent_name=ctx.agent_name, summary="Step timeout", tool_calls=tool_calls_made)
+
+            # Per-step timeout check
+            elapsed = time.time() - start_time
+            if iteration > 0 and elapsed > 60:
+                logger.warning(f"agent_step_timeout | agent={ctx.agent_name} | elapsed={elapsed:.1f}s")
+                return AgentResult(success=False, task=ctx.task_id, agent_name=ctx.agent_name, summary="Step timeout", tool_calls=tool_calls_made)
 
             # Call LLM
             logger.debug(
@@ -336,7 +394,8 @@ class AgentRuntime:
     # ------------------------------------------------------------------
 
     async def _execute_tool(
-        self, tool_call: dict, allowed_tools: list[str]
+        self, tool_call: dict, allowed_tools: list[str],
+        retries: int = 2,
     ) -> str:
         """Execute a single tool call via brain.execute_tools().
 
@@ -349,14 +408,20 @@ class AgentRuntime:
             logger.warning(f"agent_tool_denied | {msg}")
             return msg
 
-        try:
-            result = self.brain.execute_tools(
-                {"tool": tool_name, "args": tool_call.get("args", {})}
-            )
-            return str(result)
-        except Exception as e:
-            logger.error(f"agent_tool_error | tool={tool_name} | {e}")
-            return f"Error: {e}"
+        last_error = ""
+        for attempt in range(retries + 1):
+            try:
+                result = self.brain.execute_tools(
+                    {"tool": tool_name, "args": tool_call.get("args", {})}
+                )
+                return str(result)
+            except Exception as e:
+                last_error = str(e)
+                if attempt < retries:
+                    logger.warning(f"agent_tool_retry | tool={tool_name} | attempt={attempt+1}/{retries} | {e}")
+                    __import__("time").sleep(0.5 * (attempt + 1))
+        logger.error(f"agent_tool_error | tool={tool_name} | {last_error}")
+        return f"Error after {retries+1} attempts: {last_error}"
 
     # ------------------------------------------------------------------
     # Helpers

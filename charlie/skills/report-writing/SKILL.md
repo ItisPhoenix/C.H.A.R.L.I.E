@@ -1,3 +1,14 @@
+---
+name: report-writing
+description: Report templates (pentest, research, technical), writing guide, documentation standards
+metadata:
+  version: "1.0.0"
+  author: "system"
+  icon: "📝"
+  inject_mode: "on_demand"
+  tags: ["writing", "documentation", "reports", "templates"]
+---
+
 # Report Writing Guide
 
 ## Purpose

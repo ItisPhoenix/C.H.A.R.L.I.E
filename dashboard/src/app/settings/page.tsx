@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { GlassCard } from '@/components/ui/GlassCard'
 import { Button } from '@/components/ui/Button'
 import { Toggle } from '@/components/ui/Toggle'
@@ -10,39 +10,31 @@ import { ErrorState } from '@/components/ui/ErrorState'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { fetchSettings, saveSettings as saveSettingsApi, shutdownDaemon, rebootDaemon } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { Cpu, Volume2, Shield, Zap, User, ChevronDown, Save, Eye, EyeOff, X } from 'lucide-react'
+import { Cpu, Volume2, Shield, Zap, ChevronDown, Save, Eye, EyeOff, X } from 'lucide-react'
 import type { CharlieSettings } from '@/lib/types'
 
-type SectionKey = 'llm' | 'audio' | 'security' | 'resources' | 'persona'
+type SectionKey = 'llm' | 'audio' | 'security' | 'resources'
 
 const SECTION_LABELS: Record<SectionKey, string> = {
   llm: 'LLM Configuration',
   audio: 'Audio & Voice',
   security: 'Security & Safety',
   resources: 'Resources',
-  persona: 'Persona',
 }
 
 const FIELD_LABELS: Record<string, Record<string, string>> = {
   llm: {
-    provider: 'Provider',
-    llm_url: 'LLM Endpoint',
-    nim_api_key: 'API Key',
-    primary_model: 'Primary Model',
-    vision_model: 'Vision Model',
-    vision_url: 'Vision Endpoint',
-    embedding_url: 'Embedding Endpoint',
-    embedding_model: 'Embedding Model',
-    context_window: 'Context Window',
-    temperature: 'Temperature',
+    llm_url: 'LLM Endpoint (full URL)',
+    llm_api_key: 'API Key',
+    llm_model: 'Model Name',
+    llm_vision_url: 'Vision Endpoint (optional)',
+    llm_vision_api_key: 'Vision API Key',
+    llm_vision_model: 'Vision Model Name',
   },
   audio: {
     stt_model: 'STT Model',
-    pocket_tts_model: 'TTS Model',
-    pocket_tts_speed: 'TTS Speed',
     mic_index: 'Microphone Index',
     output_index: 'Output Index',
-    voice_mode: 'Voice Mode',
   },
   security: {
     tier_2_countdown: 'Tier 2 Countdown (s)',
@@ -55,11 +47,6 @@ const FIELD_LABELS: Record<string, Record<string, string>> = {
   resources: {
     vram_budget_mb: 'VRAM Budget (MB)',
   },
-  persona: {
-    address_user_as: 'Address User As',
-    response_style: 'Response Style',
-    verbosity: 'Verbosity',
-  },
 }
 
 const SECTION_ICONS: Record<SectionKey, React.ComponentType<Record<string, unknown>>> = {
@@ -67,26 +54,10 @@ const SECTION_ICONS: Record<SectionKey, React.ComponentType<Record<string, unkno
   audio: Volume2 as React.ComponentType<Record<string, unknown>>,
   security: Shield as React.ComponentType<Record<string, unknown>>,
   resources: Zap as React.ComponentType<Record<string, unknown>>,
-  persona: User as React.ComponentType<Record<string, unknown>>,
-}
-
-const PROVIDER_ENDPOINTS: Record<string, string> = {
-  'LM Studio': 'http://localhost:1234',
-  'NVIDIA NIM': 'https://integrate.api.nvidia.com',
-  'OpenRouter': 'https://openrouter.ai/api/v1',
-  'Gemini': 'https://generativelanguage.googleapis.com/v1beta',
-  'Groq': 'https://api.groq.com/openai/v1',
 }
 
 function isSensitiveField(key: string): boolean {
   return /api_key|token|secret|password/i.test(key)
-}
-
-function detectProvider(url: string): string {
-  for (const [provider, endpoint] of Object.entries(PROVIDER_ENDPOINTS)) {
-    if (url === endpoint) return provider
-  }
-  return ''
 }
 
 /** Tag/chip input for string[] fields (e.g. restricted_paths) */
@@ -159,16 +130,11 @@ export default function SettingsPage() {
   const [actionLoading, setActionLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
-  const [selectedProvider, setSelectedProvider] = useState<string>('')
   const [visibleSecrets, setVisibleSecrets] = useState<Set<string>>(new Set())
-  const userCustomizedUrl = useRef(false)
-  const initialDetectionDone = useRef(false)
 
   const loadSettings = useCallback(async () => {
     setLoading(true)
     setError(null)
-    initialDetectionDone.current = false
-    userCustomizedUrl.current = false
     try {
       const data = await fetchSettings()
       setSettings(data)
@@ -182,15 +148,6 @@ export default function SettingsPage() {
   useEffect(() => {
     loadSettings()
   }, [loadSettings])
-
-  // Auto-detect provider from current llm_url on initial load
-  useEffect(() => {
-    if (settings?.llm?.llm_url && !initialDetectionDone.current) {
-      const detected = detectProvider(settings.llm.llm_url as string)
-      if (detected) setSelectedProvider(detected)
-      initialDetectionDone.current = true
-    }
-  }, [settings?.llm?.llm_url])
 
   function toggleSection(key: SectionKey) {
     setCollapsed((prev) => {
@@ -213,20 +170,7 @@ export default function SettingsPage() {
   }
 
   function handleFieldChange(section: string, key: string, value: unknown) {
-    if (section === 'llm' && key === 'llm_url') {
-      userCustomizedUrl.current = true
-    }
     updateField(section, key, value)
-  }
-
-  function handleProviderChange(newProvider: string) {
-    setSelectedProvider(newProvider)
-    // Auto-fill endpoint only if user hasn't manually customized the URL
-    if (PROVIDER_ENDPOINTS[newProvider] && !userCustomizedUrl.current) {
-      updateField('llm', 'llm_url', PROVIDER_ENDPOINTS[newProvider])
-    }
-    // Reset the customization flag when explicitly picking a provider
-    userCustomizedUrl.current = false
   }
 
   function toggleSecretVisibility(fieldId: string) {
@@ -316,7 +260,7 @@ export default function SettingsPage() {
     )
   }
 
-  const sections: SectionKey[] = ['llm', 'audio', 'security', 'resources', 'persona']
+  const sections: SectionKey[] = ['llm', 'audio', 'security', 'resources']
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
@@ -369,25 +313,6 @@ export default function SettingsPage() {
 
             {isOpen && (
               <div className="border-t border-charlie-border px-4 py-3 space-y-4">
-                {/* Provider dropdown — rendered first in LLM section */}
-                {sectionKey === 'llm' && (
-                  <div className="grid grid-cols-[1fr_auto] gap-4 items-center">
-                    <span className="text-sm text-charlie-dim truncate" title="Provider">
-                      Provider
-                    </span>
-                    <select
-                      value={selectedProvider}
-                      onChange={(e) => handleProviderChange(e.target.value)}
-                      className="text-sm text-charlie-text font-mono bg-charlie-card border border-charlie-border rounded-lg px-3 py-1.5 w-full max-w-[260px] focus:border-charlie-cyan focus:outline-none transition-colors cursor-pointer"
-                    >
-                      <option value="">Select provider...</option>
-                      {Object.keys(PROVIDER_ENDPOINTS).map((p) => (
-                        <option key={p} value={p}>{p}</option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-
                 {Object.entries(sectionData).map(([key, value]) => {
                   const fieldId = `${sectionKey}.${key}`
                   const sensitive = isSensitiveField(key)

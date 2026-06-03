@@ -48,6 +48,9 @@ STATUS_EVENT_MAP: dict[str, str] = {
     "WIDGET_SHOW": "widget_show",
     "WIDGET_HIDE": "widget_hide",
     "PROACTIVE_CHAT": "proactive_chat",
+    "SKILL_CREATED": "skill_created",
+    "ORCHESTRATOR_UPDATE": "orchestrator_update",
+    "ORCHESTRATOR_UPDATE": "orchestrator_update",
     "TIME_UPDATE": "time_update",
 }
 

@@ -13,7 +13,7 @@ _CREDENTIAL_PATTERNS = [
     (re.compile(r'(?i)(api[_-]?key|token|password|secret|pwd)["\s:=]+[a-zA-Z0-9_\-\.]{8,}', re.IGNORECASE), r"\1: [REDACTED]"),
     (re.compile(r'(?i)(authorization:\s*bearer\s+)[a-zA-Z0-9_\-\.]+', re.IGNORECASE), r"\1[REDACTED]"),
     (re.compile(r'(?i)(telegram_token|TELEGRAM_TOKEN)["\s:=]+[a-zA-Z0-9:_\-]+'), r"\1=[REDACTED]"),
-    (re.compile(r'(?i)(NIM_API_KEY|nim_api_key)["\s:=]+[a-zA-Z0-9_\-\.]+'), r"\1=[REDACTED]"),
+    (re.compile(r'(?i)(LLM_API_KEY|llm_api_key)["\s:=]+[a-zA-Z0-9_\-\.]+'), r"\1=[REDACTED]"),
 ]
 
 # Filesystem-path patterns redact local usernames from paths. These are applied
@@ -33,7 +33,7 @@ def _apply_patterns(text, patterns):
 
 def redact_secrets(text: str) -> str:
     """Mask credential patterns (API key, token, password, secret, bearer auth,
-    NIM_API_KEY, TELEGRAM_TOKEN) in ``text``.
+    LLM_API_KEY, TELEGRAM_TOKEN) in ``text``.
 
     This is a pure, side-effect-free helper (no logging, no I/O) and the single
     source of truth for credential redaction. Strings without secrets are

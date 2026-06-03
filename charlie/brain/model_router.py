@@ -633,45 +633,35 @@ class ModelRouter:
         logger.info("loading_from_settings | no providers config, using env vars")
         router = cls()
 
-        # NIM — primary for reasoning/chat/tools
-        nim_config = ProviderConfig(
-            name="nim",
-            base_url=settings.llm.nim_base_url.rstrip("/"),
-            model=settings.llm.primary_model or "meta/llama-3.3-70b-instruct",
-            api_key=getattr(settings.llm, "nim_api_key", "") or "",
-            roles=["reasoning", "chat", "tools"],
-            priority=1,
-            timeout=60,
-        )
-        router.register(BaseProvider(nim_config))
+        # Universal LLM endpoint — one OpenAI-compatible server for chat/reasoning/tools
+        if settings.llm.llm_url:
+            llm_config = ProviderConfig(
+                name="llm",
+                base_url=settings.llm.llm_url.rstrip("/"),
+                model=settings.llm.llm_model or "default",
+                api_key=getattr(settings.llm, "llm_api_key", "") or "",
+                roles=["reasoning", "chat", "tools"],
+                priority=1,
+                timeout=60,
+            )
+            router.register(BaseProvider(llm_config))
+        else:
+            logger.warning("llm_url_empty | no_provider_registered | set LLM_URL in .env")
 
-        # OpenRouter — vision primary
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-        if openrouter_key:
-            or_config = ProviderConfig(
-                name="openrouter",
-                base_url="https://openrouter.ai/api/v1",
-                model="qwen/qwen-2.5-vl-72b-instruct:free",
-                api_key=openrouter_key,
+        # Vision — separate endpoint, optional
+        if getattr(settings.llm, "llm_vision_url", ""):
+            vision_config = ProviderConfig(
+                name="vision",
+                base_url=settings.llm.llm_vision_url.rstrip("/"),
+                model=getattr(settings.llm, "llm_vision_model", "") or "default",
+                api_key=getattr(settings.llm, "llm_vision_api_key", "") or "",
                 roles=["vision"],
                 priority=1,
                 timeout=90,
             )
-            router.register(BaseProvider(or_config))
-
-        # LM Studio — vision fallback + embeddings
-        vision_url = getattr(settings.llm, "vision_url", "")
-        if vision_url:
-            lm_config = ProviderConfig(
-                name="lmstudio",
-                base_url=vision_url.rstrip("/"),
-                model=getattr(settings.llm, "vision_model", "qwen3-vl-8b") or "qwen3-vl-8b",
-                api_key="",
-                roles=["vision"],
-                priority=2,
-                timeout=60,
-            )
-            router.register(BaseProvider(lm_config))
+            router.register(BaseProvider(vision_config))
+        else:
+            logger.info("vision_disabled | set LLM_VISION_URL and LLM_VISION_MODEL to enable")
 
         return router
 

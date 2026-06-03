@@ -25,6 +25,37 @@ MONITOR_INTERVAL = 2.5  # Frequency of watchdog checks
 # of a blocking ``time.sleep`` that would stall detection of other failures.
 RESTART_COOLDOWN = 10
 
+
+def _consume_disabled_statuses(
+    status_queues: dict[str, "multiprocessing.Queue"],
+    disabled: set[str],
+) -> None:
+    """Drain SUBSYSTEM_STATUS messages from status queues.
+
+    - ``state=disabled`` adds the child name to *disabled*.
+    - ``state=ok`` removes the child name from *disabled* (recovery).
+    - All other message types (and non-dict payloads) are silently dropped.
+    """
+    import queue as _queue
+
+    for name, q in status_queues.items():
+        while True:
+            try:
+                msg = q.get_nowait()
+            except (_queue.Empty, EOFError, OSError):
+                break
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("type") != "SUBSYSTEM_STATUS":
+                continue
+            child_name = msg.get("name", name)
+            state = msg.get("state", "")
+            if state == "disabled":
+                disabled.add(child_name)
+            elif state == "ok":
+                disabled.discard(child_name)
+
+
 # ── Shared Entry Points ──────────────────────────────────────────────────────
 
 
@@ -139,231 +170,6 @@ def run_vision(brain_task_q, status_q, heartbeat):
 # ── Self-Repair Engine ───────────────────────────────────────────────────────
 
 
-class SelfHealer:
-    def __init__(self):
-        self.log_path = "logs/charlie.log"
-        self.model = settings.llm.primary_model.split("/")[-1]
-        self.patch_dir = "hotpatches"
-        os.makedirs(self.patch_dir, exist_ok=True)
-
-    def extract_traceback(self):
-        """Extracts the most recent traceback from logs."""
-        if not os.path.exists(self.log_path):
-            return None
-
-        # Read last 50KB of the log file for efficiency
-        try:
-            filesize = os.path.getsize(self.log_path)
-            read_size = min(filesize, 50 * 1024)
-            with open(self.log_path, "rb") as f:
-                f.seek(filesize - read_size)
-                lines = f.read().decode("utf-8", errors="ignore").splitlines()
-        except Exception as e:
-            logger.debug(f"efficient_log_read_failed | error={e}")
-            with open(self.log_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-
-        tb_lines = []
-        found_start = False
-        # Search backwards for the start of a traceback
-        for line in reversed(lines[-200:]):
-            tb_lines.insert(0, line)
-            if "Traceback (most recent call last):" in line:
-                found_start = True
-                break
-
-        return "\n".join(tb_lines) if found_start else None
-
-    def rollback(self, target_file):
-        """Restores file from latest backup in hotpatches if exists."""
-        backups = sorted(
-            Path(self.patch_dir).glob(f"{Path(target_file).name}.*"),
-            key=os.path.getmtime,
-            reverse=True,
-        )
-        if backups:
-            shutil.copy2(backups[0], target_file)
-            logger.info(f"rollback_applied | file={target_file} | backup={backups[0]}")
-            return True
-        return False
-
-    def _sanitize_traceback(self, traceback: str) -> str:
-        """Sanitize traceback before sending to LLM to prevent prompt injection."""
-        # Remove any lines that look like prompt injection attempts
-        dangerous_patterns = [
-            r'ignore\s+(previous|above|all)\s+instructions',
-            r'you\s+are\s+now',
-            r'system\s*:\s*',
-            r'<\|im_start\|>',
-            r'<\|im_end\|>',
-            r'ASSISTANT\s*:',
-            r'USER\s*:',
-            r'```\s*(system|prompt|instruction)',
-        ]
-        lines = traceback.split('\n')
-        sanitized = []
-        for line in lines:
-            is_dangerous = any(re.search(p, line, re.IGNORECASE) for p in dangerous_patterns)
-            if not is_dangerous:
-                sanitized.append(line)
-        return '\n'.join(sanitized[:100])  # Limit length
-
-    def _check_local_server(self) -> bool:
-        """Check if the local LLM server is reachable before attempting self-repair."""
-        try:
-            url = settings.llm.llm_url.rstrip("/")
-            # Try a lightweight health endpoint first
-            resp = requests.get(f"{url}/v1/models", timeout=3)
-            if resp.status_code == 200:
-                return True
-            # Fallback: try the Ollama-style tags endpoint
-            resp = requests.get(f"{url}/api/tags", timeout=3)
-            return resp.status_code == 200
-        except Exception:
-            return False
-
-    def attempt_patch(self, traceback):
-        """Generates a fix proposal and saves it to hotpatches."""
-        logger.info("self_repair_initiated")
-
-        # Verify local LLM server is available before attempting repair
-        if not self._check_local_server():
-            logger.warning("self_repair_skipped | local_llm_server_unavailable | url=%s", settings.llm.llm_url)
-            return False
-
-        # Sanitize traceback to prevent prompt injection
-        traceback = self._sanitize_traceback(traceback)
-
-        matches = re.findall(r'File "(.*?)", line (\d+)', traceback)
-        if not matches:
-            return False
-
-        target_file, line_num = matches[-1]
-        if not os.path.exists(target_file):
-            return False
-
-        # Security: only patch files within the charlie directory
-        abs_target = os.path.abspath(target_file)
-        abs_charlie = os.path.abspath(os.path.join(os.getcwd(), "charlie"))
-        if not abs_target.startswith(abs_charlie):
-            logger.warning("self_repair_blocked | target outside charlie dir: %s", target_file)
-            return False
-
-        with open(target_file, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
-        start_idx = max(0, int(line_num) - 100)
-        end_idx = min(len(lines), int(line_num) + 100)
-        source_window = "".join(lines[start_idx:end_idx])
-
-        prompt = f"""You are a Python Senior Engineer. A process in the CHARLIE Autonomous Engine crashed.
-ERROR:
-{traceback}
-
-FILE: {target_file} (Showing lines {start_idx + 1} to {end_idx})
-SOURCE CONTEXT:
-{source_window}
-
-Return ONLY the corrected python code block for the lines shown. No explanations. No markdown formatting. Just raw code.
-"""
-        try:
-            url = settings.llm.llm_url.rstrip("/")
-            if "/v1" in url:
-                resp = requests.post(
-                    f"{url}/chat/completions",
-                    json={
-                        "model": self.model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.0,
-                    },
-                    timeout=60,
-                )
-                fixed_code = resp.json()["choices"][0]["message"]["content"].strip()
-            else:
-                resp = requests.post(
-                    f"{url}/api/generate",
-                    json={"model": self.model, "prompt": prompt, "stream": False},
-                    timeout=60,
-                )
-                fixed_code = resp.json().get("response", "").strip()
-
-            if "import " in fixed_code or "def " in fixed_code:
-                fixed_code = re.sub(
-                    r"^```python\n|```$", "", fixed_code, flags=re.MULTILINE
-                )
-
-                # 1. Save patch for record
-                file_basename = os.path.basename(target_file)
-                patch_name = f"patch_{file_basename}_{int(time.time())}.py"
-                patch_path = os.path.join(self.patch_dir, patch_name)
-                with open(patch_path, "w", encoding="utf-8") as f:
-                    f.write(fixed_code)
-
-                # Safety Check: syntax + banned patterns
-                import py_compile
-
-                try:
-                    py_compile.compile(patch_path, doraise=True)
-                except py_compile.PyCompileError as e:
-                    logger.warning(f"self_repair_blocked | syntax_error={e}")
-                    os.remove(patch_path)
-                    return False
-
-                # Banned pattern scan — block dangerous code from being auto-patched
-                BANNED_PATTERNS = [
-                    (r'\beval\s*\(', "eval()"),
-                    (r'\bexec\s*\(', "exec()"),
-                    (r'\bos\.system\s*\(', "os.system()"),
-                    (r'subprocess\.\w+\s*\([^)]*shell\s*=\s*True', "subprocess with shell=True"),
-                    (r'\b__import__\s*\(', "__import__()"),
-                ]
-                for pattern, name in BANNED_PATTERNS:
-                    if re.search(pattern, fixed_code):
-                        logger.warning(f"self_repair_blocked | banned_pattern={name} in {target_file}")
-                        os.remove(patch_path)
-                        return False
-
-                # 2. Create Backup before applying hot-patch
-                bak_path = target_file + ".bak"
-                if not os.path.exists(bak_path):
-                    import shutil
-
-                    shutil.copy2(target_file, bak_path)
-                    logger.info(f"backup_created: {bak_path}")
-
-                # 3. Apply Patch to Source - Replace only the window lines
-                # Split fixed_code into lines, preserving line endings if possible
-                fixed_lines = fixed_code.splitlines(keepends=True)
-                if not fixed_lines:
-                    logger.warning("self_repair_blocked | empty_fix_received")
-                    return False
-
-                # Ensure we have the same line endings as original
-                # If fixed_lines don't have line endings, add them
-                for i, line in enumerate(fixed_lines):
-                    if not line.endswith(("\n", "\r\n", "\r")):
-                        fixed_lines[i] = line + "\n"
-
-                # Replace the window in the original lines
-                new_lines = lines[:start_idx] + fixed_lines + lines[end_idx:]
-
-                # Write back the modified file
-                with open(target_file, "w", encoding="utf-8") as f:
-                    f.writelines(new_lines)
-
-                logger.info(
-                    f"hot_patch_applied: {target_file} | replaced_lines={start_idx + 1}-{end_idx} | record={patch_path}"
-                )
-                return True
-        except Exception as e:
-            logger.error("self_repair_failed", error=str(e))
-
-        return False
-
-
-# ── Phoenix Supervisor ───────────────────────────────────────────────────────
-
-
 class PhoenixSupervisor:
     def __init__(self, interrupt_event, reboot_event=None):
         self.interrupt_event = interrupt_event
@@ -402,8 +208,19 @@ class PhoenixSupervisor:
         self.processes = {}
         self._processes_lock = threading.RLock()
         self.running = True
-        self.healer = SelfHealer()
         self.doctor = Doctor(status_q=self.status_q)
+
+        # SUBSYSTEM_STATUS gate (Core Loop §C): each subsystem can post
+        # state="disabled" / state="ok" on status_q. Disabled children are
+        # exempt from heartbeat-staleness checks in monitor().
+        self.disabled_children: set[str] = set()
+        self.status_queues: dict[str, "mp.Queue"] = {
+            "audio": self.status_q,
+            "brain": self.status_q,
+            "browser": self.status_q,
+            "telegram": self.status_q,
+            "vision": self.status_q,
+        }
 
     def _safe_put(self, q, msg):
         """Put message to queue with 1.0s timeout to prevent deadlocks from clogged queues."""
@@ -545,6 +362,12 @@ class PhoenixSupervisor:
             with self._processes_lock:
                 names = list(self.processes.keys())
 
+            # ── SUBSYSTEM_STATUS gate (Core Loop §C) ──
+            # Drain any pending SUBSYSTEM_STATUS payloads from children so we
+            # know which subsystems are self-declared disabled (and which have
+            # recovered to "ok") BEFORE we evaluate heartbeat staleness.
+            _consume_disabled_statuses(self.status_queues, self.disabled_children)
+
             for name in names:
                 # Re-acquire briefly to read the specific entry (it may have been
                 # replaced/removed by a concurrent restart_subsystem call).
@@ -557,6 +380,13 @@ class PhoenixSupervisor:
                 # A quarantined process is never re-processed: no restart, no
                 # traceback re-extraction, no re-alert. Skip it every cycle.
                 if data.get("quarantined"):
+                    continue
+
+                # ── SUBSYSTEM_STATUS gate (Core Loop §C) ──
+                # A child that self-declared state="disabled" (e.g. telegram
+                # without a token) should NOT be reaped for heartbeat staleness.
+                # Recovery is signalled by the child posting state="ok".
+                if name in self.disabled_children:
                     continue
 
                 p = data["process"]
@@ -612,8 +442,7 @@ class PhoenixSupervisor:
                         f"process_failure: {name}. Strike {data['restarts'] + 1} of 3."
                     )
 
-                    tb = self.healer.extract_traceback()
-
+                    
                     # Track restart and check for 3-strike limit (Quarantine)
                     if data["restarts"] >= 3:
                         logger.critical(
@@ -632,48 +461,19 @@ class PhoenixSupervisor:
 
                             # Direct Telegram fall-back alert dispatch
                             alert_text = (
-                                f"<b>🚨 [SRE QUARANTINE PROTOCOL ACTIVATED]</b>\n\n"
-                                f"Service <b>{name}</b> has crashed consecutively (3 strikes exceeded) and has been placed in quarantine to prevent thrashing.\n\n"
-                                f"<b>Crash Traceback Extracted:</b>\n"
-                                f"<pre>{tb or 'No traceback available.'}</pre>"
+                                f"<b>SRE QUARANTINE</b>\n\n"
+                                f"Service <b>{name}</b> has crashed consecutively (3 strikes) and is now quarantined."
                             )
                             self._send_direct_telegram(alert_text)
                             data["quarantine_alerted"] = True
                         continue
 
-                    # Verbal alert for restart
-                    self._safe_put(self.tts_q, {
-                        "type": "SPEAK",
-                        "content": f"CRITICAL: {name} process failure. Attempting repair and restarting. Cooldown initiated."
-                    })
-
-                    # Alert
-                    self._safe_put(self.status_q, {"type": "PHOENIX_ALERT", "content": name})
-
                     # ── Auto-patcher gate (Req 15.6 / 17.4) ──
-                    # The source-rewriting recovery path (Doctor auto-repair +
-                    # SelfHealer patch + rollback) only runs when the Operator
-                    # has explicitly enabled the Auto_Patcher. While disabled
-                    # (the default), recovery is restart + quarantine only — we
+                    # Auto-patcher removed — restart-only recovery — we
                     # NEVER modify live source in response to a crash. Use a
                     # defensive getattr so a missing flag fails closed (no patch).
-                    if tb and getattr(settings.security, "auto_patcher_enabled", False):
-                        self.doctor.auto_repair_brain(tb)
-                        if data.get("is_patched", False):
-                            logger.error(f"patch_failed: {name}. Rolling back...")
-                            matches = re.findall(r'File "(.*?)", line (\d+)', tb)
-                            if matches:
-                                self.healer.rollback(matches[-1][0])
-                            data["is_patched"] = False
-                        else:
-                            patched = self.healer.attempt_patch(tb)
-                            if patched:
-                                logger.info(f"self_repair_success: {name} hot-patched.")
-                                data["is_patched"] = True
-                    elif tb:
-                        # Auto_Patcher disabled (default): restart + quarantine
-                        # are the only recovery paths; live source is untouched.
-                        logger.info("auto_patcher_disabled | recovery=restart_only | service=%s", name)
+                    # Auto-patcher removed — restart-only recovery
+                    logger.info("process_crash | service=%s | restart_only", name)
 
                     data["restarts"] += 1
 
