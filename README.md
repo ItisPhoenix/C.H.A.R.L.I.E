@@ -17,7 +17,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Next.js](https://img.shields.io/badge/Next.js-15-000000?style=for-the-badge&logo=next.js&logoColor=white)](https://nextjs.org)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows)](https://microsoft.com/windows)
-[![License](https://img.shields.io/badge/License-Private-red?style=for-the-badge)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-lightbluey?style=for-the-badge)](LICENSE)
 
 **Charlie v0.1 — Personal AI Assistant (Development)**
 
