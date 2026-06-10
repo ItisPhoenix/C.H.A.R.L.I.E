@@ -62,6 +62,10 @@ plans/
 scratch/
 hotpatches/
 Charlie.spec
+.commandcode/
+.hypothesis/
+.playwright-mcp/
+
 
 # ── Memory & Database (Local Data) ───────────────────────────────────────────
 charlie/memory/*.json
@@ -71,9 +75,9 @@ memory/
 *.sqlite
 *.db
 charlie/data/
+docs/
 
 # ── Models (Heavy Binaries) ──────────────────────────────────────────────────
-charlie/models/
 models/
 *.weights
 *.bin
@@ -110,3 +114,7 @@ config/secure/
 # ── Config (may contain secrets) ────────────────────────────────────────────
 charlie_config.json
 skills-lock.json
+config/scheduler_state.json
+
+# others
+ARCHITECTURE.md
