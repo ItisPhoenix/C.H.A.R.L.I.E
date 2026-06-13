@@ -9,9 +9,10 @@ async def web_search(query: str, max_results: int = 5) -> str:
     results_list = []
     
     try:
+        # DDGS context manager is robust for clean session teardown
         with DDGS() as ddgs:
             logger.info(f"Searching DDG Web for: {query}")
-            # .text() is free, unauthenticated, and open-source driven
+            # .text() is unauthenticated and open-source driven
             text_results = ddgs.text(query, max_results=max_results)
             
             if text_results:
@@ -19,47 +20,75 @@ async def web_search(query: str, max_results: int = 5) -> str:
                     desc = r.get('body', r.get('snippet', ''))
                     title = r.get('title', 'No Title')
                     url = r.get('href', r.get('url', ''))
-                    results_list.append(f"[WEB] {title}: {desc} ({url})")
+                    
+                    # Basic data integrity check
+                    if desc and url:
+                        results_list.append(f"[WEB] {title}: {desc} ({url})")
 
             if not results_list:
+                logger.warning(f"No search results found for query: {query}")
                 return "Search returned no results. Try broadening your query."
 
             return "\n".join(results_list[:max_results])
 
     except Exception as e:
         logger.error(f"search_error | {type(e).__name__}: {e}")
-        if "403" in str(e) or "Ratelimit" in str(e):
-            return "My search access is currently throttled. I'll try to find another way next time."
-        return f"Search error: {str(e)}"
+        # Identify specific anti-bot patterns
+        err_str = str(e).lower()
+        if "403" in err_str or "ratelimit" in err_str or "forbidden" in err_str:
+            return "My search access is currently throttled by the search engine. I'll try to find another way next time."
+        return "Search error occurred while looking that up. Let's try another topic."
 
 async def read_url(url: str) -> str:
     """Local scraper using httpx and BeautifulSoup (no API)."""
     logger.info(f"Scraping URL locally: {url}")
+    
+    # Validate URL basic structure
+    if not url.startswith(("http://", "https://")):
+        return f"Invalid URL: {url}. Please provide a full link starting with http or https."
+
     try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        # Use a single client with reasonable timeouts to prevent hanging
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9"
             }
-            r = await client.get(url, headers=headers, timeout=15.0)
+            
+            r = await client.get(url, headers=headers)
             r.raise_for_status()
             
-            # Simple text extraction (placeholder for more robust local parsing if needed)
+            # Content-type check to avoid trying to parse PDFs/images as HTML
+            content_type = r.headers.get("content-type", "").lower()
+            if "text/html" not in content_type and "text/plain" not in content_type:
+                return f"Skipping URL {url}: Content type '{content_type}' is not supported for text extraction."
+
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(r.text, 'html.parser')
             
-            # Remove script and style elements
-            for script in soup(["script", "style"]):
-                script.decompose()
+            # 1. REMOVE NOISE
+            for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form"]):
+                tag.decompose()
             
-            text = soup.get_text()
-            # break into lines and remove leading and trailing whitespace
+            # 2. EXTRACT MAIN CONTENT (Try common containers)
+            main_content = soup.find('main') or soup.find('article') or soup.find('div', class_='content')
+            target = main_content if main_content else soup
+            
+            text = target.get_text()
+            
+            # 3. CLEAN TEXT
             lines = (line.strip() for line in text.splitlines())
-            # break multi-headlines into a line each
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-            # drop blank lines
-            text = '\n'.join(chunk for chunk in chunks if chunk)
+            clean_text = '\n'.join(chunk for chunk in chunks if chunk)
             
-            return text[:5000] # Limit to avoid context overflow
+            if not clean_text:
+                return f"I read the page at {url}, but couldn't find any readable text content."
+                
+            return clean_text[:4000] # Slightly tighter limit to ensure context fits
+            
+    except httpx.HTTPStatusError as e:
+        logger.warning(f"URL access error {e.response.status_code} for {url}")
+        return f"I couldn't reach that website. It returned a {e.response.status_code} error."
     except Exception as e:
-        logger.error(f"local_scrape_error | {url} | {e}")
-        return f"Error reading content from {url}: {str(e)}"
+        logger.error(f"local_scrape_error | {url} | {type(e).__name__}: {e}")
+        return f"Error reading content from that site: {str(e)}"

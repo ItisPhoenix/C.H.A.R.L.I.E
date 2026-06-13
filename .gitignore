@@ -98,16 +98,13 @@ tests/
 apply_fixes*.py
 Vision part.txt
 charlie/bin/
+charlie_history.json
+
 charlie/reports/
 test_reports/
 config/secure/
 
-# ── Next.js Build ────────────────────────────────────────────────────────────
-dashboard/.next/
-dashboard/node_modules/
-dashboard/tsconfig.tsbuildinfo
 
 # ── Config (may contain secrets) ────────────────────────────────────────────
 charlie_config.json
 skills-lock.json
-config/scheduler_state.json
