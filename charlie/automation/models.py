@@ -1,11 +1,11 @@
 """Data models for the automation engine."""
+
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
 from enum import IntEnum
 
-from charlie.intelligence.outcome_tracker import Outcome as CanonicalOutcome
 from charlie.security.tiers import RiskTier
 
 
@@ -20,8 +20,9 @@ class Urgency(IntEnum):
 @dataclass
 class Event:
     """An event from any source that may trigger automation."""
-    type: str          # "email_received", "calendar_alert", "system_warning"
-    source: str        # "gmail", "calendar", "system", "news", "pattern"
+
+    type: str  # "email_received", "calendar_alert", "system_warning"
+    source: str  # "gmail", "calendar", "system", "news", "pattern"
     data: dict = field(default_factory=dict)
     urgency: Urgency = Urgency.LOW
     timestamp: float = field(default_factory=time.time)
@@ -33,10 +34,11 @@ class Event:
 @dataclass
 class AutomationRule:
     """A rule that matches events and executes actions."""
+
     name: str
-    trigger: str           # event type to match
-    condition: str         # Python expression evaluated against event.data
-    action: str            # tool name or agent name
+    trigger: str  # event type to match
+    condition: str  # Python expression evaluated against event.data
+    action: str  # tool name or agent name
     action_args: dict = field(default_factory=dict)
     risk_tier: RiskTier = RiskTier.TIER_0
     enabled: bool = True
@@ -73,11 +75,8 @@ class AutomationRule:
 
 @dataclass
 class Outcome:
-    """Thin adapter over the canonical Outcome from outcome_tracker.
+    """Result of executing an automation action."""
 
-    Preserves the legacy interface (event_type, action, success) while
-    mapping to canonical fields at construction time.
-    """
     event_type: str
     action: str
     success: bool
@@ -85,20 +84,12 @@ class Outcome:
     user_feedback: str = ""  # "good", "bad", "neutral"
     timestamp: float = field(default_factory=time.time)
 
-    def to_canonical(self) -> CanonicalOutcome:
-        """Convert to the canonical Outcome dataclass for persistence."""
-        return CanonicalOutcome(
-            timestamp=self.timestamp,
-            event_type=self.event_type,
-            outcome_type="success" if self.success else "failure",
-            tool_name=self.action,
-        )
-
 
 @dataclass
 class Prediction:
     """A predicted user need based on patterns."""
+
     description: str
-    confidence: float      # 0.0 to 1.0
+    confidence: float  # 0.0 to 1.0
     suggested_action: str
     suggested_args: dict = field(default_factory=dict)

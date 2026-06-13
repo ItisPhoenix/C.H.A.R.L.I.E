@@ -7,7 +7,10 @@ Provides safe desktop capture utilizing Pillow and local OCR spatial redactors.
 import os
 import time
 from PIL import ImageGrab
-import pygetwindow as gw
+try:
+    import pygetwindow as gw
+except ImportError:
+    gw = None  # type: ignore
 from charlie.tools.tool_decorator import tool, RiskTier
 from charlie.privacy.redactor import get_redactor
 from charlie.utils.logger import get_logger
@@ -16,13 +19,25 @@ logger = get_logger("VISION_CONTEXT")
 
 # Banned executable names or titles
 SENSITIVE_KEYWORDS = [
-    "incognito", "private browsing", "private window", "1password",
-    "bitwarden", "keepass", "dashlane", "lastpass", "passwords",
-    "password manager", "keychain", "credit card", "bank"
+    "incognito",
+    "private browsing",
+    "private window",
+    "1password",
+    "bitwarden",
+    "keepass",
+    "dashlane",
+    "lastpass",
+    "passwords",
+    "password manager",
+    "keychain",
+    "credit card",
+    "bank",
 ]
 
 def is_sensitive_window_active() -> bool:
     """Check if the active foreground window contains sensitive/private data."""
+    if gw is None:
+        return False
     try:
         active = gw.getActiveWindow()
         if not active:
@@ -36,6 +51,7 @@ def is_sensitive_window_active() -> bool:
     except Exception as e:
         logger.debug(f"sensitive_window_check_error | {e}")
         return False
+
 
 @tool(
     name="capture_desktop",
@@ -73,9 +89,17 @@ def capture_desktop() -> str:
         try:
             import numpy as np
             import cv2
+
             placeholder = np.zeros((400, 600, 3), dtype=np.uint8)
-            cv2.putText(placeholder, "[REDACTED - SECURITY EXCEPTION]", (100, 200),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+            cv2.putText(
+                placeholder,
+                "[REDACTED - SECURITY EXCEPTION]",
+                (100, 200),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (200, 200, 200),
+                2,
+            )
             cv2.imwrite(out_path, placeholder)
             return out_path
         except Exception:

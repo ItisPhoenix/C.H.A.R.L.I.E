@@ -263,7 +263,7 @@ function ApprovalCard({ approval, actionLoading, onApprove, onDeny }: ApprovalCa
   })()
 
   return (
-      <GlassCard className="hover:shadow-neon-cyan-sm transition-all">
+      <GlassCard className="hover:shadow-premium transition-all">
         <div className="flex items-start justify-between gap-4 mb-2">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1">

@@ -4,15 +4,18 @@ from charlie.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+
 class PersonalityDriftEngine:
     """
     Tracks user preferences and long-term personality alignment.
     Extracts 'preference facts' from conversations and persists them to ChromaDB.
     """
+
     def __init__(self, brain):
         self.brain = brain
         self.memory = brain.memory
         from charlie.config import settings
+
         self.extraction_interval = getattr(settings, "personality_extraction_interval", 5)
         self.turn_counter = 0
         self.is_extracting = False
@@ -35,7 +38,7 @@ class PersonalityDriftEngine:
             # Analyze last 10 turns, truncate content to 500 chars to avoid token flood
             recent = []
             for m in history[-10:]:
-                content = m['content']
+                content = m["content"]
                 if len(content) > 500:
                     content = content[:500] + "..."
                 recent.append(f"{m['role']}: {content}")

@@ -9,14 +9,18 @@ import json
 import logging
 import time
 
-import pyautogui
+try:
+    import pyautogui
+except ImportError:
+    pyautogui = None
 
 from charlie.tools.tool_decorator import tool, RiskTier
 
 logger = logging.getLogger("charlie.tools.gui_agent")
 
-pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0.05
+if pyautogui is not None:
+    pyautogui.FAILSAFE = True
+    pyautogui.PAUSE = 0.05
 
 # Valid actions the vision model can request
 VALID_ACTIONS = {"click", "type", "scroll", "hotkey", "press", "done"}
@@ -61,7 +65,7 @@ def gui_do(task: str, max_steps: int = 10) -> str:
             f"Step {step + 1} of {max_steps}.\n"
             f"Previous actions: {history[-3:] if history else 'none'}\n\n"
             f"Analyze this screenshot. What single action should I take next?\n\n"
-            f'Respond with ONLY valid JSON (no markdown):\n'
+            f"Respond with ONLY valid JSON (no markdown):\n"
             f'{{"action": "click|type|scroll|hotkey|press|done",\n'
             f'  "x": <pixel x>, "y": <pixel y>,\n'
             f'  "text": "<text to type, if action=type>",\n'

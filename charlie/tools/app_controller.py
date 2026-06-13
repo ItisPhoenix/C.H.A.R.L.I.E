@@ -8,7 +8,10 @@ import subprocess
 from typing import Any, Dict
 
 import psutil
-import pygetwindow as gw
+try:
+    import pygetwindow as gw
+except ImportError:
+    gw = None  # type: ignore
 
 from charlie.security.tiers import RiskTier, risk_tier
 from charlie.utils.logger import get_logger
@@ -28,45 +31,51 @@ class UniversalAppController:
         registry = {}
 
         if self.system == "windows":
-            registry.update({
-                "chrome": {"cmd": "chrome.exe", "args": [], "display": "Google Chrome"},
-                "firefox": {"cmd": "firefox.exe", "args": [], "display": "Mozilla Firefox"},
-                "edge": {"cmd": "msedge.exe", "args": [], "display": "Microsoft Edge"},
-                "notepad": {"cmd": "notepad.exe", "args": [], "display": "Notepad"},
-                "calculator": {"cmd": "calc.exe", "args": [], "display": "Calculator"},
-                "explorer": {"cmd": "explorer.exe", "args": [], "display": "File Explorer"},
-                "cmd": {"cmd": "cmd.exe", "args": [], "display": "Command Prompt"},
-                "powershell": {"cmd": "powershell.exe", "args": [], "display": "PowerShell"},
-                "vscode": {"cmd": "code.cmd", "args": [], "display": "Visual Studio Code"},
-                "word": {"cmd": "winword.exe", "args": [], "display": "Microsoft Word"},
-                "excel": {"cmd": "excel.exe", "args": [], "display": "Microsoft Excel"},
-                "powerpoint": {"cmd": "powerpnt.exe", "args": [], "display": "Microsoft PowerPoint"},
-                "spotify": {"cmd": "spotify.exe", "args": [], "display": "Spotify"},
-                "discord": {"cmd": "discord.exe", "args": [], "display": "Discord"},
-                "slack": {"cmd": "slack.exe", "args": [], "display": "Slack"},
-                "zoom": {"cmd": "zoom.exe", "args": [], "display": "Zoom"},
-                "teams": {"cmd": "teams.exe", "args": [], "display": "Microsoft Teams"},
-            })
+            registry.update(
+                {
+                    "chrome": {"cmd": "chrome.exe", "args": [], "display": "Google Chrome"},
+                    "firefox": {"cmd": "firefox.exe", "args": [], "display": "Mozilla Firefox"},
+                    "edge": {"cmd": "msedge.exe", "args": [], "display": "Microsoft Edge"},
+                    "notepad": {"cmd": "notepad.exe", "args": [], "display": "Notepad"},
+                    "calculator": {"cmd": "calc.exe", "args": [], "display": "Calculator"},
+                    "explorer": {"cmd": "explorer.exe", "args": [], "display": "File Explorer"},
+                    "cmd": {"cmd": "cmd.exe", "args": [], "display": "Command Prompt"},
+                    "powershell": {"cmd": "powershell.exe", "args": [], "display": "PowerShell"},
+                    "vscode": {"cmd": "code.cmd", "args": [], "display": "Visual Studio Code"},
+                    "word": {"cmd": "winword.exe", "args": [], "display": "Microsoft Word"},
+                    "excel": {"cmd": "excel.exe", "args": [], "display": "Microsoft Excel"},
+                    "powerpoint": {"cmd": "powerpnt.exe", "args": [], "display": "Microsoft PowerPoint"},
+                    "spotify": {"cmd": "spotify.exe", "args": [], "display": "Spotify"},
+                    "discord": {"cmd": "discord.exe", "args": [], "display": "Discord"},
+                    "slack": {"cmd": "slack.exe", "args": [], "display": "Slack"},
+                    "zoom": {"cmd": "zoom.exe", "args": [], "display": "Zoom"},
+                    "teams": {"cmd": "teams.exe", "args": [], "display": "Microsoft Teams"},
+                }
+            )
         elif self.system == "darwin":  # macOS
-            registry.update({
-                "chrome": {"cmd": "open", "args": ["-a", "Google Chrome"], "display": "Google Chrome"},
-                "firefox": {"cmd": "open", "args": ["-a", "Firefox"], "display": "Mozilla Firefox"},
-                "safari": {"cmd": "open", "args": ["-a", "Safari"], "display": "Safari"},
-                "vscode": {"cmd": "open", "args": ["-a", "Visual Studio Code"], "display": "Visual Studio Code"},
-                "terminal": {"cmd": "open", "args": ["-a", "Terminal"], "display": "Terminal"},
-                "spotify": {"cmd": "open", "args": ["-a", "Spotify"], "display": "Spotify"},
-                "discord": {"cmd": "open", "args": ["-a", "Discord"], "display": "Discord"},
-                "slack": {"cmd": "open", "args": ["-a", "Slack"], "display": "Slack"},
-            })
+            registry.update(
+                {
+                    "chrome": {"cmd": "open", "args": ["-a", "Google Chrome"], "display": "Google Chrome"},
+                    "firefox": {"cmd": "open", "args": ["-a", "Firefox"], "display": "Mozilla Firefox"},
+                    "safari": {"cmd": "open", "args": ["-a", "Safari"], "display": "Safari"},
+                    "vscode": {"cmd": "open", "args": ["-a", "Visual Studio Code"], "display": "Visual Studio Code"},
+                    "terminal": {"cmd": "open", "args": ["-a", "Terminal"], "display": "Terminal"},
+                    "spotify": {"cmd": "open", "args": ["-a", "Spotify"], "display": "Spotify"},
+                    "discord": {"cmd": "open", "args": ["-a", "Discord"], "display": "Discord"},
+                    "slack": {"cmd": "open", "args": ["-a", "Slack"], "display": "Slack"},
+                }
+            )
         else:  # Linux
-            registry.update({
-                "chrome": {"cmd": "google-chrome", "args": [], "display": "Google Chrome"},
-                "firefox": {"cmd": "firefox", "args": [], "display": "Mozilla Firefox"},
-                "vscode": {"cmd": "code", "args": [], "display": "Visual Studio Code"},
-                "terminal": {"cmd": "gnome-terminal", "args": [], "display": "Terminal"},
-                "spotify": {"cmd": "spotify", "args": [], "display": "Spotify"},
-                "discord": {"cmd": "discord", "args": [], "display": "Discord"},
-            })
+            registry.update(
+                {
+                    "chrome": {"cmd": "google-chrome", "args": [], "display": "Google Chrome"},
+                    "firefox": {"cmd": "firefox", "args": [], "display": "Mozilla Firefox"},
+                    "vscode": {"cmd": "code", "args": [], "display": "Visual Studio Code"},
+                    "terminal": {"cmd": "gnome-terminal", "args": [], "display": "Terminal"},
+                    "spotify": {"cmd": "spotify", "args": [], "display": "Spotify"},
+                    "discord": {"cmd": "discord", "args": [], "display": "Discord"},
+                }
+            )
 
         return registry
 
@@ -120,8 +129,10 @@ class UniversalAppController:
             if self.system == "windows":
                 # Tree-kill for Windows
                 result = subprocess.run(
-                    ["taskkill", "/F", "/T", "/IM", f"{app_name}*" if not app_name.endswith('.exe') else app_name],
-                    capture_output=True, text=True, check=False
+                    ["taskkill", "/F", "/T", "/IM", f"{app_name}*" if not app_name.endswith(".exe") else app_name],
+                    capture_output=True,
+                    text=True,
+                    check=False,
                 )
                 if result.returncode == 0:
                     return f"Successfully closed app tree: {app_name}."
@@ -130,9 +141,9 @@ class UniversalAppController:
             else:
                 # Fallback for Linux/macOS
                 closed_count = 0
-                for proc in psutil.process_iter(['pid', 'name']):
+                for proc in psutil.process_iter(["pid", "name"]):
                     try:
-                        if app_name.lower() in proc.info['name'].lower():
+                        if app_name.lower() in proc.info["name"].lower():
                             proc.terminate()
                             closed_count += 1
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -146,10 +157,10 @@ class UniversalAppController:
         """List currently running applications."""
         try:
             apps = []
-            for proc in psutil.process_iter(['pid', 'name']):
+            for proc in psutil.process_iter(["pid", "name"]):
                 try:
-                    name = proc.info['name']
-                    if name and not name.startswith(('System', 'svchost', 'csrss', 'lsass')):
+                    name = proc.info["name"]
+                    if name and not name.startswith(("System", "svchost", "csrss", "lsass")):
                         apps.append(name)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
@@ -163,12 +174,14 @@ class UniversalAppController:
     @risk_tier(RiskTier.TIER_0)
     def focus_window(self, args: Dict[str, Any]) -> str:
         """Focus/bring to front a specific application window."""
+        if gw is None:
+            return "pygetwindow not available — cannot focus windows."
         app_name = args.get("name", "").strip().lower()
         if not app_name:
             return "No application name provided."
 
         try:
-            windows = gw.getWindowsWithTitle('')
+            windows = gw.getWindowsWithTitle("")
             for window in windows:
                 if app_name in window.title.lower() and window.visible:
                     window.activate()
@@ -186,9 +199,9 @@ class UniversalAppController:
 
         try:
             killed_count = 0
-            for proc in psutil.process_iter(['pid', 'name']):
+            for proc in psutil.process_iter(["pid", "name"]):
                 try:
-                    if proc_name.lower() in proc.info['name'].lower():
+                    if proc_name.lower() in proc.info["name"].lower():
                         proc.kill()
                         killed_count += 1
                 except (psutil.NoSuchProcess, psutil.AccessDenied):

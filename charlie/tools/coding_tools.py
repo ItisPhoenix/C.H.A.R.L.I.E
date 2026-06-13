@@ -18,7 +18,9 @@ def run_code(language: str, code: str, timeout: int = 30) -> str:
         try:
             result = subprocess.run(
                 ["python", "-c", code],
-                capture_output=True, text=True, timeout=timeout,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
             )
             output = result.stdout
             if result.stderr:
@@ -41,7 +43,10 @@ def git_status(repo_path: str = ".") -> str:
     try:
         result = subprocess.run(
             ["git", "status", "--short"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result.stdout or "Clean working tree"
     except Exception as e:
@@ -58,7 +63,10 @@ def git_log(repo_path: str = ".", count: int = 10) -> str:
     try:
         result = subprocess.run(
             ["git", "log", "--oneline", f"-{count}"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result.stdout or "No commits found"
     except Exception as e:
@@ -77,7 +85,11 @@ def git_diff(repo_path: str = ".", staged: bool = False) -> str:
         if staged:
             cmd.append("--staged")
         result = subprocess.run(
-            cmd, cwd=repo_path, capture_output=True, text=True, timeout=10,
+            cmd,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result.stdout or "No changes"
     except Exception as e:
@@ -95,7 +107,10 @@ def git_commit(message: str, repo_path: str = ".") -> str:
     try:
         result = subprocess.run(
             ["git", "commit", "-m", message],
-            cwd=repo_path, capture_output=True, text=True, timeout=10,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result.stdout or result.stderr
     except Exception as e:
@@ -113,7 +128,9 @@ def project_analyze(path: str = ".") -> str:
         files = []
         for root, dirs, filenames in os.walk(path):
             # Skip hidden dirs and common non-project dirs
-            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "__pycache__", ".git", "venv")]
+            dirs[:] = [
+                d for d in dirs if not d.startswith(".") and d not in ("node_modules", "__pycache__", ".git", "venv")
+            ]
             for f in filenames:
                 files.append(os.path.join(root, f))
 
@@ -167,7 +184,7 @@ def read_dependencies(path: str = ".") -> str:
         # Extract dependencies section
         if "[project.dependencies]" in content:
             start = content.index("[project.dependencies]")
-            return content[start:start + 1000]
+            return content[start : start + 1000]
         return content[:1000]
     return "No dependency file found"
 
@@ -181,13 +198,18 @@ def read_dependencies(path: str = ".") -> str:
 def terminal_command(command: str, timeout: int = 30) -> str:
     """Run a shell command."""
     from charlie.utils.command_validator import validate_command
+
     try:
         validate_command(command)
     except ValueError as e:
         return str(e)
     try:
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=timeout,
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         output = result.stdout
         if result.stderr:
@@ -207,6 +229,7 @@ def terminal_command(command: str, timeout: int = 30) -> str:
 def parse_json(json_string: str) -> str:
     """Parse and pretty-print JSON."""
     import json
+
     try:
         data = json.loads(json_string)
         return json.dumps(data, indent=2, ensure_ascii=False)
@@ -224,7 +247,9 @@ def format_code(path: str) -> str:
     try:
         result = subprocess.run(
             ["ruff", "format", path],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         return result.stdout or "Formatted"
     except Exception as e:

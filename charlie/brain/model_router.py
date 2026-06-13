@@ -24,18 +24,20 @@ logger = get_logger("ModelRouter")
 # Task types — used to route requests to the right provider
 # ---------------------------------------------------------------------------
 
+
 class TaskType(str, Enum):
-    REASONING = "reasoning"   # Complex thought, planning, code
-    CHAT = "chat"             # General conversation
-    TOOLS = "tools"           # Tool-calling responses
-    VISION = "vision"         # Image analysis
-    EMBEDDING = "embedding"   # Vector embeddings
-    VOICE = "voice"           # Real-time voice (Gemini Live)
+    REASONING = "reasoning"  # Complex thought, planning, code
+    CHAT = "chat"  # General conversation
+    TOOLS = "tools"  # Tool-calling responses
+    VISION = "vision"  # Image analysis
+    EMBEDDING = "embedding"  # Vector embeddings
+    VOICE = "voice"  # Real-time voice (Gemini Live)
 
 
 # ---------------------------------------------------------------------------
 # Provider config
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ProviderConfig:
@@ -52,6 +54,7 @@ class ProviderConfig:
 # ---------------------------------------------------------------------------
 # Health cache — avoids hammering endpoints
 # ---------------------------------------------------------------------------
+
 
 class _HealthCache:
     """TTL-based health cache per provider."""
@@ -80,6 +83,7 @@ class _HealthCache:
 # LLM Response — normalized across providers
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class LLMResponse:
     content: str
@@ -94,6 +98,7 @@ class LLMResponse:
 # Provider base + implementations
 # ---------------------------------------------------------------------------
 
+
 class BaseProvider:
     """Async OpenAI-compatible chat completions client."""
 
@@ -104,9 +109,7 @@ class BaseProvider:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=self.config.timeout)
-            )
+            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.config.timeout))
         return self._session
 
     def _headers(self) -> Dict[str, str]:
@@ -114,6 +117,25 @@ class BaseProvider:
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
         return headers
+
+    def _chat_url(self) -> str:
+        """Build the chat-completions URL idempotently.
+
+        If the user already included ``/v1`` in the base URL (common with
+        NIM, Ollama, LM Studio, vLLM — any OpenAI-compatible server), do
+        not append a second ``/v1``. Otherwise add it.
+        """
+        base = self.config.base_url.rstrip("/")
+        if base.endswith("/v1"):
+            return f"{base}/chat/completions"
+        return f"{base}/v1/chat/completions"
+
+    def _models_url(self) -> str:
+        """Build the /models URL idempotently (see ``_chat_url``)."""
+        base = self.config.base_url.rstrip("/")
+        if base.endswith("/v1"):
+            return f"{base}/models"
+        return f"{base}/v1/models"
 
     async def complete(
         self,
@@ -126,7 +148,7 @@ class BaseProvider:
         **kwargs,
     ) -> LLMResponse:
         """Send chat completion request. Returns normalized LLMResponse."""
-        url = f"{self.config.base_url}/v1/chat/completions"
+        url = self._chat_url()
         payload: Dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
@@ -139,13 +161,9 @@ class BaseProvider:
         payload.update(kwargs)
 
         session = await self._get_session()
-        logger.info(
-            f"provider_request | name={self.name} | model={self.config.model} | msgs={len(messages)}"
-        )
+        logger.info(f"provider_request | name={self.name} | model={self.config.model} | msgs={len(messages)}")
 
-        async with session.post(
-            url, json=payload, headers=self._headers()
-        ) as resp:
+        async with session.post(url, json=payload, headers=self._headers()) as resp:
             resp.raise_for_status()
             data = await resp.json()
             return self._parse_response(data)
@@ -160,7 +178,7 @@ class BaseProvider:
         **kwargs,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Stream SSE chunks from chat completion."""
-        url = f"{self.config.base_url}/v1/chat/completions"
+        url = self._chat_url()
         payload: Dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
@@ -173,9 +191,7 @@ class BaseProvider:
         payload.update(kwargs)
 
         session = await self._get_session()
-        async with session.post(
-            url, json=payload, headers=self._headers()
-        ) as resp:
+        async with session.post(url, json=payload, headers=self._headers()) as resp:
             resp.raise_for_status()
             buffer = ""
             async for chunk in resp.content.iter_any():
@@ -188,31 +204,23 @@ class BaseProvider:
                     if line.startswith("data: "):
                         try:
                             import json
+
                             yield json.loads(line[6:])
                         except Exception:
                             continue
 
     async def health_check(self) -> bool:
         """Ping /v1/models to verify endpoint is live."""
-        url = f"{self.config.base_url}/v1/models"
+        url = self._models_url()
         try:
             session = await self._get_session()
-            async with session.get(
-                url, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
+            async with session.get(url, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status != 200:
                     return False
                 data = await resp.json()
-                models = [
-                    m.get("id", "")
-                    for m in data.get("data", [])
-                    if isinstance(m, dict)
-                ]
+                models = [m.get("id", "") for m in data.get("data", []) if isinstance(m, dict)]
                 # Accept exact match or stripped vendor prefix
-                model_ok = (
-                    self.config.model in models
-                    or self.config.model.split("/")[-1] in models
-                )
+                model_ok = self.config.model in models or self.config.model.split("/")[-1] in models
                 return model_ok
         except Exception as e:
             logger.debug(f"health_check_fail | provider={self.name} | {e}")
@@ -245,320 +253,13 @@ class BaseProvider:
 # Gemini Provider — translates OpenAI format to Gemini API
 # ---------------------------------------------------------------------------
 
-class GeminiProvider(BaseProvider):
-    """Async client for Google Gemini API (generativelanguage.googleapis.com)."""
 
-    _ROLE_MAP = {
-        "system": "user",
-        "assistant": "model",
-        "user": "user",
-    }
-
-    def _headers(self) -> Dict[str, str]:
-        headers = {"Content-Type": "application/json"}
-        if self.config.api_key:
-            headers["x-goog-api-key"] = self.config.api_key
-        return headers
-
-    def _build_url(self, stream: bool = False) -> str:
-        method = "streamGenerateContent" if stream else "generateContent"
-        return f"{self.config.base_url}/models/{self.config.model}:{method}"
-
-    def _convert_messages(
-        self, messages: List[Dict[str, Any]]
-    ) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        """Convert OpenAI messages to Gemini contents + system_instruction."""
-        system_instruction = None
-        contents: List[Dict[str, Any]] = []
-
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-
-            if role == "system":
-                system_instruction = {"parts": [{"text": content or ""}]}
-                continue
-
-            gemini_role = self._ROLE_MAP.get(role, "user")
-            parts: List[Dict[str, Any]] = []
-
-            if isinstance(content, str) and content:
-                parts.append({"text": content})
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict):
-                        if part.get("type") == "text":
-                            parts.append({"text": part.get("text", "")})
-                        elif part.get("type") == "image_url":
-                            url = part.get("image_url", {}).get("url", "")
-                            if url.startswith("data:"):
-                                # Inline base64 image
-                                header, b64 = url.split(",", 1)
-                                mime = header.split(":")[1].split(";")[0]
-                                parts.append(
-                                    {
-                                        "inline_data": {
-                                            "mime_type": mime,
-                                            "data": b64,
-                                        }
-                                    }
-                                )
-
-            # Handle tool_calls from assistant
-            if role == "assistant" and msg.get("tool_calls"):
-                for tc in msg["tool_calls"]:
-                    fn = tc.get("function", {})
-                    args_str = fn.get("arguments", "{}")
-                    import json as _json
-                    try:
-                        args = _json.loads(args_str) if isinstance(args_str, str) else args_str
-                    except Exception:
-                        args = {}
-                    parts.append(
-                        {
-                            "functionCall": {
-                                "name": fn.get("name", ""),
-                                "args": args,
-                            }
-                        }
-                    )
-
-            # Handle tool role (tool results)
-            if role == "tool":
-                tool_content = content or ""
-                parts.append(
-                    {
-                        "functionResponse": {
-                            "name": msg.get("name", "unknown"),
-                            "response": {"result": tool_content},
-                        }
-                    }
-                )
-
-            if parts:
-                contents.append({"role": gemini_role, "parts": parts})
-
-        return contents, system_instruction
-
-    def _convert_tools(
-        self, tools: Optional[List[Dict[str, Any]]]
-    ) -> Optional[List[Dict[str, Any]]]:
-        """Convert OpenAI tool definitions to Gemini function_declarations."""
-        if not tools:
-            return None
-
-        declarations = []
-        for tool in tools:
-            if tool.get("type") == "function":
-                fn = tool.get("function", {})
-                declarations.append(
-                    {
-                        "name": fn.get("name", ""),
-                        "description": fn.get("description", ""),
-                        "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
-                    }
-                )
-
-        if not declarations:
-            return None
-        return [{"function_declarations": declarations}]
-
-    async def complete(
-        self,
-        messages: List[Dict[str, Any]],
-        *,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        stream: bool = False,
-        max_tokens: int = 1024,
-        temperature: float = 0.7,
-        **kwargs,
-    ) -> LLMResponse:
-        """Send chat completion request to Gemini API."""
-        url = self._build_url(stream=False)
-        contents, system_instruction = self._convert_messages(messages)
-
-        payload: Dict[str, Any] = {
-            "contents": contents,
-            "generationConfig": {
-                "maxOutputTokens": max_tokens,
-                "temperature": temperature,
-            },
-        }
-        if system_instruction:
-            payload["systemInstruction"] = system_instruction
-
-        gemini_tools = self._convert_tools(tools)
-        if gemini_tools:
-            payload["tools"] = gemini_tools
-
-        session = await self._get_session()
-        logger.info(
-            f"gemini_request | name={self.name} | model={self.config.model} | msgs={len(messages)}"
-        )
-
-        async with session.post(
-            url, json=payload, headers=self._headers()
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            return self._parse_response(data)
-
-    async def stream_complete(
-        self,
-        messages: List[Dict[str, Any]],
-        *,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        max_tokens: int = 1024,
-        temperature: float = 0.7,
-        **kwargs,
-    ) -> AsyncIterator[Dict[str, Any]]:
-        """Stream SSE chunks from Gemini API."""
-        url = self._build_url(stream=True)
-        contents, system_instruction = self._convert_messages(messages)
-
-        payload: Dict[str, Any] = {
-            "contents": contents,
-            "generationConfig": {
-                "maxOutputTokens": max_tokens,
-                "temperature": temperature,
-            },
-        }
-        if system_instruction:
-            payload["systemInstruction"] = system_instruction
-
-        gemini_tools = self._convert_tools(tools)
-        if gemini_tools:
-            payload["tools"] = gemini_tools
-
-        session = await self._get_session()
-        async with session.post(
-            url, json=payload, headers=self._headers()
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            # Gemini stream returns a JSON array of chunks
-            if isinstance(data, list):
-                for chunk in data:
-                    yield self._normalize_stream_chunk(chunk)
-
-    def _normalize_stream_chunk(self, chunk: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert Gemini stream chunk to OpenAI SSE format."""
-        candidates = chunk.get("candidates", [])
-        if not candidates:
-            return {"choices": [{"delta": {}, "finish_reason": None}]}
-
-        candidate = candidates[0]
-        parts = candidate.get("content", {}).get("parts", [])
-        text = ""
-        tool_calls = []
-        for i, part in enumerate(parts):
-            if "text" in part:
-                text += part["text"]
-            if "functionCall" in part:
-                fc = part["functionCall"]
-                tool_calls.append(
-                    {
-                        "index": i,
-                        "id": f"call_{i}",
-                        "type": "function",
-                        "function": {
-                            "name": fc.get("name", ""),
-                            "arguments": fc.get("arguments", {}),
-                        },
-                    }
-                )
-
-        delta: Dict[str, Any] = {}
-        if text:
-            delta["content"] = text
-        if tool_calls:
-            delta["tool_calls"] = tool_calls
-
-        finish_reason = candidate.get("finishReason", None)
-        if finish_reason == "STOP":
-            finish_reason = "stop"
-
-        return {
-            "choices": [{"delta": delta, "finish_reason": finish_reason}],
-        }
-
-    def _parse_response(self, data: Dict[str, Any]) -> LLMResponse:
-        """Parse Gemini response into LLMResponse."""
-        candidates = data.get("candidates", [])
-        if not candidates:
-            return LLMResponse(
-                content="",
-                tool_calls=[],
-                finish_reason="stop",
-                model=self.config.model,
-                provider=self.name,
-                usage=data.get("usageMetadata", {}),
-            )
-
-        candidate = candidates[0]
-        parts = candidate.get("content", {}).get("parts", [])
-        text = ""
-        tool_calls = []
-        for i, part in enumerate(parts):
-            if "text" in part:
-                text += part["text"]
-            if "functionCall" in part:
-                fc = part["functionCall"]
-                import json as _json
-                tool_calls.append(
-                    {
-                        "id": f"call_{i}",
-                        "type": "function",
-                        "function": {
-                            "name": fc.get("name", ""),
-                            "arguments": _json.dumps(fc.get("arguments", {})),
-                        },
-                    }
-                )
-
-        usage_meta = data.get("usageMetadata", {})
-        finish_reason = candidate.get("finishReason", "STOP")
-        if finish_reason == "STOP":
-            finish_reason = "stop"
-
-        return LLMResponse(
-            content=text,
-            tool_calls=tool_calls,
-            finish_reason=finish_reason,
-            model=self.config.model,
-            provider=self.name,
-            usage={
-                "prompt_tokens": usage_meta.get("promptTokenCount", 0),
-                "completion_tokens": usage_meta.get("candidatesTokenCount", 0),
-                "total_tokens": usage_meta.get("totalTokenCount", 0),
-            },
-        )
-
-    async def health_check(self) -> bool:
-        """Check Gemini API by listing models."""
-        url = f"{self.config.base_url}/models"
-        try:
-            session = await self._get_session()
-            async with session.get(
-                url, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                if resp.status != 200:
-                    return False
-                data = await resp.json()
-                models = [m.get("name", "") for m in data.get("models", [])]
-                # Gemini model names are like "models/gemini-2.5-flash"
-                model_short = f"models/{self.config.model}"
-                return model_short in models or self.config.model in [
-                    m.split("/")[-1] for m in models
-                ]
-        except Exception as e:
-            logger.debug(f"gemini_health_check_fail | provider={self.name} | {e}")
-            return False
 
 
 # ---------------------------------------------------------------------------
 # Model Router — the main entry point
 # ---------------------------------------------------------------------------
+
 
 class ModelRouter:
     """
@@ -605,12 +306,7 @@ class ModelRouter:
                 priority=pcfg.get("priority", 1),
                 timeout=pcfg.get("timeout", 60),
             )
-            # Select provider class based on config
-            provider_class = pcfg.get("provider_class", "")
-            if provider_class == "gemini":
-                provider = GeminiProvider(provider_config)
-            else:
-                provider = BaseProvider(provider_config)
+            provider = BaseProvider(provider_config)
             router.register(provider)
 
         return router
@@ -674,9 +370,7 @@ class ModelRouter:
             self._role_map[role].append(provider.name)
         # Sort by priority (lower = higher priority)
         for role in self._role_map:
-            self._role_map[role].sort(
-                key=lambda n: self._providers[n].config.priority
-            )
+            self._role_map[role].sort(key=lambda n: self._providers[n].config.priority)
         # Build fallback order
         self._fallback_order = dict(self._role_map)
         logger.info(
@@ -754,9 +448,7 @@ class ModelRouter:
                 logger.warning(f"provider_fail | name={name} | {e}")
                 continue
 
-        raise RuntimeError(
-            f"All providers failed for role '{role}'. Last error: {last_error}"
-        )
+        raise RuntimeError(f"All providers failed for role '{role}'. Last error: {last_error}")
 
     async def stream_complete(
         self,
@@ -795,9 +487,7 @@ class ModelRouter:
                 logger.warning(f"stream_provider_fail | name={name} | {e}")
                 continue
 
-        raise RuntimeError(
-            f"All streaming providers failed for role '{role}'. Last error: {last_error}"
-        )
+        raise RuntimeError(f"All streaming providers failed for role '{role}'. Last error: {last_error}")
 
     async def health_check_all(self) -> Dict[str, bool]:
         """Check health of all registered providers."""

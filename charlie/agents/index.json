@@ -22,30 +22,9 @@
     "description": "Email, notifications, messaging, calendar management, communication",
     "enabled": "true",
     "tools": [
-      "send_gmail",
-      "get_gmail_messages",
       "send_file_to_mobile",
       "get_calendar_events",
       "manage_calendar"
-    ]
-  },
-  {
-    "name": "redteam",
-    "description": "Ethical hacking, penetration testing, CTF/HTB assistance, vulnerability analysis, exploit development mentorship, security tool operation, recon, and pentest report generation",
-    "enabled": "true",
-    "tools": [
-      "whois_lookup",
-      "dns_enum",
-      "subdomain_scan",
-      "tech_fingerprint",
-      "google_dork",
-      "scan_target",
-      "fuzz_dirs",
-      "analyze_vuln",
-      "generate_payload",
-      "write_report",
-      "ctf_hint",
-      "explain_exploit"
     ]
   },
   {

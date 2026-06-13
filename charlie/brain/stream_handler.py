@@ -26,13 +26,9 @@ class StreamHandler:
             # Queue full — buffer instead of dropping
             if len(self._tts_buffer) < _TTS_BUFFER_MAX:
                 self._tts_buffer.append(item)
-                logger.debug(
-                    f"tts_backpressure_buffer | buffered={len(self._tts_buffer)}"
-                )
+                logger.debug(f"tts_backpressure_buffer | buffered={len(self._tts_buffer)}")
             else:
-                logger.warning(
-                    f"tts_backpressure_drop | buffer_full={_TTS_BUFFER_MAX}"
-                )
+                logger.warning(f"tts_backpressure_drop | buffer_full={_TTS_BUFFER_MAX}")
 
     def _flush_tts_buffer(self) -> None:
         """Drain buffered TTS items into the queue if space exists."""
@@ -59,7 +55,9 @@ class StreamHandler:
 
         try:
             response = await self.brain.llm_client.complete(
-                messages, max_tokens=64, temperature=temp,
+                messages,
+                max_tokens=64,
+                temperature=temp,
             )
             res = response.content
 
@@ -91,7 +89,9 @@ class StreamHandler:
             if source == "local" or source == "all":
                 self.brain._safe_put(self.brain.status_q, {"type": "THINKING_STATUS", "content": msg})
             if (source.startswith("telegram") or source == "all") and self.brain.telegram_q:
-                self.brain._safe_put(self.brain.telegram_q, {"type": "CHAT_MSG", "speaker": "SYSTEM", "content": f"📡 {msg}"})
+                self.brain._safe_put(
+                    self.brain.telegram_q, {"type": "CHAT_MSG", "speaker": "SYSTEM", "content": f"📡 {msg}"}
+                )
         except asyncio.CancelledError:
             pass
 
@@ -101,7 +101,7 @@ class StreamHandler:
         _c = content.strip()
         if any(k in _c for k in ('"action"', '"action_input"', '"final_answer"', '"thought"')):
             return  # Suppress JSON leak entirely
-        if _c.startswith('{"') or _c.startswith('"}') or _c == '},':
+        if _c.startswith('{"') or _c.startswith('"}') or _c == "},":
             return
 
         if source == "local" or source == "all":
@@ -164,15 +164,19 @@ class StreamHandler:
                             fa_start = current_full.find(fa_marker) + len(fa_marker)
                             current_fa = current_full[fa_start:]
                             if '"' in current_fa and not current_fa.endswith('\\"'):
-                                current_fa = current_fa[:current_fa.find('"')]
+                                current_fa = current_fa[: current_fa.find('"')]
 
                             fa_fragments = re.split(r"(?<=[.!?|;:,])\s+", current_fa)
                             if len(fa_fragments) > 1:
                                 for fa_s in fa_fragments[:-1]:
                                     fa_s_clean = fa_s.strip().replace('\\"', '"').replace("\\n", " ")
                                     fa_s_clean = re.sub(r"<[^>]+>", "", fa_s_clean)
-                                    fa_s_clean = re.sub(r"(?i)\b(user|assistant|system|sir|tts|charlie):\s*", "", fa_s_clean)
-                                    fa_s_clean = fa_s_clean.replace("<endofturn>", "").replace("<startofturn>", "").strip()
+                                    fa_s_clean = re.sub(
+                                        r"(?i)\b(user|assistant|system|sir|tts|charlie):\s*", "", fa_s_clean
+                                    )
+                                    fa_s_clean = (
+                                        fa_s_clean.replace("<endofturn>", "").replace("<startofturn>", "").strip()
+                                    )
 
                                     if fa_s_clean and len(fa_s_clean) > 5:
                                         norm_fa = fa_s_clean.lower().strip()

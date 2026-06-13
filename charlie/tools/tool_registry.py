@@ -5,7 +5,7 @@ import pkgutil
 from pathlib import Path
 from typing import Any
 
-from charlie.security.tiers import RiskTier, get_tool_tier
+from charlie.security.tiers import RiskTier
 from charlie.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -24,38 +24,6 @@ _CANONICAL_TIER_SEEDS: dict[str, RiskTier] = {
     "shutdown": RiskTier.TIER_2,
     "sleep_pc": RiskTier.TIER_2,
     "hibernate_pc": RiskTier.TIER_2,
-}
-
-
-# Offensive-security tool tier FLOOR (Req 18.1, 18.2, 18.3). These tools stay
-# registered and enabled by default, but must ALWAYS route through the
-# Confirmation_Gate — so their *effective* tier is floored at TIER_2 (TIER_2+
-# routes to confirmation). The floor only ever RAISES a tier: a TIER_0/TIER_1
-# offensive tool is lifted to TIER_2, while a tool already at TIER_2/TIER_3
-# keeps its higher tier. The canonical seed table above still takes precedence
-# for its specific names (and seeds are all >= TIER_2, so the floor never
-# affects them). The explicit name set covers the offensive tools defined in
-# redteam_tools.py, recon_tools.py, and intrusion_patrol.py; the
-# ``category == "security"`` condition (applied in ``register``) additionally
-# covers any future security tool automatically.
-_OFFENSIVE_TOOL_NAMES: set[str] = {
-    # redteam_tools.py
-    "scan_target",
-    "fuzz_dirs",
-    "analyze_vuln",
-    "generate_payload",
-    "write_report",
-    "ctf_hint",
-    "explain_exploit",
-    # recon_tools.py
-    "whois_lookup",
-    "dns_enum",
-    "subdomain_scan",
-    "tech_fingerprint",
-    "google_dork",
-    "caller_lookup",
-    # intrusion_patrol.py
-    "audit_network_connections",
 }
 
 
@@ -184,14 +152,6 @@ class ToolRegistry:
         3. **Fail-closed default (Req 3.5)** — when no tier is provided
            (``risk_tier is None``) and the name is not seeded, the tool is
            assigned ``RiskTier.TIER_3`` and a warning naming the tool is logged.
-
-        After precedence resolution, an **offensive-security tier floor**
-        (Req 18.1, 18.2, 18.3) is applied: a tool that is offensive (either in
-        ``_OFFENSIVE_TOOL_NAMES`` or registered with ``category == "security"``)
-        always routes through the Confirmation_Gate, so a resolved tier below
-        ``TIER_2`` is raised to ``TIER_2``. The floor only ever raises — it
-        never lowers a tool already at ``TIER_2``/``TIER_3`` — so the canonical
-        seed table still wins (its names already resolve ``>= TIER_2``).
         """
         # The seed table is keyed by the logical tool name as requested by the
         # caller, before any collision-driven rename below.
@@ -224,23 +184,8 @@ class ToolRegistry:
             risk_tier = _CANONICAL_TIER_SEEDS[original_name]
 
         # Resolve the tier to the canonical enum so we can compare/floor it.
-        # ``ToolEntry`` would coerce again, but we need the enum here to apply
-        # the offensive floor below; coercion is idempotent on a RiskTier.
+        # ``ToolEntry`` would coerce again, but coercion is idempotent on a RiskTier.
         resolved_tier = _coerce_risk_tier(risk_tier)
-
-        # Offensive-security tier FLOOR (Req 18.1, 18.2, 18.3): tools that are
-        # offensive — either by explicit name or by ``category == "security"``
-        # — must always route through the Confirmation_Gate, so their effective
-        # tier is floored at TIER_2. The floor only RAISES: a TIER_0/TIER_1
-        # offensive tool is lifted to TIER_2; a tool already at TIER_2/TIER_3
-        # is left untouched. The canonical seed table still takes precedence
-        # (its names resolve >= TIER_2 already, so the floor is a no-op there).
-        is_offensive = (original_name in _OFFENSIVE_TOOL_NAMES) or (category == "security")
-        if is_offensive and resolved_tier.value < RiskTier.TIER_2.value:
-            logger.info(
-                "offensive_tool_tier_floor | name=%s | raised_to=TIER_2", original_name
-            )
-            resolved_tier = RiskTier.TIER_2
 
         self._tools[name] = ToolEntry(
             name=name,
@@ -450,6 +395,7 @@ class ToolRegistry:
     def register_from_handler(self, handler_obj) -> int:
         """DEPRECATED."""
         return 0
+
 
 def _discover_module_tools(module) -> list[dict]:
     """Discover @tool decorated functions in a module."""

@@ -17,8 +17,6 @@ from telegram.ext import (
 
 from charlie.config import settings
 from charlie.privacy.redactor import PrivacyRedactor
-from charlie.telegram.away_reporter import AwayReporter
-from charlie.telegram.call_tracker import CallTracker
 from charlie.telegram.jarvis import JarvisFeatures
 from charlie.intelligence.mood_detector import MoodDetector
 from charlie.intelligence.silence_detector import SilenceDetector
@@ -28,8 +26,9 @@ logger = logging.getLogger("charlie.telegram")
 
 # Voice mode constants
 VOICE_OFF = "off"
-VOICE_ON = "on"       # voice reply only when user sends voice
-VOICE_TTS = "tts"     # voice reply to ALL messages
+VOICE_ON = "on"  # voice reply only when user sends voice
+VOICE_TTS = "tts"  # voice reply to ALL messages
+
 
 def _load_voice_mode():
     """Load voice mode from charlie_config.json."""
@@ -42,6 +41,7 @@ def _load_voice_mode():
     except Exception:
         pass
     return VOICE_OFF
+
 
 def _save_voice_mode(mode):
     """Save voice mode to charlie_config.json."""
@@ -57,11 +57,18 @@ def _save_voice_mode(mode):
     except Exception as e:
         logger.error(f"save_voice_mode_err | {e}")
 
+
 class TelegramBridge(multiprocessing.Process):
-    def __init__(self, brain_task_q: multiprocessing.Queue, telegram_q: multiprocessing.Queue):
+    def __init__(
+        self,
+        brain_task_q: multiprocessing.Queue,
+        telegram_q: multiprocessing.Queue,
+        audio_cmd_q: multiprocessing.Queue = None,
+    ):
         super().__init__(daemon=True, name="TelegramBridge")
         self.brain_task_q = brain_task_q
         self.telegram_q = telegram_q
+        self.audio_cmd_q = audio_cmd_q
         self.redactor = PrivacyRedactor()
         self.token = settings.supervisor.telegram_token
         self.whitelist = [int(x) for x in (settings.supervisor.telegram_chat_id or "").split(",") if x]
@@ -95,6 +102,8 @@ class TelegramBridge(multiprocessing.Process):
         self.app.add_handler(CommandHandler("memory", self._cmd_memory))
         self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
         self.app.add_handler(CommandHandler("voice", self._cmd_voice))
+        self.app.add_handler(CommandHandler("mute", self._cmd_mute))
+        self.app.add_handler(CommandHandler("unmute", self._cmd_unmute))
         self.app.add_handler(CommandHandler("calls", self._cmd_calls))
         self.app.add_handler(CommandHandler("track", self._cmd_track))
         self.app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, self._handle_voice))
@@ -114,18 +123,22 @@ class TelegramBridge(multiprocessing.Process):
     async def _register_commands(self, application):
         """Register commands with BotFather on startup."""
         try:
-            await application.bot.set_my_commands([
-                BotCommand("start", "Start the bot"),
-                BotCommand("status", "System status"),
-                BotCommand("help", "Show commands"),
-                BotCommand("tasks", "List active tasks"),
-                BotCommand("briefing", "Daily briefing"),
-                BotCommand("memory", "Search memory"),
-                BotCommand("cancel", "Cancel operation"),
-                BotCommand("voice", "Voice reply settings"),
-                BotCommand("calls", "Call analytics"),
-                BotCommand("track", "Tracking list"),
-            ])
+            await application.bot.set_my_commands(
+                [
+                    BotCommand("start", "Start the bot"),
+                    BotCommand("status", "System status"),
+                    BotCommand("help", "Show commands"),
+                    BotCommand("tasks", "List active tasks"),
+                    BotCommand("briefing", "Daily briefing"),
+                    BotCommand("memory", "Search memory"),
+                    BotCommand("cancel", "Cancel operation"),
+                    BotCommand("voice", "Voice reply settings"),
+                    BotCommand("calls", "Call analytics"),
+                    BotCommand("track", "Tracking list"),
+                    BotCommand("mute", "Mute microphone"),
+                    BotCommand("unmute", "Unmute microphone"),
+                ]
+            )
         except Exception as e:
             logger.debug(f"register_commands_err | {e}")
 
@@ -134,7 +147,7 @@ class TelegramBridge(multiprocessing.Process):
             catchup = self.away_reporter.generate_startup_catchup()
             if catchup:
                 for user_id in self.whitelist:
-                    await application.bot.send_message(chat_id=user_id, text=catchup, parse_mode='Markdown')
+                    await application.bot.send_message(chat_id=user_id, text=catchup, parse_mode="Markdown")
         except Exception as e:
             logger.debug(f"startup_catchup_err | {e}")
 
@@ -145,7 +158,7 @@ class TelegramBridge(multiprocessing.Process):
     async def _outgoing_loop(self):
         """Polls telegram_q for messages to send to the user."""
         if not hasattr(self, "_streaming_msgs"):
-            self._streaming_msgs = {} # {user_id: {"msg_id": int, "content": str, "last_update": float}}
+            self._streaming_msgs = {}  # {user_id: {"msg_id": int, "content": str, "last_update": float}}
 
         while True:
             try:
@@ -176,18 +189,21 @@ class TelegramBridge(multiprocessing.Process):
                                         chat_id=user_id,
                                         message_id=data["msg_id"],
                                         text=f"🤖 *CHARLIE:* {content}",
-                                        parse_mode='Markdown'
+                                        parse_mode="Markdown",
                                     )
                                 except Exception as e:
                                     logger.debug(f"telegram_edit_final_err | {e}")
-                                    await self.app.bot.send_message(chat_id=user_id, text=f"🤖 *CHARLIE:* {content}", parse_mode='Markdown')
+                                    await self.app.bot.send_message(
+                                        chat_id=user_id, text=f"🤖 *CHARLIE:* {content}", parse_mode="Markdown"
+                                    )
                             else:
-                                await self.app.bot.send_message(chat_id=user_id, text=f"🤖 *CHARLIE:* {content}", parse_mode='Markdown')
+                                await self.app.bot.send_message(
+                                    chat_id=user_id, text=f"🤖 *CHARLIE:* {content}", parse_mode="Markdown"
+                                )
 
                             # Voice reply if mode matches
-                            should_voice = (
-                                self.voice_mode == VOICE_TTS or
-                                (self.voice_mode == VOICE_ON and user_id in self._last_voice_user)
+                            should_voice = self.voice_mode == VOICE_TTS or (
+                                self.voice_mode == VOICE_ON and user_id in self._last_voice_user
                             )
                             # Clear voice tracking after use
                             self._last_voice_user.discard(user_id)
@@ -206,22 +222,21 @@ class TelegramBridge(multiprocessing.Process):
 
                         elif msg_type == "STREAM_PARTIAL":
                             content = msg.get("content", "")
-                            if not content.strip(): continue
+                            if not content.strip():
+                                continue
 
                             data = self._streaming_msgs.get(user_id)
                             now = time.time()
 
                             if not data:
                                 sent_msg = await self.app.bot.send_message(
-                                    chat_id=user_id,
-                                    text=f"🤖 *CHARLIE:* {content}...",
-                                    parse_mode='Markdown'
+                                    chat_id=user_id, text=f"🤖 *CHARLIE:* {content}...", parse_mode="Markdown"
                                 )
                                 self._streaming_msgs[user_id] = {
                                     "msg_id": sent_msg.message_id,
                                     "content": content,
                                     "last_sent": content,
-                                    "last_update": now
+                                    "last_update": now,
                                 }
                             else:
                                 data["content"] += content
@@ -232,7 +247,7 @@ class TelegramBridge(multiprocessing.Process):
                                             chat_id=user_id,
                                             message_id=data["msg_id"],
                                             text=f"🤖 *CHARLIE:* {data['content']}...",
-                                            parse_mode='Markdown'
+                                            parse_mode="Markdown",
                                         )
                                         data["last_sent"] = data["content"]
                                         data["last_update"] = now
@@ -248,7 +263,7 @@ class TelegramBridge(multiprocessing.Process):
                             keyboard = [
                                 [
                                     InlineKeyboardButton("✅ Confirm", callback_data="confirm"),
-                                    InlineKeyboardButton("❌ Abort", callback_data="abort")
+                                    InlineKeyboardButton("❌ Abort", callback_data="abort"),
                                 ]
                             ]
                             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -256,7 +271,7 @@ class TelegramBridge(multiprocessing.Process):
                                 chat_id=user_id,
                                 text=f"⚠️ *AUTHORIZATION REQUIRED (TIER {tier})*\n\n{desc}",
                                 reply_markup=reply_markup,
-                                parse_mode='Markdown'
+                                parse_mode="Markdown",
                             )
 
                         elif msg_type == "PRIORITY_ALERT":
@@ -265,9 +280,7 @@ class TelegramBridge(multiprocessing.Process):
                             prefix_map = {"critical": "🚨 *CRITICAL ALERT*", "high": "⚠️ *HIGH PRIORITY ALERT*"}
                             prefix = prefix_map.get(level, "📌 *ALERT*")
                             await self.app.bot.send_message(
-                                chat_id=user_id,
-                                text=f"{prefix}\n\n{content}",
-                                parse_mode='Markdown'
+                                chat_id=user_id, text=f"{prefix}\n\n{content}", parse_mode="Markdown"
                             )
 
                 await asyncio.sleep(0.5)
@@ -277,16 +290,19 @@ class TelegramBridge(multiprocessing.Process):
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.effective_user or update.effective_user.id not in self.whitelist:
-            if update.message: await update.message.reply_text("Unauthorized access denied.")
+            if update.message:
+                await update.message.reply_text("Unauthorized access denied.")
             return
         await update.message.reply_text("C.H.A.R.L.I.E. Telegram Command Center active. Awaiting instruction, Sir.")
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_user or update.effective_user.id not in self.whitelist: return
+        if not update.effective_user or update.effective_user.id not in self.whitelist:
+            return
         self.brain_task_q.put({"type": "TEXT", "content": "system status", "source": "telegram"})
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_user or update.effective_user.id not in self.whitelist: return
+        if not update.effective_user or update.effective_user.id not in self.whitelist:
+            return
         await update.message.reply_text(
             "🤖 *CHARLIE Telegram Commands*\n\n"
             "/start — Start the bot\n"
@@ -298,19 +314,22 @@ class TelegramBridge(multiprocessing.Process):
             "/cancel — Cancel operation\n"
             "/voice — Voice reply settings\n\n"
             "You can also send: text, photos, voice messages, documents, and locations.",
-            parse_mode='Markdown'
+            parse_mode="Markdown",
         )
 
     async def _cmd_tasks(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_user or update.effective_user.id not in self.whitelist: return
+        if not update.effective_user or update.effective_user.id not in self.whitelist:
+            return
         self.brain_task_q.put({"type": "TEXT", "content": "list all active tasks", "source": "telegram"})
 
     async def _cmd_briefing(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_user or update.effective_user.id not in self.whitelist: return
+        if not update.effective_user or update.effective_user.id not in self.whitelist:
+            return
         self.brain_task_q.put({"type": "TEXT", "content": "give me my daily briefing", "source": "telegram"})
 
     async def _cmd_memory(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_user or update.effective_user.id not in self.whitelist: return
+        if not update.effective_user or update.effective_user.id not in self.whitelist:
+            return
         query = " ".join(context.args) if context.args else ""
         if not query:
             await update.message.reply_text("Usage: /memory <search query>")
@@ -318,12 +337,14 @@ class TelegramBridge(multiprocessing.Process):
         self.brain_task_q.put({"type": "TEXT", "content": f"search memory for: {query}", "source": "telegram"})
 
     async def _cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_user or update.effective_user.id not in self.whitelist: return
+        if not update.effective_user or update.effective_user.id not in self.whitelist:
+            return
         self.brain_task_q.put({"type": "CONFIRMATION_RESULT", "confirmed": False})
         await update.message.reply_text("Operation cancelled.")
 
     async def _cmd_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_user or update.effective_user.id not in self.whitelist: return
+        if not update.effective_user or update.effective_user.id not in self.whitelist:
+            return
         args = context.args
         if not args:
             cycle = {VOICE_OFF: VOICE_ON, VOICE_ON: VOICE_TTS, VOICE_TTS: VOICE_OFF}
@@ -332,7 +353,7 @@ class TelegramBridge(multiprocessing.Process):
             mode = args[0].lower()
             if mode in (VOICE_OFF, VOICE_ON, VOICE_TTS, "status"):
                 if mode == "status":
-                    await update.message.reply_text(f"Voice mode: *{self.voice_mode}*", parse_mode='Markdown')
+                    await update.message.reply_text(f"Voice mode: *{self.voice_mode}*", parse_mode="Markdown")
                     return
                 self.voice_mode = mode
             else:
@@ -344,19 +365,51 @@ class TelegramBridge(multiprocessing.Process):
             VOICE_ON: "Voice replies when you send voice messages.",
             VOICE_TTS: "Voice replies to ALL messages.",
         }
-        await update.message.reply_text(f"Voice mode: *{self.voice_mode}* — {descriptions.get(self.voice_mode, '')}", parse_mode='Markdown')
+        await update.message.reply_text(
+            f"Voice mode: *{self.voice_mode}* — {descriptions.get(self.voice_mode, '')}", parse_mode="Markdown"
+        )
+
+    async def _cmd_mute(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Mute the microphone. Audio capture is discarded until /unmute."""
+        if not update.effective_user or update.effective_user.id not in self.whitelist:
+            return
+        if self.audio_cmd_q is None:
+            await update.message.reply_text("Audio engine not running; mute unavailable.")
+            return
+        try:
+            self.audio_cmd_q.put_nowait({"type": "MUTE", "source": "telegram"})
+            await update.message.reply_text("Muted. Use /unmute to resume.")
+        except Exception as e:
+            logger.error("telegram_mute_failed | %s", e)
+            await update.message.reply_text("Mute failed.")
+
+    async def _cmd_unmute(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Resume microphone capture."""
+        if not update.effective_user or update.effective_user.id not in self.whitelist:
+            return
+        if self.audio_cmd_q is None:
+            await update.message.reply_text("Audio engine not running; unmute unavailable.")
+            return
+        try:
+            self.audio_cmd_q.put_nowait({"type": "UNMUTE", "source": "telegram"})
+            await update.message.reply_text("Unmuted.")
+        except Exception as e:
+            logger.error("telegram_unmute_failed | %s", e)
+            await update.message.reply_text("Unmute failed.")
 
     async def _cmd_calls(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_user or update.effective_user.id not in self.whitelist: return
+        if not update.effective_user or update.effective_user.id not in self.whitelist:
+            return
         analytics = self.call_tracker.get_analytics()
-        await update.message.reply_text(analytics, parse_mode='Markdown')
+        await update.message.reply_text(analytics, parse_mode="Markdown")
 
     async def _cmd_track(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_user or update.effective_user.id not in self.whitelist: return
+        if not update.effective_user or update.effective_user.id not in self.whitelist:
+            return
         args = context.args
         if not args:
             tracking = self.jarvis.list_tracking()
-            await update.message.reply_text(tracking, parse_mode='Markdown')
+            await update.message.reply_text(tracking, parse_mode="Markdown")
             return
         action = args[0].lower()
         if action == "add" and len(args) > 1:
@@ -385,7 +438,7 @@ class TelegramBridge(multiprocessing.Process):
                     if not self.silence_detector.should_be_silent():
                         briefing = self.jarvis.generate_morning_briefing()
                         for user_id in self.whitelist:
-                            await self.app.bot.send_message(chat_id=user_id, text=briefing, parse_mode='Markdown')
+                            await self.app.bot.send_message(chat_id=user_id, text=briefing, parse_mode="Markdown")
                         last_morning = now
 
                 # Email digest every 2 hours
@@ -394,7 +447,9 @@ class TelegramBridge(multiprocessing.Process):
                         email_digest = self.jarvis.generate_email_digest()
                         if email_digest and "unavailable" not in email_digest.lower():
                             for user_id in self.whitelist:
-                                await self.app.bot.send_message(chat_id=user_id, text=email_digest, parse_mode='Markdown')
+                                await self.app.bot.send_message(
+                                    chat_id=user_id, text=email_digest, parse_mode="Markdown"
+                                )
                     last_email = now
 
                 # Finance update every hour during market hours (9 AM - 4 PM)
@@ -403,7 +458,7 @@ class TelegramBridge(multiprocessing.Process):
                         finance = self.jarvis.generate_finance_update()
                         if finance and "unavailable" not in finance.lower():
                             for user_id in self.whitelist:
-                                await self.app.bot.send_message(chat_id=user_id, text=finance, parse_mode='Markdown')
+                                await self.app.bot.send_message(chat_id=user_id, text=finance, parse_mode="Markdown")
                     last_finance = now
 
                 # Check tracking updates every 6 hours
@@ -411,7 +466,9 @@ class TelegramBridge(multiprocessing.Process):
                     tracking_update = self.jarvis.check_tracking_updates()
                     if tracking_update:
                         for user_id in self.whitelist:
-                            await self.app.bot.send_message(chat_id=user_id, text=tracking_update, parse_mode='Markdown')
+                            await self.app.bot.send_message(
+                                chat_id=user_id, text=tracking_update, parse_mode="Markdown"
+                            )
 
                 await asyncio.sleep(60)  # Check every minute
 
@@ -429,11 +486,13 @@ class TelegramBridge(multiprocessing.Process):
             file = await voice.get_file()
             path = f"scratch/telegram_voice_{int(time.time())}.ogg"
             await file.download_to_drive(path)
-            self.brain_task_q.put({
-                "type": "REMOTE_VOICE",
-                "path": path,
-                "source": f"telegram_{update.effective_user.id}",
-            })
+            self.brain_task_q.put(
+                {
+                    "type": "REMOTE_VOICE",
+                    "path": path,
+                    "source": f"telegram_{update.effective_user.id}",
+                }
+            )
             # Track that this user sent a voice message (for VOICE_ON mode)
             self._last_voice_user.add(update.effective_user.id)
             await update.message.reply_text("Voice received. Transcribing...")
@@ -442,7 +501,8 @@ class TelegramBridge(multiprocessing.Process):
             await update.message.reply_text("Failed to process voice message.")
 
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_user or update.effective_user.id not in self.whitelist: return
+        if not update.effective_user or update.effective_user.id not in self.whitelist:
+            return
 
         text = update.message.text
 
@@ -459,6 +519,7 @@ class TelegramBridge(multiprocessing.Process):
             r"(?i)jailbreak|DAN\s+mode",
         ]
         import re
+
         for p in _injection_patterns:
             if re.search(p, text):
                 logger.warning("telegram_injection_detected | pattern=%s | user=%s", p[:40], update.effective_user.id)
@@ -472,14 +533,14 @@ class TelegramBridge(multiprocessing.Process):
         if self.away_reporter.should_send_digest():
             digest = self.away_reporter.generate_digest(clear=True)
             if digest:
-                await update.message.reply_text(digest, parse_mode='Markdown')
+                await update.message.reply_text(digest, parse_mode="Markdown")
 
         # Check for Tasker call events
         call_data = self.call_tracker.parse_tasker_message(text)
         if call_data:
             self.call_tracker.record_call(call_data)
             intel = self.call_tracker.get_caller_intelligence(call_data["number"])
-            await update.message.reply_text(intel, parse_mode='Markdown')
+            await update.message.reply_text(intel, parse_mode="Markdown")
             return
 
         # Check for manual call reports
@@ -489,7 +550,7 @@ class TelegramBridge(multiprocessing.Process):
             if call_data and call_data["number"] != "unknown":
                 self.call_tracker.record_call(call_data)
                 intel = self.call_tracker.get_caller_intelligence(call_data["number"])
-                await update.message.reply_text(intel, parse_mode='Markdown')
+                await update.message.reply_text(intel, parse_mode="Markdown")
                 return
 
         # Check for temporal/time-travel queries
@@ -501,19 +562,19 @@ class TelegramBridge(multiprocessing.Process):
                 result = self.time_travel.query_yesterday()
             else:
                 result = self.time_travel.query_relative(days_ago=1)
-            await update.message.reply_text(result, parse_mode='Markdown')
+            await update.message.reply_text(result, parse_mode="Markdown")
             return
 
         # Check for call analytics queries
         if any(w in text_lower for w in ("call analytics", "call history", "call stats", "who called")):
             analytics = self.call_tracker.get_analytics()
-            await update.message.reply_text(analytics, parse_mode='Markdown')
+            await update.message.reply_text(analytics, parse_mode="Markdown")
             return
 
         # Check for tracking queries
         if "track" in text_lower and any(w in text_lower for w in ("package", "flight", "delivery")):
             tracking = self.jarvis.list_tracking()
-            await update.message.reply_text(tracking, parse_mode='Markdown')
+            await update.message.reply_text(tracking, parse_mode="Markdown")
             return
 
         # Mood check-in
@@ -535,12 +596,14 @@ class TelegramBridge(multiprocessing.Process):
             path = f"scratch/telegram_img_{int(time.time())}.jpg"
             await file.download_to_drive(path)
             caption = update.message.caption or "Describe this image in detail."
-            self.brain_task_q.put({
-                "type": "IMAGE",
-                "path": path,
-                "query": caption,
-                "source": f"telegram_{update.effective_user.id}",
-            })
+            self.brain_task_q.put(
+                {
+                    "type": "IMAGE",
+                    "path": path,
+                    "query": caption,
+                    "source": f"telegram_{update.effective_user.id}",
+                }
+            )
             await update.message.reply_text("Image received. Analyzing...")
         except Exception as e:
             logger.error(f"telegram_photo_err | {e}")
@@ -559,11 +622,13 @@ class TelegramBridge(multiprocessing.Process):
             safe_name = "".join(c for c in filename if c.isalnum() or c in "._-")
             path = f"scratch/telegram_{int(time.time())}_{safe_name}"
             await file.download_to_drive(path)
-            self.brain_task_q.put({
-                "type": "TEXT",
-                "content": f"I received a file: {filename}. Please acknowledge and summarize if possible.",
-                "source": f"telegram_{update.effective_user.id}",
-            })
+            self.brain_task_q.put(
+                {
+                    "type": "TEXT",
+                    "content": f"I received a file: {filename}. Please acknowledge and summarize if possible.",
+                    "source": f"telegram_{update.effective_user.id}",
+                }
+            )
             await update.message.reply_text(f"File received: {filename}")
         except Exception as e:
             logger.error(f"telegram_doc_err | {e}")
@@ -575,35 +640,42 @@ class TelegramBridge(multiprocessing.Process):
             return
         loc = update.message.location
         lat, lon = loc.latitude, loc.longitude
-        self.brain_task_q.put({
-            "type": "TEXT",
-            "content": f"My current location is: latitude {lat}, longitude {lon}. Please remember this.",
-            "source": f"telegram_{update.effective_user.id}",
-        })
+        self.brain_task_q.put(
+            {
+                "type": "TEXT",
+                "content": f"My current location is: latitude {lat}, longitude {lon}. Please remember this.",
+                "source": f"telegram_{update.effective_user.id}",
+            }
+        )
         await update.message.reply_text(f"Location received: {lat}, {lon}")
 
     async def _handle_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
 
-        if not query.from_user or query.from_user.id not in self.whitelist: return
+        if not query.from_user or query.from_user.id not in self.whitelist:
+            return
 
         action = query.data
         try:
             if action == "confirm":
                 self.brain_task_q.put({"type": "CONFIRMATION_RESULT", "confirmed": True})
-                await query.edit_message_text(text=f"{query.message.text}\n\n✅ *Confirmed by Sir.*", parse_mode='Markdown')
+                await query.edit_message_text(
+                    text=f"{query.message.text}\n\n✅ *Confirmed by Sir.*", parse_mode="Markdown"
+                )
             else:
                 self.brain_task_q.put({"type": "CONFIRMATION_RESULT", "confirmed": False})
-                await query.edit_message_text(text=f"{query.message.text}\n\n❌ *Aborted by Sir.*", parse_mode='Markdown')
+                await query.edit_message_text(
+                    text=f"{query.message.text}\n\n❌ *Aborted by Sir.*", parse_mode="Markdown"
+                )
         except Exception as e:
             logger.error(f"telegram_button_err | {e}")
-
 
     async def _generate_voice(self, text):
         """Generate voice audio using Kokoro TTS + ffmpeg OGG conversion. Returns path or None."""
         try:
             from charlie.telegram.voice_reply import text_to_telegram_voice
+
             return await asyncio.to_thread(text_to_telegram_voice, text)
         except Exception as e:
             logger.error(f"generate_voice_err | {e}")
@@ -616,6 +688,6 @@ async def _error_handler(update, context):
 
 
 def run_bridge(brain_task_q, status_q, telegram_q, audio_cmd_q, heartbeat):
-    bridge = TelegramBridge(brain_task_q, telegram_q)
+    bridge = TelegramBridge(brain_task_q, telegram_q, audio_cmd_q)
     bridge.heartbeat = heartbeat
     bridge.run()

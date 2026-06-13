@@ -85,9 +85,7 @@ class EvolutionEngine:
         # Review each skill
         for skill_path in skills:
             try:
-                improvement = self._review_skill(
-                    skill_path, outcome_tracker, session_search, llm_client
-                )
+                improvement = self._review_skill(skill_path, outcome_tracker, session_search, llm_client)
                 result["skills_reviewed"] += 1
                 if improvement:
                     result["skills_improved"] += 1
@@ -102,19 +100,22 @@ class EvolutionEngine:
         # Notify dashboard
         if status_q and result["skills_improved"] > 0:
             try:
-                status_q.put_nowait({
-                    "type": "EVOLUTION_COMPLETE",
-                    "content": {
-                        "reviewed": result["skills_reviewed"],
-                        "improved": result["skills_improved"],
-                        "improvements": result["improvements"],
-                    },
-                })
+                status_q.put_nowait(
+                    {
+                        "type": "EVOLUTION_COMPLETE",
+                        "content": {
+                            "reviewed": result["skills_reviewed"],
+                            "improved": result["skills_improved"],
+                            "improvements": result["improvements"],
+                        },
+                    }
+                )
             except Exception:
                 pass
 
-        logger.info("evolution_complete | reviewed=%d improved=%d",
-                    result["skills_reviewed"], result["skills_improved"])
+        logger.info(
+            "evolution_complete | reviewed=%d improved=%d", result["skills_reviewed"], result["skills_improved"]
+        )
         return result
 
     def _find_skills(self, skills_dir: Path) -> list[Path]:
@@ -149,11 +150,14 @@ class EvolutionEngine:
 
         try:
             import asyncio
-            response = asyncio.run(llm_client.complete(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=2000,
-            ))
+
+            response = asyncio.run(
+                llm_client.complete(
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    max_tokens=2000,
+                )
+            )
             content = response.content.strip()
             if content.startswith("```"):
                 content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -170,13 +174,16 @@ class EvolutionEngine:
                     logger.warning("evolution_reject | improved content too short (%d chars)", len(improved))
                     return None
                 if len(improved) > len(current_content) * 5:
-                    logger.warning("evolution_reject | improved content suspiciously large (%d vs %d)", len(improved), len(current_content))
+                    logger.warning(
+                        "evolution_reject | improved content suspiciously large (%d vs %d)",
+                        len(improved),
+                        len(current_content),
+                    )
                     return None
 
                 # Write improved version
                 skill_path.write_text(improved, encoding="utf-8")
-                logger.info("skill_improved | path=%s | reason=%s",
-                          skill_path, data.get("reason", ""))
+                logger.info("skill_improved | path=%s | reason=%s", skill_path, data.get("reason", ""))
                 return {
                     "path": str(skill_path),
                     "reason": data.get("reason", ""),
@@ -187,9 +194,7 @@ class EvolutionEngine:
 
         return None
 
-    def _gather_performance(
-        self, skill_path: Path, outcome_tracker, session_search
-    ) -> dict:
+    def _gather_performance(self, skill_path: Path, outcome_tracker, session_search) -> dict:
         """Gather performance data for a skill."""
         perf = {"skill_path": str(skill_path)}
 
@@ -198,9 +203,7 @@ class EvolutionEngine:
             try:
                 outcomes = outcome_tracker.get_recent_outcomes(limit=50)
                 perf["recent_outcomes"] = len(outcomes)
-                perf["success_rate"] = (
-                    sum(1 for o in outcomes if o.outcome_type == "success") / max(len(outcomes), 1)
-                )
+                perf["success_rate"] = sum(1 for o in outcomes if o.outcome_type == "success") / max(len(outcomes), 1)
             except Exception as e:
                 logger.warning("gather_performance_outcomes_failed | %s", e)
                 perf["recent_outcomes"] = 0

@@ -51,7 +51,6 @@ button {
   --voice-processing: #fbbf24;
   --voice-speaking: #34d399;
   --voice-idle: #52525b;
-  --scanline-opacity: 0.03;
   --particle-color: rgba(136, 204, 255, 0.3);
 }
 
@@ -124,37 +123,7 @@ body {
     text-shadow: 0 0 10px rgba(136, 204, 255, 0.7), 0 0 40px rgba(136, 204, 255, 0.3), 0 0 80px rgba(136, 204, 255, 0.1);
   }
 
-  /* ==========================================
-     SCANLINE OVERLAY
-     ========================================== */
-  .scanline-overlay {
-    position: relative;
-  }
 
-  .scanline-overlay::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background: repeating-linear-gradient(
-      0deg,
-      transparent,
-      transparent 2px,
-      rgba(136, 204, 255, var(--scanline-opacity)) 2px,
-      rgba(136, 204, 255, var(--scanline-opacity)) 4px
-    );
-    border-radius: inherit;
-    z-index: 1;
-  }
-
-  /* ==========================================
-     GLITCH — STATUS CHANGE ONLY
-     ========================================== */
-  .glitch-status {
-    animation: glitch 0.5s ease-in-out;
-  }
-
-  /* ==========================================
   /* ==========================================
      SKELETON LOADER
      ========================================== */
@@ -224,7 +193,7 @@ body {
      GLOW CYAN
      ========================================== */
   .glow-cyan {
-    box-shadow: 0 0 15px rgba(136, 204, 255, 0.15);
+    box-shadow: 0 0 12px rgba(136, 204, 255, 0.08);
   }
 
   /* ==========================================

@@ -5,6 +5,7 @@ Server lifecycle management for MCP connections.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import threading
 from pathlib import Path
@@ -14,6 +15,10 @@ from charlie.mcp.client import MCPClient
 from charlie.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+class MCPTimeout(Exception):
+    """Raised when an MCP coroutine exceeds the configured timeout."""
 
 CONFIG_PATH = Path(__file__).parent.parent.parent / "charlie_config.json"
 
@@ -51,15 +56,27 @@ class MCPManager:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def run_coroutine(self, coro) -> Any:
+    def run_coroutine(self, coro, timeout: float | None = None) -> Any:
         """Submit *coro* to the MCP event loop and block until it completes.
+
+        *timeout* (seconds) bounds the wait. ``None`` waits forever. When
+        the timeout expires, the underlying future is cancelled and
+        ``MCPTimeout`` is raised so callers can fall through cleanly
+        instead of freezing on a hung server.
 
         Raises the coroutine's exception if it fails.  Use this from sync
         contexts (e.g. ``MCPToolBridge`` wrappers) instead of
         ``asyncio.get_event_loop()``.
         """
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result()  # blocks the calling thread
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as e:
+            # Attempt to cancel; the coroutine may have already completed
+            # by the time the cancel signal arrives.
+            future.cancel()
+            logger.warning("mcp_call_timeout | timeout=%s", timeout)
+            raise MCPTimeout(f"MCP call timed out after {timeout}s") from e
 
     def _load_config(self) -> None:
         """Load MCP server configs from charlie_config.json."""
@@ -88,10 +105,7 @@ class MCPManager:
     async def start_server(self, name: str) -> list[dict]:
         """Connect a single MCP server and discover its tools. Returns tool list."""
         if name not in self.servers:
-            raise ValueError(
-                f"MCP server '{name}' not configured. "
-                f"Add it to charlie_config.json under 'mcp_servers'."
-            )
+            raise ValueError(f"MCP server '{name}' not configured. Add it to charlie_config.json under 'mcp_servers'.")
 
         client = self.servers[name]
         if client.connected:
@@ -124,9 +138,7 @@ class MCPManager:
         if name in self.servers:
             client = self.servers[name]
             # Remove tool mappings
-            to_remove = [
-                k for k, v in self._tool_to_server.items() if v is client
-            ]
+            to_remove = [k for k, v in self._tool_to_server.items() if v is client]
             for k in to_remove:
                 del self._tool_to_server[k]
             await client.disconnect()
@@ -198,10 +210,7 @@ class MCPManager:
     async def ensure_connected(self, name: str) -> MCPClient:
         """Ensure a server is connected (lazy init). Returns the client."""
         if name not in self.servers:
-            raise ValueError(
-                f"MCP server '{name}' not configured. "
-                f"Add it to charlie_config.json under 'mcp_servers'."
-            )
+            raise ValueError(f"MCP server '{name}' not configured. Add it to charlie_config.json under 'mcp_servers'.")
 
         client = self.servers[name]
         if not client.connected and client.enabled:

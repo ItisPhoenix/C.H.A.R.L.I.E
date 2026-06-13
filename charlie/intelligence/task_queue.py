@@ -7,6 +7,7 @@ from charlie.perception.world_model import WorldModel
 
 logger = logging.getLogger("charlie.intelligence.task_queue")
 
+
 @dataclass(order=True)
 class BackgroundTask:
     priority: int
@@ -15,12 +16,14 @@ class BackgroundTask:
     args: tuple = field(default=(), compare=False)
     kwargs: dict = field(default_factory=dict, compare=False)
 
+
 class AutonomousTaskQueue:
     """
     AutonomousTaskQueue: Background maintenance worker.
     Executes tasks only when user is idle for > 5 minutes.
     Interrupts execution if user returns.
     """
+
     def __init__(self, world_model: WorldModel):
         self.world = world_model
         self.queue: List[BackgroundTask] = []
@@ -62,7 +65,8 @@ class AutonomousTaskQueue:
                 while (not self.queue or self.world.user_idle_seconds <= 300) and not self._stop_event.is_set():
                     self._condition.wait(timeout=10.0)
 
-                if self._stop_event.is_set(): break
+                if self._stop_event.is_set():
+                    break
                 if self.queue and self.world.user_idle_seconds > 300:
                     task_ready = True
 
@@ -70,7 +74,8 @@ class AutonomousTaskQueue:
                 self._execute_next()
 
     def _execute_next(self):
-        if not self.queue: return
+        if not self.queue:
+            return
 
         task = self.queue.pop(0)
         logger.info("task_start | %s", task.name)
@@ -85,8 +90,9 @@ class AutonomousTaskQueue:
                 try:
                     # Pass cancel_event if task accepts it
                     import inspect
+
                     sig = inspect.signature(task.func)
-                    if 'cancel_event' in sig.parameters:
+                    if "cancel_event" in sig.parameters:
                         task.func(*task.args, cancel_event=self._current_task_cancel, **task.kwargs)
                     else:
                         task.func(*task.args, **task.kwargs)

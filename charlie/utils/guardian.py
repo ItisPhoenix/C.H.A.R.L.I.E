@@ -15,9 +15,7 @@ logger = get_logger(__name__)
 class Guardian:
     def __init__(self) -> None:
         # Establish BASE_ROOT relative to this file's location (charlie/utils/guardian.py -> project root)
-        self.BASE_ROOT = os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
+        self.BASE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
         # User-centric trusted paths (Localized via environment)
         user_home = os.path.expanduser("~")
@@ -36,9 +34,7 @@ class Guardian:
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, shell_folders) as key:
                     desktop = winreg.QueryValueEx(key, "Desktop")[0]
                     documents = winreg.QueryValueEx(key, "Personal")[0]
-                    downloads = winreg.QueryValueEx(
-                        key, "{374DE290-123F-4565-9164-39C4925E467B}"
-                    )[0]
+                    downloads = winreg.QueryValueEx(key, "{374DE290-123F-4565-9164-39C4925E467B}")[0]
 
                     # Expand environment variables in registry strings (e.g. %USERPROFILE%\Desktop)
                     desktop = os.path.expandvars(desktop)
@@ -136,6 +132,7 @@ class Guardian:
                 return False, "Guardian: Command cannot be empty."
 
             import shlex
+
             try:
                 tokens = shlex.split(cmd)
             except Exception:
@@ -144,7 +141,18 @@ class Guardian:
             if not tokens:
                 return False, "Guardian: Command contains no tokens."
 
-            allowed_utilities = {"git", "uv", "pytest", "python", "notepad", "calc", "explorer", "chrome", "msedge", "code"}
+            allowed_utilities = {
+                "git",
+                "uv",
+                "pytest",
+                "python",
+                "notepad",
+                "calc",
+                "explorer",
+                "chrome",
+                "msedge",
+                "code",
+            }
             base_util = tokens[0].lower()
             if base_util.endswith(".exe"):
                 base_util = base_util[:-4]
@@ -158,7 +166,8 @@ class Guardian:
 
             # High-risk command verbs require verbal confirmation (word boundary match)
             import re as _re
-            if any(_re.search(r'\b' + _re.escape(verb) + r'\b', cmd.lower()) for verb in ["kill", "stop", "terminate"]):
+
+            if any(_re.search(r"\b" + _re.escape(verb) + r"\b", cmd.lower()) for verb in ["kill", "stop", "terminate"]):
                 return (
                     CONFIRMATION_PENDING,
                     f"Sir, I require your confirmation to terminate '{cmd.split()[-1]}'.",
@@ -171,9 +180,7 @@ class Guardian:
                 return False, "Guardian: Path cannot be empty."
 
             abs_path = os.path.abspath(path).lower()
-            is_trusted = any(
-                abs_path.startswith(trusted) for trusted in self.TRUSTED_PATHS
-            )
+            is_trusted = any(abs_path.startswith(trusted) for trusted in self.TRUSTED_PATHS)
 
             if not is_trusted:
                 logger.warning("guardian_blocked_out_of_bounds_file: %s", abs_path)
@@ -205,10 +212,7 @@ class Guardian:
                 # Self-modification exception: if writing within 'charlie/' and confirmed as TIER 1
                 if abs_path.startswith(os.path.join(self.BASE_ROOT, "charlie").lower()):
                     # Prevent writing to sensitive files
-                    if any(
-                        x in abs_path
-                        for x in [".git", "pyproject.toml", "settings.toml"]
-                    ):
+                    if any(x in abs_path for x in [".git", "pyproject.toml", "settings.toml"]):
                         return (
                             False,
                             f"Guardian: Modification of '{os.path.basename(abs_path)}' is strictly restricted.",
@@ -291,7 +295,7 @@ class Guardian:
 
         # 5. Suspicious Intent Check (word boundary matching to avoid false positives)
         malicious_keywords = ["delete all", "wipe", "spy", "steal", "hack into"]
-        if any(re.search(r'\b' + re.escape(kw) + r'\b', sir_input.lower()) for kw in malicious_keywords):
+        if any(re.search(r"\b" + re.escape(kw) + r"\b", sir_input.lower()) for kw in malicious_keywords):
             logger.warning("guardian_suspicious_intent: %s", sir_input)
             return (
                 False,
@@ -342,15 +346,22 @@ class Guardian:
         """Scan python source code to block dangerous subprocess or network socket imports."""
         try:
             import ast
+
             tree = ast.parse(code)
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
                         if alias.name.lower() in ("subprocess", "socket", "ctypes"):
-                            return False, f"Guardian: Dangerous import '{alias.name}' detected in written script. Operation blocked."
+                            return (
+                                False,
+                                f"Guardian: Dangerous import '{alias.name}' detected in written script. Operation blocked.",
+                            )
                 elif isinstance(node, ast.ImportFrom):
                     if node.module and node.module.lower() in ("subprocess", "socket", "ctypes"):
-                        return False, f"Guardian: Dangerous module import '{node.module}' detected in written script. Operation blocked."
+                        return (
+                            False,
+                            f"Guardian: Dangerous module import '{node.module}' detected in written script. Operation blocked.",
+                        )
             return True, "AST Verified"
         except SyntaxError as se:
             logger.warning("ast_parse_syntax_error | %s", se)

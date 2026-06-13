@@ -2,15 +2,19 @@ import asyncio
 import base64
 import io
 import time
+from threading import Lock
 
-import pygetwindow as gw
-from mss import mss
-from PIL import Image
-
-from charlie.config import settings
 from charlie.utils.logger import get_logger
 
 logger = get_logger("charlie.brain.vision")
+
+
+def _lazy_imports():
+    import pygetwindow as gw
+    from mss import mss
+    from PIL import Image
+    return gw, mss, Image
+
 
 class VisionHandler:
     def __init__(self, brain):
@@ -18,7 +22,13 @@ class VisionHandler:
         self.last_sentinel_scan = 0.0
         self.last_sentinel_report = ""
         self._last_vision_use = 0.0
-        self._vram_lock = __import__("threading").Lock()
+        self._vram_lock = Lock()
+        self._lazy = None
+
+    def _get_lazy(self):
+        if self._lazy is None:
+            self._lazy = _lazy_imports()
+        return self._lazy
 
     def _mark_vision_use(self):
         with self._vram_lock:
@@ -36,13 +46,16 @@ class VisionHandler:
             region: Optional (x, y, width, height) tuple to capture a sub-region.
         """
         from charlie.tools.vision_context import is_sensitive_window_active
+
         if is_sensitive_window_active():
             logger.warning("capture_screen_blocked | sensitive active window focus detected")
+            gw, mss, Image = self._get_lazy()
             black_img = Image.new("RGB", (100, 100), color="black")
             buf = io.BytesIO()
             black_img.save(buf, format="PNG")
             return base64.b64encode(buf.getvalue()).decode("utf-8")
 
+        gw, mss, Image = self._get_lazy()
         with mss() as sct:
             if region:
                 x, y, w, h = region
@@ -99,6 +112,7 @@ class VisionHandler:
         try:
             await self.brain.model_manager.load_vision_model()
             b64_img = self.capture_screen(for_vision=True, region=region)
+            gw, mss, Image = self._get_lazy()
             try:
                 titles = [w.strip() for w in gw.getAllTitles() if w.strip()]
                 os_context = ", ".join(titles[:5])
@@ -106,9 +120,7 @@ class VisionHandler:
                 os_context = "Unknown"
 
             prompt = (
-                f"OPEN WINDOWS: {os_context}\n"
-                f"QUERY: {query}\n"
-                "Answer based ONLY on what you see. Be extremely brief."
+                f"OPEN WINDOWS: {os_context}\nQUERY: {query}\nAnswer based ONLY on what you see. Be extremely brief."
             )
 
             # Route through ModelRouter for provider abstraction + failover
@@ -143,6 +155,7 @@ class VisionHandler:
     async def _ask_vision_direct(self, prompt: str, b64_img: str) -> str:
         """Direct HTTP call to vision model (fallback)."""
         import aiohttp
+
         try:
             payload = {
                 "model": self.brain.model_manager.llm_vision_model,
@@ -159,17 +172,17 @@ class VisionHandler:
             }
 
             async with self.brain.session.post(
-                    f"{self.brain.model_manager.llm_vision_url}/chat/completions",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=40),
-                ) as r:
-                    data = await r.json()
-                    if r.status >= 400 or "error" in data:
-                        await self.brain.model_manager.load_text_model()
-                        return "Sir, vision model error."
-                    result = data.get("choices", [{}])[0].get("message", {}).get("content", "Unclear.")
+                f"{self.brain.model_manager.llm_vision_url}/chat/completions",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=40),
+            ) as r:
+                data = await r.json()
+                if r.status >= 400 or "error" in data:
                     await self.brain.model_manager.load_text_model()
-                    return result
+                    return "Sir, vision model error."
+                result = data.get("choices", [{}])[0].get("message", {}).get("content", "Unclear.")
+                await self.brain.model_manager.load_text_model()
+                return result
         except Exception as e:
             logger.error("_ask_vision_direct_failed | error=%s", e)
             await self.brain.model_manager.load_text_model()
@@ -188,6 +201,7 @@ class VisionHandler:
                 return f"Image not found: {image_path}"
 
             # Load and encode the image
+            gw, mss, Image = self._get_lazy()
             img = Image.open(image_path)
             img.thumbnail((512, 512))  # Larger than screen capture for detail
             buf = io.BytesIO()
@@ -230,6 +244,7 @@ class VisionHandler:
     async def _analyze_image_direct(self, prompt: str, b64_img: str) -> str:
         """Direct HTTP call for image analysis (fallback)."""
         import aiohttp
+
         try:
             payload = {
                 "model": self.brain.model_manager.llm_vision_model,
@@ -250,13 +265,13 @@ class VisionHandler:
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=40),
             ) as r:
-                    data = await r.json()
-                    if r.status >= 400 or "error" in data:
-                        await self.brain.model_manager.load_text_model()
-                        return "Vision model error."
-                    result = data.get("choices", [{}])[0].get("message", {}).get("content", "Unclear.")
+                data = await r.json()
+                if r.status >= 400 or "error" in data:
                     await self.brain.model_manager.load_text_model()
-                    return result
+                    return "Vision model error."
+                result = data.get("choices", [{}])[0].get("message", {}).get("content", "Unclear.")
+                await self.brain.model_manager.load_text_model()
+                return result
         except Exception as e:
             logger.error("_analyze_image_direct_failed | error=%s", e)
             await self.brain.model_manager.load_text_model()
@@ -285,11 +300,14 @@ class VisionHandler:
                     if hasattr(self.brain, "ace"):
                         self.brain.ace.detector.process_error(report)
 
-                    self.brain._safe_put(self.brain.brain_task_q, {
-                        "type": "PROACTIVE_EVENT",
-                        "source": "sentinel",
-                        "content": report,
-                    })
+                    self.brain._safe_put(
+                        self.brain.brain_task_q,
+                        {
+                            "type": "PROACTIVE_EVENT",
+                            "source": "sentinel",
+                            "content": report,
+                        },
+                    )
             elif report and "CLEAR" in report.upper():
                 self.last_sentinel_report = ""
         except Exception as e:
@@ -323,8 +341,7 @@ class VisionHandler:
         """
         if region:
             return await self.ask_vision(
-                "Read and extract ALL visible text from this screen region. "
-                "Return only the text, no description.",
+                "Read and extract ALL visible text from this screen region. Return only the text, no description.",
                 region=region,
             )
         return await self.ask_vision(

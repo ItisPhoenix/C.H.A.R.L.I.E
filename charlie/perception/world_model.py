@@ -9,6 +9,7 @@ class WorldModel:
     Central state for Charlie's perception of the user's environment.
     Updated by AmbientContextEngine (ACE).
     """
+
     active_app: str = "Unknown"
     active_file: Optional[str] = None
     open_windows: List[str] = field(default_factory=list)
@@ -28,5 +29,5 @@ class WorldModel:
             "idle_sec": round(self.user_idle_seconds, 1),
             "task": self.current_task_inferred,
             "frustration": round(self.frustration_score, 2),
-            "updated": self.last_updated
+            "updated": self.last_updated,
         }

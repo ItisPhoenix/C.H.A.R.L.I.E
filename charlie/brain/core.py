@@ -60,62 +60,61 @@ class Brain:
         self.brain_req_q = brain_req_q
         self.brain_res_q = brain_res_q
 
-        # Register queues in global bridge
+        # Register self in global bridge so tools can look up the brain.
         from charlie.utils import queue_bridge
-        queue_bridge.set_status_q(status_q)
-        queue_bridge.set_telegram_q(telegram_q)
-        queue_bridge.set_tts_q(tts_q)
+
         queue_bridge.set_brain(self)
 
-        # ── Dependency Groups (lazy imports inside each) ──────────────────
-        self._init_core_handlers()
-        self._init_state()
-        self._init_mcp()
-        self._init_personality()
-        self._init_security()
-        self._init_intelligence()
-        self._init_automation()
-        self._init_external_controllers()
-        self._init_model()
+        # ── Construction pipeline (see BrainBuilder for ordering) ──
+        from charlie.brain.builder import BrainBuilder
 
-        self._discover_tools()
+        BrainBuilder(self).build()
 
     # ── INIT GROUPS (delegated to _brain_init.py) ─────────────────────────
 
     def _init_core_handlers(self) -> None:
         from charlie.brain._brain_init import init_core_handlers
+
         init_core_handlers(self)
 
     def _init_mcp(self) -> None:
         from charlie.brain._brain_init import init_mcp
+
         init_mcp(self)
 
     def _init_personality(self) -> None:
         from charlie.brain._brain_init import init_personality
+
         init_personality(self)
 
     def _init_security(self) -> None:
         from charlie.brain._brain_init import init_security
+
         init_security(self)
 
     def _init_state(self) -> None:
         from charlie.brain._brain_init import init_state
+
         init_state(self)
 
     def _init_intelligence(self) -> None:
         from charlie.brain._brain_init import init_intelligence
+
         init_intelligence(self)
 
     def _init_automation(self) -> None:
         from charlie.brain._brain_init import init_automation
+
         init_automation(self)
 
     def _init_external_controllers(self) -> None:
         from charlie.brain._brain_init import init_external_controllers
+
         init_external_controllers(self)
 
     def _init_model(self) -> None:
         from charlie.brain._brain_init import init_model
+
         init_model(self)
 
     # ── HELPERS ─────────────────────────────────────────────────────────────
@@ -139,7 +138,9 @@ class Brain:
         with self.timers_lock:
             timers = {tid: {"label": t["label"], "end_time": t["end_time"]} for tid, t in self.active_timers.items()}
             stopwatches = dict(self.active_stopwatches)
-        self._safe_put(self.status_q, {"type": "TIME_UPDATE", "content": {"timers": timers, "stopwatches": stopwatches}})
+        self._safe_put(
+            self.status_q, {"type": "TIME_UPDATE", "content": {"timers": timers, "stopwatches": stopwatches}}
+        )
 
     def _sanitize_user_input(self, user_input: str) -> str:
         if not user_input:
@@ -237,14 +238,18 @@ class Brain:
         # Register Pattern B tools directly into unified catalog (single source of truth)
         try:
             from charlie.security.tiers import get_tool_tier
+
             pattern_b_count = 0
             for tool_name, tool_fn in self.tool_handler.registry.items():
                 tier = get_tool_tier(tool_fn)
                 desc = (tool_fn.__doc__ or f"Tool: {tool_name}").strip().split("\n")[0]
                 self.tool_registry.register(
-                    name=tool_name, description=desc,
+                    name=tool_name,
+                    description=desc,
                     parameters={"type": "object", "properties": {}},
-                    handler=tool_fn, risk_tier=tier, source="native",
+                    handler=tool_fn,
+                    risk_tier=tier,
+                    source="native",
                     calling_convention="ARGS_DICT",
                 )
                 pattern_b_count += 1
@@ -259,111 +264,22 @@ class Brain:
         source: str = "local",
         skip_guardian: bool = False,
     ) -> str:
-        """Execute a tool call through the unified catalog. Single execution path."""
-        tool_name = tool_data.get("tool", "") if tool_data else ""
-        args = tool_data.get("args", {}) if tool_data else {}
+        """Execute a tool call through the unified catalog. Single execution path.
 
-        def _record_decision(decision: str, outcome: str | None = None, tier=None) -> None:
-            """Append a single gate/execution decision to the tool exec log.
+        Thin delegation to ToolExecutor. See charlie/brain/tool_executor.py
+        for the full pipeline (registry lookup, guardian verify, tier-based
+        confirmation gate, execute, outcome recording).
+        """
+        if not hasattr(self, "tool_executor"):
+            from charlie.brain.tool_executor import ToolExecutor
 
-            Guarded so a missing/partial OutcomeTracker never crashes execution.
-            """
-            tracker = getattr(self, "outcome_tracker", None)
-            if tracker is None or not hasattr(tracker, "record_tool_decision"):
-                return
-            try:
-                tracker.record_tool_decision(tool_name, tier, decision, outcome=outcome)
-            except Exception as e:  # pragma: no cover - logging only
-                logger.debug("record_tool_decision_failed | tool=%s | %s", tool_name, e)
-
-        def _record_outcome(success: bool, elapsed_ms: float) -> None:
-            """Record a tool-call outcome, guarded against a missing tracker."""
-            tracker = getattr(self, "outcome_tracker", None)
-            if tracker is None or not hasattr(tracker, "record_tool"):
-                return
-            try:
-                tracker.record_tool(
-                    tool_name,
-                    success=success,
-                    details={"elapsed_ms": round(elapsed_ms, 1), "source": source},
-                )
-            except Exception as e:  # pragma: no cover - logging only
-                logger.debug("record_tool_failed | tool=%s | %s", tool_name, e)
-
-        with self.tool_execution_lock:
-            # Authoritative path: resolve every tool via the unified catalog.
-            if tool_name and hasattr(self, "tool_registry"):
-                entry = self.tool_registry.get(tool_name)
-                if entry:
-                    tool_func = entry.handler
-                    catalog_tier = self.tool_registry.get_tier(tool_name)
-
-                    # Guardian verification using the catalog's authoritative tier
-                    if not skip_guardian:
-                        from charlie.security.tiers import CONFIRMATION_PENDING, RiskTier
-
-                        allowed, reason = self.guardian.verify_tool(
-                            tool_name, args, sir_input, tool_func=tool_func, tier=catalog_tier
-                        )
-
-                        if catalog_tier == RiskTier.TIER_0:
-                            allowed = True
-
-                        if allowed == CONFIRMATION_PENDING:
-                            tier = catalog_tier
-                            self.awaiting_confirmation = {
-                                "tool": tool_name,
-                                "args": args,
-                                "sir_input": sir_input,
-                                "tier": tier,
-                                "source": source,
-                            }
-                            self.last_confirmation_time = time.time()
-                            if self.confirmation_event:
-                                self.loop.call_soon_threadsafe(
-                                    self.confirmation_event.clear
-                                )
-
-                            payload = {
-                                "type": "CONFIRM_REQUIRED",
-                                "content": {
-                                    "desc": reason,
-                                    "tier": catalog_tier.value,
-                                },
-                            }
-
-                            if source == "local" or source == "all":
-                                self._safe_put(self.status_q, payload)
-                                self._safe_put(
-                                    self.tts_q, {"type": "SPEAK", "content": reason}
-                                )
-
-                            if (
-                                source.startswith("telegram") or source == "all"
-                            ) and self.telegram_q:
-                                self._safe_put(self.telegram_q, payload)
-
-                            _record_decision("gated", tier=catalog_tier)
-                            return CONFIRMATION_PENDING
-
-                        if not allowed:
-                            _record_decision("cancelled", tier=catalog_tier)
-                            return reason
-
-                    # Execute through the catalog, timing and recording outcome.
-                    start = time.perf_counter()
-                    result = self.tool_registry.execute(tool_name, args)
-                    elapsed_ms = (time.perf_counter() - start) * 1000
-                    success = not str(result).startswith("Error")
-                    _record_outcome(success, elapsed_ms)
-                    _record_decision(
-                        "executed",
-                        outcome="success" if success else "failure",
-                        tier=catalog_tier,
-                    )
-                    return result
-
-            return f"Error: Tool '{tool_name}' not found."
+            self.tool_executor = ToolExecutor(self)
+        return self.tool_executor.execute(
+            tool_data,
+            sir_input=sir_input,
+            source=source,
+            skip_guardian=skip_guardian,
+        )
 
     # ── RUN / SHUTDOWN LIFECYCLE ────────────────────────────────────────────
 
@@ -377,15 +293,15 @@ class Brain:
         # Start cross-process Brain RPC server (Design §D, Reqs 7.1-7.10)
         if self.brain_req_q is not None and self.brain_res_q is not None:
             from charlie.watchdog.brain_rpc import BrainRPCServer
+
             self._rpc_server = BrainRPCServer(self, self.brain_req_q, self.brain_res_q)
             self._rpc_server.start()
             logger.info("brain_rpc_server_thread_started")
 
-        threading.Thread(
-            target=self.vision_handler.peripheral_vision_loop, daemon=True
-        ).start()
+        threading.Thread(target=self.vision_handler.peripheral_vision_loop, daemon=True).start()
         threading.Thread(target=self._telemetry_monitor, daemon=True).start()
         threading.Thread(target=self._heartbeat_monitor, daemon=True).start()
+        threading.Thread(target=self._start_telegram_bridge, daemon=True).start()
 
         self.ace.start()
         self._init_bg_tasks()
@@ -393,15 +309,9 @@ class Brain:
         self.scheduler.start()
         self.suggestion_engine.start()
         self.autonomy_loop.start()
-        self.network_sentinel.start()
-        self.proactivity_engine.start()
-        self.clipboard_diagnostician.start()
-        threading.Thread(
-            target=self.rag_indexer.start_watcher, daemon=True
-        ).start()
-        threading.Thread(
-            target=self._proactive_monitor_loop, daemon=True
-        ).start()
+        self.agent_bus.start()
+        threading.Thread(target=self.rag_indexer.start_watcher, daemon=True).start()
+        threading.Thread(target=self._proactive_monitor_loop, daemon=True).start()
 
         self._emit_status("IDLE")
 
@@ -456,9 +366,7 @@ class Brain:
             ("scheduler", self.scheduler),
             ("task_queue", self.task_queue),
             ("suggestion_engine", self.suggestion_engine),
-            ("network_sentinel", self.network_sentinel),
-            ("proactivity_engine", self.proactivity_engine),
-            ("clipboard_diagnostician", self.clipboard_diagnostician),
+            ("agent_bus", self.agent_bus),
         ]:
             try:
                 if hasattr(svc, "stop"):
@@ -475,11 +383,7 @@ class Brain:
 
         # Cancel remaining async tasks (except current)
         if self.loop and self.loop.is_running():
-            tasks = [
-                t
-                for t in asyncio.all_tasks(self.loop)
-                if t is not asyncio.current_task()
-            ]
+            tasks = [t for t in asyncio.all_tasks(self.loop) if t is not asyncio.current_task()]
             for task in tasks:
                 task.cancel()
             if tasks:
@@ -503,11 +407,7 @@ class Brain:
             "history_length": len(self.history),
             "standby_mode": self.standby_mode,
             "loop_running": self.loop.is_running() if self.loop else False,
-            "session_active": (
-                self.session is not None and not self.session.closed
-                if self.session
-                else False
-            ),
+            "session_active": (self.session is not None and not self.session.closed if self.session else False),
             "shutdown_hooks": len(self._shutdown_hooks),
         }
 
@@ -517,7 +417,7 @@ class Brain:
         while not self._stop_event.is_set():
             try:
                 used_mb = get_vram_used_mb()
-                budget_mb = getattr(settings.resources, "vram_budget_mb", 7168)
+                budget_mb = settings.resources.vram_budget_mb
                 percent = min(100.0, (used_mb / budget_mb) * 100) if budget_mb > 0 else 0.0
                 self._safe_put(
                     self.status_q,
@@ -531,7 +431,7 @@ class Brain:
                     },
                 )
                 # Emit warning if above the warning threshold
-                vram_warning_mb = getattr(settings.resources, "vram_warning_mb", 6500)
+                vram_warning_mb = settings.resources.vram_warning_mb
                 if used_mb > vram_warning_mb:
                     self._safe_put(
                         self.status_q,
@@ -551,6 +451,28 @@ class Brain:
                 self.heartbeat.value = time.time()
             self._stop_event.wait(3)
 
+    def _start_telegram_bridge(self):
+        """Start Telegram bridge in a separate thread (runs inside Brain process)."""
+        try:
+            import pythoncom
+
+            pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+        except Exception as e:
+            logger.debug("telegram_com_init_skipped | %s", e)
+
+        try:
+            from charlie.telegram.bridge import run_bridge
+
+            run_bridge(
+                brain_task_q=self.brain_task_q,
+                status_q=self.status_q,
+                telegram_q=self.telegram_q,
+                audio_cmd_q=self.audio_cmd_q,
+                heartbeat=self.heartbeat,
+            )
+        except Exception as e:
+            logger.error("telegram_bridge_start_failed | %s", e)
+
     def _get_vram_used_mb(self) -> float:
         return get_vram_used_mb()
 
@@ -558,13 +480,11 @@ class Brain:
         try:
             return calculate_budget_mb(detect_total_vram_mb())
         except Exception:
-            return getattr(settings.resources, "vram_budget_mb", 4096)
+            return settings.resources.vram_budget_mb
 
     def _init_bg_tasks(self):
         """Initializes baseline background maintenance tasks."""
-        self.task_queue.add_task(
-            "Memory Consolidation", self.memory.consolidate, priority=20
-        )
+        self.task_queue.add_task("Memory Consolidation", self.memory.consolidate, priority=20)
         self.task_queue.add_task(
             "Memory Graph Indexing",
             self.graph_builder.run_full_index,
@@ -574,6 +494,7 @@ class Brain:
         def cleanup_temp():
             import os
             import time
+
             scratch = os.path.join(os.getcwd(), "scratch")
             if not os.path.isdir(scratch):
                 return
@@ -606,7 +527,10 @@ class Brain:
             result = nudge.review_session(data, llm_client=llm)
             if result and result.get("create_skill"):
                 path = nudge.create_skill(result)
-                self._safe_put(self.status_q, {"type": "SKILL_CREATED", "content": {"name": result.get("name", "?"), "path": str(path)}})
+                self._safe_put(
+                    self.status_q,
+                    {"type": "SKILL_CREATED", "content": {"name": result.get("name", "?"), "path": str(path)}},
+                )
                 logger.info("skill_nudge_created | %s", result.get("name"))
         except Exception as e:
             logger.debug("skill_nudge_quiet_fail | %s", e)
@@ -622,44 +546,24 @@ class Brain:
                     logger.info("rule_matched | %s -> %s", rule.name, rule.action)
                     loop = self.loop
                     if loop and loop.is_running():
-                        asyncio.run_coroutine_threadsafe(
-                            self._execute_rule(rule, event), loop
-                        )
+                        asyncio.run_coroutine_threadsafe(self._execute_rule(rule, event), loop)
             else:
-                logger.info(
-                    f"no_rule_matched | type={event.type} | routing_to_autonomy"
-                )
+                logger.info(f"no_rule_matched | type={event.type} | routing_to_autonomy")
                 loop = self.loop
                 if loop and loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        self.autonomy_loop.process_event(event), loop
-                    )
+                    asyncio.run_coroutine_threadsafe(self.autonomy_loop.process_event(event), loop)
         except Exception as e:
             logger.error("automation_event_failed | %s", e)
 
     async def _execute_rule(self, rule, event):
         """Execute an automation rule through the risk gate."""
-        from charlie.automation.models import Outcome
 
-        approved = await self.risk_gate.evaluate(
-            rule.action, rule.action_args, rule.risk_tier
-        )
+        approved = await self.risk_gate.evaluate(rule.action, rule.action_args, rule.risk_tier)
         if approved:
             try:
                 result = self._dispatch_automation_action(rule, event)
-                self.learning_tracker.record(
-                    Outcome(event_type=event.type, action=rule.action, success=True)
-                )
-                logger.info(
-                    f"rule_executed | {rule.name} | result={str(result)[:100]}"
-                )
-
+                logger.info(f"rule_executed | {rule.name} | result={str(result)[:100]}")
             except Exception as e:
-                self.learning_tracker.record(
-                    Outcome(
-                        event_type=event.type, action=rule.action, success=False
-                    )
-                )
                 logger.error("rule_execution_failed | %s | %s", rule.name, e)
 
     # Direct tool mappings for automation actions
@@ -679,9 +583,7 @@ class Brain:
 
         # Direct tool mappings
         if action in self._TOOL_ACTION_MAP:
-            return self.execute_tools(
-                {"tool": self._TOOL_ACTION_MAP[action], "args": rule.action_args}
-            )
+            return self.execute_tools({"tool": self._TOOL_ACTION_MAP[action], "args": rule.action_args})
 
         # Custom action handlers
         handler = getattr(self, f"_action_{action}", None)
@@ -792,30 +694,15 @@ class Brain:
     def _on_suggestion(self, suggestion) -> None:
         """Callback for SuggestionEngine — delivers suggestions to user."""
         msg = f"[{suggestion.type.upper()}] {suggestion.message}"
-        try:
-            self.status_q.put_nowait(
-                {
-                    "type": "PROACTIVE_CHAT",
-                    "text": msg,
-                }
-            )
-        except queue.Full:
-            pass
-        try:
-            self.telegram_q.put_nowait(
-                {
-                    "type": "PROACTIVE_CHAT",
-                    "text": msg,
-                }
-            )
-        except queue.Full:
-            pass
-        logger.info(
-            f"suggestion_delivered | type={suggestion.type} | {suggestion.message[:80]}"
-        )
+        # Route through _safe_put, which handles every failure (incl. queue.Full
+        # when the queue is switched to a bounded one) and logs at debug
+        # instead of silently swallowing.
+        self._safe_put(self.status_q, {"type": "PROACTIVE_CHAT", "text": msg})
+        self._safe_put(self.telegram_q, {"type": "PROACTIVE_CHAT", "text": msg})
+        logger.info(f"suggestion_delivered | type={suggestion.type} | {suggestion.message[:80]}")
 
     def _proactive_monitor_loop(self):
-        """Monitors WorldModel and Calendar for proactive triggers."""
+        """Monitors WorldModel for proactive triggers (frustration, ambient services)."""
         while not self._stop_event.is_set():
             try:
                 self._proactive_monitor_step()
@@ -828,121 +715,23 @@ class Brain:
         if self.world.frustration_score > 0.7:
             if time.time() - self._last_frustration_alert > 300:  # 5 min cool
                 msg = "Sir, I noticed you've encountered several errors recently. Shall I assist with the current task?"
-                self._safe_put(
-                    self.brain_task_q, {"type": "PROACTIVE_CHAT", "content": msg}
-                )
+                self._safe_put(self.brain_task_q, {"type": "PROACTIVE_CHAT", "content": msg})
                 self._last_frustration_alert = time.time()
 
-        # 2. Calendar Alert Check
-        alerts = self.calendar.check_for_upcoming_alerts()
-        for event in alerts:
-            msg = f"Sir, your event '{event['summary']}' starts in less than 30 minutes."
-            self._safe_put(
-                self.brain_task_q, {"type": "PROACTIVE_CHAT", "content": msg}
-            )
-            # Also push to ContextPanel
-            self._safe_put(
-                self.status_q,
-                {
-                    "type": "INTEGRATION_UPDATE",
-                    "content": {
-                        "service": "CALENDAR",
-                        "title": "Upcoming Event",
-                        "body": f"{event['summary']} at {event['start']}",
-                        "color": [0, 160, 255],  # Azure
-                    },
-                },
-            )
-
-        # 3. Ambient Service Polling (every 5 minutes)
+        # 2. Ambient Service Polling (every 5 minutes)
         now = time.time()
         if now - self._last_service_poll > 300:
             self._last_service_poll = now
             threading.Thread(target=self._poll_ambient_services, daemon=True).start()
 
     def _poll_ambient_services(self):
-        """Background thread for integration polling to avoid blocking brain loop."""
-        try:
-            # Gmail
-            if hasattr(
-                self.tool_handler, "_gmail_integration"
-            ) or settings.integrations.get("gmail", {}).get("enabled"):
-                from charlie.integrations.gmail import GmailIntegration
+        """Background thread for integration polling to avoid blocking brain loop.
 
-                if not hasattr(self, "_gmail_poller"):
-                    self._gmail_poller = GmailIntegration()
-                msgs = self._gmail_poller.fetch(max_results=3)
-                for m in msgs:
-                    seen = self.memory.procedural.is_seen(m["id"], "gmail")
-                    if not seen:
-                        self.memory.procedural.mark_seen(m["id"], "gmail")
-                        self._safe_put(
-                            self.status_q,
-                            {
-                                "type": "INTEGRATION_UPDATE",
-                                "content": {
-                                    "service": "GMAIL",
-                                    "title": m["subject"],
-                                    "body": f"From: {m['from']}",
-                                    "color": [255, 60, 60],  # Red-ish
-                                },
-                            },
-                        )
-
-            # GitHub
-            if hasattr(
-                self.tool_handler, "_github_integration"
-            ) or settings.integrations.get("github", {}).get("enabled"):
-                from charlie.integrations.github import GitHubIntegration
-
-                if not hasattr(self, "_github_poller"):
-                    self._github_poller = GitHubIntegration()
-                activity = self._github_poller.fetch(repo_name="alerts", limit=3)
-                for item in activity:
-                    item_id = item.get("title") or item.get("url")
-                    if item_id and not self.memory.procedural.is_seen(item_id, "github"):
-                        self.memory.procedural.mark_seen(item_id, "github")
-                        self._safe_put(
-                            self.status_q,
-                            {
-                                "type": "INTEGRATION_UPDATE",
-                                "content": {
-                                    "service": "GITHUB",
-                                    "title": item.get("type", "Alert")
-                                    .replace("_", " ")
-                                    .title(),
-                                    "body": item.get("title", "New Activity"),
-                                    "color": [255, 255, 255],  # White
-                                },
-                            },
-                        )
-
-            # Notion
-            if hasattr(
-                self.tool_handler, "_notion_integration"
-            ) or settings.integrations.get("notion", {}).get("enabled"):
-                from charlie.integrations.notion import NotionIntegration
-
-                if not hasattr(self, "_notion_poller"):
-                    self._notion_poller = NotionIntegration()
-                pages = self._notion_poller.fetch(limit=3)
-                for p in pages:
-                    if not self.memory.procedural.is_seen(p["id"], "notion"):
-                        self.memory.procedural.mark_seen(p["id"], "notion")
-                        self._safe_put(
-                            self.status_q,
-                            {
-                                "type": "INTEGRATION_UPDATE",
-                                "content": {
-                                    "service": "NOTION",
-                                    "title": p["title"],
-                                    "body": f"Edited: {p['last_edited']}",
-                                    "color": [255, 255, 255],  # White
-                                },
-                            },
-                        )
-        except Exception as e:
-            logger.error("ambient_polling_failed | %s", e)
+        Only Telegram and calendar remain; the legacy email/PR/notes pollers
+        were removed. Keep this a no-op so the daemon supervisor's poll tick
+        still has a stable target.
+        """
+        return
 
     # ── DELEGATED WRAPPERS ──────────────────────────────────────────────────
 

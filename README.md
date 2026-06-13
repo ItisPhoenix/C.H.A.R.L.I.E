@@ -17,7 +17,11 @@
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Next.js](https://img.shields.io/badge/Next.js-15-000000?style=for-the-badge&logo=next.js&logoColor=white)](https://nextjs.org)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows)](https://microsoft.com/windows)
+<<<<<<< HEAD
 [![License](https://img.shields.io/badge/License-MIT-lightbluey?style=for-the-badge)](LICENSE)
+=======
+[![License](https://img.shields.io/badge/License-MIT-lightblue?style=for-the-badge)](LICENSE)
+>>>>>>> 8918b47 (added more errors)
 
 **Charlie v0.1 — Personal AI Assistant (Development)**
 
@@ -109,7 +113,7 @@ Charlie auto-detects GPU VRAM via nvidia-smi and calculates a budget after fixed
 | Layer | Component | Description |
 |-------|-----------|-------------|
 | **Core** | `charlie/brain/` | Brain, Reactor, Chain Executor, Tool Handler, Model Router, Stream Handler |
-| **Agents** | `charlie/agents/` | 7 manifest-driven agents with coordinator pattern, LLM goal decomposition, parallel execution |
+| **Agents** | `charlie/agents/` | 6 manifest-driven agents with coordinator pattern, LLM goal decomposition, parallel execution |
 | **Intelligence** | `charlie/intelligence/` | Skill Nudge, Evolution Engine, Pattern Tracker, Suggestion Engine, Outcome Tracker |
 | **Memory** | `charlie/memory/` | Working, Episodic (ChromaDB), Semantic (SQLite+ChromaDB), Procedural (seen_ids), RAG Indexer |
 | **Automation** | `charlie/automation/` | Rule Engine, Autonomy Loop, Event Router, Risk Gate, Learning Tracker |
@@ -165,8 +169,11 @@ Charlie uses a coordinator pattern for complex goals:
 ## Testing
 
 ```bash
-# Run all tests (59 tests)
+# Run all tests
 uv run pytest tests/ -v
+
+# Run only the fast tests (skip any marked ``slow``)
+uv run pytest tests/ -m "not slow" -v
 
 # Lint
 uv run ruff check charlie/
@@ -174,6 +181,26 @@ uv run ruff check charlie/
 # TypeScript check (dashboard)
 cd dashboard && npx tsc --noEmit
 ```
+
+---
+
+## Command Line
+
+The `charlie` console script is the canonical entry point. It wraps
+the old `python main.py` flow in tidy subcommands:
+
+```bash
+uv run charlie             # run in foreground (phoenix) mode
+uv run charlie daemon      # run in headless daemon mode
+uv run charlie doctor      # print the self-check report
+uv run charlie status      # query the control server's /api/status
+uv run charlie audit       # audit the automation subsystem wiring
+uv run charlie --version
+uv run charlie --help
+```
+
+The old `python main.py` and `python main.py --daemon` invocations
+still work, but the subcommand form is preferred.
 
 ---
 

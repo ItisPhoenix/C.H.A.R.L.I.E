@@ -10,6 +10,7 @@ import requests
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("startup_validator")
 
+
 class StartupValidator:
     def __init__(self):
         self.root_dir = Path(__file__).parent.parent.parent
@@ -22,7 +23,7 @@ class StartupValidator:
         for name, q in queues.items():
             try:
                 # Check if queue is closed
-                if hasattr(q, '_closed') and q._closed:
+                if hasattr(q, "_closed") and q._closed:
                     results[name] = False
                 else:
                     results[name] = True
@@ -60,6 +61,7 @@ class StartupValidator:
         # Check Camera (OpenCV)
         try:
             import cv2
+
             cap = cv2.VideoCapture(0)
             if cap.isOpened():
                 hardware["camera"] = True
@@ -70,6 +72,7 @@ class StartupValidator:
         # Check Audio (sounddevice)
         try:
             import sounddevice as sd
+
             devices = sd.query_devices()
             if len(devices) > 0:
                 hardware["audio"] = True
@@ -123,23 +126,22 @@ class StartupValidator:
         """Run all validation checks and return overall status."""
         logger.info("--- CHARLIE STARTUP VALIDATION ---")
 
-        checks = [
-            self.check_env_vars(),
-            self.check_llm_server(),
-            self.check_hardware()
-        ]
+        checks = [self.check_env_vars(), self.check_llm_server(), self.check_hardware()]
 
         if queues:
             checks.append(self.check_queues(queues))
 
         logger.info("Validation complete.")
         for category, status in self.health_report.items():
-            logger.info(f"{category.upper()}: {'PASSED' if (isinstance(status, bool) and status) or (isinstance(status, dict) and all(status.values())) else 'FAILED/PARTIAL'}")
+            logger.info(
+                f"{category.upper()}: {'PASSED' if (isinstance(status, bool) and status) or (isinstance(status, dict) and all(status.values())) else 'FAILED/PARTIAL'}"
+            )
             if isinstance(status, dict):
                 for sub, val in status.items():
                     logger.info(f"  - {sub}: {'OK' if val else 'FAIL'}")
 
         return all(checks)
+
 
 if __name__ == "__main__":
     validator = StartupValidator()

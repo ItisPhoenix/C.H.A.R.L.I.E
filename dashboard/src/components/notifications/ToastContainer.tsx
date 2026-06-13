@@ -59,7 +59,7 @@ export function ToastContainer() {
               initial={{ opacity: 0, x: 20, scale: 0.95 }}
               animate={{ opacity: 1, x: 0, scale: 1 }}
               exit={{ opacity: 0, x: 20, scale: 0.95 }}
-              className={`glass-card p-4 flex items-start gap-3 border shadow-neon-glow rounded-xl ${colors[toast.type]}`}
+              className={`glass-card p-4 flex items-start gap-3 border rounded-xl ${colors[toast.type]}`}
             >
               <Icon size={16} className="mt-0.5 flex-shrink-0" />
               <div className="flex-1 min-w-0">

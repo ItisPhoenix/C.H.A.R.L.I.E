@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 @dataclass
 class ToolResult:
     """Standard result type returned by dynamic tools."""
+
     success: bool
     data: Any = None
     error: Optional[str] = None
@@ -32,6 +33,7 @@ class ToolResult:
 
 def tool_metadata(name: str, description: str, category: str = "custom"):
     """Decorator to attach metadata to a dynamic tool function."""
+
     def decorator(func):
         func._tool_name = name
         func._tool_description = description

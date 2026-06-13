@@ -21,6 +21,7 @@ logger = logging.getLogger("charlie.tools.screen")
 def see_screen(question: str = "What is on the screen?") -> str:
     """Capture the screen and ask the vision model to describe it."""
     from charlie.tools._vision_bridge import get_brain
+
     brain = get_brain()
     if not brain or not hasattr(brain, "vision_handler"):
         return "Vision handler not available"
@@ -42,6 +43,7 @@ def see_screen(question: str = "What is on the screen?") -> str:
 def find_element(description: str) -> str:
     """Find a UI element on screen using the vision model."""
     from charlie.tools._vision_bridge import get_brain
+
     brain = get_brain()
     if not brain or not hasattr(brain, "vision_handler"):
         return "Vision handler not available"
@@ -52,7 +54,7 @@ def find_element(description: str) -> str:
 
     prompt = (
         f'Find "{description}" in this screenshot. '
-        f'Return ONLY valid JSON (no markdown): '
+        f"Return ONLY valid JSON (no markdown): "
         f'{{"x": <center pixel x>, "y": <center pixel y>, '
         f'"found": true/false, "confidence": 0.0-1.0}}'
     )
@@ -83,18 +85,15 @@ def find_element(description: str) -> str:
     category="vision",
     risk_tier=RiskTier.TIER_0,
 )
-def read_screen_text(
-    x: int = 0, y: int = 0, width: int = 0, height: int = 0
-) -> str:
+def read_screen_text(x: int = 0, y: int = 0, width: int = 0, height: int = 0) -> str:
     """Extract text from screen using OCR. If region is 0, reads full screen."""
     try:
         import pytesseract
         from PIL import ImageGrab
         import os
+
         if os.name == "nt":
-            tesseract_path = os.getenv(
-                "TESSERACT_PATH", r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-            )
+            tesseract_path = os.getenv("TESSERACT_PATH", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
             if os.path.exists(tesseract_path):
                 pytesseract.pytesseract.tesseract_cmd = tesseract_path
     except ImportError:

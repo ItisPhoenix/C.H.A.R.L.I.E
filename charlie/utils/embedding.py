@@ -18,9 +18,7 @@ _lock = threading.Lock()
 
 def _load_sentence_transformer():
     """Attempt to load SentenceTransformerEmbeddingFunction."""
-    return embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name=_model_name
-    )
+    return embedding_functions.SentenceTransformerEmbeddingFunction(model_name=_model_name)
 
 
 def get_embedding_fn():

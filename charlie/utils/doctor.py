@@ -79,9 +79,7 @@ class Doctor:
                     )
 
             if alert == "CRITICAL_VRAM":
-                if self.status_q and (
-                    time.time() - Doctor._last_alert_time > Doctor._alert_cooldown
-                ):
+                if self.status_q and (time.time() - Doctor._last_alert_time > Doctor._alert_cooldown):
                     self.status_q.put(
                         {
                             "type": "ALERT",
@@ -92,9 +90,7 @@ class Doctor:
 
             if alert == "CRITICAL_RAM":
                 gc.collect()
-                if self.status_q and (
-                    time.time() - Doctor._last_alert_time > Doctor._alert_cooldown
-                ):
+                if self.status_q and (time.time() - Doctor._last_alert_time > Doctor._alert_cooldown):
                     self.status_q.put(
                         {
                             "type": "ALERT",
@@ -259,25 +255,31 @@ def run_self_check() -> DoctorReport:
     checks.append(_check_llm_reachability())
 
     # ── 2. STT model file ──
-    checks.append(_check_file_exists(
-        name="stt_model",
-        path=Path("charlie/models/charlie.onnx"),
-        description="STT wake-word model",
-    ))
+    checks.append(
+        _check_file_exists(
+            name="stt_model",
+            path=Path("charlie/models/charlie.onnx"),
+            description="STT wake-word model",
+        )
+    )
 
     # ── 3. TTS model file ──
-    checks.append(_check_file_exists(
-        name="tts_model",
-        path=Path("charlie/models/kokoro-v1.0.onnx"),
-        description="TTS Kokoro model",
-    ))
+    checks.append(
+        _check_file_exists(
+            name="tts_model",
+            path=Path("charlie/models/kokoro-v1.0.onnx"),
+            description="TTS Kokoro model",
+        )
+    )
 
     # ── 4. Gmail credentials ──
-    checks.append(_check_file_exists(
-        name="gmail_credentials",
-        path=Path("config/secure/credentials.json"),
-        description="Gmail OAuth credentials",
-    ))
+    checks.append(
+        _check_file_exists(
+            name="gmail_credentials",
+            path=Path("config/secure/credentials.json"),
+            description="Gmail OAuth credentials",
+        )
+    )
 
     # ── 5. MCP servers config ──
     checks.append(_check_mcp_servers())
@@ -311,13 +313,29 @@ def _check_llm_reachability() -> DoctorCheck:
             cause="settings.llm.llm_url is empty",
             remediation="Set LLM_URL in .env to any OpenAI-compatible endpoint.",
         )
+    # Build /v1/models URL idempotently. NIM/Ollama/LM Studio users
+    # commonly include /v1 in their base URL; appending /v1/models
+    # unconditionally produces a 404 (e.g. .../v1/v1/models). See the
+    # same pattern in charlie/brain/model_router.py:121.
+    base = llm_url.rstrip("/")
+    models_url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+
+    # Build headers conditionally — omit Authorization when the key is
+    # empty. Sending "Authorization: Bearer " (empty value) makes NIM
+    # and other OpenAI-compatible gateways return 401/404, which
+    # previously caused a false-positive 404 in the self-check.
+    headers: dict = {}
+    if getattr(settings.llm, "llm_api_key", ""):
+        headers["Authorization"] = f"Bearer {settings.llm.llm_api_key}"
+
     try:
-        r = requests.get(
-            f"{llm_url.rstrip('/')}/v1/models",
-            timeout=5,
-            headers={"Authorization": f"Bearer {getattr(settings.llm, 'llm_api_key', '') or ''}"},
-        )
-        if r.status_code < 400:
+        r = requests.get(models_url, timeout=5, headers=headers)
+        # 200-299  -> pass
+        # 401/403  -> pass (server reachable, auth applied at chat time)
+        # 404      -> pass (server reachable, no /v1/models endpoint)
+        # 5xx      -> warn (server reachable, but unhappy)
+        # network  -> fail
+        if 200 <= r.status_code < 300 or r.status_code in (401, 403, 404):
             return DoctorCheck(
                 name="llm_reachability",
                 status="pass",
@@ -393,20 +411,20 @@ def _check_mcp_servers() -> DoctorCheck:
 
 
 def _check_vram_budget() -> DoctorCheck:
-    """Check that VRAM threshold is set."""
-    threshold = getattr(settings.resources, "vram_threshold_mb", None)
-    if threshold and threshold > 0:
+    """Check that VRAM budget is set."""
+    budget = getattr(settings.resources, "vram_budget_mb", None)
+    if budget and budget > 0:
         return DoctorCheck(
             name="vram_budget",
             status="pass",
-            message=f"VRAM threshold set to {threshold} MB.",
+            message=f"VRAM budget set to {budget} MB.",
         )
     return DoctorCheck(
         name="vram_budget",
         status="warn",
-        message="VRAM threshold not configured or zero.",
-        cause="settings.resources.vram_threshold_mb is not set",
-        remediation="Set resources.vram_threshold_mb in charlie_config.json.",
+        message="VRAM budget not configured or zero.",
+        cause="settings.resources.vram_budget_mb is not set",
+        remediation="Set resources.vram_budget_mb in charlie_config.json.",
     )
 
 
@@ -443,9 +461,7 @@ def _check_canonical_tiers() -> DoctorCheck:
             )
             actual_tier = registry.get_tier(tool_name)
             if actual_tier != expected_tier:
-                violations.append(
-                    f"{tool_name}: expected {expected_tier.name}, got {actual_tier.name}"
-                )
+                violations.append(f"{tool_name}: expected {expected_tier.name}, got {actual_tier.name}")
 
         if violations:
             return DoctorCheck(

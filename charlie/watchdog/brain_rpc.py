@@ -156,6 +156,10 @@ class BrainRPCServer:
         self.res_q = res_q
         self._running = False
         self._thread: threading.Thread | None = None
+        # Count responses we could not enqueue (Manager proxy back-pressure).
+        # Surfaced in logs so we know the server is keeping up with demand.
+        self._dropped_responses = 0
+        self._processed_requests = 0
 
         # Dispatch table: op string → bound handler. Each handler takes the
         # request params dict and returns a JSON-safe result.
@@ -166,8 +170,8 @@ class BrainRPCServer:
             "GET_TOOL_LOG": self._handle_get_tool_log,
             "GET_AUTOMATION_RULES": self._handle_get_automation_rules,
             "TOGGLE_RULE": self._handle_toggle_rule,
+            "GET_MEMORY_STATS": self._handle_get_memory_stats,
             "GET_AGENT_STATUS": self._handle_get_agent_status,
-            "GET_OUTCOMES": self._handle_get_outcomes,
             "SEARCH": self._handle_search,
             "GET_SETTINGS": self._handle_get_settings,
         }
@@ -179,9 +183,7 @@ class BrainRPCServer:
         if self._thread is not None and self._thread.is_alive():
             return self._thread
         self._running = True
-        self._thread = threading.Thread(
-            target=self.serve_forever, name="BrainRPCServer", daemon=True
-        )
+        self._thread = threading.Thread(target=self.serve_forever, name="BrainRPCServer", daemon=True)
         self._thread.start()
         return self._thread
 
@@ -212,9 +214,7 @@ class BrainRPCServer:
             try:
                 req = self._coerce_request(item)
                 if req is None:
-                    logger.warning(
-                        "brain_rpc_bad_request_item | type=%s", type(item).__name__
-                    )
+                    logger.warning("brain_rpc_bad_request_item | type=%s", type(item).__name__)
                     continue
                 request_id = req.request_id
 
@@ -233,7 +233,24 @@ class BrainRPCServer:
                 resp = RPCResponse(request_id=request_id, ok=False, error=str(e))
 
             try:
-                self.res_q.put(resp)
+                # Use put_nowait so a Manager-proxy stall on the
+                # response round-trip can never block the server's request
+                # loop. The requester (BrainRPCClient) has its own 10s
+                # waiter that times out and falls back to ok=False; a
+                # dropped response just means we hit that timeout, but
+                # the server keeps draining the request queue instead of
+                # wedging the whole Brain process.
+                self.res_q.put_nowait(resp)
+                self._processed_requests += 1
+            except queue.Full:
+                self._dropped_responses += 1
+                # Log every 50th drop to avoid log spam during a stall.
+                if self._dropped_responses % 50 == 1:
+                    logger.warning(
+                        "brain_rpc_response_dropped | total_dropped=%d | processed=%d",
+                        self._dropped_responses,
+                        self._processed_requests,
+                    )
             except Exception as e:
                 logger.error("brain_rpc_response_put_failed | %s", e)
 
@@ -292,15 +309,6 @@ class BrainRPCServer:
             return {"ok": False, "task_id": task_id, "error": str(e)}
         return {"ok": cancelled, "task_id": task_id}
 
-    def _handle_get_tool_log(self, params: dict) -> list:
-        """GET_TOOL_LOG → brain.outcome_tracker.get_tool_exec_log(limit=...)."""
-        brain = self.brain
-        limit = int(params.get("limit", 50))
-        tracker = getattr(brain, "outcome_tracker", None)
-        if tracker is None or not hasattr(tracker, "get_tool_exec_log"):
-            return []
-        log = tracker.get_tool_exec_log(limit=limit)
-        return log if log is not None else []
 
     def _handle_get_automation_rules(self, params: dict) -> list:
         """GET_AUTOMATION_RULES → list of rule dicts."""
@@ -345,11 +353,37 @@ class BrainRPCServer:
         return {"name": name, "enabled": new_state}
 
     def _handle_get_agent_status(self, params: dict) -> list:
-        """GET_AGENT_STATUS → best-effort agent list from brain.orchestrator."""
+        """GET_AGENT_STATUS → agent list from brain.orchestrator.registry."""
         brain = self.brain
         orch = getattr(brain, "orchestrator", None)
         if orch is None:
             return []
+
+        # Preferred path: AgentRegistry.list_agents()
+        registry = getattr(orch, "registry", None)
+        if registry is not None and hasattr(registry, "list_agents"):
+            try:
+                out = []
+                for spec in registry.list_agents():
+                    out.append({
+                        "name": getattr(spec, "name", ""),
+                        "description": getattr(spec, "description", "")[:200],
+                        "status": "idle",  # default; updated below if busy
+                        "tools": getattr(spec, "tools", []),
+                        "enabled": getattr(spec, "enabled", True),
+                    })
+                # Enrich with busy status from brain.is_busy if the active agent matches
+                if brain and getattr(brain, "is_busy", False):
+                    active_agent = getattr(brain, "_active_agent_name", None)
+                    if active_agent:
+                        for a in out:
+                            if a["name"] == active_agent:
+                                a["status"] = "busy"
+                return out
+            except Exception as e:
+                logger.warning("rpc_agent_status_registry_failed | %s", e)
+
+        # Fallback: try direct method, then agents collection
         for attr in ("get_agent_status", "get_status", "agent_status"):
             method = getattr(orch, attr, None)
             if callable(method):
@@ -358,7 +392,6 @@ class BrainRPCServer:
                     return result if result is not None else []
                 except Exception:
                     return []
-        # Fall back to a plain ``agents`` collection if exposed.
         agents = getattr(orch, "agents", None)
         if agents is None:
             return []
@@ -370,34 +403,27 @@ class BrainRPCServer:
                 elif hasattr(a, "to_dict"):
                     out.append(a.to_dict())
                 else:
-                    out.append(
-                        {
-                            "id": getattr(a, "id", getattr(a, "name", "")),
-                            "name": getattr(a, "name", ""),
-                            "status": getattr(a, "status", "idle"),
-                        }
-                    )
+                    out.append({
+                        "id": getattr(a, "id", getattr(a, "name", "")),
+                        "name": getattr(a, "name", ""),
+                        "status": getattr(a, "status", "idle"),
+                    })
         except Exception:
             return []
         return out
 
-    def _handle_get_outcomes(self, params: dict) -> list:
-        """GET_OUTCOMES → recent outcomes mapped to dicts."""
+    def _handle_get_memory_stats(self, params: dict) -> dict:
+        """GET_MEMORY_STATS → brain.memory.get_stats()."""
         brain = self.brain
-        limit = int(params.get("limit", 50))
-        tracker = getattr(brain, "outcome_tracker", None)
-        if tracker is None or not hasattr(tracker, "get_recent_outcomes"):
-            return []
-        outcomes = tracker.get_recent_outcomes(limit=limit) or []
-        out = []
-        for o in outcomes:
-            if hasattr(o, "to_dict"):
-                out.append(o.to_dict())
-            elif isinstance(o, dict):
-                out.append(o)
-            else:
-                out.append(str(o))
-        return out
+        memory = getattr(brain, "memory", None)
+        if memory is None or not hasattr(memory, "get_stats"):
+            return {"working_turns": 0}
+        try:
+            return memory.get_stats()
+        except Exception as e:
+            logger.warning("rpc_memory_stats_failed | %s", e)
+            return {"working_turns": 0, "error": str(e)}
+
 
     def _handle_search(self, params: dict) -> list:
         """SEARCH → matches across the tool exec log and tasks."""
@@ -408,31 +434,6 @@ class BrainRPCServer:
 
         results: list[dict] = []
 
-        # Tool execution log
-        tracker = getattr(brain, "outcome_tracker", None)
-        if tracker is not None and hasattr(tracker, "get_tool_exec_log"):
-            try:
-                for entry in tracker.get_tool_exec_log(limit=100) or []:
-                    if isinstance(entry, dict):
-                        d = entry
-                    elif hasattr(entry, "to_dict"):
-                        d = entry.to_dict()
-                    else:
-                        d = {}
-                    tool_name = str(d.get("tool_name", d.get("tool", "")))
-                    content = str(
-                        d.get("detail", d.get("details", d.get("outcome", "")))
-                    )
-                    if query in tool_name.lower() or query in content.lower():
-                        results.append(
-                            {
-                                "source": "tools",
-                                "category": tool_name,
-                                "content": content[:300],
-                            }
-                        )
-            except Exception:
-                pass
 
         # Tasks
         tm = getattr(brain, "task_mgr", None) or getattr(brain, "task_manager", None)
@@ -458,6 +459,7 @@ class BrainRPCServer:
         """GET_SETTINGS → full JSON-safe config from settings.to_dict()."""
         try:
             from charlie.config import settings
+
             return settings.to_dict()
         except Exception as e:
             logger.warning("brain_rpc_settings_import_failed | %s", e)
@@ -510,9 +512,7 @@ class BrainRPCClient:
         if self._thread is not None and self._thread.is_alive():
             return
         self._running = True
-        self._thread = threading.Thread(
-            target=self._drain_loop, name="BrainRPCClient", daemon=True
-        )
+        self._thread = threading.Thread(target=self._drain_loop, name="BrainRPCClient", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -599,7 +599,10 @@ class BrainRPCClient:
                     if attempt < self._MAX_RETRIES:
                         logger.warning(
                             "brain_rpc_timeout_retry | op=%s | attempt=%d/%d | backoff=%.1fs",
-                            op, attempt + 1, 1 + self._MAX_RETRIES, backoff,
+                            op,
+                            attempt + 1,
+                            1 + self._MAX_RETRIES,
+                            backoff,
                         )
                         time.sleep(backoff)
                         backoff *= 2
@@ -611,9 +614,7 @@ class BrainRPCClient:
 
         return RPCResponse(request_id="", ok=False, error=last_error)
 
-    async def request_async(
-        self, op: str, params: dict | None = None
-    ) -> RPCResponse:
+    async def request_async(self, op: str, params: dict | None = None) -> RPCResponse:
         """Await :meth:`request` on a worker thread without blocking the loop."""
         return await asyncio.to_thread(self.request, op, params)
 

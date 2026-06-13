@@ -75,9 +75,7 @@ class MentorSystem:
 
     # ── Interaction Tracking ──────────────────────────────────────────────────
 
-    def log_task(
-        self, topic: str, tool_used: Optional[str] = None, xp_delta: int = 10
-    ) -> None:
+    def log_task(self, topic: str, tool_used: Optional[str] = None, xp_delta: int = 10) -> None:
         """Call after every completed task."""
         self.stats["total_tasks"] += 1
         self._update_topic(topic, xp_delta)
@@ -101,9 +99,7 @@ class MentorSystem:
         self._recalibrate_verbosity(towards="brief")
         self.save()
 
-    def log_feedback(
-        self, user_input: str, charlie_response: str, outcome: str
-    ) -> None:
+    def log_feedback(self, user_input: str, charlie_response: str, outcome: str) -> None:
         """
         Appends raw interaction to feedback log for future fine-tuning dataset.
         outcome: 'positive' | 'negative' | 'neutral'
@@ -120,9 +116,7 @@ class MentorSystem:
         except Exception as e:
             logger.error("feedback_log_failed", error=str(e))
 
-    def log_episodic_memory(
-        self, event_type: str, content: str, significance: float = 0.5
-    ) -> None:
+    def log_episodic_memory(self, event_type: str, content: str, significance: float = 0.5) -> None:
         """
         Records a significant interaction or instruction for the Reflect-Evolve engine.
         event_type: 'user_instruction' | 'self_reflection' | 'correction' | 'tool_failure'
@@ -160,22 +154,16 @@ class MentorSystem:
                 break
 
     def _recalibrate_verbosity(self, towards: str) -> None:
-        ratio = self.stats["confirmations"] / max(
-            1, self.stats["confirmations"] + self.stats["corrections"]
-        )
+        ratio = self.stats["confirmations"] / max(1, self.stats["confirmations"] + self.stats["corrections"])
         self.stats["verbosity_preference"] = "brief" if ratio > 0.75 else "technical"
 
     # ── Prompt Injection ──────────────────────────────────────────────────────
 
     def get_adaptive_prompt_injection(self) -> str:
         """Returns context block for system prompt."""
-        top_topics = sorted(
-            self.stats["topics"].items(), key=lambda x: x[1]["score"], reverse=True
-        )[:4]
+        top_topics = sorted(self.stats["topics"].items(), key=lambda x: x[1]["score"], reverse=True)[:4]
 
-        topics_str = (
-            ", ".join(t for t, _ in top_topics) if top_topics else "not yet established"
-        )
+        topics_str = ", ".join(t for t, _ in top_topics) if top_topics else "not yet established"
         verbosity = self.stats["verbosity_preference"]
 
         return (
@@ -189,14 +177,10 @@ class MentorSystem:
     def generate_report(self) -> str:
         """Formatted report."""
         accuracy = round(
-            self.stats["confirmations"]
-            / max(1, self.stats["confirmations"] + self.stats["corrections"])
-            * 100
+            self.stats["confirmations"] / max(1, self.stats["confirmations"] + self.stats["corrections"]) * 100
         )
 
-        top_topics = sorted(
-            self.stats["topics"].items(), key=lambda x: x[1]["score"], reverse=True
-        )[:5]
+        top_topics = sorted(self.stats["topics"].items(), key=lambda x: x[1]["score"], reverse=True)[:5]
 
         lines = [
             "📊 *Interaction Report*",

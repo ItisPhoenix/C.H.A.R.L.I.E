@@ -1,4 +1,4 @@
-﻿<#
+<#
     start-charlie.ps1 - One-shot launcher for Charlie v0.1
 
     Brings up the entire stack:
@@ -88,32 +88,12 @@ uv sync
 if ($LASTEXITCODE -ne 0) { Write-Err "uv sync failed. See output above."; Read-Host "Press Enter to exit"; exit 1 }
 Write-Ok "Python environment ready"
 
-if ($haveNode) {
-    $dashDir = Join-Path $root "dashboard"
-    $nodeModules = Join-Path $dashDir "node_modules"
-    if (-not (Test-Path $nodeModules)) {
-        Write-Step "Installing dashboard dependencies (npm install) - first run only, may take a few minutes"
-        Push-Location $dashDir
-        npm install
-        $npmExit = $LASTEXITCODE
-        Pop-Location
-        if ($npmExit -ne 0) {
-            Write-Warn "npm install failed - dashboard UI will be skipped. Daemon will still run."
-            $haveNode = $false
-        } else {
-            Write-Ok "Dashboard dependencies installed"
-        }
-    } else {
-        Write-Ok "Dashboard dependencies already installed"
-    }
-}
-
 # -----------------------------------------------------------------------------
 # 3. KILL STALE PROCESSES
 # -----------------------------------------------------------------------------
 Write-Step "Checking for stale Charlie processes"
 $staleProcs = Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-    Where-Object { $_.CommandLine -match "main\.py\s+--daemon" -or $_.CommandLine -match "charlie" } |
+    Where-Object { $_.CommandLine -match "charlie\s+daemon" -or $_.CommandLine -match "main\.py\s+--daemon" -or $_.CommandLine -match "charlie" } |
     Select-Object ProcessId, CommandLine
 if ($staleProcs) {
     foreach ($p in $staleProcs) {
@@ -130,26 +110,82 @@ if ($staleProcs) {
 # 4. OPTIONAL DOCTOR SELF-CHECK
 # -----------------------------------------------------------------------------
 Write-Step "Running Doctor self-check"
-uv run python main.py doctor
+uv run charlie doctor
 Write-Host ""
+
+if ($haveNode) {
+    $dashDir = Join-Path $root "dashboard"
+    $nodeModules = Join-Path $dashDir "node_modules"
+    $prodBuild = Join-Path $dashDir ".next\BUILD_ID"
+    if (-not (Test-Path $nodeModules)) {
+        Write-Step "Installing dashboard dependencies (npm install) - first run only, may take a few minutes"
+        Push-Location $dashDir
+        npm install
+        $npmExit = $LASTEXITCODE
+        Pop-Location
+        if ($npmExit -ne 0) {
+            Write-Warn "npm install failed - dashboard UI will be skipped. Daemon will still run."
+            $haveNode = $false
+        } else {
+            Write-Ok "Dashboard dependencies installed"
+        }
+    } else {
+        Write-Ok "Dashboard dependencies already installed"
+    }
+    if ($haveNode) {
+        if (-not (Test-Path $prodBuild)) {
+            Write-Step "Building dashboard (npm run build) - first run only, may take a minute"
+            Push-Location $dashDir
+            npm run build
+            $buildExit = $LASTEXITCODE
+            Pop-Location
+            if ($buildExit -ne 0) {
+                Write-Warn "Dashboard build failed - falling back to dev server"
+                $fallbackDev = $true
+            } else {
+                Write-Ok "Dashboard built"
+                $fallbackDev = $false
+            }
+        } else {
+            Write-Ok "Dashboard already built"
+            $fallbackDev = $false
+        }
+    }
+}
 
 # -----------------------------------------------------------------------------
 # 5. LAUNCH
 # -----------------------------------------------------------------------------
 Write-Step "Launching Charlie daemon (Brain, Audio, Vision, Browser, Control Server :8090)"
-Start-Process -FilePath "uv" -ArgumentList "run","python","main.py","--daemon" `
-    -WorkingDirectory $root -WindowStyle Normal
-Write-Ok "Daemon starting in its own window"
+Start-Process -FilePath "uv" -ArgumentList "run","charlie","daemon" `
+    -WorkingDirectory $root -WindowStyle Hidden
+Write-Ok "Daemon started (hidden, tray icon in system tray)"
 
 if ($haveNode) {
-    Write-Step "Launching dashboard UI (Next.js dev server on :3000)"
-    Start-Process -FilePath "cmd.exe" -ArgumentList "/c","npm run dev" `
+    $dashScript = if ($fallbackDev) { "dev" } else { "start" }
+    Write-Step "Launching dashboard UI (Next.js $dashScript on :3000)"
+    Start-Process -FilePath "cmd.exe" -ArgumentList "/c","npm run $dashScript" `
         -WorkingDirectory (Join-Path $root "dashboard") -WindowStyle Normal
     Write-Ok "Dashboard starting in its own window"
-
-    Write-Step "Waiting for the dashboard to come up, then opening your browser"
-    Start-Sleep -Seconds 8
-    Start-Process "http://localhost:3000/"
+    Write-Step "Waiting for the control server on :8090..."
+    $ready = $false
+    for ($i = 0; $i -lt 15; $i++) {
+        try {
+            $null = Invoke-WebRequest -Uri "http://127.0.0.1:8090/api/token" -TimeoutSec 2 -ErrorAction Stop
+            $ready = $true
+            break
+        } catch {
+            Start-Sleep -Seconds 1
+        }
+    }
+    if ($ready) {
+        Write-Ok "Control server is up"
+        Write-Step "Opening browser to dashboard"
+        Start-Process "http://localhost:3000/"
+    } else {
+        Write-Warn "Control server not reachable after 15s — the daemon may still be starting. Opening browser anyway."
+        Start-Process "http://localhost:3000/"
+    }
 } else {
     Write-Warn "Dashboard skipped (no npm). Control Server REST/WS is still available on http://localhost:8090/"
 }
@@ -158,7 +194,7 @@ Write-Host "`n==========================================================" -Foreg
 Write-Host "   Charlie is starting up." -ForegroundColor Green
 Write-Host "   Dashboard : http://localhost:3000/" -ForegroundColor White
 Write-Host "   Control   : http://localhost:8090/" -ForegroundColor White
-Write-Host "   Two windows opened (daemon + dashboard). Close them to stop Charlie." -ForegroundColor Gray
+Write-Host "   Dashboard window is open. Daemon runs in the background (tray icon). Close the windows to stop Charlie." -ForegroundColor Gray
 Write-Host "==========================================================" -ForegroundColor Magenta
 Write-Host ""
 Read-Host "Press Enter to close this launcher window (Charlie keeps running)"

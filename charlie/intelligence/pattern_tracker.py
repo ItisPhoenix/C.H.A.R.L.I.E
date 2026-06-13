@@ -7,11 +7,13 @@ from typing import List, Optional
 
 logger = logging.getLogger("charlie.intelligence.patterns")
 
+
 class PatternTracker:
     """
     PatternTracker: Predictive Context Engine.
     Logs user activity and identifies recurring patterns to anticipate context needs.
     """
+
     def __init__(self, log_path: str = "logs/patterns.jsonl"):
         self.log_path = log_path
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
@@ -48,7 +50,7 @@ class PatternTracker:
             "file": file,
             "task": task,
             "hour": datetime.now().hour,
-            "weekday": datetime.now().weekday()
+            "weekday": datetime.now().weekday(),
         }
         try:
             with open(self.log_path, "a") as f:
@@ -87,11 +89,11 @@ class PatternTracker:
             next_apps = []
             for i in range(len(events) - 1):
                 if events[i]["app"] == last_app:
-                    next_apps.append(events[i+1]["app"])
+                    next_apps.append(events[i + 1]["app"])
 
             if next_apps:
                 top_next = max(set(next_apps), key=next_apps.count)
-                if next_apps.count(top_next) > 2: # Significant pattern
+                if next_apps.count(top_next) > 2:  # Significant pattern
                     return f"sequence_{top_next.lower()}"
 
         except Exception as e:

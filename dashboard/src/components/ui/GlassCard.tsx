@@ -16,7 +16,7 @@ export function GlassCard({ children, className, glow, hover = false, onClick }:
       className={cn(
         'glass-card flex flex-col overflow-hidden p-4 transition-all duration-300 ease-in-out',
         glow && 'glow-cyan',
-        hover && 'hover:border-charlie-cyan/40 hover:shadow-neon-glow',
+        hover && 'hover:border-charlie-border hover:shadow-premium',
         onClick && 'cursor-pointer',
         className,
       )}

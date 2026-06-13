@@ -74,11 +74,7 @@ class AgentLearningTracker:
             records = [r for r in self._records if r["agent"] == agent_name]
             if keywords:
                 keyword_set = set(k.lower() for k in keywords)
-                records = [
-                    r
-                    for r in records
-                    if any(k.lower() in keyword_set for k in r.get("keywords", []))
-                ]
+                records = [r for r in records if any(k.lower() in keyword_set for k in r.get("keywords", []))]
             if not records:
                 return 0.5
             successes = sum(1 for r in records if r["success"])
@@ -90,9 +86,7 @@ class AgentLearningTracker:
             agents = set(r["agent"] for r in self._records)
             return {agent: self.get_score(agent) for agent in agents}
 
-    def get_history(
-        self, agent_name: Optional[str] = None, limit: int = 50
-    ) -> list[dict]:
+    def get_history(self, agent_name: Optional[str] = None, limit: int = 50) -> list[dict]:
         """Get recent task records."""
         with self._lock:
             records = self._records
@@ -120,9 +114,7 @@ class AgentLearningTracker:
                 if r["success"]:
                     agents[name]["successes"] += 1
             for name in agents:
-                agents[name]["success_rate"] = (
-                    agents[name]["successes"] / agents[name]["total"]
-                )
+                agents[name]["success_rate"] = agents[name]["successes"] / agents[name]["total"]
             return {
                 "total_records": total,
                 "overall_success_rate": successes / total,

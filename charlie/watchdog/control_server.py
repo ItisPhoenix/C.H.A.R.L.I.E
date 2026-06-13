@@ -24,6 +24,7 @@ logger = get_logger("ControlServer")
 # Imported from the single canonical definition so there is exactly one map.
 WS_FORWARD_TYPES = set(STATUS_EVENT_MAP.keys())
 
+
 class ControlServer:
     """
     Daemon control server. REST + WebSocket on localhost:8090.
@@ -45,7 +46,13 @@ class ControlServer:
         self._ws_clients: list[web.WebSocketResponse] = []
         self._running = False
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._pending_approvals: dict = {}
+        # Underlying approval queue (thread-safe, auto-expires, has
+        # listener API for WS push). Persistence is via the queue's
+        # own get_all() view serialized to JSON.
+        from charlie.watchdog.approval_queue import ApprovalQueue
+
+        self._approval_queue = ApprovalQueue()
+        self._approval_queue.on_change(self._on_approval_change)
         self._last_briefing: dict = {}
         self._approvals_path = Path(__file__).parent.parent.parent / "scratch" / "approvals.json"
         self._token = os.environ.get("CONTROL_SERVER_TOKEN") or secrets.token_urlsafe(32)
@@ -68,6 +75,7 @@ class ControlServer:
             res_q = getattr(daemon, "brain_res_q", None)
             if req_q is not None and res_q is not None:
                 from charlie.watchdog.brain_rpc import BrainRPCClient
+
                 self.brain_rpc = BrainRPCClient(req_q, res_q)
                 self.brain_rpc.start()
 
@@ -76,6 +84,7 @@ class ControlServer:
                 # wait_until_ready sends PINGs until the server responds or
                 # a timeout elapses; the result is only logged.
                 import threading as _thr
+
                 _thr.Thread(
                     target=self.brain_rpc.wait_until_ready,
                     kwargs={"timeout": 20.0},
@@ -101,7 +110,7 @@ class ControlServer:
         if remote in ("127.0.0.1", "::1"):
             return await handler(request)
         now = time.time()
-        if not hasattr(self, '_rate_limits'):
+        if not hasattr(self, "_rate_limits"):
             self._rate_limits = {}
         # Clean old entries
         self._rate_limits = {k: v for k, v in self._rate_limits.items() if now - v[-1] < 60}
@@ -118,7 +127,9 @@ class ControlServer:
 
     async def _start_async(self):
         """Async startup."""
-        self._app = web.Application(middlewares=[self._rate_limit_middleware, self._token_auth_middleware, self._cors_middleware])
+        self._app = web.Application(
+            middlewares=[self._rate_limit_middleware, self._token_auth_middleware, self._cors_middleware]
+        )
         self._setup_routes()
         self._load_approvals()
 
@@ -127,24 +138,34 @@ class ControlServer:
         site = web.TCPSite(self._runner, "127.0.0.1", self.port)
         try:
             await site.start()
-            self._running = True
-            logger.info(f"control_server_started | http://127.0.0.1:{self.port}")
         except OSError as e:
             logger.error(
                 f"control_server_port_failed | port={self.port} | error={e} | "
                 f"hint='Is another CHARLIE instance already running?'"
             )
             self._running = False
-            # Push SRE status alert if supervisor queues are available
             if self.daemon and hasattr(self.daemon, "status_q") and self.daemon.status_q:
                 try:
-                    self.daemon.status_q.put_nowait({
-                        "type": "PHOENIX_ALERT",
-                        "content": f"ControlServer bind failed on port {self.port}. Is another instance running?"
-                    })
-                except Exception as e:
-                    logger.warning("phoenix_alert_push_failed | %s", e)
+                    self.daemon.status_q.put_nowait(
+                        {
+                            "type": "PHOENIX_ALERT",
+                            "content": f"ControlServer bind failed on port {self.port}. Is another instance running?",
+                        }
+                    )
+                except Exception as ex:
+                    logger.warning("phoenix_alert_push_failed | %s", ex)
             return
+
+        # Also bind IPv6 loopback to prevent ::1 bypass (best-effort)
+        try:
+            site6 = web.TCPSite(self._runner, "::1", self.port)
+            await site6.start()
+            logger.info(f"ipv6_bind_ok | [::1]:{self.port}")
+        except OSError:
+            logger.debug("ipv6_bind_skipped | ::1 not available on this system")
+
+        self._running = True
+        logger.info(f"control_server_started | http://127.0.0.1:{self.port}")
 
         # Keep running until stopped
         try:
@@ -162,7 +183,14 @@ class ControlServer:
 
     @web.middleware
     async def _cors_middleware(self, request, handler):
-        """CORS middleware for dashboard cross-origin access."""
+        """CORS middleware for dashboard cross-origin access.
+
+        The control server is authenticated via the ``X-Control-Token``
+        header (token-based, not cookie-based), so we never set
+        ``Access-Control-Allow-Credentials``. Origins are pinned to a
+        trusted allowlist (``localhost``/``127.0.0.1``/``[::1]``) to
+        avoid the unsafe ``*`` + credentials combination.
+        """
         if request.method == "OPTIONS":
             response = web.Response()
         else:
@@ -171,23 +199,31 @@ class ControlServer:
             except web.HTTPException as exc:
                 response = exc
         origin = request.headers.get("Origin", "")
-        # Allow any localhost/127.0.0.1 origin for dev flexibility
-        if origin and ("localhost" in origin or "127.0.0.1" in origin):
+        # Pin the origin to a known-safe value (or omit it entirely if
+        # the origin is untrusted). Wildcard is only emitted when the
+        # request has no Origin header (i.e. a non-browser client).
+        if origin and ("localhost" in origin or "127.0.0.1" in origin or "[::1]" in origin):
             response.headers["Access-Control-Allow-Origin"] = origin
-        else:
+            response.headers["Vary"] = "Origin"
+        elif not origin:
             response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Control-Token"
-        response.headers["Access-Control-Allow-Credentials"] = "true"
+        # Intentionally NOT setting Access-Control-Allow-Credentials:
+        # auth is via X-Control-Token header, not cookies, so the
+        # credentials flag is unnecessary and unsafe to combine with *.
         return response
 
     @web.middleware
     async def _token_auth_middleware(self, request, handler):
-        """Token auth: all requests require X-Control-Token.
+        """Token auth: every request must carry the ``X-Control-Token``.
 
-        The server binds to 127.0.0.1, so only localhost processes can connect.
-        Token auth ensures only the dashboard (which knows the token) can call
-        privileged endpoints like /api/control/shutdown.
+        The server binds to 127.0.0.1, so only localhost processes can
+        connect, but **any** local process can connect — so we always
+        require the token. The dashboard proxy at ``charlie/dashboard``
+        already injects the token on behalf of the browser, so removing
+        the localhost bypass does not break the legitimate dashboard
+        flow.
         """
         # Allow unauthenticated access to the token bootstrap endpoint
         if request.path == "/api/token":
@@ -195,11 +231,6 @@ class ControlServer:
 
         # Allow CORS preflight without auth
         if request.method == "OPTIONS":
-            return await handler(request)
-
-        # Allow dashboard requests from localhost without token
-        remote = request.remote or ""
-        if remote in ("127.0.0.1", "::1", "localhost"):
             return await handler(request)
 
         # Accept token from header OR query param (for WebSocket)
@@ -294,6 +325,11 @@ class ControlServer:
 
         # Voice, tasks, MCP
         self._app.router.add_get("/api/voice/status", self._handle_voice_status)
+        self._app.router.add_post("/api/audio/mute", self._handle_audio_mute)
+        self._app.router.add_get("/api/audio/mute", self._handle_audio_mute_status)
+        self._app.router.add_get("/api/audio/config", self._handle_audio_config)
+        self._app.router.add_post("/api/audio/config", self._handle_audio_config_set)
+        self._app.router.add_get("/api/metrics", self._handle_metrics)
         self._app.router.add_get("/api/tasks", self._handle_tasks)
         self._app.router.add_post("/api/tasks/{task_id}/cancel", self._handle_cancel_task)
         self._app.router.add_get("/api/mcp/servers", self._handle_mcp_servers)
@@ -308,6 +344,9 @@ class ControlServer:
         self._app.router.add_post("/api/orchestrator/plan", self._handle_orchestrator_plan)
         self._app.router.add_get("/api/orchestrator/learning", self._handle_orchestrator_learning)
         self._app.router.add_post("/api/orchestrator/execute", self._handle_orchestrator_execute)
+
+        # Prometheus metrics exposition
+        self._app.router.add_get("/api/metrics", self._handle_metrics)
 
         # WebSocket
         self._app.router.add_get("/ws/events", self._handle_ws)
@@ -367,17 +406,23 @@ class ControlServer:
                     if p.is_alive():
                         p.kill()
 
-            # Restart using the appropriate entry point
-            entry_points = {
-                "Audio": self.daemon._run_audio_safe,
-                "Brain": self.daemon._run_brain_safe,
-                "Browser": self.daemon._run_browser_safe,
-                "Telegram": self.daemon._run_telegram_safe,
-                "Vision": self.daemon._run_vision_safe,
+            # Restart using the appropriate entry point.
+            # IMPORTANT: look up the method via getattr at call time —
+            # eager dict-eval of unbound attribute references would raise
+            # AttributeError for subsystems not implemented on this supervisor
+            # (e.g. Audio/Telegram/Vision are wired in Phoenix but not Daemon mode).
+            entry_point_methods = {
+                "Brain": "_run_brain_safe",
+                "Browser": "_run_browser_safe",
             }
 
-            if name in entry_points:
-                await asyncio.to_thread(self.daemon.start_process, name, entry_points[name])
+            if name in entry_point_methods:
+                method = getattr(self.daemon, entry_point_methods[name], None)
+                if method is None:
+                    return web.json_response(
+                        {"error": f"subsystem_not_implemented: {name}"}, status=501
+                    )
+                await asyncio.to_thread(self.daemon.start_process, name, method)
             else:
                 return web.json_response({"error": f"unknown_subsystem: {name}"}, status=400)
 
@@ -412,28 +457,20 @@ class ControlServer:
 
     async def _handle_get_approvals(self, request):
         """GET /api/approvals — pending approval queue."""
-        pending = [
-            {**a, "id": aid}
-            for aid, a in self._pending_approvals.items()
-            if a.get("status") == "pending"
-        ]
+        pending = [pa.to_dict() for pa in self._approval_queue.get_pending()]
         return web.json_response({"pending": pending})
 
     async def _handle_approve(self, request):
         """POST /api/approvals/{id}/approve — approve a pending action."""
         aid = request.match_info["id"]
-        if aid in self._pending_approvals:
-            self._pending_approvals[aid]["status"] = "approved"
-            await self._broadcast_ws("approval_resolved", {"id": aid, "decision": "approved"})
+        if self._approval_queue.approve(aid):
             return web.json_response({"ok": True, "status": "approved", "id": aid})
         return web.json_response({"error": "not_found"}, status=404)
 
     async def _handle_deny(self, request):
         """POST /api/approvals/{id}/deny — deny a pending action."""
         aid = request.match_info["id"]
-        if aid in self._pending_approvals:
-            self._pending_approvals[aid]["status"] = "denied"
-            await self._broadcast_ws("approval_resolved", {"id": aid, "decision": "denied"})
+        if self._approval_queue.deny(aid):
             return web.json_response({"ok": True, "status": "denied", "id": aid})
         return web.json_response({"error": "not_found"}, status=404)
 
@@ -483,9 +520,11 @@ class ControlServer:
     def _docker_gateway_probe(url: str = "http://127.0.0.1:8080/sse", timeout: float = 0.5) -> bool:
         """True if the Docker MCP gateway SSE endpoint is accepting connections."""
         import socket
+
         try:
             # urlparse to get host/port
             from urllib.parse import urlparse
+
             u = urlparse(url)
             host = u.hostname or "127.0.0.1"
             port = u.port or 80
@@ -504,13 +543,15 @@ class ControlServer:
           - container_id: str | None (only set if we started it)
         """
         reachable = await asyncio.to_thread(self._docker_gateway_probe)
-        return web.json_response({
-            "ok": True,
-            "reachable": reachable,
-            "managed_here": self._docker_gateway_container_id is not None,
-            "container_id": self._docker_gateway_container_id,
-            "port": 8080,
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "reachable": reachable,
+                "managed_here": self._docker_gateway_container_id is not None,
+                "container_id": self._docker_gateway_container_id,
+                "port": 8080,
+            }
+        )
 
     async def _handle_docker_gateway_start(self, request):
         """POST /api/control/docker/gateway/start — start the gateway container.
@@ -521,11 +562,13 @@ class ControlServer:
         """
         # If already reachable, don't double-start
         if await asyncio.to_thread(self._docker_gateway_probe):
-            return web.json_response({
-                "ok": True,
-                "already_running": True,
-                "reachable": True,
-            })
+            return web.json_response(
+                {
+                    "ok": True,
+                    "already_running": True,
+                    "reachable": True,
+                }
+            )
 
         # Pull the token from charlie_config.json so the gateway's auth matches
         # what MCPClient sends. Fall back to a placeholder if not configured.
@@ -533,11 +576,7 @@ class ControlServer:
         try:
             cfg_path = Path(__file__).parent.parent.parent / "charlie_config.json"
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-            token = (
-                cfg.get("mcp_servers", {})
-                .get("docker-mcp-gateway", {})
-                .get("token", "")
-            )
+            token = cfg.get("mcp_servers", {}).get("docker-mcp-gateway", {}).get("token", "")
         except Exception as e:
             logger.warning("docker_gateway_token_lookup_failed | %s", e)
 
@@ -545,8 +584,12 @@ class ControlServer:
         image = os.environ.get("CHARLIE_DOCKER_MCP_IMAGE", "docker/mcp-gateway:latest")
         # Container listens on :8080 by default; --rm so it cleans up on stop.
         cmd = [
-            "docker", "run", "-d", "--rm",
-            "-p", "8080:8080",
+            "docker",
+            "run",
+            "-d",
+            "--rm",
+            "-p",
+            "8080:8080",
         ]
         if token:
             cmd.extend(["-e", f"MCP_GATEWAY_TOKEN={token}"])
@@ -594,12 +637,14 @@ class ControlServer:
         # Give the container a moment to bind the port, then probe.
         await asyncio.sleep(2)
         reachable = await asyncio.to_thread(self._docker_gateway_probe)
-        return web.json_response({
-            "ok": True,
-            "reachable": reachable,
-            "container_id": self._docker_gateway_container_id,
-            "port": 8080,
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "reachable": reachable,
+                "container_id": self._docker_gateway_container_id,
+                "port": 8080,
+            }
+        )
 
     async def _handle_docker_gateway_stop(self, request):
         """POST /api/control/docker/gateway/stop — stop a gateway we started."""
@@ -611,7 +656,10 @@ class ControlServer:
             )
         try:
             proc = await asyncio.create_subprocess_exec(
-                "docker", "rm", "-f", cid,
+                "docker",
+                "rm",
+                "-f",
+                cid,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -648,13 +696,12 @@ class ControlServer:
             if resp.ok:
                 data = resp.data or {}
             elif resp.error == "brain_rpc_timeout":
-                return web.json_response(
-                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
-                )
+                return web.json_response({"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503)
         if not data:
             try:
                 from charlie.config import settings
-                data = settings.to_dict() if hasattr(settings, 'to_dict') else {}
+
+                data = settings.to_dict() if hasattr(settings, "to_dict") else {}
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
         return web.json_response(data)
@@ -732,12 +779,14 @@ class ControlServer:
 
         elif action == "confirm_result":
             # Forward confirmation result to brain_task_q
-            if self.daemon and hasattr(self.daemon, 'brain_task_q'):
-                self.daemon.brain_task_q.put({
-                    "type": "CONFIRMATION_RESULT",
-                    "content": data.get("result"),
-                    "source": "ws_client",
-                })
+            if self.daemon and hasattr(self.daemon, "brain_task_q"):
+                self.daemon.brain_task_q.put(
+                    {
+                        "type": "CONFIRMATION_RESULT",
+                        "content": data.get("result"),
+                        "source": "ws_client",
+                    }
+                )
                 await ws.send_json({"type": "confirm_ack"})
 
         else:
@@ -769,25 +818,28 @@ class ControlServer:
         if self.brain_rpc:
             resp = await self.brain_rpc.request_async("SEARCH", params)
             if resp.ok:
-                return web.json_response({
-                    "results": resp.data or [],
-                    "count": len(resp.data or []),
-                })
-            if resp.error == "brain_rpc_timeout":
                 return web.json_response(
-                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
+                    {
+                        "results": resp.data or [],
+                        "count": len(resp.data or []),
+                    }
                 )
+            if resp.error == "brain_rpc_timeout":
+                return web.json_response({"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503)
 
         # Fallback: local timeline search
         try:
             from charlie.intelligence.timeline import TimelineIndexer
+
             indexer = TimelineIndexer()
             await asyncio.to_thread(indexer.build_index)
             results = await asyncio.to_thread(indexer.search, query=query, limit=50)
-            return web.json_response({
-                "results": [e.to_dict() for e in results],
-                "count": len(results),
-            })
+            return web.json_response(
+                {
+                    "results": [e.to_dict() for e in results],
+                    "count": len(results),
+                }
+            )
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
@@ -808,9 +860,7 @@ class ControlServer:
             if resp.ok:
                 return web.json_response({"results": resp.data or [], "count": len(resp.data or [])})
             if resp.error == "brain_rpc_timeout":
-                return web.json_response(
-                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
-                )
+                return web.json_response({"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503)
 
         # Fallback: local search (chat history only, since Brain is unreachable)
         results = []
@@ -823,12 +873,14 @@ class ControlServer:
                         for msg in messages:
                             content = msg.get("content", "")
                             if query.lower() in content.lower():
-                                results.append({
-                                    "source": "chat",
-                                    "category": msg.get("role", "message"),
-                                    "content": content[:300],
-                                    "timestamp": msg.get("timestamp"),
-                                })
+                                results.append(
+                                    {
+                                        "source": "chat",
+                                        "category": msg.get("role", "message"),
+                                        "content": content[:300],
+                                        "timestamp": msg.get("timestamp"),
+                                    }
+                                )
         except Exception:
             pass
 
@@ -846,9 +898,7 @@ class ControlServer:
                 logger.info(f"rule_toggled | name={name} | enabled={data.get('enabled')}")
                 return web.json_response({"ok": True, **data})
             if resp.error == "brain_rpc_timeout":
-                return web.json_response(
-                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
-                )
+                return web.json_response({"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503)
             return web.json_response({"error": resp.error or "rpc_failed"}, status=500)
         return web.json_response({"error": "brain_rpc_not_available"}, status=503)
 
@@ -856,27 +906,7 @@ class ControlServer:
 
     async def _handle_get_integrations(self, request):
         """GET /api/integrations — list integration health."""
-        if not self.daemon:
-            return web.json_response({"integrations": []})
-        try:
-            from charlie.integrations.health_tracker import IntegrationHealthTracker
-            tracker = IntegrationHealthTracker()
-            # Register known integrations via Brain RPC agent status
-            if self.brain_rpc:
-                resp = await self.brain_rpc.request_async("GET_AGENT_STATUS")
-                if resp.ok and isinstance(resp.data, list):
-                    for agent_info in resp.data:
-                        if isinstance(agent_info, dict):
-                            tracker.register(type("Integration", (), {
-                                "name": agent_info.get("name", "unknown"),
-                                "status": agent_info.get("status", "idle"),
-                            })())
-            health = tracker.get_all_health()
-            return web.json_response({
-                "integrations": [h.to_dict() for h in health],
-            })
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        return web.json_response({"integrations": []})
 
     # ── Automation ──
 
@@ -936,12 +966,14 @@ class ControlServer:
                 return web.json_response({"error": "empty_message"}, status=400)
 
             # Forward to Brain
-            if self.daemon and hasattr(self.daemon, 'brain_task_q'):
-                self.daemon.brain_task_q.put({
-                    "type": "TEXT",
-                    "content": message,
-                    "source": "dashboard",
-                })
+            if self.daemon and hasattr(self.daemon, "brain_task_q"):
+                self.daemon.brain_task_q.put(
+                    {
+                        "type": "TEXT",
+                        "content": message,
+                        "source": "dashboard",
+                    }
+                )
                 return web.json_response({"status": "queued", "message": "Message sent"})
             return web.json_response({"error": "brain_not_available"}, status=503)
         except Exception as e:
@@ -957,22 +989,23 @@ class ControlServer:
             if resp.ok:
                 agents = resp.data or []
                 active_count = sum(1 for a in agents if isinstance(a, dict) and a.get("status") == "busy")
-                return web.json_response({
-                    "orchestrator": {
-                        "status": "executing" if active_count > 0 else "idle",
-                        "active_agents": active_count,
-                        "current_plan": "",
-                    },
-                    "agents": agents,
-                })
-            if resp.error == "brain_rpc_timeout":
                 return web.json_response(
-                    {"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503
+                    {
+                        "orchestrator": {
+                            "status": "executing" if active_count > 0 else "idle",
+                            "active_agents": active_count,
+                            "current_plan": "",
+                        },
+                        "agents": agents,
+                    }
                 )
+            if resp.error == "brain_rpc_timeout":
+                return web.json_response({"status": "unavailable", "reason": "brain_rpc_timeout"}, status=503)
         # Fallback: scan agent manifests on disk
         try:
             import json
             import pathlib
+
             agents_dir = pathlib.Path("charlie/agents")
             agents = []
             if agents_dir.is_dir():
@@ -983,41 +1016,50 @@ class ControlServer:
                             with open(manifest_path) as f:
                                 manifest = json.load(f)
                             agent_name = manifest.get("name", agent_path.name)
-                            agents.append({
-                                "id": agent_name,
-                                "name": agent_name,
-                                "role": manifest.get("role", "") or agent_path.name,
-                                "status": "idle",
-                                "current_task": "",
-                            })
+                            agents.append(
+                                {
+                                    "id": agent_name,
+                                    "name": agent_name,
+                                    "role": manifest.get("role", "") or agent_path.name,
+                                    "status": "idle",
+                                    "current_task": "",
+                                }
+                            )
                         except Exception:
                             pass
-            return web.json_response({
-                "orchestrator": {"status": "idle", "active_agents": 0, "current_plan": ""},
-                "agents": agents,
-            })
+            return web.json_response(
+                {
+                    "orchestrator": {"status": "idle", "active_agents": 0, "current_plan": ""},
+                    "agents": agents,
+                }
+            )
         except Exception as e:
             logger.warning("agents_status_failed | error=%s", e)
-            return web.json_response({"orchestrator": {"status": "error", "active_agents": 0, "current_plan": ""}, "agents": []})
+            return web.json_response(
+                {"orchestrator": {"status": "error", "active_agents": 0, "current_plan": ""}, "agents": []}
+            )
 
     async def _handle_skills(self, request):
         """GET /api/skills — list all available skills from charlie/skills/."""
         try:
             from charlie.brain.skill_loader import SkillLoader
+
             loader = SkillLoader(skills_dir="charlie/skills")
             skill_specs = loader.load_all()
-            return web.json_response({
-                "skills": [
-                    {
-                        "name": s.name,
-                        "description": getattr(s, "description", ""),
-                        "tags": getattr(s, "tags", []),
-                        "enabled": getattr(s, "enabled", True),
-                        "inject_mode": getattr(s, "inject_mode", "default"),
-                    }
-                    for s in skill_specs
-                ]
-            })
+            return web.json_response(
+                {
+                    "skills": [
+                        {
+                            "name": s.name,
+                            "description": getattr(s, "description", ""),
+                            "tags": getattr(s, "tags", []),
+                            "enabled": getattr(s, "enabled", True),
+                            "inject_mode": getattr(s, "inject_mode", "default"),
+                        }
+                        for s in skill_specs
+                    ]
+                }
+            )
         except Exception as e:
             logger.debug("skills_load_failed | error=%s", e)
             return web.json_response({"skills": []})
@@ -1103,19 +1145,13 @@ class ControlServer:
 
     async def _handle_run_briefing(self, request):
         """POST /api/briefing/run — generate new briefing."""
-        try:
-            from charlie.intelligence.briefing import BriefingAssembler
-            assembler = BriefingAssembler(brain=None)
-            briefing = await assembler.assemble()
-            self._last_briefing = briefing.to_dict()
-            return web.json_response({"briefing": self._last_briefing})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        return web.json_response({"briefing": {}})
 
     async def _handle_voice_status(self, request):
         """GET /api/voice/status — voice pipeline status."""
         try:
             from charlie.config import settings
+
             # Check if Audio subsystem is running via daemon
             audio_running = False
             if self.daemon:
@@ -1134,20 +1170,121 @@ class ControlServer:
                 ipc_speaking, ipc_listening = ipc_bridge.get_voice_state()
                 is_speaking = ipc_speaking
                 is_listening = is_listening and ipc_listening
-            return web.json_response({
-                "stt_model": getattr(settings.audio, 'stt_model', 'unknown'),
-                "tts_model": "kokoro",
-                "tts_speed": getattr(settings.audio, 'kokoro_speed', 1.0),
-                "voice_mode": getattr(settings.audio, 'voice_mode', 'local'),
-                "is_listening": is_listening,
-                "is_speaking": is_speaking,
-            })
+            return web.json_response(
+                {
+                    "stt_model": getattr(settings.audio, "stt_model", "unknown"),
+                    "tts_model": "kokoro",
+                    "tts_speed": getattr(settings.audio, "kokoro_speed", 1.0),
+                    "voice_mode": getattr(settings.audio, "voice_mode", "local"),
+                    "is_listening": is_listening,
+                    "is_speaking": is_speaking,
+                }
+            )
         except Exception as e:
             logger.error("voice_status_error | %s", e)
-        return web.json_response({
-            "stt_model": "unknown", "tts_model": "unknown", "tts_speed": 1.0,
-            "is_listening": False, "is_speaking": False,
-        })
+        return web.json_response(
+            {
+                "stt_model": "unknown",
+                "tts_model": "unknown",
+                "tts_speed": 1.0,
+                "is_listening": False,
+                "is_speaking": False,
+            }
+        )
+
+    async def _handle_audio_mute(self, request):
+        """POST /api/audio/mute — toggle microphone mute.
+
+        Body: {"muted": true|false}
+        Sends a MUTE/UNMUTE command to the audio engine via audio_cmd_q.
+        """
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        muted = bool(payload.get("muted", False))
+        cmd_type = "MUTE" if muted else "UNMUTE"
+        sent = False
+        # Try the daemon's audio_cmd_q first
+        if self.daemon is not None:
+            audio_cmd_q = getattr(self.daemon, "audio_cmd_q", None)
+            if audio_cmd_q is not None:
+                try:
+                    audio_cmd_q.put_nowait({"type": cmd_type})
+                    sent = True
+                except Exception as e:
+                    logger.warning("audio_mute_queue_put_failed | %s", e)
+        # Fallback: BrainRPC
+        if not sent and self.brain_rpc is not None:
+            try:
+                resp = await self.brain_rpc.request_async(cmd_type)
+                sent = resp.ok
+            except Exception as e:
+                logger.warning("audio_mute_brainrpc_failed | %s", e)
+        return web.json_response({"muted": muted, "sent": sent})
+
+    async def _handle_audio_mute_status(self, request):
+        """GET /api/audio/mute — return current mute state.
+
+        Reads the cached voice state from IPCBridge. The IPCBridge caches
+        `muted` from the latest VOICE_ACTIVITY event with a 1.5s max-age
+        (matches the existing voice-state cache).
+        """
+        try:
+            ipc_bridge = getattr(self.daemon, "_ipc_bridge", None) if self.daemon else None
+            if ipc_bridge is not None and hasattr(ipc_bridge, "get_mute_state"):
+                muted = ipc_bridge.get_mute_state(max_age=1.5)
+            else:
+                muted = False
+            return web.json_response({"muted": muted})
+        except Exception as e:
+            logger.error("audio_mute_status_error | %s", e)
+            return web.json_response({"muted": False})
+
+    async def _handle_audio_config(self, request):
+        """GET /api/audio/config — return current audio configuration."""
+        audio_engine = getattr(self.daemon, "audio_engine", None) if self.daemon else None
+        if audio_engine is not None and hasattr(audio_engine, "get_config"):
+            try:
+                return web.json_response(audio_engine.get_config())
+            except Exception as e:
+                logger.error("audio_config_read_failed | %s", e)
+        return web.json_response(
+            {
+                "muted": False,
+                "wake_word": "charlie",
+                "wake_word_sensitivity": 0.5,
+                "mute_hotkey": "Ctrl+Shift+M",
+            }
+        )
+
+    async def _handle_audio_config_set(self, request):
+        """POST /api/audio/config — update audio config (subset of fields)."""
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        audio_engine = getattr(self.daemon, "audio_engine", None) if self.daemon else None
+        if audio_engine is not None and hasattr(audio_engine, "set_config"):
+            try:
+                return web.json_response(audio_engine.set_config(payload))
+            except Exception as e:
+                logger.error("audio_config_set_failed | %s", e)
+                return web.json_response({"error": str(e)}, status=500)
+        return web.json_response({"error": "audio engine not available"}, status=503)
+
+    async def _handle_metrics(self, request):
+        """GET /api/metrics — Prometheus exposition format."""
+        from charlie.watchdog.metrics import get_collector
+        try:
+            text = get_collector().render()
+            return web.Response(
+                text=text,
+                content_type="text/plain; version=0.0.4; charset=utf-8",
+            )
+        except Exception as e:
+            logger.error("metrics_render_failed | %s", e)
+            return web.Response(text="# render error\n", status=500)
 
     async def _handle_tasks(self, request):
         """GET /api/tasks — task queue via Brain RPC with local fallback."""
@@ -1173,15 +1310,11 @@ class ControlServer:
         reflects the actual outcome of AsyncTaskManager.cancel, not just
         that the request was queued.
         """
-        task_id = request.match_info['task_id']
+        task_id = request.match_info["task_id"]
         if not self.brain_rpc:
-            return web.json_response(
-                {"ok": False, "error": "brain_rpc_unavailable"}, status=503
-            )
+            return web.json_response({"ok": False, "error": "brain_rpc_unavailable"}, status=503)
         try:
-            resp = await self.brain_rpc.request_async(
-                "CANCEL_TASK", {"task_id": task_id}
-            )
+            resp = await self.brain_rpc.request_async("CANCEL_TASK", {"task_id": task_id})
         except Exception as e:
             logger.error("cancel_task_rpc_failed | %s", e)
             return web.json_response({"ok": False, "error": str(e)}, status=500)
@@ -1203,6 +1336,7 @@ class ControlServer:
         """
         if self._mcp_manager is None:
             from charlie.mcp.manager import MCPManager
+
             self._mcp_manager = MCPManager()
         return self._mcp_manager
 
@@ -1251,6 +1385,7 @@ class ControlServer:
             if not skills_dir.exists():
                 return web.json_response({"ok": False, "error": "Skill not found"}, status=404)
             import shutil
+
             shutil.rmtree(skills_dir)
             return web.json_response({"ok": True})
         except Exception as e:
@@ -1307,6 +1442,7 @@ class ControlServer:
             if not agent_dir.exists():
                 return web.json_response({"ok": False, "error": "Agent not found"}, status=404)
             import shutil
+
             shutil.rmtree(agent_dir)
             return web.json_response({"ok": True})
         except Exception as e:
@@ -1318,6 +1454,7 @@ class ControlServer:
         try:
             body = await request.json()
             from charlie.automation.models import AutomationRule
+
             rule = AutomationRule.from_dict(body)
             config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
             data = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
@@ -1378,14 +1515,16 @@ class ControlServer:
                 mcp_config = data.get("mcp_servers", {})
                 for name, cfg in mcp_config.items():
                     if isinstance(cfg, dict):
-                        servers.append({
-                            "id": name,
-                            "name": name,
-                            "status": "configured" if cfg.get("enabled", True) else "disabled",
-                            "enabled": cfg.get("enabled", True),
-                            "tools": [],
-                            "config": {k: v for k, v in cfg.items() if k not in ("token",)},
-                        })
+                        servers.append(
+                            {
+                                "id": name,
+                                "name": name,
+                                "status": "configured" if cfg.get("enabled", True) else "disabled",
+                                "enabled": cfg.get("enabled", True),
+                                "tools": [],
+                                "config": {k: v for k, v in cfg.items() if k not in ("token",)},
+                            }
+                        )
             # Also try live manager for connected servers
             try:
                 manager = self._get_mcp_manager()
@@ -1396,14 +1535,16 @@ class ControlServer:
                         existing["status"] = "connected" if client.connected else existing["status"]
                         existing["tools"] = client.tools if client.connected else []
                     else:
-                        servers.append({
-                            "id": name,
-                            "name": name,
-                            "status": "connected" if client.connected else "disconnected",
-                            "enabled": client.enabled,
-                            "tools": client.tools if client.connected else [],
-                            "config": getattr(client, 'config', {}),
-                        })
+                        servers.append(
+                            {
+                                "id": name,
+                                "name": name,
+                                "status": "connected" if client.connected else "disconnected",
+                                "enabled": client.enabled,
+                                "tools": client.tools if client.connected else [],
+                                "config": getattr(client, "config", {}),
+                            }
+                        )
             except Exception:
                 pass  # Config-based list is still valid
             return web.json_response({"servers": servers})
@@ -1412,7 +1553,7 @@ class ControlServer:
 
     async def _handle_toggle_mcp(self, request):
         """POST /api/mcp/{server_id}/toggle — toggle MCP server enabled state."""
-        server_id = request.match_info['server_id']
+        server_id = request.match_info["server_id"]
         try:
             manager = self._get_mcp_manager()
             new_state = manager.toggle_server(server_id)
@@ -1422,7 +1563,7 @@ class ControlServer:
 
     async def _handle_mcp_connect(self, request):
         """POST /api/mcp/{server_id}/connect — connect to MCP server and discover tools."""
-        server_id = request.match_info['server_id']
+        server_id = request.match_info["server_id"]
         try:
             manager = self._get_mcp_manager()
             tools = await manager.start_server(server_id)
@@ -1432,7 +1573,7 @@ class ControlServer:
 
     async def _handle_mcp_disconnect(self, request):
         """POST /api/mcp/{server_id}/disconnect — disconnect from MCP server."""
-        server_id = request.match_info['server_id']
+        server_id = request.match_info["server_id"]
         try:
             manager = self._get_mcp_manager()
             await manager.stop_server(server_id)
@@ -1442,8 +1583,8 @@ class ControlServer:
 
     async def _handle_mcp_call_tool(self, request):
         """POST /api/mcp/{server_id}/tools/{tool_name}/call — call an MCP tool."""
-        server_id = request.match_info['server_id']
-        tool_name = request.match_info['tool_name']
+        server_id = request.match_info["server_id"]
+        tool_name = request.match_info["tool_name"]
         try:
             body = await request.json()
         except Exception:
@@ -1481,13 +1622,15 @@ class ControlServer:
             # Reload config into the shared manager
             manager = self._get_mcp_manager()
             manager.reload_config()
-            return web.json_response({"ok": True, "server": {"id": name, "name": name, "status": "configured", "enabled": True}})
+            return web.json_response(
+                {"ok": True, "server": {"id": name, "name": name, "status": "configured", "enabled": True}}
+            )
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)})
 
     async def _handle_mcp_delete_server(self, request):
         """DELETE /api/mcp/{server_id} — remove MCP server from config."""
-        server_id = request.match_info['server_id']
+        server_id = request.match_info["server_id"]
         try:
             config_path = Path(__file__).parent.parent.parent / "charlie_config.json"
             data = {}
@@ -1512,13 +1655,29 @@ class ControlServer:
 
     def _get_orchestrator(self):
         """Get or create orchestrator singleton."""
-        if not hasattr(self, '_orchestrator'):
+        if not hasattr(self, "_orchestrator"):
             from charlie.brain.learning import AgentLearningTracker
-            from charlie.brain.orchestrator import Orchestrator
+            from charlie.brain.orchestrator import TaskOrchestrator
+
             learning = AgentLearningTracker()
-            brain = getattr(self.daemon, '_brain', None) if self.daemon else None
-            self._orchestrator = Orchestrator(brain=brain, learning_tracker=learning)
+            brain = getattr(self.daemon, "_brain", None) if self.daemon else None
+            self._orchestrator = TaskOrchestrator(brain=brain, learning_tracker=learning)
         return self._orchestrator
+
+    # ── Metrics endpoint ──
+
+    async def _handle_metrics(self, request):
+        """GET /api/metrics — Prometheus exposition format."""
+        from charlie.watchdog.metrics import get_collector
+        try:
+            text = get_collector().render()
+            return web.Response(
+                text=text,
+                content_type="text/plain; version=0.0.4; charset=utf-8",
+            )
+        except Exception as e:
+            logger.error("metrics_render_failed | %s", e)
+            return web.Response(text="# render error\n", status=500)
 
     async def _handle_orchestrator_plan(self, request):
         """POST /api/orchestrator/plan — decompose a goal into subtasks."""
@@ -1528,22 +1687,28 @@ class ControlServer:
             if not goal:
                 return web.json_response({"ok": False, "error": "No goal provided"}, status=400)
             orchestrator = self._get_orchestrator()
-            agents = list(orchestrator.planner._pick_agent.__code__.co_consts) if False else ["research", "coding", "writer", "comms", "system", "vision", "redteam"]
+            agents = (
+                list(orchestrator.planner._pick_agent.__code__.co_consts)
+                if False
+                else ["research", "coding", "writer", "comms", "system", "vision"]
+            )
             subtasks = await orchestrator.plan(goal, agents)
-            return web.json_response({
-                "ok": True,
-                "subtasks": [
-                    {
-                        "id": t.id,
-                        "description": t.description,
-                        "suggested_agent": t.suggested_agent,
-                        "dependencies": t.dependencies,
-                        "required_tools": t.required_tools,
-                        "status": t.status.value,
-                    }
-                    for t in subtasks
-                ],
-            })
+            return web.json_response(
+                {
+                    "ok": True,
+                    "subtasks": [
+                        {
+                            "id": t.id,
+                            "description": t.description,
+                            "suggested_agent": t.suggested_agent,
+                            "dependencies": t.dependencies,
+                            "required_tools": t.required_tools,
+                            "status": t.status.value,
+                        }
+                        for t in subtasks
+                    ],
+                }
+            )
         except Exception as e:
             logger.error("orchestrator_plan_error | %s", e)
             return web.json_response({"ok": False, "error": str(e)}, status=500)
@@ -1567,13 +1732,13 @@ class ControlServer:
             if not goal:
                 return web.json_response({"ok": False, "error": "No goal provided"}, status=400)
             orchestrator = self._get_orchestrator()
-            agents = ["research", "coding", "writer", "comms", "system", "vision", "redteam"]
+            agents = ["research", "coding", "writer", "comms", "system", "vision"]
             subtasks = await orchestrator.plan(goal, agents)
             # Get agent registry from brain if available
             agent_registry = None
-            if self.daemon and hasattr(self.daemon, '_brain'):
+            if self.daemon and hasattr(self.daemon, "_brain"):
                 brain = self.daemon._brain
-                if hasattr(brain, 'agent_registry'):
+                if hasattr(brain, "agent_registry"):
                     agent_registry = brain.agent_registry
             results = await orchestrator.execute_plan(subtasks, agent_registry)
             return web.json_response({"ok": True, "results": results})
@@ -1603,55 +1768,103 @@ class ControlServer:
         if not self._running or not self._loop:
             return
         try:
-            asyncio.run_coroutine_threadsafe(
-                self._broadcast_ws(event_type, data), self._loop
-            )
+            asyncio.run_coroutine_threadsafe(self._broadcast_ws(event_type, data), self._loop)
         except Exception as e:
             logger.debug(f"broadcast_sync_failed | {e}")
 
     # ── Approval queue management ──
 
-    def _load_approvals(self):
-        """Load persisted approvals from disk."""
+    def _on_approval_change(self, event_type: str, approval):
+        """ApprovalQueue change listener: push to WS + persist."""
         try:
-            if self._approvals_path.exists():
-                with open(self._approvals_path, "r", encoding="utf-8") as f:
-                    self._pending_approvals = json.load(f)
-                logger.info("approvals_loaded | count=%d", len(self._pending_approvals))
+            self.broadcast_sync(
+                "approval_resolved" if event_type in ("approved", "denied", "expired") else "approval_pending",
+                {
+                    "id": approval.id,
+                    "decision": event_type,
+                    **{k: v for k, v in approval.to_dict().items() if k != "id"},
+                },
+            )
+        except Exception:
+            pass
+        self._save_approvals()
+
+    def _load_approvals(self):
+        """Load persisted approvals from disk and re-seed the queue."""
+        try:
+            if not self._approvals_path.exists():
+                return
+            with open(self._approvals_path, "r", encoding="utf-8") as f:
+                persisted = json.load(f)
+            # Persisted format is {id: {status, action, ...}}; re-add to
+            # the live queue. The queue's PendingApproval dataclass needs
+            # the same fields the loader has been writing.
+            from charlie.watchdog.approval_queue import PendingApproval
+
+            for aid, data in persisted.items():
+                if not isinstance(data, dict):
+                    continue
+                pa = PendingApproval(
+                    id=aid,
+                    action=data.get("action", ""),
+                    args=data.get("args", {}),
+                    risk_tier=int(data.get("risk_tier", 1)),
+                    description=data.get("description", ""),
+                    source=data.get("source", "unknown"),
+                    timestamp=float(data.get("timestamp", time.time())),
+                    timeout=float(data.get("timeout", 60.0)),
+                    status=data.get("status", "pending"),
+                )
+                # Skip expired or already-resolved entries on load
+                if pa.is_expired or pa.status != "pending":
+                    continue
+                self._approval_queue.add(pa)
+            logger.info(
+                "approvals_loaded | count=%d",
+                self._approval_queue.pending_count,
+            )
         except Exception as e:
             logger.warning("approvals_load_failed | %s", e)
 
     def _save_approvals(self):
-        """Persist approvals to disk."""
+        """Persist approvals to disk using the queue's get_all() view."""
         try:
             self._approvals_path.parent.mkdir(parents=True, exist_ok=True)
+            persisted: dict = {}
+            for pa in self._approval_queue.get_all():
+                persisted[pa.id] = pa.to_dict()
             with open(self._approvals_path, "w", encoding="utf-8") as f:
-                json.dump(self._pending_approvals, f, indent=2)
+                json.dump(persisted, f, indent=2)
         except Exception as e:
             logger.warning("approvals_save_failed | %s", e)
 
     def add_pending_approval(self, approval_id: str, approval_data: dict):
-        """Add a pending approval to the queue."""
-        self._pending_approvals[approval_id] = {
-            **approval_data,
-            "status": "pending",
-            "timestamp": time.time(),
-        }
-        self._save_approvals()
-        self.broadcast_sync("approval_pending", {
-            "id": approval_id,
-            **approval_data,
-        })
+        """Stage a pending approval on the queue (no legacy dict mirror).
+
+        The ``on_change`` listener (``_on_approval_change``) handles the WS
+        broadcast and persistence, so callers do not need to do either.
+        """
+        from charlie.watchdog.approval_queue import PendingApproval
+
+        pa = PendingApproval(
+            id=approval_id,
+            action=approval_data.get("action", ""),
+            args=approval_data.get("args", {}),
+            risk_tier=int(approval_data.get("risk_tier", 1)),
+            description=approval_data.get("description", ""),
+            source=approval_data.get("source", "unknown"),
+            timestamp=time.time(),
+            timeout=float(approval_data.get("timeout", 60.0)),
+            status="pending",
+        )
+        self._approval_queue.add(pa)
 
     def resolve_approval(self, approval_id: str, decision: str):
-        """Resolve a pending approval."""
-        if approval_id in self._pending_approvals:
-            self._pending_approvals[approval_id]["status"] = decision
-            self._save_approvals()
-            self.broadcast_sync("approval_resolved", {
-                "id": approval_id,
-                "decision": decision,
-            })
+        """Resolve a pending approval (approve / deny)."""
+        if decision == "approved":
+            self._approval_queue.approve(approval_id)
+        else:
+            self._approval_queue.deny(approval_id)
 
     @property
     def is_running(self) -> bool:

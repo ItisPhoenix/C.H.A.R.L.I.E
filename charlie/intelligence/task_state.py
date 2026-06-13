@@ -1,4 +1,4 @@
-﻿"""
+"""
 charlie/intelligence/task_state.py
 
 Persistent task state management using SQLite.
@@ -22,6 +22,7 @@ logger = logging.getLogger("charlie.intelligence.task_state")
 
 class TaskStatus(str, Enum):
     """Task execution status."""
+
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -33,6 +34,7 @@ class TaskStatus(str, Enum):
 @dataclass
 class SubTask:
     """A single executable unit within a task graph."""
+
     id: str
     description: str
     tool: str
@@ -83,6 +85,7 @@ class SubTask:
 @dataclass
 class TaskGraph:
     """A collection of subtasks forming a directed acyclic graph."""
+
     goal: str
     tasks: list = field(default_factory=list)
     max_parallel: int = 3
@@ -236,25 +239,38 @@ class TaskState:
         task_id = str(uuid.uuid4())[:8]
         now = time.time()
 
-        self._conn.execute("""
+        self._conn.execute(
+            """
             INSERT INTO tasks (id, goal, status, created_at, deadline, task_graph_json)
             VALUES (?, ?, 'pending', ?, ?, ?)
-        """, (task_id, goal, now, deadline.isoformat() if deadline else None,
-              str(task_graph.to_dict()) if task_graph else None))
+        """,
+            (
+                task_id,
+                goal,
+                now,
+                deadline.isoformat() if deadline else None,
+                str(task_graph.to_dict()) if task_graph else None,
+            ),
+        )
 
         if task_graph:
             for subtask in task_graph.tasks:
-                self._conn.execute("""
+                self._conn.execute(
+                    """
                     INSERT INTO subtasks (id, parent_task_id, description, tool, args, status, created_at)
                     VALUES (?, ?, ?, ?, ?, 'pending', ?)
-                """, (subtask.id, task_id, subtask.description, subtask.tool,
-                      str(subtask.args), subtask.created_at))
+                """,
+                    (subtask.id, task_id, subtask.description, subtask.tool, str(subtask.args), subtask.created_at),
+                )
 
                 for dep_id in subtask.depends_on:
-                    self._conn.execute("""
+                    self._conn.execute(
+                        """
                         INSERT INTO task_dependencies (task_id, depends_on_id)
                         VALUES (?, ?)
-                    """, (subtask.id, dep_id))
+                    """,
+                        (subtask.id, dep_id),
+                    )
 
         self._conn.commit()
         logger.info(f"task_created | id={task_id} | goal={goal[:50]}")
@@ -262,79 +278,92 @@ class TaskState:
 
     def get_task(self, task_id: str) -> Optional[dict]:
         """Get a task by ID."""
-        row = self._conn.execute(
-            "SELECT * FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone()
+        row = self._conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return dict(row) if row else None
 
     def get_subtasks(self, parent_task_id: str) -> list:
         """Get all subtasks for a parent task."""
-        rows = self._conn.execute(
-            "SELECT * FROM subtasks WHERE parent_task_id = ?", (parent_task_id,)
-        ).fetchall()
+        rows = self._conn.execute("SELECT * FROM subtasks WHERE parent_task_id = ?", (parent_task_id,)).fetchall()
 
         subtasks = []
         for row in rows:
             deps = self._conn.execute(
-                "SELECT depends_on_id FROM task_dependencies WHERE task_id = ?",
-                (row["id"],)
+                "SELECT depends_on_id FROM task_dependencies WHERE task_id = ?", (row["id"],)
             ).fetchall()
             dep_ids = [d["depends_on_id"] for d in deps]
 
-            subtasks.append(SubTask(
-                id=row["id"],
-                description=row["description"],
-                tool=row["tool"],
-                args=json.loads(row["args"]) if row["args"] else {},
-                depends_on=dep_ids,
-                status=TaskStatus(row["status"]),
-                result=row["result"],
-                error=row["error"],
-                created_at=row["created_at"],
-                started_at=row["started_at"],
-                completed_at=row["completed_at"],
-            ))
+            subtasks.append(
+                SubTask(
+                    id=row["id"],
+                    description=row["description"],
+                    tool=row["tool"],
+                    args=json.loads(row["args"]) if row["args"] else {},
+                    depends_on=dep_ids,
+                    status=TaskStatus(row["status"]),
+                    result=row["result"],
+                    error=row["error"],
+                    created_at=row["created_at"],
+                    started_at=row["started_at"],
+                    completed_at=row["completed_at"],
+                )
+            )
         return subtasks
 
-    def update_subtask_status(self, subtask_id: str, status: TaskStatus,
-                              result: any = None, error: str = None):
+    def update_subtask_status(self, subtask_id: str, status: TaskStatus, result: any = None, error: str = None):
         """Update a subtask's status."""
         now = time.time()
 
         if status == TaskStatus.RUNNING:
-            self._conn.execute("""
+            self._conn.execute(
+                """
                 UPDATE subtasks SET status = ?, started_at = ? WHERE id = ?
-            """, (status.value, now, subtask_id))
+            """,
+                (status.value, now, subtask_id),
+            )
         elif status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
-            self._conn.execute("""
+            self._conn.execute(
+                """
                 UPDATE subtasks SET status = ?, completed_at = ?, result = ?, error = ?
                 WHERE id = ?
-            """, (status.value, now, str(result) if result else None, error, subtask_id))
+            """,
+                (status.value, now, str(result) if result else None, error, subtask_id),
+            )
         else:
-            self._conn.execute("""
+            self._conn.execute(
+                """
                 UPDATE subtasks SET status = ? WHERE id = ?
-            """, (status.value, subtask_id))
+            """,
+                (status.value, subtask_id),
+            )
 
         self._conn.commit()
 
-    def update_task_status(self, task_id: str, status: TaskStatus,
-                          result: str = None, error: str = None):
+    def update_task_status(self, task_id: str, status: TaskStatus, result: str = None, error: str = None):
         """Update a task's status."""
         now = time.time()
 
         if status == TaskStatus.RUNNING:
-            self._conn.execute("""
+            self._conn.execute(
+                """
                 UPDATE tasks SET status = ?, started_at = ? WHERE id = ?
-            """, (status.value, now, task_id))
+            """,
+                (status.value, now, task_id),
+            )
         elif status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
-            self._conn.execute("""
+            self._conn.execute(
+                """
                 UPDATE tasks SET status = ?, completed_at = ?, result = ?, error = ?
                 WHERE id = ?
-            """, (status.value, now, result, error, task_id))
+            """,
+                (status.value, now, result, error, task_id),
+            )
         else:
-            self._conn.execute("""
+            self._conn.execute(
+                """
                 UPDATE tasks SET status = ? WHERE id = ?
-            """, (status.value, task_id))
+            """,
+                (status.value, task_id),
+            )
 
         self._conn.commit()
 
@@ -355,21 +384,29 @@ class TaskState:
         recovered = []
 
         for task in interrupted:
-            self._conn.execute("""
+            self._conn.execute(
+                """
                 UPDATE tasks SET status = 'interrupted' WHERE id = ?
-            """, (task["id"],))
+            """,
+                (task["id"],),
+            )
 
-            self._conn.execute("""
+            self._conn.execute(
+                """
                 UPDATE subtasks SET status = 'interrupted'
                 WHERE parent_task_id = ? AND status = 'running'
-            """, (task["id"],))
+            """,
+                (task["id"],),
+            )
 
-            recovered.append({
-                "id": task["id"],
-                "goal": task["goal"],
-                "created_at": task["created_at"],
-                "started_at": task["started_at"],
-            })
+            recovered.append(
+                {
+                    "id": task["id"],
+                    "goal": task["goal"],
+                    "created_at": task["created_at"],
+                    "started_at": task["started_at"],
+                }
+            )
 
         self._conn.commit()
 
@@ -399,9 +436,7 @@ class TaskState:
         """Get task statistics."""
         stats = {}
         for status in TaskStatus:
-            count = self._conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status = ?", (status.value,)
-            ).fetchone()[0]
+            count = self._conn.execute("SELECT COUNT(*) FROM tasks WHERE status = ?", (status.value,)).fetchone()[0]
             stats[status.value] = count
         return stats
 
@@ -414,6 +449,7 @@ class TaskState:
 
 # Singleton instance
 _task_state: Optional[TaskState] = None
+
 
 def get_task_state() -> TaskState:
     """Get the singleton TaskState instance."""

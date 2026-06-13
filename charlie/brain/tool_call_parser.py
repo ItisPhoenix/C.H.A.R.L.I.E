@@ -28,9 +28,11 @@ logger = get_logger(__name__)
 # Parsed result dataclass
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ParsedToolCall:
     """Result of parsing an LLM response for tool calls."""
+
     action: str  # Tool name, or "none" for final answer
     action_input: Dict[str, Any]  # Tool arguments
     final_answer: str  # User-facing response text
@@ -76,6 +78,7 @@ def is_phantom_phrase(text: str) -> bool:
 # ---------------------------------------------------------------------------
 # Neural loop detection (standalone helper)
 # ---------------------------------------------------------------------------
+
 
 def detect_neural_loop(
     action: str,
@@ -135,6 +138,7 @@ _TOOL_ALIASES: Dict[str, str] = {
 # Main parser
 # ---------------------------------------------------------------------------
 
+
 class ToolCallParser:
     """
     Parses tool calls from LLM responses in various formats.
@@ -193,11 +197,7 @@ class ToolCallParser:
         if content:
             return {"type": "content", "text": content}
 
-        reasoning = (
-            delta.get("reasoning_content")
-            or delta.get("reasoning", "")
-            or delta.get("thought", "")
-        )
+        reasoning = delta.get("reasoning_content") or delta.get("reasoning", "") or delta.get("thought", "")
         if reasoning:
             return {"type": "reasoning", "text": reasoning}
 
@@ -233,7 +233,7 @@ class ToolCallParser:
             lower_text = text.lower()
             for prefix in echo_prefixes:
                 if lower_text.startswith(prefix):
-                    text = text[len(prefix):].lstrip(",. ")
+                    text = text[len(prefix) :].lstrip(",. ")
                     break
 
         # 0b. STRIP MODEL TAGS AND HALLUCINATED TURNS
@@ -289,7 +289,7 @@ class ToolCallParser:
         text = re.sub(r'^\s*\{\s*"final_answer"\s*:\s*"', "", text)
         text = re.sub(r'"\s*\}\s*$', "", text)
         # Strip markdown code blocks that wrap JSON
-        text = re.sub(r'```(?:json)?\s*\{[^}]*\}\s*```', "", text, flags=re.DOTALL)
+        text = re.sub(r"```(?:json)?\s*\{[^}]*\}\s*```", "", text, flags=re.DOTALL)
 
         original_text = text
 
@@ -309,11 +309,7 @@ class ToolCallParser:
         sentences = re.split(r"(?<=[.!?])\s+", sanitized)
         filtered_sentences = []
         for s in sentences:
-            if (
-                is_phantom_phrase(s)
-                and len(s.split()) < 12
-                and not any(c.isdigit() for c in s)
-            ):
+            if is_phantom_phrase(s) and len(s.split()) < 12 and not any(c.isdigit() for c in s):
                 logger.info(f"phantom_sentence_suppressed | {s[:30]}...")
                 continue
             filtered_sentences.append(s)
@@ -376,11 +372,7 @@ class ToolCallParser:
 
         # 6. Final Polish
         if sanitized:
-            sanitized = (
-                sanitized[0].upper() + sanitized[1:]
-                if len(sanitized) > 1
-                else sanitized.upper()
-            )
+            sanitized = sanitized[0].upper() + sanitized[1:] if len(sanitized) > 1 else sanitized.upper()
             sanitized = re.sub(r"(?i)\bsir\b", "Sir", sanitized)
 
         return sanitized
@@ -485,16 +477,12 @@ class ToolCallParser:
 
         if not res:
             # Balanced brace matching
-            blocks = re.finditer(
-                r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}", raw, re.DOTALL
-            )
+            blocks = re.finditer(r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}", raw, re.DOTALL)
             for block in blocks:
                 content = block.group(0)
                 try:
                     res = json.loads(content)
-                    if res and isinstance(res, dict) and (
-                        "action" in res or "final_answer" in res
-                    ):
+                    if res and isinstance(res, dict) and ("action" in res or "final_answer" in res):
                         break
                 except (json.JSONDecodeError, ValueError):
                     # Brute force repair
@@ -505,9 +493,7 @@ class ToolCallParser:
                         if open_b > close_b:
                             fixed += "}" * (open_b - close_b)
                         res = json.loads(fixed)
-                        if res and isinstance(res, dict) and (
-                            "action" in res or "final_answer" in res
-                        ):
+                        if res and isinstance(res, dict) and ("action" in res or "final_answer" in res):
                             break
                     except (json.JSONDecodeError, ValueError):
                         continue
@@ -524,21 +510,15 @@ class ToolCallParser:
 
         return res
 
-    def _regex_fallback(
-        self, raw: str, sanitize_fn: Optional[Any] = None
-    ) -> Optional[Dict[str, Any]]:
+    def _regex_fallback(self, raw: str, sanitize_fn: Optional[Any] = None) -> Optional[Dict[str, Any]]:
         """
         Regex fallback for non-JSON tool formats.
 
         Handles: call:tool(args), tool_call: tool(arg), tool_name: arg, tool_name(args)
         """
-        call_match = re.search(
-            r"(?:call|tool_call|action):\s*(\w+)", raw, re.IGNORECASE
-        )
+        call_match = re.search(r"(?:call|tool_call|action):\s*(\w+)", raw, re.IGNORECASE)
         if not call_match:
-            call_match = re.search(
-                r"^(\w+):\s*([\w\s\.]+)", raw.strip(), re.IGNORECASE
-            )
+            call_match = re.search(r"^(\w+):\s*([\w\s\.]+)", raw.strip(), re.IGNORECASE)
         if not call_match:
             call_match = re.search(r"(\w+)\s*\(", raw)
 
@@ -554,11 +534,7 @@ class ToolCallParser:
         if len(call_match.groups()) > 1 and call_match.group(2):
             val = call_match.group(2).strip()
             if tool_name in ("open_app", "close_app", "open_website", "search"):
-                arg_key = (
-                    "name"
-                    if "app" in tool_name
-                    else ("url" if "website" in tool_name else "query")
-                )
+                arg_key = "name" if "app" in tool_name else ("url" if "website" in tool_name else "query")
                 args[arg_key] = val
 
         # Try to extract JSON from the rest
@@ -567,9 +543,7 @@ class ToolCallParser:
             try:
                 args = json.loads(json_match.group(0))
             except (json.JSONDecodeError, ValueError):
-                kv_pairs = re.findall(
-                    r"['\"](\w+)['\"]\s*:\s*['\"]([^'\"]+)['\"]", raw
-                )
+                kv_pairs = re.findall(r"['\"](\w+)['\"]\s*:\s*['\"]([^'\"]+)['\"]", raw)
                 for k, v in kv_pairs:
                     try:
                         args[k] = json.loads(v) if v.startswith(("[", "{")) else v
@@ -596,9 +570,7 @@ class ToolCallParser:
             "final_answer": "",
         }
 
-    def _clean_last_resort(
-        self, raw: str, sanitize_fn: Optional[Any] = None
-    ) -> str:
+    def _clean_last_resort(self, raw: str, sanitize_fn: Optional[Any] = None) -> str:
         """Last resort cleanup — treat raw text as final answer."""
         clean_raw = re.sub(
             r"^(Thought|Reasoning|Internal|Process):\s*",
@@ -606,9 +578,7 @@ class ToolCallParser:
             raw,
             flags=re.IGNORECASE,
         )
-        clean_raw = re.split(
-            r"(?:Action|Tool Call|Step \d):", clean_raw, flags=re.IGNORECASE
-        )[0].strip()
+        clean_raw = re.split(r"(?:Action|Tool Call|Step \d):", clean_raw, flags=re.IGNORECASE)[0].strip()
 
         # If it looks like raw JSON without the right keys, suppress
         if clean_raw.startswith("{") and clean_raw.endswith("}"):

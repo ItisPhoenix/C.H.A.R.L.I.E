@@ -9,6 +9,7 @@ logger = logging.getLogger("charlie.privacy")
 # Singleton instance
 _redactor_instance = None
 
+
 def get_redactor() -> "PrivacyRedactor":
     """Return the singleton PrivacyRedactor instance."""
     global _redactor_instance
@@ -22,13 +23,18 @@ class PrivacyRedactor:
         # List of (compiled_pattern, replacement) tuples
         self.patterns = [
             # API Keys, Tokens, Passwords (min 12 chars)
-            (re.compile(r'(api[_-]?key|token|secret|password|passwd|auth)[^a-z0-9]{1,10}[a-z0-9_-]{12,128}', re.IGNORECASE), "[REDACTED_CREDENTIAL]"),
+            (
+                re.compile(
+                    r"(api[_-]?key|token|secret|password|passwd|auth)[^a-z0-9]{1,10}[a-z0-9_-]{12,128}", re.IGNORECASE
+                ),
+                "[REDACTED_CREDENTIAL]",
+            ),
             # AWS Access Keys
-            (re.compile(r'AKIA[0-9A-Z]{16}', re.IGNORECASE), "[AWS_ACCESS_KEY]"),
+            (re.compile(r"AKIA[0-9A-Z]{16}", re.IGNORECASE), "[AWS_ACCESS_KEY]"),
             # URLs with credentials
-            (re.compile(r'https?://[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+@', re.IGNORECASE), "https://[USER:PASS]@"),
+            (re.compile(r"https?://[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+@", re.IGNORECASE), "https://[USER:PASS]@"),
             # Email addresses
-            (re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', re.IGNORECASE), "[EMAIL_ADDRESS]"),
+            (re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", re.IGNORECASE), "[EMAIL_ADDRESS]"),
             # Generic secret assignment
             (re.compile(r'([a-z0-9_-]+_secret)\s*[:=]\s*["\'][^"\']+["\']', re.IGNORECASE), "\\1: [REDACTED]"),
         ]
@@ -38,7 +44,8 @@ class PrivacyRedactor:
         """Lazy-initialize EasyOCR reader (heavy import)."""
         if self._ocr_reader is None:
             import easyocr
-            self._ocr_reader = easyocr.Reader(['en'], gpu=True)
+
+            self._ocr_reader = easyocr.Reader(["en"], gpu=True)
         return self._ocr_reader
 
     def redact(self, text: str) -> str:
@@ -91,7 +98,7 @@ class PrivacyRedactor:
             results = reader.readtext(image_path)
 
             redacted_any = False
-            for (bbox, text, confidence) in results:
+            for bbox, text, confidence in results:
                 # Check if detected text contains PII
                 if self._contains_pii(text):
                     # Blur the bounding box region
@@ -107,7 +114,9 @@ class PrivacyRedactor:
                         blurred = cv2.GaussianBlur(roi, (99, 99), 30)
                         img[y_min:y_max, x_min:x_max] = blurred
                         redacted_any = True
-                        logger.debug(f"redacted_region | text='{text[:20]}...' | bbox=({x_min},{y_min},{x_max},{y_max})")
+                        logger.debug(
+                            f"redacted_region | text='{text[:20]}...' | bbox=({x_min},{y_min},{x_max},{y_max})"
+                        )
 
             if not redacted_any:
                 logger.info(f"redact_image_no_pii | path={image_path}")
@@ -131,13 +140,13 @@ class PrivacyRedactor:
         """Write a black placeholder image with a redaction notice."""
         try:
             import cv2
+
             placeholder = np.zeros((h, w, 3), dtype=np.uint8)
             # Dark gray background
             placeholder[:] = (40, 40, 40)
             # Add notice text
             font = cv2.FONT_HERSHEY_SIMPLEX
-            cv2.putText(placeholder, "[REDACTED - PII Protection]", (w // 6, h // 2),
-                        font, 0.7, (200, 200, 200), 2)
+            cv2.putText(placeholder, "[REDACTED - PII Protection]", (w // 6, h // 2), font, 0.7, (200, 200, 200), 2)
             cv2.imwrite(output_path, placeholder)
             logger.warning(f"safe_placeholder_written | path={output_path}")
             return output_path

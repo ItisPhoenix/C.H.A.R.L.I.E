@@ -35,7 +35,7 @@ export function NotificationCenter() {
       </button>
 
       {open && (
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 glass-card p-4 shadow-neon-glow z-50 rounded-2xl border-charlie-cyan/20 translate-y-[-8px] animate-fade-in-up">
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 glass-card p-4 shadow-premium z-50 rounded-2xl border-charlie-border/20 translate-y-[-8px] animate-fade-in-up">
           <div className="font-display text-xs tracking-[0.1em] text-charlie-cyan uppercase mb-2">
             Notifications
           </div>

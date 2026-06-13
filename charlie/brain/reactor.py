@@ -8,7 +8,10 @@ from charlie.utils.logger import get_logger
 from charlie.security.tiers import RiskTier
 from charlie.config import settings
 import psutil
-import pygetwindow as gw
+try:
+    import pygetwindow as gw
+except ImportError:
+    gw = None  # type: ignore
 from datetime import datetime
 from charlie.utils.system import get_vram_used_mb
 
@@ -29,6 +32,7 @@ class InputType(Enum):
     INTERRUPT = "INTERRUPT"
     STATUS = "STATUS"
     HEARTBEAT = "HEARTBEAT"
+    WAKE = "WAKE"
     UNKNOWN = "UNKNOWN"
 
 
@@ -68,6 +72,7 @@ class Reactor:
         if not response or len(response) < 10:
             return False
         from difflib import SequenceMatcher
+
         for prev in self.last_responses:
             ratio = SequenceMatcher(None, response.lower(), prev.lower()).ratio()
             if ratio > 0.85:
@@ -95,11 +100,14 @@ class Reactor:
             input_type = InputType.UNKNOWN
 
         handler_map = {
-            InputType.TEXT: lambda: self._handle_text(message.get("content", ""), message.get("source", "local"), progress_cb),
+            InputType.TEXT: lambda: self._handle_text(
+                message.get("content", ""), message.get("source", "local"), progress_cb
+            ),
             InputType.PROACTIVE_EVENT: lambda: self._handle_proactive(message),
             InputType.IMAGE: lambda: self._handle_image(message),
             InputType.TOOL_RESULT: lambda: self._handle_tool_result(message),
             InputType.INTERRUPT: lambda: self._handle_interrupt(message),
+            InputType.WAKE: lambda: self._handle_wake(message),
         }
 
         handler = handler_map.get(input_type)
@@ -123,12 +131,6 @@ class Reactor:
 
             text_clean = text.lower().strip().rstrip(".,!?")
 
-            # Track implicit user signals (thanks, no, wrong, rephrase)
-            if hasattr(self.brain, "outcome_tracker") and self.brain.outcome_tracker:
-                from charlie.intelligence.outcome_tracker import OutcomeTracker
-                signal = OutcomeTracker.detect_signal(text)
-                if signal:
-                    self.brain.outcome_tracker.record_user_signal(signal, {"source": source})
 
             # Determine effective source
             if source == "system":
@@ -162,9 +164,19 @@ class Reactor:
 
             # Keywords (Reload/Standby/Shutdown/Clear)
             if "reload" in text_clean and len(text_clean) < 15:
-                if self.brain.reboot_event: self.brain.reboot_event.set()
+                if self.brain.reboot_event:
+                    self.brain.reboot_event.set()
                 self.brain.running = False
                 return "Reloading engine, Sir."
+ 
+            # Mute/Unmute voice commands
+            if self.brain.audio_cmd_q:
+                if text_clean == "mute":
+                    self.brain._safe_put(self.brain.audio_cmd_q, {"type": "MUTE"})
+                    return "Muted, Sir."
+                if text_clean in ("unmute", "unmute yourself"):
+                    self.brain._safe_put(self.brain.audio_cmd_q, {"type": "UNMUTE"})
+                    return "Unmuted, Sir."
 
             self.brain.system_prompt = self.brain.context_builder.get_system_prompt_cached()
             memory_context = self.brain.memory.get_context_injection(text)
@@ -172,11 +184,7 @@ class Reactor:
             # 3. Add to history (with sanitization)
             sanitized_text = self.brain._sanitize_user_input(text)
             if sanitized_text and isinstance(sanitized_text, str):
-                self.brain.history.append({
-                    "role": "user",
-                    "content": sanitized_text,
-                    "source": effective_source
-                })
+                self.brain.history.append({"role": "user", "content": sanitized_text, "source": effective_source})
             else:
                 logger.warning("dropped_empty_user_input | text=%s", text)
                 return None
@@ -192,15 +200,22 @@ class Reactor:
 
                 async with self.brain.async_llm_lock:
                     final_response_text = await self.brain.chain_mgr.execute_chain(
-                        self.brain, text, memory_context, current_history, sent_sentences_global, cumulative_chat_text_ref
+                        self.brain,
+                        text,
+                        memory_context,
+                        current_history,
+                        sent_sentences_global,
+                        cumulative_chat_text_ref,
                     )
 
                 if final_response_text:
                     # Commit assistant response to history
-                    self.brain.history.append({
-                        "role": "assistant",
-                        "content": final_response_text,
-                    })
+                    self.brain.history.append(
+                        {
+                            "role": "assistant",
+                            "content": final_response_text,
+                        }
+                    )
                     self.brain._save_history()
 
                     # Skill nudge: check if session should be saved as a skill
@@ -210,37 +225,45 @@ class Reactor:
                             step_count = getattr(chain_ctx, "current_step_count", 0)
                             if self.brain.skill_nudge.should_nudge(step_count):
                                 import threading
+
                                 def _nudge_bg():
                                     try:
                                         summary = {
-                                            "steps": [{"tool": s.tool_name, "args": s.args, "output": str(s.output)[:500]} for s in chain_ctx.steps],
+                                            "steps": [
+                                                {"tool": s.tool_name, "args": s.args, "output": str(s.output)[:500]}
+                                                for s in chain_ctx.steps
+                                            ],
                                             "tools_used": [s.tool_name for s in chain_ctx.steps],
                                         }
                                         self.brain.skill_nudge.review_session(summary, llm_client=self.brain.llm_client)
                                     except Exception:
                                         pass
+
                                 threading.Thread(target=_nudge_bg, daemon=True).start()
                     except Exception:
                         pass
 
                     # Final commit - only if different from what was already streamed
                     if final_response_text.strip().lower() != cumulative_chat_text_ref[0].strip().lower():
-                        self.brain._safe_put(self.brain.status_q, {
-                            "type": "CHAT_MSG",
-                            "speaker": "CHARLIE",
-                            "content": final_response_text,
-                            "stream": False # Explicitly commit the message
-                        })
+                        self.brain._safe_put(
+                            self.brain.status_q,
+                            {
+                                "type": "CHAT_MSG",
+                                "speaker": "CHARLIE",
+                                "content": final_response_text,
+                                "stream": False,  # Explicitly commit the message
+                            },
+                        )
 
                     # ── Presence Routing ──
                     if effective_source.startswith("telegram") and self.brain.telegram_q:
-                        self.brain._safe_put(self.brain.telegram_q, {
-                            "type": "CHAT_MSG",
-                            "speaker": "CHARLIE",
-                            "content": final_response_text
-                        })
+                        self.brain._safe_put(
+                            self.brain.telegram_q,
+                            {"type": "CHAT_MSG", "speaker": "CHARLIE", "content": final_response_text},
+                        )
             finally:
-                if not lag_check_task.done(): lag_check_task.cancel()
+                if not lag_check_task.done():
+                    lag_check_task.cancel()
 
             # Keyword detection for trust management
             topic = self._detect_topic(text_clean)
@@ -268,7 +291,7 @@ class Reactor:
         source = message.get("source", "unknown")
         logger.info("reactor_image_received | source=%s", source)
         try:
-            if hasattr(self.brain, 'vision_handler') and self.brain.vision_handler:
+            if hasattr(self.brain, "vision_handler") and self.brain.vision_handler:
                 query = message.get("query", "Describe this image in detail")
                 result = await self.brain.vision_handler.describe_image(
                     image_data=message.get("data", b""),
@@ -292,7 +315,7 @@ class Reactor:
     async def _handle_interrupt(self, message: dict) -> Optional[str]:
         """Handle INTERRUPT input with context preservation and announcement."""
         # Save current context if a task is active
-        active_task = getattr(self.brain, '_active_query_task', None)
+        active_task = getattr(self.brain, "_active_query_task", None)
         if active_task and not active_task.done():
             self._interrupted_context = {
                 "history_snapshot": list(self.brain.history[-10:]),
@@ -312,16 +335,31 @@ class Reactor:
 
         # JARVIS-style announcement
         import random
+
         reason = message.get("reason", message.get("content", "Unknown event"))
         template = random.choice(INTERRUPT_ANNOUNCEMENTS)
         announcement = template.format(event=reason)
 
         if self.brain.telegram_q:
-            self.brain._safe_put(self.brain.telegram_q, {
-                "type": "CHAT_MSG", "speaker": "CHARLIE", "content": announcement
-            })
+            self.brain._safe_put(
+                self.brain.telegram_q, {"type": "CHAT_MSG", "speaker": "CHARLIE", "content": announcement}
+            )
 
         return announcement
+    async def _handle_wake(self, message: dict) -> Optional[str]:
+        """Handle WAKE input — wake-word detected, activate listening."""
+        logger.info("reactor_wake_received | activating_listening")
+        
+        # Clear interrupt state
+        self.brain.interrupt_event.clear()
+        self.brain.chain_mgr.clear_chain()
+        
+        # Update status
+        self.brain._safe_put(self.brain.status_q, {"type": "PHASE", "content": "LISTENING", "source": "audio"})
+        
+        # Wake-word detected — brain is now ready for voice input
+        # The STT will trigger and send USER_TEXT when speech is captured
+        return None
 
     def _check_priority_preempt(self, task: dict) -> bool:
         """Check if a task should preempt the current one. Returns True if preempted."""
@@ -334,7 +372,7 @@ class Reactor:
         if priority.value < Priority.HIGH.value:
             return False
 
-        active_task = getattr(self.brain, '_active_query_task', None)
+        active_task = getattr(self.brain, "_active_query_task", None)
         if not active_task or active_task.done():
             return False
 
@@ -355,12 +393,13 @@ class Reactor:
             return
         self._interrupted_context = None
         import random
+
         template = random.choice(INTERRUPT_ANNOUNCEMENTS)
         announcement = template.format(event=completed_task[:80])
         if self.brain.telegram_q:
-            self.brain._safe_put(self.brain.telegram_q, {
-                "type": "CHAT_MSG", "speaker": "CHARLIE", "content": announcement
-            })
+            self.brain._safe_put(
+                self.brain.telegram_q, {"type": "CHAT_MSG", "speaker": "CHARLIE", "content": announcement}
+            )
 
     async def main_async_loop(self):
         """Central event loop for brain processing, delegated from Brain."""
@@ -380,7 +419,10 @@ class Reactor:
                         self.brain._safe_put(self.brain.tts_q, {"type": "SPEAK", "content": timeout_msg})
                         self.brain._safe_put(self.brain.tts_q, {"type": "TURN_END"})
                         if self.brain.telegram_q:
-                            self.brain._safe_put(self.brain.telegram_q, {"type": "CHAT_MSG", "speaker": "CHARLIE", "content": f"⏱️ {timeout_msg}"})
+                            self.brain._safe_put(
+                                self.brain.telegram_q,
+                                {"type": "CHAT_MSG", "speaker": "CHARLIE", "content": f"⏱️ {timeout_msg}"},
+                            )
                             self.brain._safe_put(self.brain.telegram_q, {"type": "CLEAR_CONFIRMATION"})
 
                 # ── 2. Queue Polling ──
@@ -407,23 +449,17 @@ class Reactor:
                     if self.brain.heartbeat:
                         self.brain.heartbeat.value = time.time()
 
-                    # ── 2.1 Periodic News Sync ──
-                    if time.time() - self.brain.news_last_update > 600: # Every 10 mins
-                        self.brain.news_last_update = time.time()
-                        async def _sync():
-                            req_id = f"news_sync_{int(time.time())}"
-                            if self.brain.browser_req_q:
-                                self.brain._safe_put(self.brain.browser_req_q, {"type": "NEWS", "id": req_id, "data": {"silent": True}})
-                                # Wait briefly for response in background? No, let the handler update it.
-                        asyncio.create_task(_sync())
-
                     if mtype == "TEXT":
                         text = task.get("content", "").strip()
                         source = task.get("source", "local")
 
                         # Deduplication
                         now = time.time()
-                        if hasattr(self.brain, "_last_text") and self.brain._last_text == text.lower() and (now - getattr(self.brain, "_last_text_time", 0)) < 2.0:
+                        if (
+                            hasattr(self.brain, "_last_text")
+                            and self.brain._last_text == text.lower()
+                            and (now - getattr(self.brain, "_last_text_time", 0)) < 2.0
+                        ):
                             continue
                         self.brain._last_text = text.lower()
                         self.brain._last_text_time = now
@@ -432,21 +468,28 @@ class Reactor:
                         self._check_priority_preempt(task)
 
                         if source == "local":
-                            self.brain._safe_put(self.brain.status_q, {"type": "CHAT_MSG", "speaker": "SIR", "content": text})
+                            self.brain._safe_put(
+                                self.brain.status_q, {"type": "CHAT_MSG", "speaker": "SIR", "content": text}
+                            )
 
                         is_cancellation = any(k in text.lower() for k in ["stop", "abort", "cancel"])
                         if self.brain._active_query_task and not self.brain._active_query_task.done():
                             self.brain._active_query_task.cancel()
-                            if self.brain.status_q: self.brain._safe_put(self.brain.status_q, {"type": "PHASE", "content": "IDLE"})
+                            if self.brain.status_q:
+                                self.brain._safe_put(self.brain.status_q, {"type": "PHASE", "content": "IDLE"})
 
                         if not is_cancellation:
                             _raw_priority = task.get("priority", "normal")
-                            priority = _raw_priority if _raw_priority in ("low", "normal", "high", "critical") else "normal"
+                            priority = (
+                                _raw_priority if _raw_priority in ("low", "normal", "high", "critical") else "normal"
+                            )
+
                             async def _run_and_resume(p, s, t):
                                 result = await self.process_query(t, source=s)
                                 if p in ("high", "critical"):
                                     self._announce_resumption(t)
                                 return result
+
                             self.brain._active_query_task = asyncio.create_task(_run_and_resume(priority, source, text))
 
                     elif mtype in ("PROACTIVE_EVENT", "PROACTIVE_HELP"):
@@ -466,22 +509,30 @@ class Reactor:
                                 "Be very concise. DO NOT call any tools unless Sir explicitly asks now.)"
                             )
 
-                        asyncio.create_task(self._dispatch({"type": "PROACTIVE_EVENT", "content": content, "source": source}))
+                        asyncio.create_task(
+                            self._dispatch({"type": "PROACTIVE_EVENT", "content": content, "source": source})
+                        )
 
                     elif mtype == "REMOTE_VOICE":
                         path = task.get("path")
                         if path and os.path.exists(path):
                             try:
-                                transcribe_fn = getattr(self.brain.model_manager, 'transcribe_file', None)
+                                transcribe_fn = getattr(self.brain.model_manager, "transcribe_file", None)
                                 transcription = transcribe_fn(path) if transcribe_fn else None
                                 if transcription:
                                     asyncio.create_task(self.process_query(transcription, source="telegram"))
                                 else:
-                                    self.brain._safe_put(self.brain.telegram_q, {"type": "CHAT_MSG", "speaker": "CHARLIE", "content": "Audio unclear, Sir."})
-                            except Exception as e: logger.error("remote_voice_failed | %s", e)
+                                    self.brain._safe_put(
+                                        self.brain.telegram_q,
+                                        {"type": "CHAT_MSG", "speaker": "CHARLIE", "content": "Audio unclear, Sir."},
+                                    )
+                            except Exception as e:
+                                logger.error("remote_voice_failed | %s", e)
                             finally:
-                                try: os.remove(path)
-                                except OSError: pass
+                                try:
+                                    os.remove(path)
+                                except OSError:
+                                    pass
 
                     elif mtype == "CONFIRMATION_RESULT":
                         if self.brain.awaiting_confirmation:
@@ -490,25 +541,35 @@ class Reactor:
                             self.brain.awaiting_confirmation = None
                             self.brain.confirmation_event.set()
                             if not self.brain.confirmation_result:
-                                self.brain.relationship.log_event("action_aborted", f"Sir aborted TIER {pending.get('tier', '?')} action: {pending.get('tool')}")
-                                self.brain._safe_put(self.brain.tts_q, {"type": "SPEAK", "content": "Operation aborted, Sir."})
+                                self.brain.relationship.log_event(
+                                    "action_aborted",
+                                    f"Sir aborted TIER {pending.get('tier', '?')} action: {pending.get('tool')}",
+                                )
+                                self.brain._safe_put(
+                                    self.brain.tts_q, {"type": "SPEAK", "content": "Operation aborted, Sir."}
+                                )
                                 self.brain._safe_put(self.brain.tts_q, {"type": "TURN_END"})
                             else:
-                                self.brain.relationship.log_event("action_confirmed", f"Sir confirmed TIER {pending.get('tier', '?')} action")
+                                self.brain.relationship.log_event(
+                                    "action_confirmed", f"Sir confirmed TIER {pending.get('tier', '?')} action"
+                                )
 
                     elif mtype == "INTERRUPT":
                         self.brain.interrupt_event.set()
                         if self.brain._active_query_task and not self.brain._active_query_task.done():
                             self.brain._active_query_task.cancel()
                         while not self.brain.tts_q.empty():
-                            try: self.brain.tts_q.get_nowait()
-                            except Exception: break
+                            try:
+                                self.brain.tts_q.get_nowait()
+                            except Exception:
+                                break
 
                     elif mtype == "HARD_SHUTDOWN":
                         self.brain.running = False
                         return
 
                     elif mtype == "SENSORY_READY":
+
                         async def delayed_welcome():
                             await asyncio.sleep(2.5)
                             await self.run_welcome_protocol()
@@ -519,7 +580,8 @@ class Reactor:
                         asyncio.create_task(delayed_welcome())
 
                     elif mtype == "SHUTDOWN":
-                        if self.brain.reboot_event: self.brain.reboot_event.set()
+                        if self.brain.reboot_event:
+                            self.brain.reboot_event.set()
                         self.brain.running = False
                         return
 
@@ -539,31 +601,28 @@ class Reactor:
         try:
             # 1. Gather System Vitals
             used_vram = get_vram_used_mb()
-            limit_vram = getattr(settings.llm, "vram_limit_mb", 8192)
+            limit_vram = settings.resources.vram_total_mb
             vram_pct = min(100.0, (used_vram / limit_vram) * 100)
 
             cpu = psutil.cpu_percent()
             ram = psutil.virtual_memory().percent
 
             # 2. Gather Active Windows
-            try:
-                titles = [w.title for w in gw.getAllWindows() if w.visible and w.title][
-                    :10
-                ]
-                windows_str = ", ".join(titles)
-            except Exception as e:
-                logger.debug("window_enumeration_failed | %s", e)
+            if gw is None:
                 windows_str = "None"
+            else:
+                try:
+                    titles = [w.title for w in gw.getAllWindows() if w.visible and w.title][:10]
+                    windows_str = ", ".join(titles)
+                except Exception as e:
+                    logger.debug("window_enumeration_failed | %s", e)
+                    windows_str = "None"
 
             # 3. Read Last Session & Mobile Context
             now = datetime.now()
-            time_ctx = (
-                f"Time: {now.strftime('%I:%M %p')}, Date: {now.strftime('%A, %B %d')}"
-            )
+            time_ctx = f"Time: {now.strftime('%I:%M %p')}, Date: {now.strftime('%A, %B %d')}"
             mobile_context = ""
-            recent_telegram = [
-                m for m in self.brain.history[-10:] if m.get("source") == "telegram"
-            ]
+            recent_telegram = [m for m in self.brain.history[-10:] if m.get("source") == "telegram"]
             if recent_telegram:
                 mobile_context = f"\nRECENT MOBILE CONTEXT (Telegram): {recent_telegram[-1]['content']}"
 
@@ -612,11 +671,10 @@ class Reactor:
                 async def _delayed_hide():
                     await asyncio.sleep(3)
                     self.brain._safe_put(self.brain.status_q, {"type": "WIDGET_HIDE", "content": "welcome"})
+
                 asyncio.create_task(_delayed_hide())
 
-            logger.info(
-                f"welcome_protocol_executed | content_len={len(clean_response)}"
-            )
+            logger.info(f"welcome_protocol_executed | content_len={len(clean_response)}")
 
         except Exception as e:
             logger.error("welcome_protocol_failed | %s", e)
@@ -645,7 +703,7 @@ class Reactor:
         cancel_prefixes = ["stop the ", "cancel the ", "kill the ", "abort the "]
         for prefix in cancel_prefixes:
             if lower.startswith(prefix):
-                return lower[len(prefix):].strip()
+                return lower[len(prefix) :].strip()
         if lower.startswith("stop ") and len(lower.split()) <= 4:
             return lower.replace("stop ", "").strip()
         return None

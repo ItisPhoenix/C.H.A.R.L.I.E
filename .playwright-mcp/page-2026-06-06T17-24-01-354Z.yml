@@ -1,0 +1,130 @@
+- generic [active] [ref=e1]:
+  - complementary [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e6]: CHARLIE
+      - button "Collapse sidebar" [ref=e7] [cursor=pointer]:
+        - img [ref=e8]
+    - link "Idle" [ref=e12] [cursor=pointer]:
+      - /url: /
+      - img [ref=e14]
+      - generic [ref=e20]: Idle
+    - navigation [ref=e21]:
+      - generic [ref=e22]:
+        - generic [ref=e23]: Overview
+        - link "Status" [ref=e24] [cursor=pointer]:
+          - /url: /status
+          - img [ref=e25]
+          - generic [ref=e27]: Status
+        - link "Briefing" [ref=e28] [cursor=pointer]:
+          - /url: /briefing
+          - img [ref=e29]
+          - generic [ref=e31]: Briefing
+        - link "Analytics" [ref=e32] [cursor=pointer]:
+          - /url: /analytics
+          - img [ref=e33]
+          - generic [ref=e35]: Analytics
+      - generic [ref=e36]:
+        - generic [ref=e37]: Intelligence
+        - link "Agents" [ref=e38] [cursor=pointer]:
+          - /url: /agents
+          - img [ref=e39]
+          - generic [ref=e42]: Agents
+        - link "Knowledge" [ref=e43] [cursor=pointer]:
+          - /url: /memory
+          - img [ref=e44]
+          - generic [ref=e48]: Knowledge
+        - link "Evolution" [ref=e49] [cursor=pointer]:
+          - /url: /evolution
+          - img [ref=e50]
+          - generic [ref=e53]: Evolution
+      - generic [ref=e54]:
+        - generic [ref=e55]: Operations
+        - link "Tasks" [ref=e56] [cursor=pointer]:
+          - /url: /tasks
+          - img [ref=e57]
+          - generic [ref=e60]: Tasks
+        - link "Approvals" [ref=e61] [cursor=pointer]:
+          - /url: /approvals
+          - img [ref=e62]
+          - generic [ref=e64]: Approvals
+        - link "Automation" [ref=e65] [cursor=pointer]:
+          - /url: /automation
+          - img [ref=e66]
+          - generic [ref=e68]: Automation
+      - generic [ref=e69]:
+        - generic [ref=e70]: Ecosystem
+        - link "MCP Servers" [ref=e71] [cursor=pointer]:
+          - /url: /mcp
+          - img [ref=e72]
+          - generic [ref=e75]: MCP Servers
+        - link "Skills" [ref=e76] [cursor=pointer]:
+          - /url: /skills
+          - img [ref=e77]
+          - generic [ref=e79]: Skills
+        - link "Integrations" [ref=e80] [cursor=pointer]:
+          - /url: /integrations
+          - img [ref=e81]
+          - generic [ref=e83]: Integrations
+        - link "Tools" [ref=e84] [cursor=pointer]:
+          - /url: /tools
+          - img [ref=e85]
+          - generic [ref=e87]: Tools
+      - generic [ref=e88]:
+        - generic [ref=e89]: Interface
+        - link "Conversation" [ref=e90] [cursor=pointer]:
+          - /url: /chat
+          - img [ref=e91]
+          - generic [ref=e93]: Conversation
+        - link "Search" [ref=e94] [cursor=pointer]:
+          - /url: /search
+          - img [ref=e95]
+          - generic [ref=e98]: Search
+        - link "Voice Control" [ref=e99] [cursor=pointer]:
+          - /url: /voice
+          - img [ref=e100]
+          - generic [ref=e103]: Voice Control
+        - link "Logs" [ref=e104] [cursor=pointer]:
+          - /url: /logs
+          - img [ref=e105]
+          - generic [ref=e108]: Logs
+        - link "Settings" [ref=e109] [cursor=pointer]:
+          - /url: /settings
+          - img [ref=e110]
+          - generic [ref=e113]: Settings
+    - generic [ref=e115] [cursor=pointer]:
+      - button [ref=e117]:
+        - img [ref=e118]
+      - generic [ref=e121]: Notifications
+  - main [ref=e122]:
+    - generic [ref=e124]:
+      - generic [ref=e125]:
+        - button "Mute microphone" [ref=e126] [cursor=pointer]:
+          - img [ref=e130]
+        - generic [ref=e133]:
+          - 'status "Status: idle" [ref=e134]':
+            - generic [ref=e135]: "Status: idle"
+          - generic [ref=e136]: Idle
+      - generic [ref=e139]:
+        - img [ref=e140]
+        - generic [ref=e143]: Live Transcript
+      - generic [ref=e144]:
+        - generic [ref=e145]:
+          - generic [ref=e146]:
+            - img [ref=e147]
+            - generic [ref=e149]: Current Task
+          - generic [ref=e151]: $ no_active_tasks
+        - generic [ref=e153]:
+          - generic [ref=e154]:
+            - img [ref=e155]
+            - generic [ref=e157]: Recent Activity
+          - generic [ref=e160]: $ no_recent_activity
+        - generic [ref=e162]:
+          - generic [ref=e163]:
+            - img [ref=e164]
+            - generic [ref=e167]: System Health
+          - generic [ref=e168]: Connecting...
+  - button "Expand status bar" [ref=e169] [cursor=pointer]:
+    - generic [ref=e172]: Link Severed
+    - generic [ref=e174]: idle
+    - img [ref=e175]
+  - alert [ref=e177]

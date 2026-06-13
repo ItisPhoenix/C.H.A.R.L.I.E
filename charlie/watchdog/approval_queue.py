@@ -19,6 +19,7 @@ logger = get_logger("ApprovalQueue")
 @dataclass
 class PendingApproval:
     """A pending action awaiting user approval."""
+
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     action: str = ""
     args: dict = field(default_factory=dict)
@@ -26,20 +27,22 @@ class PendingApproval:
     description: str = ""
     source: str = "unknown"  # "tool_handler", "risk_gate", "guardian"
     timestamp: float = field(default_factory=time.time)
-    timeout: float = 60.0  # seconds until auto-deny
+    timeout: float = 300.0  # seconds until auto-deny (increased from 60s to prevent TOCTOU)
+    grace_period: float = 30.0  # grace period after timeout where approval can still be acted on
     status: str = "pending"  # "pending", "approved", "denied", "expired"
     result_event: threading.Event = field(default_factory=threading.Event, repr=False)
     result_value: bool = False
 
     @property
     def is_expired(self) -> bool:
-        return self.status == "pending" and (time.time() - self.timestamp) > self.timeout
+        elapsed = time.time() - self.timestamp
+        return self.status == "pending" and elapsed > (self.timeout + self.grace_period)
 
     @property
     def remaining_seconds(self) -> float:
         if self.status != "pending":
             return 0.0
-        return max(0.0, self.timeout - (time.time() - self.timestamp))
+        return max(0.0, (self.timeout + self.grace_period) - (time.time() - self.timestamp))
 
     def to_dict(self) -> dict:
         return {
@@ -70,9 +73,7 @@ class ApprovalQueue:
         self._pending: dict[str, PendingApproval] = {}
         self._lock = threading.Lock()
         self._on_change: list[Callable] = []
-        self._cleanup_thread = threading.Thread(
-            target=self._cleanup_loop, daemon=True, name="ApprovalCleanup"
-        )
+        self._cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True, name="ApprovalCleanup")
         self._cleanup_thread.start()
 
     def add(self, approval: PendingApproval) -> str:
@@ -173,10 +174,7 @@ class ApprovalQueue:
         while True:
             time.sleep(10)
             with self._lock:
-                expired = [
-                    a for a in self._pending.values()
-                    if a.is_expired and a.status == "pending"
-                ]
+                expired = [a for a in self._pending.values() if a.is_expired and a.status == "pending"]
                 for a in expired:
                     a.status = "expired"
                     a.result_value = False

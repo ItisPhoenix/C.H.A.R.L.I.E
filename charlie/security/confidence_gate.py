@@ -13,10 +13,10 @@ logger = logging.getLogger("charlie.security.confidence_gate")
 
 # Confidence thresholds per risk tier
 THRESHOLDS = {
-    0: 0.0,   # TIER_0: always auto-approve (already the case)
+    0: 0.0,  # TIER_0: always auto-approve (already the case)
     1: 0.85,  # TIER_1: auto-approve if confidence > 0.85
-    2: 1.0,   # TIER_2: never auto-approve (needs explicit confirmation)
-    3: 1.0,   # TIER_3: never auto-approve
+    2: 1.0,  # TIER_2: never auto-approve (needs explicit confirmation)
+    3: 1.0,  # TIER_3: never auto-approve
 }
 
 
@@ -55,9 +55,7 @@ class ConfidenceGate:
             return False, 0.0
 
         # TIER_1: calculate confidence
-        confidence = self._calculate_confidence(
-            tool_name, args, outcome_tracker, user_approvals
-        )
+        confidence = self._calculate_confidence(tool_name, args, outcome_tracker, user_approvals)
 
         threshold = THRESHOLDS.get(risk_tier, 1.0)
         should_approve = confidence >= threshold
@@ -112,9 +110,11 @@ class ConfidenceGate:
         """Record an approval decision for future confidence calculation."""
         if tool_name not in self._approval_history:
             self._approval_history[tool_name] = []
-        self._approval_history[tool_name].append({
-            "approved": approved,
-            "timestamp": time.time(),
-        })
+        self._approval_history[tool_name].append(
+            {
+                "approved": approved,
+                "timestamp": time.time(),
+            }
+        )
         # Keep last 50 per tool
         self._approval_history[tool_name] = self._approval_history[tool_name][-50:]

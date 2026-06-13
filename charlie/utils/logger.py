@@ -3,15 +3,68 @@ import logging
 import os
 import re
 import sys
+import time
 from logging.handlers import RotatingFileHandler
+
+
+# One-shot rollover-error gate. Windows can't rename a file while another
+# process has it open; the audio + brain subprocesses both write to the same
+# log, so rollover races are expected. When one happens, we silence the
+# `--- Logging error ---` traceback that Python's lastResort handler would
+# otherwise print for every subsequent log call (which floods stderr with
+# thousands of lines). The handler keeps writing to the still-open file
+# (just over the maxBytes cap); on the next rollover attempt the backup
+# files are pruned back to ``backupCount`` and a normal rollover succeeds.
+_rollover_error_logged_at = 0.0
+_ROLLOVER_ERROR_SUPPRESS_SECONDS = 60.0
+
+
+class _RolloverSafeFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that swallows the cross-process rename race.
+
+    On Windows, multiple processes can hold ``charlie.log`` open at once.
+    When a rollover attempts ``os.rename(charlie.log, charlie.log.1)`` it
+    raises ``PermissionError [WinError 32]`` because the file is in use.
+    The default behavior is to print a full traceback to stderr for every
+    subsequent log call. We swallow the exception (the file stays open and
+    the handler keeps appending) and emit one warning line per minute
+    instead of a flood.
+    """
+
+    def doRollover(self):  # type: ignore[override]
+        global _rollover_error_logged_at
+        try:
+            super().doRollover()
+        except (PermissionError, OSError) as e:
+            now = time.monotonic()
+            if now - _rollover_error_logged_at > _ROLLOVER_ERROR_SUPPRESS_SECONDS:
+                _rollover_error_logged_at = now
+                # Write to the still-open stream so the warning lands in the
+                # log file (and shows up in the dashboard via the broadcaster)
+                # but does NOT flood stderr.
+                try:
+                    self.stream.write(
+                        f"\n[WARN] log rollover skipped: {e!r} "
+                        f"(file still open by another process; will retry on next rotation)\n"
+                    )
+                    self.stream.flush()
+                except Exception:
+                    pass
+        except Exception:
+            # Unknown rollover failure — let it propagate, but only after
+            # the file is still usable.
+            pass
 
 
 # Single source of truth for credential redaction. Each entry is a
 # (compiled_pattern, replacement) pair that masks a credential value while
 # preserving the surrounding key/label so logs stay readable.
 _CREDENTIAL_PATTERNS = [
-    (re.compile(r'(?i)(api[_-]?key|token|password|secret|pwd)["\s:=]+[a-zA-Z0-9_\-\.]{8,}', re.IGNORECASE), r"\1: [REDACTED]"),
-    (re.compile(r'(?i)(authorization:\s*bearer\s+)[a-zA-Z0-9_\-\.]+', re.IGNORECASE), r"\1[REDACTED]"),
+    (
+        re.compile(r'(?i)(api[_-]?key|token|password|secret|pwd)["\s:=]+[a-zA-Z0-9_\-\.]{8,}', re.IGNORECASE),
+        r"\1: [REDACTED]",
+    ),
+    (re.compile(r"(?i)(authorization:\s*bearer\s+)[a-zA-Z0-9_\-\.]+", re.IGNORECASE), r"\1[REDACTED]"),
     (re.compile(r'(?i)(telegram_token|TELEGRAM_TOKEN)["\s:=]+[a-zA-Z0-9:_\-]+'), r"\1=[REDACTED]"),
     (re.compile(r'(?i)(LLM_API_KEY|llm_api_key)["\s:=]+[a-zA-Z0-9_\-\.]+'), r"\1=[REDACTED]"),
 ]
@@ -19,8 +72,8 @@ _CREDENTIAL_PATTERNS = [
 # Filesystem-path patterns redact local usernames from paths. These are applied
 # only on the logging path (not by redact_secrets, which targets credentials).
 _PATH_PATTERNS = [
-    (re.compile(r'C:\\Users\\[^\\]+\\'), r'C:\\Users\\[USER]\\'),
-    (re.compile(r'/home/[^/]+/'), r'/home/[USER]/'),
+    (re.compile(r"C:\\Users\\[^\\]+\\"), r"C:\\Users\\[USER]\\"),
+    (re.compile(r"/home/[^/]+/"), r"/home/[USER]/"),
 ]
 
 
@@ -58,11 +111,11 @@ class SensitiveDataFilter(logging.Filter):
         return _apply_patterns(redact_secrets(text), _PATH_PATTERNS)
 
     def filter(self, record):
-        if hasattr(record, 'msg') and isinstance(record.msg, str):
+        if hasattr(record, "msg") and isinstance(record.msg, str):
             record.msg = self._scrub(record.msg)
-        if hasattr(record, 'args') and record.args:
+        if hasattr(record, "args") and record.args:
             new_args = []
-            for arg in (record.args if isinstance(record.args, tuple) else [record.args]):
+            for arg in record.args if isinstance(record.args, tuple) else [record.args]:
                 if isinstance(arg, str):
                     arg = self._scrub(arg)
                 new_args.append(arg)
@@ -210,7 +263,7 @@ def get_logger(name):
 
     if not logger.handlers:
         os.makedirs("logs", exist_ok=True)
-        file_handler = RotatingFileHandler(
+        file_handler = _RolloverSafeFileHandler(
             "logs/charlie.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8"
         )
         file_handler.setFormatter(JsonFormatter())
@@ -220,9 +273,9 @@ def get_logger(name):
         console_handler.setFormatter(HumanFormatter())
         console_handler.setLevel(logging.INFO)
         # Force UTF-8 encoding for console to handle special characters
-        if hasattr(console_handler.stream, 'reconfigure'):
+        if hasattr(console_handler.stream, "reconfigure"):
             try:
-                console_handler.stream.reconfigure(encoding='utf-8', errors='replace')
+                console_handler.stream.reconfigure(encoding="utf-8", errors="replace")
             except Exception:
                 pass
         logger.addHandler(console_handler)

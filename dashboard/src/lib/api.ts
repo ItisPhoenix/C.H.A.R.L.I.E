@@ -26,9 +26,39 @@ class ApiError extends Error {
   }
 }
 
+// === Control server auth token ============================================
+// The control server requires the X-Control-Token header on every request.
+// We fetch it once from the public /api/token endpoint and cache it.
+let _cachedToken: string | null = null
+let _tokenFetchInFlight: Promise<string | null> | null = null
+
+async function fetchControlToken(): Promise<string | null> {
+  if (_cachedToken) return _cachedToken
+  if (_tokenFetchInFlight) return _tokenFetchInFlight
+  _tokenFetchInFlight = (async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/token`, { cache: 'no-store' })
+      if (!res.ok) return null
+      const data = await res.json()
+      _cachedToken = data?.token ?? null
+      return _cachedToken
+    } catch {
+      return null
+    } finally {
+      _tokenFetchInFlight = null
+    }
+  })()
+  return _tokenFetchInFlight
+}
+
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+  }
+  // /api/token itself is the only public endpoint — don't try to add a token to it
+  if (path !== '/api/token') {
+    const token = await fetchControlToken()
+    if (token) headers['X-Control-Token'] = token
   }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 10000)

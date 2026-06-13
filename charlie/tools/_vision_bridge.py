@@ -18,6 +18,7 @@ def get_brain():
         return _brain
     try:
         from charlie.utils.queue_bridge import get_brain as _get_brain
+
         _brain = _get_brain()
         return _brain
     except Exception as e:

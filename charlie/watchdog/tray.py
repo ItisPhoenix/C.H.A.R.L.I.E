@@ -98,6 +98,7 @@ class TrayIcon:
     def _on_open_dashboard(self, icon, item):
         """Open the dashboard in the default browser."""
         import webbrowser
+
         if self.on_open_dashboard:
             self.on_open_dashboard()
         else:
@@ -106,6 +107,7 @@ class TrayIcon:
     def _on_toggle_autostart(self, icon, item):
         """Toggle auto-start with Windows."""
         from charlie.utils.autostart import disable, enable, is_enabled
+
         if is_enabled():
             disable()
             logger.info("autostart_disabled_via_tray")
@@ -117,6 +119,7 @@ class TrayIcon:
         """Check if auto-start is enabled."""
         try:
             from charlie.utils.autostart import is_enabled
+
             return is_enabled()
         except Exception:
             return False
@@ -155,4 +158,5 @@ class TrayIcon:
                 self.daemon.stop()
         else:
             import sys
+
             sys.exit(0)

@@ -50,7 +50,6 @@ STATUS_EVENT_MAP: dict[str, str] = {
     "PROACTIVE_CHAT": "proactive_chat",
     "SKILL_CREATED": "skill_created",
     "ORCHESTRATOR_UPDATE": "orchestrator_update",
-    "ORCHESTRATOR_UPDATE": "orchestrator_update",
     "TIME_UPDATE": "time_update",
 }
 
@@ -62,6 +61,7 @@ WS_FORWARD_TYPES: set[str] = set(STATUS_EVENT_MAP.keys())
 # Mapping helper
 # ---------------------------------------------------------------------------
 
+
 def map_event_type(msg_type: str) -> str | None:
     """Return the WS event name for ``msg_type`` or ``None`` if unmapped."""
     return STATUS_EVENT_MAP.get(msg_type)
@@ -70,6 +70,7 @@ def map_event_type(msg_type: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Payload extractor
 # ---------------------------------------------------------------------------
+
 
 def extract_ws_data(msg: dict) -> dict:
     """Produce a WebSocket-ready payload from a ``status_q`` message.
@@ -97,6 +98,7 @@ def extract_ws_data(msg: dict) -> dict:
             "waveform": msg.get("waveform", []),
             "is_speaking": bool(msg.get("is_speaking", False)),
             "is_listening": bool(msg.get("is_listening", False)),
+            "muted": bool(msg.get("muted", False)),
         }
 
     content = msg.get("content", {})

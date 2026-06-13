@@ -34,7 +34,7 @@ class TimeTravelEngine:
             if hour is not None:
                 target_time = target_time.replace(hour=hour, minute=0, second=0)
             start_ts = int(target_time.timestamp()) - 1800  # 30 min before
-            end_ts = int(target_time.timestamp()) + 1800    # 30 min after
+            end_ts = int(target_time.timestamp()) + 1800  # 30 min after
 
             results = []
 
@@ -73,8 +73,7 @@ class TimeTravelEngine:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT * FROM outcomes WHERE timestamp BETWEEN ? AND ? ORDER BY timestamp",
-                (start_ts, end_ts)
+                "SELECT * FROM outcomes WHERE timestamp BETWEEN ? AND ? ORDER BY timestamp", (start_ts, end_ts)
             ).fetchall()
             conn.close()
             return [dict(r) for r in rows]
@@ -91,10 +90,7 @@ class TimeTravelEngine:
                 messages = json.load(f)
             if not isinstance(messages, list):
                 return []
-            return [
-                m for m in messages
-                if m.get("timestamp", 0) >= start_ts and m.get("timestamp", 0) <= end_ts
-            ]
+            return [m for m in messages if m.get("timestamp", 0) >= start_ts and m.get("timestamp", 0) <= end_ts]
         except Exception:
             return []
 
@@ -102,6 +98,7 @@ class TimeTravelEngine:
         """Search memory graph for relevant context."""
         try:
             from charlie.intelligence.memory_graph import MemoryGraph
+
             mg = MemoryGraph()
             results = mg.search(query, limit=5)
             if not results:

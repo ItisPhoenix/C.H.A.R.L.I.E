@@ -28,6 +28,8 @@ def init_core_handlers(brain: "Brain") -> None:
     from charlie.brain.chain_executor import ChainExecutor
     from charlie.brain.context_builder import ContextBuilder
     from charlie.brain.reactor import Reactor
+    from charlie.brain.skill_injector import SkillInjector
+    from charlie.brain.skill_loader import SkillLoader
     from charlie.brain.stream_handler import StreamHandler
     from charlie.brain.task_manager import AsyncTaskManager
     from charlie.brain.tool_handler import ToolHandler
@@ -51,6 +53,9 @@ def init_core_handlers(brain: "Brain") -> None:
     brain.evolution_engine = EvolutionEngine()
     brain.confidence_gate = ConfidenceGate()
     brain.agent_bus = AgentBus()
+    brain.skill_loader = SkillLoader(skills_dir="charlie/skills")
+    brain.skill_loader.load_all()
+    brain.skill_injector = SkillInjector(skill_loader=brain.skill_loader)
     brain.task_mgr = AsyncTaskManager(max_concurrent=3)
     brain.mentor = MentorSystem()
     brain.messenger = Messenger()
@@ -86,19 +91,15 @@ def init_mcp(brain: "Brain") -> None:
 def init_personality(brain: "Brain") -> None:
     """Personality and relationship management."""
     from charlie.personality.drift_engine import PersonalityDriftEngine
-    from charlie.personality.relationship import RelationshipManager
 
-    brain.relationship = RelationshipManager()
     brain.drift = PersonalityDriftEngine(brain)
 
 
 def init_security(brain: "Brain") -> None:
     """Security snapshot and self-modification router."""
     from charlie.security.snapshot import SnapshotManager
-    from charlie.self_mod.mod_router import ModRouter
 
     brain.snapshot = SnapshotManager()
-    brain.self_mod = ModRouter()
 
 
 def init_state(brain: "Brain") -> None:
@@ -116,7 +117,6 @@ def init_state(brain: "Brain") -> None:
     brain._last_service_poll: float = 0.0
 
     brain._last_frustration_alert: float = 0.0
-    brain.news_last_update: float = 0.0
 
     # Event loop — created in run(), not here
     brain.loop = None
@@ -125,6 +125,7 @@ def init_state(brain: "Brain") -> None:
     brain.is_busy = False
     brain.standby_mode = False
     brain.conversation_active = False
+    brain.system_prompt = ""  # Reactor writes to this attr; init it.
     brain.awaiting_confirmation = None
     brain.confirmation_event = None  # Created in _async_init when event loop exists
     brain.confirmation_result = None
@@ -134,6 +135,12 @@ def init_state(brain: "Brain") -> None:
     brain.timers_lock = threading.Lock()
     brain._stop_event = threading.Event()
 
+    # Centralized idle detection — single source of truth shared by
+    # ProactivityEngine, AutonomyLoop, and any other idle-aware subsystem.
+    from charlie.perception.idle import IdleWatcher
+
+    brain.idle_watcher = IdleWatcher()
+
     # Lifecycle
     brain._startup_time: float = time.time()
     brain._shutdown_hooks: list = []
@@ -141,8 +148,6 @@ def init_state(brain: "Brain") -> None:
 
 def init_intelligence(brain: "Brain") -> None:
     """Ambient intelligence: world model, scheduler, suggestions, RAG."""
-    from charlie.intelligence.calendar_intel import CalendarIntel
-    from charlie.intelligence.context_broker import ContextBroker
     from charlie.intelligence.graph_builder import GraphBuilder
     from charlie.intelligence.memory_graph import MemoryGraph
     from charlie.intelligence.scheduler import TaskScheduler
@@ -156,7 +161,6 @@ def init_intelligence(brain: "Brain") -> None:
     brain.ace = AmbientContextEngine(brain.world)
     brain.task_queue = AutonomousTaskQueue(brain.world)
     brain.scheduler = TaskScheduler(brain.task_queue, brain=brain)
-    brain.calendar = CalendarIntel()
 
     brain.suggestion_engine = SuggestionEngine()
     if hasattr(brain.ace, "tracker"):
@@ -164,20 +168,9 @@ def init_intelligence(brain: "Brain") -> None:
     brain.suggestion_engine.set_brain(brain)
     brain.suggestion_engine.delivery_callback = brain._on_suggestion
 
-    brain.context_broker = ContextBroker.get_context_broker(
-        storage_path="scratch/context_broker"
-    )
-
     # Pass shared ChromaDB client to RAG indexer to avoid duplicate backend
     shared_chroma = getattr(brain.memory, "_chroma_client", None)
     brain.rag_indexer = ProjectIndexer(root_dir=".", chroma_client=shared_chroma)
-    from charlie.intelligence.outcome_tracker import OutcomeTracker
-    from charlie.intelligence.pattern_detector import PatternDetector
-    brain.outcome_tracker = OutcomeTracker()
-    brain.pattern_detector = PatternDetector(brain.outcome_tracker)
-
-    brain.suggestion_engine.set_pattern_detector(brain.pattern_detector)
-    brain.suggestion_engine.set_outcome_tracker(brain.outcome_tracker)
 
     brain.graph = MemoryGraph()
     brain.graph_builder = GraphBuilder(brain.graph, brain.memory)
@@ -186,40 +179,19 @@ def init_intelligence(brain: "Brain") -> None:
 def init_automation(brain: "Brain") -> None:
     """Automation engine: orchestrator, rules, risk gate, autonomy loop."""
     from charlie.automation.autonomy_loop import AutonomyLoop
-    from charlie.automation.event_router import EventRouter
-    from charlie.automation.learning_tracker import LearningTracker
     from charlie.automation.risk_gate import RiskGate
     from charlie.automation.rule_engine import RuleEngine
     from charlie.automation.rules import get_default_rules
     from charlie.brain.agent import Orchestrator
+    from charlie.brain.agent_creator import AgentCreator
+    from charlie.brain.agent_factory import AgentFactory
 
     brain.orchestrator = Orchestrator(brain)
-    brain.event_router = EventRouter()
     brain.rule_engine = RuleEngine()
     brain.risk_gate = RiskGate(brain=brain)
-    brain.learning_tracker = LearningTracker(
-        outcome_tracker=getattr(brain, "outcome_tracker", None)
-    )
     brain.autonomy_loop = AutonomyLoop(brain=brain)
-
-    from charlie.tools.intrusion_patrol import NetworkIntrusionSentinel
-    brain.network_sentinel = NetworkIntrusionSentinel(
-        status_q=brain.status_q,
-        telegram_q=brain.telegram_q
-    )
-
-    from charlie.automation.proactivity_engine import ProactivityEngine
-    brain.proactivity_engine = ProactivityEngine(
-        status_q=brain.status_q,
-        telegram_q=brain.telegram_q
-    )
-
-    from charlie.automation.clipboard_diagnostician import ClipboardDiagnostician
-    brain.clipboard_diagnostician = ClipboardDiagnostician(
-        status_q=brain.status_q,
-        telegram_q=brain.telegram_q
-    )
-
+    brain.agent_factory = AgentFactory(agents_dir="charlie/agents")
+    brain.agent_creator = AgentCreator(agents_dir="charlie/agents")
     for rule in get_default_rules():
         brain.rule_engine.add_rule(rule)
 
@@ -228,13 +200,11 @@ def init_external_controllers(brain: "Brain") -> None:
     """External controllers: app, browser, research."""
     from charlie.tools.app_controller import UniversalAppController
     from charlie.tools.browser_controller import AdvancedBrowserController
-    from charlie.tools.research_analyzer import AdvancedResearchToolkit
 
     brain.app_controller = UniversalAppController()
     brain.browser_controller = AdvancedBrowserController()
-    brain.research_toolkit = AdvancedResearchToolkit(
-        brain.browser_req_q, brain.browser_res_q
-    )
+    # analyze_dependencies is exposed as a Pattern A @tool function in
+    # charlie.tools.research_tools — no controller object needed.
 
 
 def init_model(brain: "Brain") -> None:

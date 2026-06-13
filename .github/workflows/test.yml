@@ -7,10 +7,14 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    runs-on: windows-latest
+  # Fast unit tests — runs on every push for quick PR feedback
+  unit:
+    name: Unit tests (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.12", "3.13"]
 
     steps:
@@ -25,5 +29,52 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Run tests
-        run: uv run python -m pytest tests/ -v --tb=short
+      - name: Run unit tests
+        run: uv run python -m pytest tests/ -v --tb=short -m "not integration" --timeout=30
+
+  # Integration tests — runs cross-process bus + tool executor + orchestrator
+  integration:
+    name: Integration tests (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run integration tests
+        run: uv run python -m pytest tests/integration/ -v --tb=short --timeout=60
+
+  # Lint — quick feedback on style
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: ruff check
+        run: uv run ruff check . --output-format=github
+
+      - name: ruff format check
+        run: uv run ruff format --check .

@@ -12,12 +12,8 @@ class KokoroTTS:
     """Wrapper around kokoro_onnx for text-to-speech synthesis."""
 
     def __init__(self, model_path: str | None = None, voices_path: str | None = None):
-        self.model_path = model_path or os.getenv(
-            "KOKORO_MODEL_PATH", "charlie/models/kokoro-v1.0.onnx"
-        )
-        self.voices_path = voices_path or os.getenv(
-            "KOKORO_VOICES_PATH", "charlie/models/voices-v1.0.bin"
-        )
+        self.model_path = model_path or os.getenv("KOKORO_MODEL_PATH", "charlie/models/kokoro-v1.0.onnx")
+        self.voices_path = voices_path or os.getenv("KOKORO_VOICES_PATH", "charlie/models/voices-v1.0.bin")
         self._engine = None
 
     def _load_engine(self):
@@ -26,6 +22,7 @@ class KokoroTTS:
             return True
         try:
             from kokoro_onnx import Kokoro
+
             self._engine = Kokoro(self.model_path, self.voices_path)
             logger.info("kokoro_loaded | model=%s", self.model_path)
             return True
@@ -46,13 +43,12 @@ class KokoroTTS:
             return None
 
         if output_path is None:
-            output_path = os.path.join(
-                tempfile.gettempdir(), f"charlie_tts_{int(time.time())}.wav"
-            )
+            output_path = os.path.join(tempfile.gettempdir(), f"charlie_tts_{int(time.time())}.wav")
 
         try:
             audio = self._engine.create(text, voice=voice, speed=speed, lang=lang)
             import soundfile as sf
+
             sf.write(output_path, audio, 24000)
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return output_path

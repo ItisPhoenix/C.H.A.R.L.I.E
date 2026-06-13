@@ -64,16 +64,16 @@ class MCPClient:
             tools_result = await self._session.list_tools()
             self._tools = []
             for tool in tools_result.tools:
-                self._tools.append({
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
-                })
+                self._tools.append(
+                    {
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                    }
+                )
 
             self._connected = True
-            logger.info(
-                "mcp_connected | server=%s | tools=%d", self.name, len(self._tools)
-            )
+            logger.info("mcp_connected | server=%s | tools=%d", self.name, len(self._tools))
 
         except Exception as e:
             logger.error("mcp_connect_failed | server=%s | error=%s", self.name, e)
@@ -136,9 +136,7 @@ class MCPClient:
             return "Tool executed successfully (no output)."
 
         except Exception as e:
-            logger.error(
-                "mcp_tool_failed | server=%s | tool=%s | error=%s", self.name, name, e
-            )
+            logger.error("mcp_tool_failed | server=%s | tool=%s | error=%s", self.name, name, e)
             return f"Error calling MCP tool '{name}': {e}"
 
     async def disconnect(self) -> None:
@@ -177,26 +175,29 @@ class MCPClient:
                     wait_time = min(2 ** (attempt - 1), 30)
                     logger.info(
                         "mcp_reconnect_attempt | server=%s | attempt=%d | wait=%ds",
-                        self.name, attempt + 1, wait_time,
+                        self.name,
+                        attempt + 1,
+                        wait_time,
                     )
                     await asyncio.sleep(wait_time)
 
                 await self.connect()
                 logger.info(
                     "mcp_reconnect_success | server=%s | attempt=%d",
-                    self.name, attempt + 1,
+                    self.name,
+                    attempt + 1,
                 )
                 return True
 
             except Exception as e:
                 logger.warning(
                     "mcp_reconnect_failed | server=%s | attempt=%d | error=%s",
-                    self.name, attempt + 1, e,
+                    self.name,
+                    attempt + 1,
+                    e,
                 )
 
-        logger.error(
-            "mcp_reconnect_exhausted | server=%s | attempts=%d", self.name, max_retries
-        )
+        logger.error("mcp_reconnect_exhausted | server=%s | attempts=%d", self.name, max_retries)
         return False
 
     def get_tool_info(self, tool_name: str) -> dict | None:

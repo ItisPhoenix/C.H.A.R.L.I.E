@@ -106,6 +106,7 @@ def search_files(pattern: str, root: str = ".") -> str:
 def copy_to_clipboard(text: str) -> str:
     try:
         import pyperclip
+
         pyperclip.copy(text)
         return f"Copied {len(text)} chars to clipboard"
     except ImportError:
@@ -122,6 +123,7 @@ def copy_to_clipboard(text: str) -> str:
 def read_clipboard() -> str:
     try:
         import pyperclip
+
         text = pyperclip.paste()
         return text if text else "Clipboard is empty"
     except ImportError:
@@ -149,6 +151,7 @@ def get_file_info(path: str) -> str:
             size_str = f"{size} bytes"
 
         import time
+
         modified = time.ctime(stat.st_mtime)
 
         return f"Path: {path}\nSize: {size_str}\nModified: {modified}\nType: {'Directory' if os.path.isdir(path) else 'File'}"
@@ -178,8 +181,7 @@ def code_analyze(path: str) -> str:
         return (
             f"File: {path}\n"
             f"Lines: {total} ({total - blanks} code, {blanks} blank, {comments} comments)\n"
-            f"Imports: {len(imports)}\n"
-            + "\n".join(f"  - {i}" for i in imports[:10])
+            f"Imports: {len(imports)}\n" + "\n".join(f"  - {i}" for i in imports[:10])
         )
     except Exception as e:
         return f"Error analyzing {path}: {e}"
@@ -198,6 +200,7 @@ def code_search(pattern: str, path: str = ".", file_types: str = ".py,.js,.ts") 
         return msg
 
     import re
+
     try:
         extensions = [t.strip() for t in file_types.split(",")]
         matches = []
@@ -228,6 +231,7 @@ def find_sensitive_data(path: str) -> str:
     if not _is_within_project(path):
         return f"Error: Path '{path}' is outside the project directory."
     import re
+
     try:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -236,8 +240,8 @@ def find_sensitive_data(path: str) -> str:
             "API Key": r'(?i)(api[_-]?key|apikey)\s*[:=]\s*["\'][^"\']{10,}["\']',
             "Password": r'(?i)(password|passwd|pwd)\s*[:=]\s*["\'][^"\']+["\']',
             "Token": r'(?i)(token|secret)\s*[:=]\s*["\'][^"\']{10,}["\']',
-            "AWS Key": r'AKIA[0-9A-Z]{16}',
-            "Private Key": r'-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----',
+            "AWS Key": r"AKIA[0-9A-Z]{16}",
+            "Private Key": r"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----",
         }
 
         findings = []

@@ -12,6 +12,7 @@ from charlie.utils.logger import get_logger
 
 logger = get_logger("SKILL_SYNTHESIZER")
 
+
 class SkillSynthesizer:
     """Manages secure generation and user-signed registration of dynamic tools."""
 
@@ -29,6 +30,7 @@ class SkillSynthesizer:
         # AST safety check on dynamic code before even staging it
         try:
             import ast
+
             ast.parse(code)
         except SyntaxError as se:
             return f"Error: Compiled Python code contains syntax errors: {se}"

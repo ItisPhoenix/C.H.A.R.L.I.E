@@ -32,6 +32,7 @@ def tool(
     - Wraps with input validation, timeout, error boundary, audit log
     - Stores metadata on the function for ToolRegistry discovery
     """
+
     def decorator(func: Callable) -> Callable:
         tool_name = name or func.__name__
         tool_desc = description or inspect.getdoc(func) or f"Tool: {tool_name}"
@@ -73,7 +74,7 @@ def tool(
 
         # Store metadata on the function
         # Extract integer value from RiskTier enum for compatibility
-        tier_value = risk_tier.value if hasattr(risk_tier, 'value') else int(risk_tier)
+        tier_value = risk_tier.value if hasattr(risk_tier, "value") else int(risk_tier)
 
         # If caller explicitly passed a convention, use it. Otherwise auto-detect.
         effective_convention = calling_convention

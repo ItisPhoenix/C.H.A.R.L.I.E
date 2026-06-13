@@ -36,7 +36,7 @@ function ToolRow({ exec }: { exec: ToolExecution }) {
   return (
       <div
         className={cn(
-          'border-l-2 rounded-r-lg bg-charlie-card/50 mb-2 cursor-pointer transition-all hover:bg-charlie-card/80 hover:shadow-neon-cyan-sm',
+          'border-l-2 rounded-r-lg bg-charlie-card/50 mb-2 cursor-pointer transition-all hover:bg-charlie-card/80 hover:shadow-premium',
           borderColorMap[exec.status] || 'border-l-charlie-border',
         )}
         role="button"

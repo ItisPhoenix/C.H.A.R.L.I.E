@@ -62,6 +62,7 @@ def control_media(action: str) -> str:
     """Control media playback."""
     try:
         import pyautogui
+
         actions = {
             "play": "playpause",
             "pause": "playpause",
@@ -90,6 +91,7 @@ def screenshot_save(path: str = "screenshot.png") -> str:
     """Take a screenshot and save it."""
     try:
         import mss
+
         with mss.mss() as sct:
             sct.shot(output=path)
         return f"Screenshot saved to: {path}"
@@ -109,6 +111,7 @@ def capture_webcam(path: str = "webcam.jpg") -> str:
     """Capture a webcam image."""
     try:
         import cv2
+
         cap = cv2.VideoCapture(0)
         ret, frame = cap.read()
         cap.release()
@@ -120,5 +123,3 @@ def capture_webcam(path: str = "webcam.jpg") -> str:
         return "opencv-python not installed"
     except Exception as e:
         return f"Webcam capture failed: {e}"
-
-

@@ -60,9 +60,7 @@ class SkillInjector:
 
         return system_prompt + "\n\n" + "\n\n---\n\n".join(sections)
 
-    def inject_on_demand(
-        self, system_prompt: str, task: str, available_skills: list
-    ) -> str:
+    def inject_on_demand(self, system_prompt: str, task: str, available_skills: list) -> str:
         """Inject skills whose tags match the task content.
 
         1. Check task text against skill tags

@@ -90,9 +90,7 @@ class LLMClient:
     def _prune_call_times(self) -> None:
         """Remove timestamps outside the current rate window."""
         now = time.monotonic()
-        self._call_times = [
-            t for t in self._call_times if now - t < self._rate_window
-        ]
+        self._call_times = [t for t in self._call_times if now - t < self._rate_window]
 
     def check_rate_limit(self) -> bool:
         """Check and record an LLM call against the rate limit.
@@ -167,21 +165,12 @@ class LLMClient:
                 last_error = exc
                 if attempt < self._max_retries:
                     delay = self._backoff_base * (2 ** (attempt - 1))
-                    logger.warning(
-                        f"complete_retry | attempt={attempt} "
-                        f"error={exc} backoff={delay:.1f}s"
-                    )
+                    logger.warning(f"complete_retry | attempt={attempt} error={exc} backoff={delay:.1f}s")
                     await asyncio.sleep(delay)
                 else:
-                    logger.error(
-                        f"complete_failed | exhausted {self._max_retries} "
-                        f"attempts | last_error={exc}"
-                    )
+                    logger.error(f"complete_failed | exhausted {self._max_retries} attempts | last_error={exc}")
 
-        raise RuntimeError(
-            f"LLM complete failed after {self._max_retries} attempts: "
-            f"{last_error}"
-        ) from last_error
+        raise RuntimeError(f"LLM complete failed after {self._max_retries} attempts: {last_error}") from last_error
 
     # ------------------------------------------------------------------
     # Streaming completion
@@ -216,8 +205,7 @@ class LLMClient:
             yielded = False
             try:
                 logger.info(
-                    f"stream_start | attempt={attempt}/{self._max_retries} "
-                    f"task={task_type.value} msgs={len(messages)}"
+                    f"stream_start | attempt={attempt}/{self._max_retries} task={task_type.value} msgs={len(messages)}"
                 )
                 chunk_count = 0
                 async for chunk in self._router.stream_complete(
@@ -240,28 +228,16 @@ class LLMClient:
                 if yielded:
                     # Already yielded chunks to caller -- can't retry
                     # without producing duplicates.  Propagate immediately.
-                    logger.error(
-                        f"stream_mid_error | chunks_already_yielded={chunk_count} "
-                        f"error={exc}"
-                    )
+                    logger.error(f"stream_mid_error | chunks_already_yielded={chunk_count} error={exc}")
                     raise
                 if attempt < self._max_retries:
                     delay = self._backoff_base * (2 ** (attempt - 1))
-                    logger.warning(
-                        f"stream_retry | attempt={attempt} "
-                        f"error={exc} backoff={delay:.1f}s"
-                    )
+                    logger.warning(f"stream_retry | attempt={attempt} error={exc} backoff={delay:.1f}s")
                     await asyncio.sleep(delay)
                 else:
-                    logger.error(
-                        f"stream_failed | exhausted {self._max_retries} "
-                        f"attempts | last_error={exc}"
-                    )
+                    logger.error(f"stream_failed | exhausted {self._max_retries} attempts | last_error={exc}")
 
-        raise RuntimeError(
-            f"LLM stream failed after {self._max_retries} attempts: "
-            f"{last_error}"
-        ) from last_error
+        raise RuntimeError(f"LLM stream failed after {self._max_retries} attempts: {last_error}") from last_error
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -279,7 +255,4 @@ class LLMClient:
     def _enforce_rate_limit(self):
         """Check rate limit and raise if exceeded."""
         if not self.check_rate_limit():
-            raise RateLimitExceeded(
-                f"Rate limit exceeded "
-                f"({self._rate_limit} calls / {self._rate_window}s)"
-            )
+            raise RateLimitExceeded(f"Rate limit exceeded ({self._rate_limit} calls / {self._rate_window}s)")

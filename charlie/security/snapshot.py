@@ -1,10 +1,22 @@
 import os
+import re
 import subprocess
 
 from charlie.security.tiers import TIER_2, risk_tier
 from charlie.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Commit hashes are 4-40 lowercase hex characters. Anything else (including
+# ref names like ``HEAD~1``, branches, or shell metacharacters) is rejected.
+_COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{4,40}$")
+
+
+def _is_valid_commit_hash(commit_hash: str) -> bool:
+    """Return True if *commit_hash* is a syntactically valid git SHA."""
+    if not isinstance(commit_hash, str):
+        return False
+    return bool(_COMMIT_HASH_RE.match(commit_hash))
 
 
 class SnapshotManager:
@@ -75,11 +87,15 @@ class SnapshotManager:
         if not self.repo_ready:
             return False
 
+        # Validate the commit hash to prevent argument-injection (e.g.
+        # ``HEAD; rm -rf /`` into the git command line).
+        if not _is_valid_commit_hash(commit_hash):
+            logger.error("rollback_blocked | invalid_commit_hash=%r", commit_hash)
+            return False
+
         try:
             # 1. Hard reset
-            subprocess.run(
-                ["git", "reset", "--hard", commit_hash], cwd=self.root_dir, check=True
-            )
+            subprocess.run(["git", "reset", "--hard", commit_hash], cwd=self.root_dir, check=True)
             # 2. Clean untracked files/directories
             self.clean_orphaned_files()
 

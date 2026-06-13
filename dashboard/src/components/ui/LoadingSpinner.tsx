@@ -20,7 +20,7 @@ export function LoadingSpinner({ size = 'md', label, className }: LoadingSpinner
   return (
     <div className={cn('flex items-center gap-3', className)}>
       <div
-        className="animate-hex-spin"
+        className="animate-spin"
         style={{ width: px, height: px }}
       >
         <svg viewBox="0 0 100 100" width={px} height={px}>

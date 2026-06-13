@@ -1,4 +1,4 @@
-﻿"""
+"""
 charlie/brain/agent.py
 
 Agent Runtime — autonomous multi-step task execution with manifest-driven agents.
@@ -21,13 +21,16 @@ logger = get_logger(__name__)
 
 @dataclass
 class AgentResult:
-    """Result of an agent's goal execution."""
+    """Unified result of an agent's task execution."""
+
     success: bool
-    goal: str
+    task: str
     agent_name: str
     summary: str = ""
-    results: list = field(default_factory=list)
+    tool_calls: list[dict] = field(default_factory=list)
     duration_seconds: float = 0.0
+    error: str | None = None
+    results: list = field(default_factory=list)
     replan_count: int = 0
 
 
@@ -93,13 +96,11 @@ class AgentRegistry:
 
 class Orchestrator:
     """
-    Multi-agent coordinator with goal decomposition and result merging.
+    [DEPRECATED] Use charlie.brain.orchestrator.TaskOrchestrator instead.
 
-    Flow:
-    1. Decompose complex goals into sub-tasks (LLM-driven)
-    2. Route each sub-task to the best-fit specialist agent
-    3. Execute agents in parallel (independent) or sequential (dependent)
-    4. Merge results into a unified response
+    Multi-agent coordinator with goal decomposition and result merging.
+    Kept for backward compatibility — redirected to TaskOrchestrator API.
+    New code should import TaskOrchestrator from charlie.brain.orchestrator.
     """
 
     def __init__(self, brain, agent_registry: AgentRegistry | None = None):
@@ -151,8 +152,7 @@ class Orchestrator:
         merged = await self._merge_results(goal, successful, [t[1] for t in agent_tasks])
 
         self._emit_status(brain, "idle", goal)
-        logger.info("coordinator_done | sub_tasks=%d | merged=%d | failed=%d",
-                     len(agent_tasks), len(successful), len(failed))
+        logger.info("coordinator_done | sub_tasks=%d | merged=%d | failed=%d", len(agent_tasks), len(successful), len(failed))
         return merged
 
     def _emit_status(self, brain, status, goal, agent=None, count=0):
@@ -182,10 +182,10 @@ class Orchestrator:
             f"Break this goal into 2-4 concrete sub-tasks. Each sub-task should be "
             f"assigned to one of these agents: [{agent_names}].\n\n"
             f'Goal: "{goal}"\n\n'
-            f'Respond with ONLY a JSON array like:\n'
+            f"Respond with ONLY a JSON array like:\n"
             f'[{{"description": "search for X", "agent": "research"}}, '
             f'{{"description": "write summary of X", "agent": "writer"}}]\n'
-            f'If the goal is simple (1 step), return an empty array [].'
+            f"If the goal is simple (1 step), return an empty array []."
         )
 
         try:
@@ -229,13 +229,13 @@ class Orchestrator:
 
         parts = []
         for i, (task, result) in enumerate(zip(sub_tasks, results)):
-            parts.append(f"Sub-task {i+1}: {task}\nResult: {result[:500]}")
+            parts.append(f"Sub-task {i + 1}: {task}\nResult: {result[:500]}")
 
         prompt = (
             f'The user asked: "{goal}"\n\n'
-            f'Multiple agents completed sub-tasks. Merge into one coherent response:\n\n'
-            f'{"\n\n".join(parts)}\n\n'
-            f'Merged response (concise, no redundancy):'
+            f"Multiple agents completed sub-tasks. Merge into one coherent response:\n\n"
+            f"{'\\n\\n'.join(parts)}\n\n"
+            f"Merged response (concise, no redundancy):"
         )
 
         try:
@@ -253,7 +253,9 @@ class Orchestrator:
             return f"Agent '{agent_name}' not found"
 
         from charlie.brain.agent_runtime import AgentRuntime
-        runtime = AgentRuntime(self.brain)
+
+        tool_registry = getattr(self.brain, "tool_registry", None) if self.brain else None
+        runtime = AgentRuntime(self.brain, tool_registry=tool_registry)
         result = await runtime.execute(spec, task, task_chain=task_chain)
         return result.summary
 
@@ -271,7 +273,7 @@ class Orchestrator:
             summary = await self.route_goal(goal)
             return AgentResult(
                 success=True,
-                goal=goal,
+                task=goal,
                 agent_name=agent_name,
                 summary=summary,
                 duration_seconds=time.time() - start_time,
@@ -280,22 +282,37 @@ class Orchestrator:
             logger.error("orchestrator_execute_failed | %s", e)
             return AgentResult(
                 success=False,
-                goal=goal,
+                task=goal,
                 agent_name=agent_name,
                 summary=f"Execution failed: {e}",
                 duration_seconds=time.time() - start_time,
+                error=str(e),
             )
 
 
 def is_complex_goal(goal: str) -> bool:
     """Heuristic: detect if a goal requires multi-step agent execution."""
     indicators = [
-        " and then ", " first ", " after that ", " also ",
-        " then ", " finally ",
-        "research", "analyze", "compare", "summarize",
-        "create a report", "send me", "notify",
-        "find all", "look up", "check if", "write a",
-        "automate", "schedule", "monitor",
+        " and then ",
+        " first ",
+        " after that ",
+        " also ",
+        " then ",
+        " finally ",
+        "research",
+        "analyze",
+        "compare",
+        "summarize",
+        "create a report",
+        "send me",
+        "notify",
+        "find all",
+        "look up",
+        "check if",
+        "write a",
+        "automate",
+        "schedule",
+        "monitor",
     ]
     goal_lower = goal.lower()
     score = sum(1 for k in indicators if k in goal_lower)

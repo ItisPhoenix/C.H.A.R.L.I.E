@@ -10,11 +10,13 @@ from charlie.intelligence.task_queue import AutonomousTaskQueue
 
 logger = logging.getLogger("charlie.intelligence.scheduler")
 
+
 class TaskScheduler:
     """
     TaskScheduler: Manages periodic triggers for background tasks.
     Adds tasks to AutonomousTaskQueue based on time intervals.
     """
+
     def __init__(self, task_queue: AutonomousTaskQueue, brain=None):
         self.queue = task_queue
         self.brain = brain
@@ -29,7 +31,8 @@ class TaskScheduler:
             try:
                 with open(self.state_path, "r") as f:
                     return json.load(f)
-            except Exception: pass
+            except Exception:
+                pass
         return {
             "vram_temp_check": 0.0,
             "memory_graph_refresh": 0.0,
@@ -45,7 +48,8 @@ class TaskScheduler:
             os.makedirs("config", exist_ok=True)
             with open(self.state_path, "w") as f:
                 json.dump(self.last_runs, f)
-        except Exception: pass
+        except Exception:
+            pass
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -67,7 +71,7 @@ class TaskScheduler:
                 self._check_and_schedule()
             except Exception as e:
                 logger.error(f"scheduler_check_failed | {e}")
-            time.sleep(60) # Check every minute
+            time.sleep(60)  # Check every minute
 
     def _check_and_schedule(self):
         now = time.time()
@@ -94,6 +98,7 @@ class TaskScheduler:
 
         # 5. Daily: Morning briefing (once per day, only if morning hours 6-10)
         import datetime
+
         hour = datetime.datetime.now().hour
         if now - self.last_runs["daily_briefing"] >= 86400 and 6 <= hour <= 10:
             self.queue.add_task("Daily Briefing", self._task_daily_briefing, priority=10)
@@ -151,10 +156,12 @@ class TaskScheduler:
                 # Push alert to status_q
                 if self.brain:
                     try:
-                        self.brain.status_q.put_nowait({
-                            "type": "INTEGRATION_UPDATE",
-                            "data": {"service": "system", "count": 1, "detail": msg},
-                        })
+                        self.brain.status_q.put_nowait(
+                            {
+                                "type": "INTEGRATION_UPDATE",
+                                "data": {"service": "system", "count": 1, "detail": msg},
+                            }
+                        )
                     except Exception:
                         pass
             else:
@@ -166,7 +173,7 @@ class TaskScheduler:
     def _task_graph_refresh(self):
         """Refresh the memory graph index."""
         try:
-            if self.brain and hasattr(self.brain, 'graph_builder'):
+            if self.brain and hasattr(self.brain, "graph_builder"):
                 self.brain.graph_builder.run_full_index()
                 logger.info("bg_task | memory_graph_refresh | completed")
             else:
@@ -177,7 +184,7 @@ class TaskScheduler:
     def _task_chroma_vacuum(self):
         """Vacuum and deduplicate ChromaDB."""
         try:
-            if self.brain and hasattr(self.brain, 'memory'):
+            if self.brain and hasattr(self.brain, "memory"):
                 self.brain.memory.consolidate()
                 logger.info("bg_task | chroma_vacuum | completed")
             else:
@@ -190,8 +197,10 @@ class TaskScheduler:
         try:
             result = subprocess.run(
                 ["git", "log", "--oneline", "--since=7.days", "--no-merges"],
-                capture_output=True, text=True, timeout=15,
-                cwd=os.getcwd()
+                capture_output=True,
+                text=True,
+                timeout=15,
+                cwd=os.getcwd(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 lines = result.stdout.strip().split("\n")
@@ -204,10 +213,12 @@ class TaskScheduler:
                 # Push to status_q
                 if self.brain:
                     try:
-                        self.brain.status_q.put_nowait({
-                            "type": "INTEGRATION_UPDATE",
-                            "data": {"service": "git", "count": len(lines), "detail": summary},
-                        })
+                        self.brain.status_q.put_nowait(
+                            {
+                                "type": "INTEGRATION_UPDATE",
+                                "data": {"service": "git", "count": len(lines), "detail": summary},
+                            }
+                        )
                     except Exception:
                         pass
             else:
@@ -215,44 +226,6 @@ class TaskScheduler:
         except Exception as e:
             logger.error(f"bg_task | git_summary | error={e}")
 
-    def _task_daily_briefing(self):
-        """Generate and push daily morning briefing."""
-        try:
-            if not self.brain:
-                logger.warning("bg_task | daily_briefing | no brain available")
-                return
-
-            from charlie.intelligence.briefing import BriefingAssembler
-
-            assembler = BriefingAssembler(brain=self.brain)
-            import asyncio
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(assembler.assemble(), loop)
-                briefing = future.result(timeout=30)
-            else:
-                briefing = asyncio.run(assembler.assemble())
-
-            briefing_text = briefing.to_text()
-            logger.info(f"bg_task | daily_briefing | assembled {len(briefing_text)} chars")
-
-            # Push briefing as a chat message so it appears in dashboard
-            if self.brain.status_q:
-                try:
-                    self.brain._safe_put(self.brain.status_q, {
-                        "type": "CHAT_MSG",
-                        "content": briefing_text,
-                        "role": "assistant",
-                    })
-                except Exception:
-                    pass
-
-        except Exception as e:
-            logger.error(f"bg_task | daily_briefing | error={e}")
 
     def _task_skill_evolution(self):
         """Run self-evolution cycle on skills."""
@@ -260,6 +233,7 @@ class TaskScheduler:
             if not self.brain or not hasattr(self.brain, "evolution_engine"):
                 return
             from pathlib import Path
+
             result = self.brain.evolution_engine.run_evolution(
                 outcome_tracker=getattr(self.brain, "outcome_tracker", None),
                 session_search=getattr(self.brain, "session_search", None),
@@ -267,7 +241,9 @@ class TaskScheduler:
                 llm_client=getattr(self.brain, "llm_client", None),
                 status_q=self.brain.status_q,
             )
-            logger.info(f"bg_task | skill_evolution | reviewed={result.get('skills_reviewed', 0)} improved={result.get('skills_improved', 0)}")
+            logger.info(
+                f"bg_task | skill_evolution | reviewed={result.get('skills_reviewed', 0)} improved={result.get('skills_improved', 0)}"
+            )
         except Exception as e:
             logger.error(f"bg_task | skill_evolution | error={e}")
 

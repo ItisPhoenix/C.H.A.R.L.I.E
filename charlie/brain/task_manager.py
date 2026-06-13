@@ -84,8 +84,7 @@ class AsyncTaskManager:
         self._pending.append(spec)
         self._pending.sort(key=lambda s: s.priority.value)
 
-        logger.info("task_submitted | id=%s | desc=%s | priority=%s",
-                     spec.id, spec.description, spec.priority.name)
+        logger.info("task_submitted | id=%s | desc=%s | priority=%s", spec.id, spec.description, spec.priority.name)
         return spec.id
 
     def cancel(self, task_id: str) -> bool:

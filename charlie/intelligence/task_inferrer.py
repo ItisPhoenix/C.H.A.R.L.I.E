@@ -13,11 +13,13 @@ TASK_SIGNATURES = {
     "Writing": ["word", "notepad", "obsidian", "overleaf", "latex"],
 }
 
+
 class TaskInferrer:
     """
     TaskInferrer: Inferred Task Detection.
     Maps system activity to high-level tasks and tracks their duration.
     """
+
     def __init__(self):
         self.current_task = "Idle"
         self.task_start_time = time.time()

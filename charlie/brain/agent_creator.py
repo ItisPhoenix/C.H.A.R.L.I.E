@@ -1,8 +1,9 @@
 """
 Agent Creator — Programmatic agent plugin folder creation.
 
-Creates new agent directories with validated agent.json manifests.
-Supports both dict-based and natural-language-based agent specifications.
+Creates new agent directories with validated AGENT.md manifests (YAML
+frontmatter + markdown body). Supports both dict-based and natural-language-
+based agent specifications.
 
 Usage::
 
@@ -23,6 +24,7 @@ import os
 import re
 import time
 
+from charlie.brain.agent_factory import _render_agent_md
 from charlie.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -44,9 +46,6 @@ _KEYWORD_TOOL_MAP: dict[str, list[str]] = {
     "process": ["get_active_processes", "kill_process", "run_command"],
     "app": ["open_app", "close_app"],
     "launch": ["open_app"],
-    "email": ["read_gmail", "send_gmail"],
-    "gmail": ["read_gmail", "send_gmail"],
-    "mail": ["read_gmail", "send_gmail"],
     "calendar": ["manage_calendar"],
     "event": ["manage_calendar"],
     "schedule": ["manage_calendar"],
@@ -87,12 +86,13 @@ _KEYWORD_TOOL_MAP: dict[str, list[str]] = {
 # AgentCreator
 # ---------------------------------------------------------------------------
 
+
 class AgentCreator:
-    """Creates new agent plugin folders with validated agent.json manifests."""
+    """Creates new agent plugin folders with validated AGENT.md manifests."""
 
     def __init__(self, agents_dir: str = "charlie/agents") -> None:
         self.agents_dir = agents_dir
-        self._template_path = os.path.join(agents_dir, "_template", "agent.json")
+        self._template_path = os.path.join(agents_dir, "_template", "AGENT.md")
 
     # ------------------------------------------------------------------
     # Public API
@@ -102,8 +102,8 @@ class AgentCreator:
         """Create an agent from a dict specification.
 
         1. Validate required fields
-        2. Fill defaults from template
-        3. Write to ``charlie/agents/<name>/agent.json``
+        2. Fill defaults
+        3. Write ``charlie/agents/<name>/AGENT.md`` with YAML frontmatter
         4. Return the agent directory path
 
         Raises
@@ -126,13 +126,15 @@ class AgentCreator:
             raise
 
         # Fill defaults
-        agent_json = self._fill_defaults(dict(spec))
+        filled = self._fill_defaults(dict(spec))
 
-        # Write manifest
-        manifest_path = os.path.join(agent_dir, "agent.json")
+        # Write AGENT.md (with YAML frontmatter) so the loader
+        # finds the new agent on the next reload. The agent.json writer
+        # left new agents invisible because the loader reads AGENT.md only.
+        manifest_path = os.path.join(agent_dir, "AGENT.md")
         try:
             with open(manifest_path, "w", encoding="utf-8") as fh:
-                json.dump(agent_json, fh, indent=2, ensure_ascii=False)
+                fh.write(_render_agent_md(filled))
         except OSError as exc:
             logger.error("agent_manifest_write_failed | path=%s | %s", manifest_path, exc)
             raise
@@ -211,9 +213,9 @@ class AgentCreator:
         if not os.path.exists(self.agents_dir):
             return []
         return [
-            d for d in os.listdir(self.agents_dir)
-            if os.path.isdir(os.path.join(self.agents_dir, d))
-            and not d.startswith("_")
+            d
+            for d in os.listdir(self.agents_dir)
+            if os.path.isdir(os.path.join(self.agents_dir, d)) and not d.startswith("_")
         ]
 
     # ------------------------------------------------------------------
@@ -271,9 +273,31 @@ class AgentCreator:
 
         # Fallback: take first 2-3 meaningful words
         stop_words = {
-            "a", "an", "the", "that", "for", "and", "or", "is", "it",
-            "to", "of", "in", "on", "with", "can", "will", "do", "my",
-            "new", "create", "make", "build", "i", "want", "need",
+            "a",
+            "an",
+            "the",
+            "that",
+            "for",
+            "and",
+            "or",
+            "is",
+            "it",
+            "to",
+            "of",
+            "in",
+            "on",
+            "with",
+            "can",
+            "will",
+            "do",
+            "my",
+            "new",
+            "create",
+            "make",
+            "build",
+            "i",
+            "want",
+            "need",
         }
         words = [w for w in re.split(r"\W+", desc_lower) if w and w not in stop_words]
         if words:
@@ -314,11 +338,42 @@ class AgentCreator:
         Picks out meaningful words that could be used for routing.
         """
         stop_words = {
-            "a", "an", "the", "that", "for", "and", "or", "is", "it",
-            "to", "of", "in", "on", "with", "can", "will", "do", "my",
-            "new", "create", "make", "build", "i", "want", "need",
-            "agent", "assistant", "bot", "specialist", "who", "does",
-            "about", "helps", "helping", "able", "uses",
+            "a",
+            "an",
+            "the",
+            "that",
+            "for",
+            "and",
+            "or",
+            "is",
+            "it",
+            "to",
+            "of",
+            "in",
+            "on",
+            "with",
+            "can",
+            "will",
+            "do",
+            "my",
+            "new",
+            "create",
+            "make",
+            "build",
+            "i",
+            "want",
+            "need",
+            "agent",
+            "assistant",
+            "bot",
+            "specialist",
+            "who",
+            "does",
+            "about",
+            "helps",
+            "helping",
+            "able",
+            "uses",
         }
         words = re.split(r"\W+", desc_lower)
         keywords: list[str] = []

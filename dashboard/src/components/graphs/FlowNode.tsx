@@ -25,7 +25,7 @@ export function FlowNode({ data }: { data: FlowNodeData }) {
         'glass-card p-3 min-w-[160px] max-w-[200px]',
         config.bg,
         config.border,
-        data.active && 'shadow-neon-cyan-sm',
+        data.active && 'shadow-premium',
       )}
     >
       <Handle type="target" position={Position.Left} className="!bg-charlie-cyan !w-2 !h-2" />

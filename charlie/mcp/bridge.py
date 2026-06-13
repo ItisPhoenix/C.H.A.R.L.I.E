@@ -16,6 +16,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("charlie.mcp.bridge")
 
+# Default per-tool timeout (seconds). Bounds the time we'll wait for an
+# MCP server to respond so a hung server can't freeze the caller.
+_MCP_TOOL_TIMEOUT_S = 30.0
+
 
 class MCPToolBridge:
     """Bridges MCP tools into Charlie's ToolHandler registry and the unified catalog."""
@@ -111,6 +115,9 @@ class MCPToolBridge:
         The wrapper matches Charlie's tool signature: (args: dict) -> str
         and handles lazy connection + async-to-sync bridging via the
         manager's dedicated MCP event loop (Req 9.4).
+
+        Calls are bounded by ``_MCP_TOOL_TIMEOUT_S`` (default 30s) so a
+        hung MCP server can't freeze the caller (Req 2.10).
         """
         manager = self.manager
 
@@ -119,7 +126,8 @@ class MCPToolBridge:
             if not client.connected:
                 try:
                     manager.run_coroutine(
-                        manager.ensure_connected(client.name)
+                        manager.ensure_connected(client.name),
+                        timeout=_MCP_TOOL_TIMEOUT_S,
                     )
                 except Exception as e:
                     return f"Error: MCP server '{client.name}' not available: {e}"
@@ -127,7 +135,8 @@ class MCPToolBridge:
             # Call the tool via the dedicated MCP event loop
             try:
                 return manager.run_coroutine(
-                    client.call_tool(tool_name, args)
+                    client.call_tool(tool_name, args),
+                    timeout=_MCP_TOOL_TIMEOUT_S,
                 )
             except Exception as e:
                 return f"Error calling MCP tool '{tool_name}': {e}"
@@ -195,6 +204,7 @@ class MCPToolBridge:
 
             if self._tool_registry is not None:
                 from charlie.security.tiers import RiskTier
+
                 self._tool_registry.register(
                     name=prefixed,
                     description=f"MCP server dispatcher: {name} (lazy — connects on first call)",
@@ -223,7 +233,8 @@ class MCPToolBridge:
             if not client.connected:
                 try:
                     manager.run_coroutine(
-                        bridge._lazy_setup(client, tool_handler)
+                        bridge._lazy_setup(client, tool_handler),
+                        timeout=_MCP_TOOL_TIMEOUT_S,
                     )
                 except Exception as e:
                     return f"Error: MCP server '{client.name}' failed to start: {e}"

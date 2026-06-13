@@ -62,9 +62,7 @@ def load_stt_with_fallback(
         logger.info("stt_fallback_loaded | model=%s | device=cpu", fallback_model)
         return fallback_model
     except Exception as exc2:
-        logger.error(
-            "stt_fallback_also_failed | model=%s | error=%s", fallback_model, exc2
-        )
+        logger.error("stt_fallback_also_failed | model=%s | error=%s", fallback_model, exc2)
         return f"Error: STT fallback also failed ({exc2})"
 
 
@@ -79,7 +77,7 @@ class ModelManager:
         LLM_URL             → settings.llm.llm_url
         LLM_API_KEY         → settings.llm.llm_api_key
         LLM_MODEL           → settings.llm.llm_model
-        VRAM_THRESHOLD_MB   → settings.resources.vram_threshold_mb
+        VRAM (no env var)   → settings.resources.vram_total_mb / vram_budget_mb / vram_warning_mb
     """
 
     def __init__(self, settings):
@@ -101,16 +99,10 @@ class ModelManager:
         self._last_health_check = 0.0
         self._health_cache = False
 
-        # VRAM governor settings (Task 14.1)
-        self._vram_budget_mb: float = getattr(
-            settings.resources, "vram_budget_mb", 7168
-        )
-        self._vram_warning_mb: float = getattr(
-            settings.resources, "vram_warning_mb", 6500
-        )
-        self._model_unload_delay_s: int = getattr(
-            settings.resources, "model_unload_delay_s", 30
-        )
+        # VRAM governor settings (sourced from ResourceSettings; no env-var override)
+        self._vram_budget_mb: float = float(settings.resources.vram_budget_mb)
+        self._vram_warning_mb: float = float(settings.resources.vram_warning_mb)
+        self._model_unload_delay_s: int = getattr(settings.resources, "model_unload_delay_s", 30)
         self._model_priority: dict = getattr(
             settings.resources, "model_priority", {"text": "primary", "vision": "on_demand"}
         )
@@ -246,11 +238,9 @@ class ModelManager:
                 allocated = torch.cuda.memory_allocated() / 1024**3
                 reserved = torch.cuda.memory_reserved() / 1024**3
                 pressure = allocated / reserved if reserved > 0 else 0
-                threshold = self.settings.resources.vram_threshold_mb / 8192
-                if pressure > threshold:
-                    logger.warning(
-                        f"vram_pressure_critical | {pressure:.2%} | threshold={threshold:.2%}"
-                    )
+                # Warn above 95% pressure on the GPU
+                if pressure > 0.95:
+                    logger.warning(f"vram_pressure_critical | {pressure:.2%} | threshold={threshold:.2%}")
                     return True
         except Exception as e:
             logger.debug("vram_check_failed | %s", e)
@@ -361,9 +351,7 @@ class ModelManager:
     async def _activate_nim(self):
         """Mark NIM primary as active; verify endpoint if switching from vision."""
         prev = self.current_model
-        logger.info(
-            f"activating_llm | from={prev} | model={self.llm_model} | endpoint={self.llm_url}"
-        )
+        logger.info(f"activating_llm | from={prev} | model={self.llm_model} | endpoint={self.llm_url}")
         healthy = await self.nim_health()
         if not healthy:
             logger.error("llm_endpoint_unreachable | check LLM_URL in .env")
@@ -373,9 +361,7 @@ class ModelManager:
 
     async def _activate_vision(self):
         """Switch to the vision model on its own endpoint."""
-        logger.info(
-            f"activating_vision | from={self.current_model} | model={self.llm_vision_model}"
-        )
+        logger.info(f"activating_vision | from={self.current_model} | model={self.llm_vision_model}")
         if not self.llm_vision_url:
             logger.error("vision_url_not_set | set LLM_VISION_URL in .env")
             return

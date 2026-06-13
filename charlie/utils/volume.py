@@ -1,7 +1,14 @@
-import comtypes
-import win32api
-import win32gui
-from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+try:
+    import comtypes
+    import win32api
+    import win32gui
+    from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+except (ImportError, OSError, AttributeError):
+    comtypes = None
+    win32api = None
+    win32gui = None
+    AudioUtilities = None
+    ISimpleAudioVolume = None
 
 from charlie.utils.logger import get_logger
 
@@ -12,9 +19,11 @@ APPCOMMAND_VOLUME_DOWN = 9
 APPCOMMAND_VOLUME_UP = 10
 APPCOMMAND_VOLUME_MUTE = 8
 
+
 def _send_command(cmd):
     hwnd = win32gui.GetForegroundWindow()
     win32api.SendMessage(hwnd, WM_APPCOMMAND, 0, cmd * 0x10000)
+
 
 class VolumeController:
     """
@@ -28,6 +37,9 @@ class VolumeController:
         self.session_volumes = {}  # PID -> original volume float
 
     def duck(self):
+        if AudioUtilities is None:
+            logger.warning("duck_skipped | pycaw not available")
+            return
         if self.is_ducked:
             return
 
@@ -75,6 +87,8 @@ class VolumeController:
     def _restore_volumes(self, saved_volumes: dict):
         """Restore saved volumes for previously ducked sessions."""
         comtypes.CoInitialize()
+        if AudioUtilities is None:
+            return
         sessions = AudioUtilities.GetAllSessions()
         for session in sessions:
             if session.Process and session.Process.pid in saved_volumes:

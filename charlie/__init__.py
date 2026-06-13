@@ -45,9 +45,7 @@ if os.name == "nt":
                         os.environ["PATH"] = bin_dir + os.pathsep + os.environ["PATH"]
                         seen_paths.add(bin_dir)
                     except Exception as e:
-                        logger.debug(
-                            f"dll_add_failed | lib={sub} | path={bin_dir} | error={e}"
-                        )
+                        logger.debug(f"dll_add_failed | lib={sub} | path={bin_dir} | error={e}")
 
         # B. Register primary ML folders (ONNX, Ctranslate2)
         primary_dirs = [
@@ -73,11 +71,7 @@ if os.name == "nt":
                 seen_paths.add(bin_dir)
             except Exception as e:
                 logger.debug(f"bin_dll_add_failed | path={bin_dir} | error={e}")
-        elif (
-            os.path.exists(root)
-            and "site-packages" not in root
-            and root not in seen_paths
-        ):
+        elif os.path.exists(root) and "site-packages" not in root and root not in seen_paths:
             # Direct registration for CUDNN paths that end in x64
             try:
                 os.add_dll_directory(root)

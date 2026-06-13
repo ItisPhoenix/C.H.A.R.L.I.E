@@ -31,8 +31,7 @@ const nodeTypes = { agent: AgentNode }
 
 const AGENT_MANIFESTS = [
   { id: 'coding', name: 'coding', description: 'Code analysis, debugging, building, testing, git operations', tools: ['run_command', 'read_file', 'write_file', 'code_analyze', 'code_search', 'search_files'], skills: ['python-debugging'], icon: '💻' },
-  { id: 'comms', name: 'comms', description: 'Email, notifications, messaging, calendar management', tools: ['send_gmail', 'get_gmail_messages', 'send_file_to_mobile', 'get_calendar_events', 'manage_calendar'], skills: [], icon: '💬' },
-  { id: 'redteam', name: 'redteam', description: 'Ethical hacking, penetration testing, CTF/HTB assistance', tools: ['whois_lookup', 'dns_enum', 'subdomain_scan', 'tech_fingerprint', 'google_dork', 'scan_target', 'fuzz_dirs', 'analyze_vuln', 'generate_payload', 'write_report', 'ctf_hint', 'explain_exploit'], skills: ['nmap-mastery', 'web-exploitation'], icon: '🔴' },
+  { id: 'comms', name: 'comms', description: 'Email, notifications, messaging, calendar management', tools: ['send_file_to_mobile', 'get_calendar_events', 'manage_calendar'], skills: [], icon: '💬' },
   { id: 'research', name: 'research', description: 'Web research, search engines, browser fetching, news analysis', tools: ['search', 'browser_fetch', 'get_news', 'read_file', 'code_analyze', 'code_search'], skills: ['deep-research', 'source-verification'], icon: '🔍' },
   { id: 'system', name: 'system', description: 'PC control, processes, app management, system monitoring', tools: ['run_command', 'get_pc_status', 'get_system_status', 'get_active_processes', 'open_app', 'open_website', 'set_volume', 'control_media', 'press_key', 'type_text'], skills: [], icon: '⚙️' },
   { id: 'vision', name: 'vision', description: 'Screen analysis, image understanding, OCR, visual inspection', tools: ['analyze_screen', 'describe_image', 'read_screen_text', 'screenshot_save', 'capture_webcam'], skills: [], icon: '👁️' },

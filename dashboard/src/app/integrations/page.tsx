@@ -137,7 +137,7 @@ function IntegrationCard({ integration }: { integration: IntegrationHealth }) {
   const dotStatus = STATUS_DOT_STATUS[integration.status] || 'idle'
 
   return (
-      <GlassCard className="hover:shadow-neon-cyan-sm transition-all">
+      <GlassCard className="hover:shadow-premium transition-all">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <StatusDot status={dotStatus} pulse={integration.status === 'connected'} />

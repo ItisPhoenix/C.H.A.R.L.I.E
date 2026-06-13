@@ -33,6 +33,7 @@ class JarvisFeatures:
         """Save tracking items to config with file locking."""
         try:
             import msvcrt
+
             config_path = os.path.join(os.getcwd(), "charlie_config.json")
             lock_path = config_path + ".lock"
             with open(lock_path, "w") as lock_f:
@@ -58,21 +59,6 @@ class JarvisFeatures:
         now = datetime.now()
         sections = [f"☀️ *Good morning! — {now.strftime('%A, %B %d')}*\n"]
 
-        # Calendar events
-        try:
-            from charlie.intelligence.calendar_intel import CalendarIntel
-            cal = CalendarIntel()
-            if hasattr(cal, 'get_todays_events'):
-                events = cal.get_todays_events()
-                if events:
-                    sections.append("📅 *Today's calendar:*")
-                    for e in events[:5]:
-                        sections.append(f"  • {e}")
-                else:
-                    sections.append("📅 No calendar events today.")
-        except Exception:
-            sections.append("📅 Calendar unavailable.")
-
         # Active tasks
         sections.append("\n📋 *Active tasks:*")
         sections.append("  (Querying brain...)")
@@ -90,26 +76,7 @@ class JarvisFeatures:
         return "\n".join(sections)
 
     def generate_email_digest(self) -> str:
-        """Generate an email digest from Gmail integration."""
-        try:
-            from charlie.integrations.gmail import GmailIntegration
-            gmail = GmailIntegration()
-            if hasattr(gmail, 'get_recent_emails'):
-                emails = gmail.get_recent_emails(max_results=10)
-                if not emails:
-                    return "📧 No new emails."
-
-                sections = [f"📧 *Email Digest* ({len(emails)} new)\n"]
-                for email in emails[:7]:
-                    sender = email.get("from", "unknown")
-                    subject = email.get("subject", "no subject")
-                    snippet = email.get("snippet", "")[:60]
-                    sections.append(f"  • *{sender}*: {subject}")
-                    if snippet:
-                        sections.append(f"    {snippet}")
-                return "\n".join(sections)
-        except Exception as e:
-            logger.debug(f"email_digest_err | {e}")
+        """Email digest stub — Gmail integration was removed."""
         return "📧 Email digest unavailable."
 
     def generate_finance_update(self) -> str:
@@ -121,7 +88,9 @@ class JarvisFeatures:
                     cfg = json.load(f)
                 watchlist = cfg.get("telegram", {}).get("finance_watchlist", [])
                 if not watchlist:
-                    return "💰 No stocks/crypto in watchlist. Add some in charlie_config.json → telegram.finance_watchlist"
+                    return (
+                        "💰 No stocks/crypto in watchlist. Add some in charlie_config.json → telegram.finance_watchlist"
+                    )
 
                 sections = ["💰 *Financial Update*\n"]
                 for item in watchlist:
@@ -134,13 +103,15 @@ class JarvisFeatures:
     def add_tracking(self, item_type: str, query: str) -> str:
         """Add an item to track (package, flight, delivery)."""
         item_id = f"track_{int(time.time())}"
-        self.tracking_items.append({
-            "id": item_id,
-            "type": item_type,
-            "query": query,
-            "last_status": "pending",
-            "added_at": time.time(),
-        })
+        self.tracking_items.append(
+            {
+                "id": item_id,
+                "type": item_type,
+                "query": query,
+                "last_status": "pending",
+                "added_at": time.time(),
+            }
+        )
         self._save_tracking()
         return f"📦 Now tracking: {query} ({item_id})"
 
@@ -158,7 +129,9 @@ class JarvisFeatures:
         sections = [f"📦 *Tracking ({len(self.tracking_items)} items):*\n"]
         for item in self.tracking_items:
             age_days = int((time.time() - item.get("added_at", 0)) / 86400)
-            sections.append(f"  • [{item['type']}] {item['query']} — {item.get('last_status', 'unknown')} ({age_days}d ago)")
+            sections.append(
+                f"  • [{item['type']}] {item['query']} — {item.get('last_status', 'unknown')} ({age_days}d ago)"
+            )
         return "\n".join(sections)
 
     def check_tracking_updates(self) -> str | None:

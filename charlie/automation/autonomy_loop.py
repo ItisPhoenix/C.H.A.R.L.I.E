@@ -1,4 +1,5 @@
 """Autonomy Loop — background polling for proactive behavior."""
+
 from __future__ import annotations
 
 import logging
@@ -38,7 +39,8 @@ class AutonomyLoop:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._last_activity: float = time.time()
+        # Idle state is now read from brain.idle_watcher (charlie.perception.idle)
+        # so all subsystems share one source of truth.
 
         # Workspace directory watcher properties
         self.workspace_root = os.path.abspath(".")
@@ -72,13 +74,11 @@ class AutonomyLoop:
             return current_hour >= self.quiet_hours_start or current_hour < self.quiet_hours_end
         return self.quiet_hours_start <= current_hour < self.quiet_hours_end
 
-    def notify_activity(self):
-        """Call when user activity is detected (resets idle timer)."""
-        self._last_activity = time.time()
-
     def _poll_loop(self):
-        """Main background polling loop."""
+        """Main background polling loop with adaptive backoff."""
         last_world_check = 0.0
+        backoff = 1.0  # start at 1s, max at 30s
+        idle_rounds = 0
         # Initialize seen files baseline to prevent flooding on boot
         try:
             self._scan_workspace(init_baseline=True)
@@ -88,19 +88,26 @@ class AutonomyLoop:
         while not self._stop_event.is_set():
             try:
                 now = time.time()
-                # 1. Scan workspace files (every 5 seconds)
+                # 1. Scan workspace files (adaptive interval)
                 self._scan_workspace(init_baseline=False)
 
                 # 2. Check other state checks (every poll_interval seconds)
                 if now - last_world_check >= self.poll_interval:
                     last_world_check = now
                     if not self.is_quiet_hours():
+                        idle_rounds = 0
+                        backoff = 1.0
                         self._check_world_state()
                         self._check_proactive_tasks()
+                    else:
+                        # Quiet hours: use exponential backoff up to 30s
+                        idle_rounds += 1
+                        if idle_rounds > 3:
+                            backoff = min(backoff * 1.5, 30.0)
             except Exception as e:
                 logger.error(f"autonomy_poll_error | {e}")
 
-            self._stop_event.wait(5.0)
+            self._stop_event.wait(backoff)
 
     def _scan_workspace(self, init_baseline: bool = False):
         """Scan workspace folders, ignoring symlinks and enforcing 10s file stability debouncer."""
@@ -152,10 +159,7 @@ class AutonomyLoop:
             if not prev or prev[0] != size or prev[1] != mtime:
                 # Stage file for stability tracking
                 if path not in self.staged_files:
-                    self.staged_files[path] = {
-                        "last_size": size,
-                        "stable_since": time.time()
-                    }
+                    self.staged_files[path] = {"last_size": size, "stable_since": time.time()}
                 else:
                     st = self.staged_files[path]
                     if st["last_size"] != size:
@@ -185,29 +189,33 @@ class AutonomyLoop:
                 self.pending_exfiltrations[path] = {
                     "name": os.path.basename(path),
                     "size": size,
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
                 }
                 logger.warning(f"file_staged_for_approval | path={path}")
 
                 # Notify operator via PyQt status_q for click review
                 if self.brain and self.brain.status_q:
                     try:
-                        self.brain.status_q.put_nowait({
-                            "type": "WIDGET_SHOW",
-                            "content": {
-                                "widget": "exfiltration_request",
-                                "data": {
-                                    "file_path": path,
-                                    "file_name": os.path.basename(path),
-                                    "size_bytes": size
-                                }
+                        self.brain.status_q.put_nowait(
+                            {
+                                "type": "WIDGET_SHOW",
+                                "content": {
+                                    "widget": "exfiltration_request",
+                                    "data": {
+                                        "file_path": path,
+                                        "file_name": os.path.basename(path),
+                                        "size_bytes": size,
+                                    },
+                                },
                             }
-                        })
-                        self.brain.status_q.put_nowait({
-                            "type": "CHAT_MSG",
-                            "speaker": "CHARLIE",
-                            "content": f"Staged file '{os.path.basename(path)}' for exfiltration review."
-                        })
+                        )
+                        self.brain.status_q.put_nowait(
+                            {
+                                "type": "CHAT_MSG",
+                                "speaker": "CHARLIE",
+                                "content": f"Staged file '{os.path.basename(path)}' for exfiltration review.",
+                            }
+                        )
                     except Exception:
                         pass
 
@@ -218,21 +226,24 @@ class AutonomyLoop:
 
         # Check frustration level
         try:
-            if hasattr(self.brain, 'world') and self.brain.world:
-                frustration = getattr(self.brain.world, 'frustration_score', 0)
+            if hasattr(self.brain, "world") and self.brain.world:
+                frustration = getattr(self.brain.world, "frustration_score", 0)
                 if frustration > self.frustration_threshold:
                     logger.info(f"autonomy_frustration_detected | level={frustration}")
-                    se = getattr(self.brain, 'suggestion_engine', None)
+                    se = getattr(self.brain, "suggestion_engine", None)
                     if se:
                         se.trigger_now("error_recovery")
         except Exception as e:
             logger.debug(f"world_state_check_failed | {e}")
 
-        # Check idle state
-        idle_minutes = (time.time() - self._last_activity) / 60
+        # Check idle state (read from central IdleWatcher)
+        idle_watcher = getattr(self.brain, "idle_watcher", None)
+        if idle_watcher is None:
+            return
+        idle_minutes = idle_watcher.get_idle_duration() / 60
         if idle_minutes > self.idle_threshold_minutes:
             logger.info(f"autonomy_idle_detected | minutes={idle_minutes:.0f}")
-            se = getattr(self.brain, 'suggestion_engine', None)
+            se = getattr(self.brain, "suggestion_engine", None)
             if se:
                 se.trigger_now("idle_resume")
 
@@ -241,7 +252,7 @@ class AutonomyLoop:
         if not self.brain:
             return
 
-        tracker = getattr(self.brain, 'outcome_tracker', None)
+        tracker = getattr(self.brain, "outcome_tracker", None)
         if not tracker:
             return
 
@@ -249,10 +260,7 @@ class AutonomyLoop:
             recent = tracker.get_recent_outcomes(event_type="tool_call", limit=20)
             failures = [o for o in recent if o.outcome_type == "failure"]
             if len(failures) >= 5:
-                logger.warning(
-                    f"autonomy_high_failure_rate | "
-                    f"failures={len(failures)}/20 recent calls"
-                )
+                logger.warning(f"autonomy_high_failure_rate | failures={len(failures)}/20 recent calls")
         except Exception as e:
             logger.debug(f"proactive_task_check_failed | {e}")
 
@@ -266,10 +274,8 @@ class AutonomyLoop:
         logger.info(f"autonomy_processing | type={event.type} | source={event.source}")
 
         try:
-            if hasattr(self.brain, 'orchestrator'):
-                result = await self.brain.orchestrator.execute_goal(
-                    prompt, source="autonomy"
-                )
+            if hasattr(self.brain, "orchestrator"):
+                result = await self.brain.orchestrator.execute_goal(prompt, source="autonomy")
                 if result.success:
                     logger.info(f"autonomy_success | {result.summary[:100]}")
                     return result.summary

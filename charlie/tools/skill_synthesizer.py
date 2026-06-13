@@ -7,6 +7,7 @@ from charlie.tools.tool_decorator import tool, RiskTier
 from charlie.intelligence.skill_synthesizer import SkillSynthesizer
 from charlie.utils import queue_bridge
 
+
 @tool(
     name="synthesize_new_skill",
     description="Compile and stage a new custom Python skill/tool strictly to a .pending file for user inspection",
@@ -18,6 +19,7 @@ def synthesize_new_skill(skill_name: str, code: str) -> str:
     brain = queue_bridge.get_brain()
     synthesizer = SkillSynthesizer(brain=brain)
     return synthesizer.synthesize(skill_name, code)
+
 
 @tool(
     name="activate_pending_skill",
@@ -41,6 +43,7 @@ def activate_pending_skill(skill_name: str, approval_signature: str) -> str:
 def approve_file_exfiltration(file_path: str) -> str:
     """Approve and dispatch a staged document to mobile Telegram bridge."""
     import logging
+
     logger = logging.getLogger("charlie.tools.exfiltration")
 
     brain = queue_bridge.get_brain()
@@ -55,10 +58,7 @@ def approve_file_exfiltration(file_path: str) -> str:
 
     # Exfiltrate securely to Telegram
     if brain.telegram_q:
-        brain._safe_put(brain.telegram_q, {
-            "type": "FILE",
-            "content": file_path
-        })
+        brain._safe_put(brain.telegram_q, {"type": "FILE", "content": file_path})
         logger.warning(f"file_exfiltrated_successfully | path={file_path}")
         return f"Success: Staged file '{file_info['name']}' has been approved and dispatched to mobile, Sir!"
     return "Error: Telegram queue bridge is offline."

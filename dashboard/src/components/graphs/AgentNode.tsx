@@ -24,7 +24,7 @@ export function AgentNode({ data }: { data: AgentNodeData }) {
     <div
       className={cn(
         'glass-card p-3 min-w-[180px] max-w-[220px]',
-        data.status === 'running' && 'border-charlie-cyan/30 shadow-neon-cyan-sm',
+        data.status === 'running' && 'border-charlie-cyan/30 shadow-premium',
       )}
     >
       <Handle type="target" position={Position.Top} className="!bg-charlie-cyan !w-2 !h-2" />

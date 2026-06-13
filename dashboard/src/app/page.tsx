@@ -18,6 +18,53 @@ import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 function VoiceOrb() {
   const voice = useDashboardStore((s) => s.voiceActivity)
   const phase = useDashboardStore((s) => s.currentPhase)
+  const isMuted = voice?.muted ?? false
+
+  // On mount, fetch the current mute state from the backend so the orb
+  // reflects the real value even before the first VOICE_ACTIVITY event
+  // arrives (which can be a long time if the mic is muted — chicken-and-egg).
+  useEffect(() => {
+    let mounted = true
+    fetch('/api/audio/mute')
+      .then((r) => r.json())
+      .then((data) => {
+        if (mounted && data && typeof data.muted === 'boolean') {
+          const current = useDashboardStore.getState().voiceActivity
+          if (current) {
+            useDashboardStore.setState({
+              voiceActivity: { ...current, muted: data.muted },
+            })
+          } else {
+            useDashboardStore.setState({
+              voiceActivity: {
+                is_listening: false,
+                is_speaking: false,
+                stt_active: false,
+                tts_active: false,
+                wake_word_detected: false,
+                muted: data.muted,
+              },
+            })
+          }
+        }
+      })
+      .catch((err) => console.warn('initial mute fetch failed', err))
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  const toggleMute = useCallback(async () => {
+    try {
+      await fetch('/api/audio/mute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ muted: !isMuted }),
+      })
+    } catch (err) {
+      console.error('mute toggle failed', err)
+    }
+  }, [isMuted])
 
   const isListening = voice?.is_listening ?? false
   const isSpeaking = voice?.is_speaking ?? false
@@ -54,9 +101,13 @@ function VoiceOrb() {
 
   return (
     <div className="flex flex-col items-center justify-center py-8">
-      {/* Outer ring */}
-      <div
-        className="relative w-48 h-48 flex items-center justify-center"
+      {/* Outer ring — entire pulsing circle is the mute button */}
+      <button
+        type="button"
+        onClick={toggleMute}
+        title={isMuted ? 'Unmute (Ctrl+Shift+M)' : 'Mute (Ctrl+Shift+M)'}
+        aria-label={isMuted ? 'Unmute microphone' : 'Mute microphone'}
+        className="relative w-48 h-48 flex items-center justify-center bg-transparent border-0 p-0 cursor-pointer rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-charlie-cyan/60"
         style={{
           animation: `pulse ${pulseSpeed} ease-in-out infinite`,
         }}
@@ -87,15 +138,17 @@ function VoiceOrb() {
             boxShadow: `0 0 40px ${glowColor}, 0 0 80px ${glowColor}`,
           }}
         >
-          {isListening ? (
+          {isMuted ? (
+            <MicOff size={32} className="text-charlie-dim drop-shadow-lg" />
+          ) : isListening ? (
             <Mic size={32} className="text-charlie-text drop-shadow-lg" />
           ) : isSpeaking ? (
             <Activity size={32} className="text-charlie-text drop-shadow-lg" />
           ) : (
-            <MicOff size={32} className="text-charlie-dim" />
+            <Mic size={32} className="text-charlie-dim" />
           )}
         </div>
-      </div>
+      </button>
 
       {/* State label */}
       <div className="mt-4 flex items-center gap-2">
@@ -104,7 +157,7 @@ function VoiceOrb() {
           pulse={isListening || isSpeaking || isProcessing}
         />
         <span className="font-display text-sm tracking-[0.15em] uppercase" style={{ color: orbColorVar }}>
-          {label}
+          {isMuted ? 'Muted' : label}
         </span>
       </div>
     </div>
@@ -178,8 +231,20 @@ function KeyMetrics() {
   const phase = useDashboardStore((s) => s.currentPhase)
   const [currentTask, setCurrentTask] = useState<Task | null>(null)
   const [recentTools, setRecentTools] = useState<ToolExecution[]>([])
+  // True while a loadMetrics fetch is in flight; prevents the 5s interval
+  // (and concurrent re-renders) from stacking more RPC calls on top of
+  // a slow Brain response.
+  const loadMetricsRef = useRef(false)
 
   const loadMetrics = useCallback(async () => {
+    // In-flight guard: if a previous loadMetrics is still pending when
+    // the 5s interval fires (or when multiple tabs call this concurrently
+    // over the same WebSocket/render tree), drop the new call instead of
+    // piling on the cross-process Brain RPC. Without this, dashboard
+    // back-pressure on brain_req_q can wedge the Brain's heartbeat and
+    // Phoenix will restart the whole subsystem tree.
+    if (loadMetricsRef.current) return
+    loadMetricsRef.current = true
     try {
       const [tasksData, toolsData, statusData] = await Promise.all([fetchTasks(), fetchToolLog(), fetchStatus()])
       const active = (tasksData.tasks || []).find((t) => t.status === 'running' || t.status === 'pending')
@@ -194,6 +259,8 @@ function KeyMetrics() {
       }
     } catch (e) {
       console.error('Failed to load metrics:', e)
+    } finally {
+      loadMetricsRef.current = false
     }
   }, [setDaemonStatus])
 

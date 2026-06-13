@@ -3,6 +3,7 @@
 import { useEffect } from 'react'
 import { wsManager } from '@/lib/ws'
 import { useDashboardStore } from '@/lib/store'
+import type { VoiceActivity } from '@/lib/types'
 import { checkBrainStatus } from '@/lib/api'
 import { addToast } from '@/components/notifications/ToastContainer'
 
@@ -50,15 +51,21 @@ export function WSBridge() {
     })
 
     const unsubVoice = wsManager.subscribe('voice_activity', (data) => {
-      setVoiceActivity({
-        is_listening: data.is_listening as boolean ?? false,
-        is_speaking: data.is_speaking as boolean ?? false,
-        stt_active: data.stt_active as boolean ?? false,
-        tts_active: data.tts_active as boolean ?? false,
-        wake_word_detected: data.wake_word_detected as boolean ?? false,
-        current_transcript: data.current_transcript as string | undefined,
-        volume_level: data.volume_level as number | undefined,
-      })
+      // Merge with current state. Backend may emit partial events (e.g. only
+      // is_listening) — preserve fields the incoming event omits. Matches the
+      // sticky-muted behavior at charlie/watchdog/ipc_bridge.py.
+      const current = useDashboardStore.getState().voiceActivity
+      const merged: VoiceActivity = {
+        is_listening: typeof data.is_listening === 'boolean' ? data.is_listening : current?.is_listening ?? false,
+        is_speaking: typeof data.is_speaking === 'boolean' ? data.is_speaking : current?.is_speaking ?? false,
+        stt_active: typeof data.stt_active === 'boolean' ? data.stt_active : current?.stt_active ?? false,
+        tts_active: typeof data.tts_active === 'boolean' ? data.tts_active : current?.tts_active ?? false,
+        wake_word_detected: typeof data.wake_word_detected === 'boolean' ? data.wake_word_detected : current?.wake_word_detected ?? false,
+        current_transcript: typeof data.current_transcript === 'string' ? data.current_transcript : current?.current_transcript,
+        volume_level: typeof data.volume_level === 'number' ? data.volume_level : current?.volume_level,
+        muted: typeof data.muted === 'boolean' ? data.muted : current?.muted ?? false,
+      }
+      setVoiceActivity(merged)
     })
 
     const unsubPhoenixAlert = wsManager.subscribe('subsystem_failure', (data) => {

@@ -324,7 +324,7 @@ function VoiceMicButton({ onTranscript, onInterim }: { onTranscript?: (text: str
       className={cn(
         'relative w-10 h-10 rounded-full flex items-center justify-center transition-all flex-shrink-0 cursor-pointer',
         isRecording
-          ? 'bg-charlie-cyan/25 shadow-neon-cyan'
+          ? 'bg-charlie-cyan/25 shadow-premium'
           : isCharlieSpeaking
             ? 'bg-charlie-amber/20 border border-charlie-amber/40'
             : 'bg-charlie-card border border-charlie-border hover:border-charlie-cyan/30',
@@ -408,7 +408,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         className={cn(
           'max-w-[75%] rounded-lg px-3 py-2 text-sm transition-all',
           isUser
-            ? 'bg-charlie-cyan/15 text-charlie-text border border-charlie-cyan/25 shadow-neon-cyan-sm'
+            ? 'bg-charlie-cyan/15 text-charlie-text border border-charlie-cyan/25 shadow-premium'
             : 'bg-charlie-card text-charlie-text border border-charlie-border',
         )}
       >
@@ -643,7 +643,7 @@ export default function ChatPage() {
                 disabled={sending || hasInterim}
                 aria-label="Chat message input"
                 className={cn(
-                  'flex-1 bg-charlie-card border rounded-lg px-4 py-2 text-sm text-charlie-text placeholder-charlie-dim focus:outline-none focus:shadow-neon-cyan-sm transition-all disabled:opacity-50 font-body',
+                  'flex-1 bg-charlie-card border rounded-lg px-4 py-2 text-sm text-charlie-text placeholder-charlie-dim focus:outline-none focus:shadow-premium transition-all disabled:opacity-50 font-body',
                   hasInterim
                     ? 'border-charlie-cyan/40 bg-charlie-cyan/5'
                     : 'border-charlie-border focus:border-charlie-cyan/50',

@@ -103,9 +103,7 @@ class SkillLoader:
 
         metadata = data.get("metadata", {})
         if not isinstance(metadata, dict):
-            logger.warning(
-                "manifest_metadata_not_dict | path=%s — defaulting to {}", folder
-            )
+            logger.warning("manifest_metadata_not_dict | path=%s — defaulting to {}", folder)
             metadata = {}
 
         spec = SkillSpec(
@@ -136,9 +134,7 @@ class SkillLoader:
         required = ("name", "description", "content_files")
         missing = [f for f in required if f not in data]
         if missing:
-            logger.warning(
-                "manifest_missing_fields | path=%s missing=%s", path, missing
-            )
+            logger.warning("manifest_missing_fields | path=%s missing=%s", path, missing)
             return False
 
         # Type checks
@@ -162,9 +158,7 @@ class SkillLoader:
         for filename in content_files:
             filepath = folder / filename
             if not filepath.is_file():
-                logger.warning(
-                    "content_file_missing | skill=%s file=%s", folder.name, filename
-                )
+                logger.warning("content_file_missing | skill=%s file=%s", folder.name, filename)
                 continue
             try:
                 text = filepath.read_text(encoding="utf-8").strip()

@@ -6,8 +6,10 @@ Dashboard is the sole interface.
 """
 
 import asyncio
+import logging as _logging
 import threading
 import time
+from queue import Queue
 
 from charlie.watchdog.phoenix import PhoenixSupervisor, logger
 
@@ -20,16 +22,99 @@ class DaemonSupervisor(PhoenixSupervisor):
         self._control_server = None
         self._ipc_bridge = None
         self._start_time = time.time()
+        # Bounded buffer for live log entries. The DashboardLogHandler
+        # pushes onto this queue; the IPCBridge drains it in a dedicated
+        # thread and forwards entries to the dashboard WebSocket. Sized
+        # for ~10s of INFO traffic at chat rate before backpressure kicks
+        # in — anything beyond is dropped (counted on the handler).
+        self.log_q: Queue = Queue(maxsize=500)
+        # Reference is held so we can read dropped_count from the WS/REST
+        # endpoints later. Stays alive for the lifetime of the daemon.
+        self._log_handler = None
+        self._install_dashboard_log_handler()
+
+    def _install_dashboard_log_handler(self) -> None:
+        """Install the DashboardLogHandler on the root logger.
+
+        Idempotent: re-installing a daemon is rare but possible after a
+        reboot, so we detach any previous instance first.
+        """
+        try:
+            from charlie.watchdog.log_broadcaster import DashboardLogHandler
+        except Exception as e:  # pragma: no cover — defensive only
+            logger.warning("log_broadcaster_import_failed | %s", e)
+            return
+
+        handler = DashboardLogHandler(self.log_q, level=_logging.INFO)
+        handler.setFormatter(_logging.Formatter("%(message)s"))
+
+        root_logger = _logging.getLogger()
+        if self._log_handler is not None:
+            try:
+                root_logger.removeHandler(self._log_handler)
+            except Exception:
+                pass
+        root_logger.addHandler(handler)
+        self._log_handler = handler
+        logger.info("dashboard_log_handler_installed")
+
+    def _start_mcp_gateway(self):
+        """Start MCP gateway via docker-compose."""
+        import os
+        import secrets
+        import subprocess
+
+        # Generate token if not set
+        if not os.environ.get("MCP_GATEWAY_TOKEN"):
+            os.environ["MCP_GATEWAY_TOKEN"] = secrets.token_urlsafe(32)
+
+        try:
+            proc = subprocess.Popen(
+                ["docker-compose", "up", "-d", "mcp-gateway"],
+                cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._mcp_gateway_proc = proc
+            logger.info("mcp_gateway_started | pid=%d", proc.pid)
+        except FileNotFoundError:
+            logger.warning("mcp_gateway_skipped | docker-compose not found")
+            self._mcp_gateway_proc = None
+        except Exception as e:
+            logger.error("mcp_gateway_failed | %s", e)
+            self._mcp_gateway_proc = None
+
+    def _start_playwright_mcp(self):
+        """Start Playwright MCP server for browser automation."""
+        import subprocess
+        import os
+
+        npx_cmd = "npx.cmd" if os.name == "nt" else "npx"
+        try:
+            proc = subprocess.Popen(
+                [npx_cmd, "@playwright/mcp@latest", "--port", "8081"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._playwright_mcp_proc = proc
+            logger.info("playwright_mcp_started | pid=%d", proc.pid)
+        except FileNotFoundError:
+            logger.warning("playwright_mcp_skipped | npx not found")
+            self._playwright_mcp_proc = None
+        except Exception as e:
+            logger.error("playwright_mcp_failed | %s", e)
+            self._playwright_mcp_proc = None
 
     def start(self):
-        """Start all processes."""
+        """Start processes."""
         logger.info("daemon_supervisor_ignited")
 
-        self.start_process("Audio", self._run_audio_safe)
         self.start_process("Brain", self._run_brain_safe)
         self.start_process("Browser", self._run_browser_safe)
-        self.start_process("Telegram", self._run_telegram_safe)
-        self.start_process("Vision", self._run_vision_safe)
+        # Start MCP gateway
+        self._start_mcp_gateway()
+        # Start Playwright MCP for browser automation
+        self._start_playwright_mcp()
 
         # Start control server if available
         self._start_control_server()
@@ -49,10 +134,9 @@ class DaemonSupervisor(PhoenixSupervisor):
         """Start the HTTP/WS control server and IPC bridge in background threads."""
         try:
             from charlie.watchdog.control_server import ControlServer
+
             self._control_server = ControlServer(daemon=self)
-            thread = threading.Thread(
-                target=self._control_server.start, daemon=True, name="ControlServer"
-            )
+            thread = threading.Thread(target=self._control_server.start, daemon=True, name="ControlServer")
             thread.start()
             logger.info("control_server_started")
         except ImportError:
@@ -63,10 +147,12 @@ class DaemonSupervisor(PhoenixSupervisor):
         # Start IPC bridge (status_q → WS)
         try:
             from charlie.watchdog.ipc_bridge import IPCBridge
+
             self._ipc_bridge = IPCBridge(
                 status_q=self.status_q,
                 brain_task_q=self.brain_task_q,
                 control_server=self._control_server,
+                log_q=self.log_q,
             )
             self._ipc_bridge.start()
             logger.info("ipc_bridge_started")
@@ -97,6 +183,15 @@ class DaemonSupervisor(PhoenixSupervisor):
         except Exception as e:
             logger.error("ipc_bridge_teardown_failed", error=str(e))
 
+        # Detach the dashboard log handler so the root logger does not
+        # retain a queue that the IPCBridge thread is no longer draining.
+        try:
+            handler = getattr(self, "_log_handler", None)
+            if handler is not None:
+                _logging.getLogger().removeHandler(handler)
+        except Exception as e:
+            logger.error("log_handler_detach_failed | %s", e)
+
         # Stop the Control_Server (async coroutine on its own loop/thread).
         try:
             cs = getattr(self, "_control_server", None)
@@ -121,10 +216,39 @@ class DaemonSupervisor(PhoenixSupervisor):
         except Exception as e:
             logger.error("control_server_teardown_failed", error=str(e))
 
+        # Stop MCP gateway container
+        try:
+            import subprocess
+            import os
+
+            proc = getattr(self, "_mcp_gateway_proc", None)
+            if proc is not None:
+                subprocess.run(
+                    ["docker-compose", "down"],
+                    cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15,
+                )
+                logger.info("mcp_gateway_stopped_on_teardown")
+        except Exception as e:
+            logger.error("mcp_gateway_teardown_failed | %s", e)
+
+        # Stop Playwright MCP server
+        try:
+            proc = getattr(self, "_playwright_mcp_proc", None)
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=5)
+                logger.info("playwright_mcp_stopped_on_teardown")
+        except Exception as e:
+            logger.error("playwright_mcp_teardown_failed | %s", e)
+
     def _start_tray(self):
         """Start system tray icon in a background thread."""
         try:
             from charlie.watchdog.tray import TrayIcon
+
             self._tray = TrayIcon(daemon=self)
             self._tray.start()
             logger.info("tray_icon_started")
@@ -169,42 +293,46 @@ class DaemonSupervisor(PhoenixSupervisor):
             },
         }
 
-    # ── Safe entry points that handle pythoncom ──
+    # ── Safe entry points ──
 
     @staticmethod
-    def _run_audio_safe(audio_q, brain_task_q, tts_q, status_q, audio_cmd_q,
-                        heartbeat, interrupt_event):
+    def _run_brain_safe(
+        brain_task_q,
+        tts_q,
+        status_q,
+        audio_cmd_q,
+        browser_req_q,
+        browser_res_q,
+        telegram_q,
+        heartbeat,
+        interrupt_event,
+        reboot_event,
+        brain_req_q=None,
+        brain_res_q=None,
+    ):
         from dotenv import load_dotenv
+
         load_dotenv(override=True)
         from charlie.config import ensure_initialized
-        ensure_initialized()
 
-        import pythoncom
-        from charlie.audio_proc import AudioEngine
-        pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
-        engine = AudioEngine(brain_task_q, tts_q, status_q, audio_cmd_q,
-                             heartbeat, interrupt_event)
-        engine.run()
-
-    @staticmethod
-    def _run_brain_safe(brain_task_q, tts_q, status_q, audio_cmd_q,
-                        browser_req_q, browser_res_q, telegram_q, heartbeat,
-                        interrupt_event, reboot_event, brain_req_q=None,
-                        brain_res_q=None):
-        from dotenv import load_dotenv
-        load_dotenv(override=True)
-        from charlie.config import ensure_initialized
         ensure_initialized()
 
         import pythoncom
         from charlie.brain.core import Brain
+
         pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
         brain = Brain(
-            brain_task_q=brain_task_q, tts_q=tts_q, status_q=status_q,
-            audio_cmd_q=audio_cmd_q, browser_req_q=browser_req_q,
-            browser_res_q=browser_res_q, telegram_q=telegram_q,
-            heartbeat=heartbeat, interrupt_event=interrupt_event,
-            reboot_event=reboot_event, brain_req_q=brain_req_q,
+            brain_task_q=brain_task_q,
+            tts_q=tts_q,
+            status_q=status_q,
+            audio_cmd_q=audio_cmd_q,
+            browser_req_q=browser_req_q,
+            browser_res_q=browser_res_q,
+            telegram_q=telegram_q,
+            heartbeat=heartbeat,
+            interrupt_event=interrupt_event,
+            reboot_event=reboot_event,
+            brain_req_q=brain_req_q,
             brain_res_q=brain_res_q,
         )
         brain.run()
@@ -212,42 +340,13 @@ class DaemonSupervisor(PhoenixSupervisor):
     @staticmethod
     def _run_browser_safe(browser_req_q, browser_res_q, status_q, heartbeat):
         from dotenv import load_dotenv
+
         load_dotenv(override=True)
         from charlie.config import ensure_initialized
+
         ensure_initialized()
 
         from charlie.browser.headless_browser import HeadlessBrowserProcess
-        proc = HeadlessBrowserProcess(browser_req_q, browser_res_q, heartbeat,
-                                      status_q=status_q)
+
+        proc = HeadlessBrowserProcess(browser_req_q, browser_res_q, heartbeat, status_q=status_q)
         proc.run()
-
-    @staticmethod
-    def _run_telegram_safe(brain_task_q, status_q, telegram_q, audio_cmd_q,
-                           heartbeat):
-        from dotenv import load_dotenv
-        load_dotenv(override=True)
-        from charlie.config import ensure_initialized
-        ensure_initialized()
-
-        import pythoncom
-        from charlie.telegram.bridge import run_bridge
-        pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
-        run_bridge(brain_task_q, status_q, telegram_q, audio_cmd_q, heartbeat)
-
-    @staticmethod
-    def _run_vision_safe(brain_task_q, status_q, heartbeat):
-        from dotenv import load_dotenv
-        load_dotenv(override=True)
-        from charlie.config import ensure_initialized
-        ensure_initialized()
-
-        import os
-        from charlie.vision.activity_sentinel import ActivitySentinel
-        if os.name == 'nt':
-            try:
-                null_fd = os.open('NUL', os.O_WRONLY)
-                os.dup2(null_fd, 2)
-            except Exception:
-                pass
-        sentinel = ActivitySentinel(brain_task_q, status_q, heartbeat)
-        sentinel.run()

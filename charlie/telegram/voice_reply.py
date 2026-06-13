@@ -67,16 +67,19 @@ def _generate_kokoro_tts(text: str) -> str | None:
 
         # Load Kokoro ONNX model (same as audio pipeline)
         from kokoro_onnx import Kokoro
+
         kokoro_model = os.getenv("KOKORO_MODEL_PATH", "charlie/models/kokoro-v1.0.onnx")
         kokoro_voices = os.getenv("KOKORO_VOICES_PATH", "charlie/models/voices-v1.0.bin")
 
         # Try GPU first, fall back to CPU
         try:
             import onnxruntime as ort
+
             opts = ort.SessionOptions()
             opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
             sess = ort.InferenceSession(
-                kokoro_model, opts,
+                kokoro_model,
+                opts,
                 providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
             )
             engine = Kokoro.from_session(sess, kokoro_voices)
@@ -89,6 +92,7 @@ def _generate_kokoro_tts(text: str) -> str | None:
         # Write WAV
         import numpy as np
         import soundfile as sf
+
         audio = np.array(samples, dtype=np.float32)
         wav_path = os.path.join(tempfile.gettempdir(), f"charlie_tts_{int(time.time())}.wav")
         sf.write(wav_path, audio, sr)
@@ -110,12 +114,18 @@ def _convert_to_ogg(wav_path: str) -> str | None:
     try:
         result = subprocess.run(
             [
-                "ffmpeg", "-y",
-                "-i", wav_path,
-                "-c:a", "libopus",
-                "-b:a", "64k",
-                "-vbr", "on",
-                "-application", "voip",
+                "ffmpeg",
+                "-y",
+                "-i",
+                wav_path,
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "64k",
+                "-vbr",
+                "on",
+                "-application",
+                "voip",
                 ogg_path,
             ],
             capture_output=True,

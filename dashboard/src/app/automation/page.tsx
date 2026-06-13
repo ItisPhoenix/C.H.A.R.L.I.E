@@ -285,7 +285,7 @@ export default function AutomationPage() {
             const isOpen = expanded.has(rule.name)
 
             return (
-                <GlassCard key={rule.name} className="!p-0 hover:shadow-neon-cyan-sm transition-all">
+                <GlassCard key={rule.name} className="!p-0 hover:shadow-premium transition-all">
                   <div className="p-4">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">

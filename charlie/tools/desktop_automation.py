@@ -6,15 +6,19 @@ Desktop automation tools for mouse, keyboard, and window control.
 
 import logging
 
-import pyautogui
+try:
+    import pyautogui
+except ImportError:
+    pyautogui = None
 
 from charlie.tools.tool_decorator import tool, RiskTier
 
 logger = logging.getLogger("charlie.tools.desktop")
-
-# Safety: pyautogui failsafe (move mouse to corner to abort)
-pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0.05
+if pyautogui is None:
+    logger.warning("pyautogui not installed — desktop automation tools will return errors")
+else:
+    pyautogui.FAILSAFE = True
+    pyautogui.PAUSE = 0.05
 
 
 @tool(
@@ -102,6 +106,7 @@ def keyboard_press(key: str) -> str:
 def window_focus(title: str) -> str:
     """Focus a window by partial title match."""
     import pygetwindow as gw
+
     windows = gw.getWindowsWithTitle(title)
     if not windows:
         return f"No window found matching '{title}'"
@@ -121,6 +126,7 @@ def window_focus(title: str) -> str:
 def window_resize(title: str, width: int, height: int) -> str:
     """Resize a window to the given dimensions."""
     import pygetwindow as gw
+
     windows = gw.getWindowsWithTitle(title)
     if not windows:
         return f"No window found matching '{title}'"
@@ -138,6 +144,7 @@ def window_resize(title: str, width: int, height: int) -> str:
 def window_minimize(title: str) -> str:
     """Minimize a window."""
     import pygetwindow as gw
+
     windows = gw.getWindowsWithTitle(title)
     if not windows:
         return f"No window found matching '{title}'"
@@ -155,6 +162,7 @@ def window_minimize(title: str) -> str:
 def window_close(title: str) -> str:
     """Close a window."""
     import pygetwindow as gw
+
     windows = gw.getWindowsWithTitle(title)
     if not windows:
         return f"No window found matching '{title}'"

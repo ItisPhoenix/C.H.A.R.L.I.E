@@ -4,7 +4,6 @@ Agent Runtime -- Executes a single agent's task with independent LLM context.
 Agent Runtime
 
 This module provides:
-- AgentResult dataclass for structured execution results
 - AgentTaskContext for progress reporting and cancellation
 - AgentRuntime: ReAct loop executor that runs an agent's task with its own
   system prompt and tool subset, independent of the main Brain conversation.
@@ -15,11 +14,12 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass, field
 from typing import Any
 
 from charlie.brain.tool_call_parser import ToolCallParser
 from charlie.utils.logger import get_logger
+
+from charlie.brain.agent import AgentResult
 
 logger = get_logger(__name__)
 
@@ -27,19 +27,6 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class AgentResult:
-    """Result of an agent's task execution."""
-
-    success: bool
-    task: str
-    agent_name: str
-    summary: str = ""
-    tool_calls: list[dict] = field(default_factory=list)
-    duration_seconds: float = 0.0
-    error: str | None = None
 
 
 class AgentTaskContext:
@@ -65,8 +52,9 @@ class AgentTaskContext:
 class AgentRuntime:
     """Executes a single agent's task with independent LLM context."""
 
-    def __init__(self, brain: Any):
+    def __init__(self, brain: Any, tool_registry=None):
         self.brain = brain
+        self.tool_registry = tool_registry
         self._parser = ToolCallParser()
 
     # ------------------------------------------------------------------
@@ -74,7 +62,10 @@ class AgentRuntime:
     # ------------------------------------------------------------------
 
     async def execute(
-        self, agent_spec: Any, task: str, context: str = "",
+        self,
+        agent_spec: Any,
+        task: str,
+        context: str = "",
         task_chain: list = None,
     ) -> AgentResult:
         """Execute a task using the agent's spec.
@@ -91,19 +82,17 @@ class AgentRuntime:
 
         return await self._run_react_loop(agent_spec, task, context)
 
-    async def _execute_chain(
-        self, agent_spec: Any, goal: str, task_chain: list, context: str = ""
-    ) -> AgentResult:
+    async def _execute_chain(self, agent_spec: Any, goal: str, task_chain: list, context: str = "") -> AgentResult:
         """Execute a chain of sub-tasks sequentially, feeding results forward."""
-        start_time = time.time()
         agent_name = getattr(agent_spec, "name", "unknown")
         all_tool_calls = []
         step_results = []
 
         for i, step in enumerate(task_chain):
-            step_desc = step.get("description", step.get("tool", f"step {i+1}"))
-            logger.info("chain_step | agent=%s | step=%d/%d | desc=%s",
-                        agent_name, i+1, len(task_chain), step_desc[:60])
+            step_desc = step.get("description", step.get("tool", f"step {i + 1}"))
+            logger.info(
+                "chain_step | agent=%s | step=%d/%d | desc=%s", agent_name, i + 1, len(task_chain), step_desc[:60]
+            )
 
             # Feed previous results into context
             prev_context = "\n".join(step_results[-3:]) if step_results else ""
@@ -114,7 +103,7 @@ class AgentRuntime:
             step_results.append(result.summary)
 
             if not result.success:
-                logger.warning("chain_step_failed | step=%d | agent=%s", i+1, agent_name)
+                logger.warning("chain_step_failed | step=%d | agent=%s", i + 1, agent_name)
 
         return AgentResult(
             success=True,
@@ -124,9 +113,7 @@ class AgentRuntime:
             tool_calls=all_tool_calls,
         )
 
-    async def _run_react_loop(
-        self, agent_spec: Any, task: str, context: str = ""
-    ) -> AgentResult:
+    async def _run_react_loop(self, agent_spec: Any, task: str, context: str = "") -> AgentResult:
         """Single ReAct loop execution."""
         start_time = time.time()
         agent_name = getattr(agent_spec, "name", "unknown")
@@ -134,9 +121,7 @@ class AgentRuntime:
 
         ctx = AgentTaskContext(task_id=task_id, agent_name=agent_name)
 
-        logger.info(
-            f"agent_runtime_start | agent={agent_name} | task='{task[:60]}...'"
-        )
+        logger.info(f"agent_runtime_start | agent={agent_name} | task='{task[:60]}...'")
 
         # Build messages
         system_prompt = self._build_system_prompt(agent_spec, context)
@@ -149,7 +134,7 @@ class AgentRuntime:
         tools = list(getattr(agent_spec, "tools", []))
 
         try:
-            result = await self._run_react_loop(messages, tools, agent_spec, ctx)
+            result = await self._run_react_loop_inner(messages, tools, agent_spec, ctx)
             result.duration_seconds = time.time() - start_time
             logger.info(
                 f"agent_runtime_done | agent={agent_name} | "
@@ -160,9 +145,7 @@ class AgentRuntime:
 
         except Exception as e:
             duration = time.time() - start_time
-            logger.error(
-                f"agent_runtime_crash | agent={agent_name} | error={e}"
-            )
+            logger.error(f"agent_runtime_crash | agent={agent_name} | error={e}")
             return AgentResult(
                 success=False,
                 task=task,
@@ -176,7 +159,7 @@ class AgentRuntime:
     # ReAct loop
     # ------------------------------------------------------------------
 
-    async def _run_react_loop(
+    async def _run_react_loop_inner(
         self,
         messages: list,
         tools: list[str],
@@ -191,8 +174,15 @@ class AgentRuntime:
         times out, or is cancelled.
         """
         config = getattr(agent_spec, "config", {}) or {}
-        max_iterations = config.get("max_chain_depth", 8)
-        timeout = config.get("timeout_seconds", 120)
+        # Coerce JSON config values to correct types (agent.json stores everything as strings)
+        try:
+            max_iterations = int(config.get("max_chain_depth", 8))
+        except (ValueError, TypeError):
+            max_iterations = 8
+        try:
+            timeout = int(config.get("timeout_seconds", 120))
+        except (ValueError, TypeError):
+            timeout = 120
         tool_calls_made: list[dict] = []
         start_time = time.time()
 
@@ -211,9 +201,7 @@ class AgentRuntime:
             # Timeout check
             elapsed = time.time() - start_time
             if elapsed > timeout:
-                logger.warning(
-                    f"agent_timeout | agent={ctx.agent_name} | elapsed={elapsed:.1f}s"
-                )
+                logger.warning(f"agent_timeout | agent={ctx.agent_name} | elapsed={elapsed:.1f}s")
                 return AgentResult(
                     success=False,
                     task=ctx.task_id,
@@ -226,18 +214,28 @@ class AgentRuntime:
             elapsed = time.time() - start_time
             if elapsed > step_timeout:
                 logger.warning(f"agent_step_timeout | agent={ctx.agent_name}")
-                return AgentResult(success=False, task=ctx.task_id, agent_name=ctx.agent_name, summary="Step timeout", tool_calls=tool_calls_made)
+                return AgentResult(
+                    success=False,
+                    task=ctx.task_id,
+                    agent_name=ctx.agent_name,
+                    summary="Step timeout",
+                    tool_calls=tool_calls_made,
+                )
 
             # Per-step timeout check
             elapsed = time.time() - start_time
             if iteration > 0 and elapsed > 60:
                 logger.warning(f"agent_step_timeout | agent={ctx.agent_name} | elapsed={elapsed:.1f}s")
-                return AgentResult(success=False, task=ctx.task_id, agent_name=ctx.agent_name, summary="Step timeout", tool_calls=tool_calls_made)
+                return AgentResult(
+                    success=False,
+                    task=ctx.task_id,
+                    agent_name=ctx.agent_name,
+                    summary="Step timeout",
+                    tool_calls=tool_calls_made,
+                )
 
             # Call LLM
-            logger.debug(
-                f"agent_react_iter | agent={ctx.agent_name} | iter={iteration + 1}/{max_iterations}"
-            )
+            logger.debug(f"agent_react_iter | agent={ctx.agent_name} | iter={iteration + 1}/{max_iterations}")
             response = await self._call_llm(messages, tools)
             if not response:
                 return AgentResult(
@@ -272,9 +270,7 @@ class AgentRuntime:
                 tool_name = tc.get("tool", "")
                 tool_args = tc.get("args", {})
 
-                logger.info(
-                    f"agent_tool_call | agent={ctx.agent_name} | tool={tool_name}"
-                )
+                logger.info(f"agent_tool_call | agent={ctx.agent_name} | tool={tool_name}")
                 result = await self._execute_tool(tc, tools)
 
                 tool_calls_made.append(
@@ -286,14 +282,10 @@ class AgentRuntime:
                 )
 
                 # Feed observation back into the conversation
-                messages.append(
-                    {"role": "user", "content": f"OBSERVATION: {result}"}
-                )
+                messages.append({"role": "user", "content": f"OBSERVATION: {result}"})
 
         # Max iterations reached
-        logger.warning(
-            f"agent_max_iterations | agent={ctx.agent_name} | iters={max_iterations}"
-        )
+        logger.warning(f"agent_max_iterations | agent={ctx.agent_name} | iters={max_iterations}")
         return AgentResult(
             success=True,
             task=ctx.task_id,
@@ -301,7 +293,6 @@ class AgentRuntime:
             summary="Max iterations reached",
             tool_calls=tool_calls_made,
         )
-
     # ------------------------------------------------------------------
     # LLM interaction
     # ------------------------------------------------------------------
@@ -315,9 +306,7 @@ class AgentRuntime:
         try:
             llm_client = getattr(self.brain, "llm_client", None)
             if llm_client is not None:
-                response = await llm_client.complete(
-                    messages, temperature=0.3, max_tokens=1024
-                )
+                response = await llm_client.complete(messages, temperature=0.3, max_tokens=1024)
                 # LLMResponse has .content attribute
                 content = getattr(response, "content", None)
                 if content:
@@ -326,9 +315,7 @@ class AgentRuntime:
             # Fallback: model_manager.nim_chat()
             model_manager = getattr(self.brain, "model_manager", None)
             if model_manager is not None:
-                raw = await model_manager.nim_chat(
-                    messages, temperature=0.3, max_tokens=1024
-                )
+                raw = await model_manager.nim_chat(messages, temperature=0.3, max_tokens=1024)
                 if isinstance(raw, dict):
                     choices = raw.get("choices", [])
                     if choices:
@@ -394,7 +381,9 @@ class AgentRuntime:
     # ------------------------------------------------------------------
 
     async def _execute_tool(
-        self, tool_call: dict, allowed_tools: list[str],
+        self,
+        tool_call: dict,
+        allowed_tools: list[str],
         retries: int = 2,
     ) -> str:
         """Execute a single tool call via brain.execute_tools().
@@ -411,17 +400,15 @@ class AgentRuntime:
         last_error = ""
         for attempt in range(retries + 1):
             try:
-                result = self.brain.execute_tools(
-                    {"tool": tool_name, "args": tool_call.get("args", {})}
-                )
+                result = self.brain.execute_tools({"tool": tool_name, "args": tool_call.get("args", {})})
                 return str(result)
             except Exception as e:
                 last_error = str(e)
                 if attempt < retries:
-                    logger.warning(f"agent_tool_retry | tool={tool_name} | attempt={attempt+1}/{retries} | {e}")
+                    logger.warning(f"agent_tool_retry | tool={tool_name} | attempt={attempt + 1}/{retries} | {e}")
                     __import__("time").sleep(0.5 * (attempt + 1))
         logger.error(f"agent_tool_error | tool={tool_name} | {last_error}")
-        return f"Error after {retries+1} attempts: {last_error}"
+        return f"Error after {retries + 1} attempts: {last_error}"
 
     # ------------------------------------------------------------------
     # Helpers

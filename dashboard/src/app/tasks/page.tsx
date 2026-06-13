@@ -167,7 +167,7 @@ function TaskCard({ task, cancelling, expanded, onToggle, onCancel }: TaskCardPr
   const hasDetail = !!(task.result || task.error)
 
   return (
-      <GlassCard className="hover:shadow-neon-cyan-sm transition-all !p-0 overflow-hidden">
+      <GlassCard className="hover:shadow-premium transition-all !p-0 overflow-hidden">
         <div
           className={cn('p-4', hasDetail && 'cursor-pointer')}
           onClick={hasDetail ? onToggle : undefined}

@@ -164,12 +164,8 @@ def analyze_recent_performance() -> dict:
         "repetition_ratio": repetition_ratio,
         "diversity_score": min(1.0, unique_responses / max(total_responses, 1)),
         "suggested_improvements": [
-            "Increase response variation"
-            if repetition_ratio > 0.3
-            else "Response diversity adequate",
-            "Consider more contextual adaptations"
-            if total_responses < 3
-            else "Sufficient interaction history",
+            "Increase response variation" if repetition_ratio > 0.3 else "Response diversity adequate",
+            "Consider more contextual adaptations" if total_responses < 3 else "Sufficient interaction history",
         ],
     }
 
@@ -206,6 +202,7 @@ DEFAULT_PERSONA = {
         ],
     },
 }
+
 
 def load_persona() -> dict[str, Any]:
     """Loads persona from memory/core_persona.json, merging with defaults."""
@@ -254,7 +251,7 @@ def get_system_prompt(adaptive_context: str = "", realtime_data: str = "", tool_
     # DYNAMIC REFLECTION: Get current codebase capabilities
     current_caps = state_reflector.get_current_capabilities()
 
-    # PHASE 4: Load Soul Directives
+    # Step 4: load soul directives from charlie_soul.md
     soul_content = ""
     soul_path = Path("charlie_soul.md")
     if soul_path.exists():
@@ -276,16 +273,13 @@ def get_system_prompt(adaptive_context: str = "", realtime_data: str = "", tool_
         "- CONVERSATIONAL PROTOCOL: Be concise for acknowledgments. Full depth for briefings and reports.\n"
         "- NO FILLER: Avoid 'On it' or 'Looking that up'.\n"
         "- ADAPTIVE RESPONSE PROTOCOL: Vary phrasing based on query type and recent history.\n\n"
-        "BEHAVIORAL RULES:\n"
-        + "\n".join([f"- {rule}" for rule in p.get("behavioral_rules", [])])
+        "BEHAVIORAL RULES:\n" + "\n".join([f"- {rule}" for rule in p.get("behavioral_rules", [])])
     )
 
     user_context_block = (
         f"ABOUT {p.get('user_name').upper()}:\n"
         f"- Role: {p.get('user_context', {}).get('role', 'User')}\n"
-        + "\n".join(
-            [f"- {pref}" for pref in p.get("user_context", {}).get("preferences", [])]
-        )
+        + "\n".join([f"- {pref}" for pref in p.get("user_context", {}).get("preferences", [])])
     )
 
     # Build tools block from live ToolRegistry
@@ -295,23 +289,16 @@ def get_system_prompt(adaptive_context: str = "", realtime_data: str = "", tool_
             tools_for_llm = tool_registry.get_tools_for_llm()
             if tools_for_llm:
                 tools_block = "\n".join(
-                    f"- {t['function']['name']}: {t['function']['description']}"
-                    for t in tools_for_llm
+                    f"- {t['function']['name']}: {t['function']['description']}" for t in tools_for_llm
                 )
         except Exception:
             pass
     if not tools_block:
         tools_block = "(Tools discovered at runtime — see ToolRegistry)"
 
-    context_block = (
-        f"REAL-TIME SYSTEM CONTEXT:\n{realtime_data}" if realtime_data else ""
-    )
+    context_block = f"REAL-TIME SYSTEM CONTEXT:\n{realtime_data}" if realtime_data else ""
 
-    adaptive_block = (
-        f"\n\nMENTOR FEEDBACK & ADAPTIVE INJECTION:\n{adaptive_context}"
-        if adaptive_context
-        else ""
-    )
+    adaptive_block = f"\n\nMENTOR FEEDBACK & ADAPTIVE INJECTION:\n{adaptive_context}" if adaptive_context else ""
 
     self_mod_block = (
         "SELF-MODIFICATION CAPABILITIES:\n"
@@ -322,9 +309,7 @@ def get_system_prompt(adaptive_context: str = "", realtime_data: str = "", tool_
         "  'remember I prefer short answers' -> call self_modify with intent='preference', payload={'preference': 'User prefers short answers'}\n"
     )
 
-    return (
-        f"{soul_content}\n\n" if soul_content else ""
-    ) + (
+    return (f"{soul_content}\n\n" if soul_content else "") + (
         f"{identity_block}\n\n"
         f"USER_CONTEXT:\n{user_context_block}\n\n"
         f"{context_block}\n\n"
@@ -356,6 +341,7 @@ def get_system_prompt(adaptive_context: str = "", realtime_data: str = "", tool_
         "3. ORCHESTRATION: You are a high-performance system engine. Be professional, direct, and subtly witty.\n"
     )
 
+
 def get_tool_names(tool_registry=None) -> list[str]:
     if tool_registry is not None:
         return tool_registry.list_tools()
@@ -371,9 +357,7 @@ def evolve_persona(trait_update: dict[str, Any]) -> str:
     # Deep update logic for nested dicts (user_context, pronunciation_guide)
     for k, v in trait_update.items():
         if k == "agent_name":
-            logger.warning(
-                f"persona_renaming_blocked | {v} rejected | agent_name is static"
-            )
+            logger.warning(f"persona_renaming_blocked | {v} rejected | agent_name is static")
             continue
         if isinstance(v, dict) and k in p and isinstance(p[k], dict):
             p[k].update(v)
@@ -383,8 +367,6 @@ def evolve_persona(trait_update: dict[str, Any]) -> str:
     path = Path("charlie/memory/core_persona.json")
     try:
         path.write_text(json.dumps(p, indent=2), encoding="utf-8")
-        return (
-            f"Persona evolved successfully. Updated traits: {list(trait_update.keys())}"
-        )
+        return f"Persona evolved successfully. Updated traits: {list(trait_update.keys())}"
     except Exception as e:
         return f"Evolution failed: {str(e)}"

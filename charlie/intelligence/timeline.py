@@ -18,9 +18,10 @@ logger = get_logger("Timeline")
 @dataclass
 class TimelineEntry:
     """A single timeline event."""
+
     timestamp: float
-    source: str          # "conversation", "trust", "task", "memory", "automation"
-    category: str        # "user_input", "charlie_response", "tool_call", "trust_event", ...
+    source: str  # "conversation", "trust", "task", "memory", "automation"
+    category: str  # "user_input", "charlie_response", "tool_call", "trust_event", ...
     content: str
     metadata: dict = field(default_factory=dict)
 
@@ -114,13 +115,15 @@ class TimelineIndexer:
                     continue
 
                 category = "user_input" if speaker in ("SIR", "user") else "charlie_response"
-                self._index.append(TimelineEntry(
-                    timestamp=timestamp,
-                    source="conversation",
-                    category=category,
-                    content=str(content)[:200],
-                    metadata={"speaker": speaker},
-                ))
+                self._index.append(
+                    TimelineEntry(
+                        timestamp=timestamp,
+                        source="conversation",
+                        category=category,
+                        content=str(content)[:200],
+                        metadata={"speaker": speaker},
+                    )
+                )
         except Exception as e:
             logger.debug(f"conversation_index_failed | {e}")
 
@@ -138,17 +141,19 @@ class TimelineIndexer:
                         continue
                     try:
                         entry = json.loads(line)
-                        self._index.append(TimelineEntry(
-                            timestamp=entry.get("timestamp", time.time()),
-                            source="trust",
-                            category="trust_event",
-                            content=entry.get("reason", "Trust update"),
-                            metadata={
-                                "delta": entry.get("delta", 0),
-                                "new_score": entry.get("new_score", 0),
-                                "event": entry.get("event", ""),
-                            },
-                        ))
+                        self._index.append(
+                            TimelineEntry(
+                                timestamp=entry.get("timestamp", time.time()),
+                                source="trust",
+                                category="trust_event",
+                                content=entry.get("reason", "Trust update"),
+                                metadata={
+                                    "delta": entry.get("delta", 0),
+                                    "new_score": entry.get("new_score", 0),
+                                    "event": entry.get("event", ""),
+                                },
+                            )
+                        )
                     except json.JSONDecodeError:
                         continue
         except Exception as e:
@@ -169,17 +174,19 @@ class TimelineIndexer:
             for outcome in outcomes:
                 if not isinstance(outcome, dict):
                     continue
-                self._index.append(TimelineEntry(
-                    timestamp=outcome.get("timestamp", time.time()),
-                    source="automation",
-                    category="automation_outcome",
-                    content=outcome.get("action", "Automation event"),
-                    metadata={
-                        "success": outcome.get("success", False),
-                        "user_approved": outcome.get("user_approved", None),
-                        "event_type": outcome.get("event_type", ""),
-                    },
-                ))
+                self._index.append(
+                    TimelineEntry(
+                        timestamp=outcome.get("timestamp", time.time()),
+                        source="automation",
+                        category="automation_outcome",
+                        content=outcome.get("action", "Automation event"),
+                        metadata={
+                            "success": outcome.get("success", False),
+                            "user_approved": outcome.get("user_approved", None),
+                            "event_type": outcome.get("event_type", ""),
+                        },
+                    )
+                )
         except Exception as e:
             logger.debug(f"automation_index_failed | {e}")
 

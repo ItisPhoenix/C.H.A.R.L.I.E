@@ -16,6 +16,7 @@ from charlie.tools.tool_decorator import tool, RiskTier
 def get_pc_status() -> str:
     try:
         import psutil
+
         cpu = psutil.cpu_percent(interval=0.1)
         mem = psutil.virtual_memory()
         disk = psutil.disk_usage("/")
@@ -37,6 +38,7 @@ def get_active_processes(sort_by: str = "cpu", count: int = 10) -> str:
     """Return top processes sorted by cpu or memory."""
     try:
         import psutil
+
         procs = []
         for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent"]):
             try:
@@ -67,6 +69,7 @@ def get_system_uptime() -> str:
     """Return system uptime as a human-readable string."""
     try:
         import psutil
+
         uptime = time.time() - psutil.boot_time()
         hours = int(uptime // 3600)
         minutes = int((uptime % 3600) // 60)
@@ -85,7 +88,9 @@ def get_vram_usage() -> str:
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
             used, total = result.stdout.strip().split(",")
@@ -104,13 +109,18 @@ def get_vram_usage() -> str:
 def run_command(command: str, timeout: int = 30) -> str:
     """Execute a shell command with timeout."""
     from charlie.utils.command_validator import validate_command
+
     try:
         validate_command(command)
     except ValueError as e:
         return str(e)
     try:
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=timeout,
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         output = result.stdout
         if result.stderr:
@@ -143,6 +153,7 @@ def open_app(app_name: str) -> str:
     # Block dangerous executable types
     dangerous_exts = {".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".msi", ".com", ".scr"}
     from pathlib import Path
+
     p = Path(app_name)
     if p.suffix.lower() in dangerous_exts:
         return f"Error: Cannot open executable files directly ({p.suffix}). Use run_command instead."
@@ -166,6 +177,7 @@ def open_app(app_name: str) -> str:
 def open_website(url: str) -> str:
     """Open a URL in the default browser."""
     import webbrowser
+
     # Validate URL scheme to prevent javascript: or file: attacks
     if not url.startswith(("http://", "https://")):
         url = "https://" + url

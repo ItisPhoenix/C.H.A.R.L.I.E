@@ -31,9 +31,7 @@ class Messenger:
         """Sends a message via Telegram bot with rate limiting."""
         if self.bot_token == "REPLACE_ME" or not self.chat_id:
             logger.warning("telegram_send_aborted | not_configured")
-            return (
-                "Telegram error: Bot not configured. Set token and chat_id in settings."
-            )
+            return "Telegram error: Bot not configured. Set token and chat_id in settings."
 
         # Simple Rate Limiting
         elapsed = time.time() - self.last_send_time
@@ -71,14 +69,10 @@ class Messenger:
             # Explicit check for traversal symbols before sanitization
             if ".." in filename or "/" in filename or "\\" in filename:
                 logger.warning(f"messenger_traversal_blocked | input={filename}")
-                return (
-                    "Error: Path traversal or directory symbols detected in filename."
-                )
+                return "Error: Path traversal or directory symbols detected in filename."
 
             # 1. Sanitize filename
-            filename = "".join(
-                [c for c in filename if c.isalnum() or c in "._-"]
-            ).strip()
+            filename = "".join([c for c in filename if c.isalnum() or c in "._-"]).strip()
             if not filename:
                 filename = f"report_{int(time.time())}.md"
             if "." not in filename:

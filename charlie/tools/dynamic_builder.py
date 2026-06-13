@@ -1,4 +1,4 @@
-﻿"""
+"""
 charlie/tools/dynamic_builder.py
 
 Dynamic tool builder for creating and registering tools at runtime.
@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 @dataclass
 class ToolParameter:
     """Definition of a tool parameter."""
+
     name: str
     type: str  # "string", "integer", "boolean", "float", "list", "dict"
     description: str
@@ -33,14 +34,7 @@ class ToolParameter:
         if self.enum_values and value not in self.enum_values:
             return False
 
-        type_map = {
-            "string": str,
-            "integer": int,
-            "boolean": bool,
-            "float": (int, float),
-            "list": list,
-            "dict": dict
-        }
+        type_map = {"string": str, "integer": int, "boolean": bool, "float": (int, float), "list": list, "dict": dict}
 
         expected_type = type_map.get(self.type)
         if expected_type and not isinstance(value, expected_type):
@@ -52,6 +46,7 @@ class ToolParameter:
 @dataclass
 class ToolDefinition:
     """Complete definition of a dynamic tool."""
+
     tool_id: str
     name: str
     description: str
@@ -104,74 +99,75 @@ class ToolDefinition:
     def to_dict(self) -> Dict:
         """Serialize to dictionary."""
         return {
-            'tool_id': self.tool_id,
-            'name': self.name,
-            'description': self.description,
-            'category': self.category,
-            'parameters': [
+            "tool_id": self.tool_id,
+            "name": self.name,
+            "description": self.description,
+            "category": self.category,
+            "parameters": [
                 {
-                    'name': p.name,
-                    'type': p.type,
-                    'description': p.description,
-                    'required': p.required,
-                    'default': p.default,
-                    'enum_values': p.enum_values
+                    "name": p.name,
+                    "type": p.type,
+                    "description": p.description,
+                    "required": p.required,
+                    "default": p.default,
+                    "enum_values": p.enum_values,
                 }
                 for p in self.parameters
             ],
-            'code': self.code,
-            'imports': self.imports,
-            'created_at': self.created_at,
-            'created_by': self.created_by,
-            'version': self.version,
-            'risk_tier': self.risk_tier,
-            'usage_count': self.usage_count,
-            'success_count': self.success_count,
-            'failure_count': self.failure_count,
-            'last_used': self.last_used,
-            'enabled': self.enabled,
-            'verified': self.verified
+            "code": self.code,
+            "imports": self.imports,
+            "created_at": self.created_at,
+            "created_by": self.created_by,
+            "version": self.version,
+            "risk_tier": self.risk_tier,
+            "usage_count": self.usage_count,
+            "success_count": self.success_count,
+            "failure_count": self.failure_count,
+            "last_used": self.last_used,
+            "enabled": self.enabled,
+            "verified": self.verified,
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> 'ToolDefinition':
+    def from_dict(cls, data: Dict) -> "ToolDefinition":
         """Deserialize from dictionary."""
         params = [
             ToolParameter(
-                name=p['name'],
-                type=p['type'],
-                description=p['description'],
-                required=p.get('required', True),
-                default=p.get('default'),
-                enum_values=p.get('enum_values')
+                name=p["name"],
+                type=p["type"],
+                description=p["description"],
+                required=p.get("required", True),
+                default=p.get("default"),
+                enum_values=p.get("enum_values"),
             )
-            for p in data.get('parameters', [])
+            for p in data.get("parameters", [])
         ]
 
         return cls(
-            tool_id=data['tool_id'],
-            name=data['name'],
-            description=data['description'],
-            category=data['category'],
+            tool_id=data["tool_id"],
+            name=data["name"],
+            description=data["description"],
+            category=data["category"],
             parameters=params,
-            code=data['code'],
-            imports=data.get('imports', []),
-            created_at=data.get('created_at', time.time()),
-            created_by=data.get('created_by', 'system'),
-            version=data.get('version', '1.0.0'),
-            risk_tier=data.get('risk_tier', 'TIER_3'),
-            usage_count=data.get('usage_count', 0),
-            success_count=data.get('success_count', 0),
-            failure_count=data.get('failure_count', 0),
-            last_used=data.get('last_used'),
-            enabled=data.get('enabled', True),
-            verified=data.get('verified', False)
+            code=data["code"],
+            imports=data.get("imports", []),
+            created_at=data.get("created_at", time.time()),
+            created_by=data.get("created_by", "system"),
+            version=data.get("version", "1.0.0"),
+            risk_tier=data.get("risk_tier", "TIER_3"),
+            usage_count=data.get("usage_count", 0),
+            success_count=data.get("success_count", 0),
+            failure_count=data.get("failure_count", 0),
+            last_used=data.get("last_used"),
+            enabled=data.get("enabled", True),
+            verified=data.get("verified", False),
         )
 
 
 @dataclass
 class ToolExecutionResult:
     """Result of tool execution."""
+
     tool_id: str
     success: bool
     result: Any = None
@@ -188,7 +184,7 @@ class DynamicToolBuilder:
     Implements singleton pattern for global access.
     """
 
-    _instance: Optional['DynamicToolBuilder'] = None
+    _instance: Optional["DynamicToolBuilder"] = None
     _lock = threading.Lock()
 
     def __init__(self, storage_path: Optional[str] = None):
@@ -216,7 +212,7 @@ class DynamicToolBuilder:
             self._start_save_thread()
 
     @classmethod
-    def get_builder(cls, storage_path: Optional[str] = None) -> 'DynamicToolBuilder':
+    def get_builder(cls, storage_path: Optional[str] = None) -> "DynamicToolBuilder":
         """Get or create the singleton instance."""
         if cls._instance is None:
             with cls._lock:
@@ -236,7 +232,7 @@ class DynamicToolBuilder:
 
     def _register_default_templates(self):
         """Register built-in tool templates."""
-        self._templates['file_reader'] = '''
+        self._templates["file_reader"] = '''
 def {tool_name}({params}):
     """{description}"""
     import os
@@ -247,7 +243,7 @@ def {tool_name}({params}):
     return {{"content": content, "path": path, "size": len(content)}}
 '''
 
-        self._templates['file_writer'] = '''
+        self._templates["file_writer"] = '''
 def {tool_name}({params}):
     """{description}"""
     import os
@@ -257,7 +253,7 @@ def {tool_name}({params}):
     return {{"success": True, "path": path, "bytes_written": len(content)}}
 '''
 
-        self._templates['web_search'] = '''
+        self._templates["web_search"] = '''
 def {tool_name}({params}):
     """{description}"""
     import urllib.request
@@ -268,7 +264,7 @@ def {tool_name}({params}):
     return {{"query": query, "results": []}}
 '''
 
-        self._templates['data_transform'] = '''
+        self._templates["data_transform"] = '''
 def {tool_name}({params}):
     """{description}"""
     import json
@@ -321,13 +317,13 @@ def {tool_name}({params}):
 
     # Banned patterns that will cause auto-rejection
     BANNED_PATTERNS = [
-        (r'\beval\s*\(', "eval() is forbidden — security risk"),
-        (r'\bexec\s*\(', "exec() is forbidden — security risk"),
-        (r'subprocess\.Popen\s*\([^)]*shell\s*=\s*True', "subprocess with shell=True is forbidden"),
-        (r'subprocess\.run\s*\([^)]*shell\s*=\s*True', "subprocess.run with shell=True is forbidden"),
-        (r'subprocess\.call\s*\([^)]*shell\s*=\s*True', "subprocess.call with shell=True is forbidden"),
-        (r'\bos\.system\s*\(', "os.system() is forbidden — use subprocess with shell=False"),
-        (r'\b__import__\s*\(', "__import__() is forbidden — use importlib instead"),
+        (r"\beval\s*\(", "eval() is forbidden — security risk"),
+        (r"\bexec\s*\(", "exec() is forbidden — security risk"),
+        (r"subprocess\.Popen\s*\([^)]*shell\s*=\s*True", "subprocess with shell=True is forbidden"),
+        (r"subprocess\.run\s*\([^)]*shell\s*=\s*True", "subprocess.run with shell=True is forbidden"),
+        (r"subprocess\.call\s*\([^)]*shell\s*=\s*True", "subprocess.call with shell=True is forbidden"),
+        (r"\bos\.system\s*\(", "os.system() is forbidden — use subprocess with shell=False"),
+        (r"\b__import__\s*\(", "__import__() is forbidden — use importlib instead"),
     ]
 
     # Required structural check that is actually satisfiable by builder
@@ -337,7 +333,7 @@ def {tool_name}({params}):
     # builder's own templates, so safety metadata is now attached to the
     # ToolDefinition instead of being hand-written into every template.)
     REQUIRED_FUNCTION_PATTERN = (
-        r'def\s+\w+\s*\(',
+        r"def\s+\w+\s*\(",
         "Tool code must define at least one function",
     )
 
@@ -382,7 +378,7 @@ def {tool_name}({params}):
 
         # Then verify syntax
         try:
-            compile(definition.code, f"<tool:{definition.tool_id}>", 'exec')
+            compile(definition.code, f"<tool:{definition.tool_id}>", "exec")
             return True, None
         except SyntaxError as e:
             return False, f"Syntax error: {e}"
@@ -420,7 +416,7 @@ def {tool_name}({params}):
     def _extract_function_name(self, code: str) -> Optional[str]:
         """Extract function name from code."""
         # Find all function definitions
-        pattern = r'def\s+(\w+)\s*\('
+        pattern = r"def\s+(\w+)\s*\("
         matches = re.findall(pattern, code)
         if matches:
             return matches[-1]  # Return last function (main function)
@@ -498,35 +494,21 @@ def {tool_name}({params}):
         # Get tool
         tool = self._tools.get(tool_id)
         if not tool:
-            return ToolExecutionResult(
-                tool_id=tool_id,
-                success=False,
-                error=f"Tool {tool_id} not found"
-            )
+            return ToolExecutionResult(tool_id=tool_id, success=False, error=f"Tool {tool_id} not found")
 
         if not tool.enabled:
-            return ToolExecutionResult(
-                tool_id=tool_id,
-                success=False,
-                error=f"Tool {tool_id} is disabled"
-            )
+            return ToolExecutionResult(tool_id=tool_id, success=False, error=f"Tool {tool_id} is disabled")
 
         # Get executor
         executor = self._executors.get(tool_id)
         if not executor:
-            return ToolExecutionResult(
-                tool_id=tool_id,
-                success=False,
-                error=f"Tool {tool_id} not compiled"
-            )
+            return ToolExecutionResult(tool_id=tool_id, success=False, error=f"Tool {tool_id} not compiled")
 
         # Validate parameters
         for param in tool.parameters:
             if param.required and param.name not in parameters:
                 return ToolExecutionResult(
-                    tool_id=tool_id,
-                    success=False,
-                    error=f"Missing required parameter: {param.name}"
+                    tool_id=tool_id, success=False, error=f"Missing required parameter: {param.name}"
                 )
 
         # Execute
@@ -535,18 +517,12 @@ def {tool_name}({params}):
             tool.record_success()
 
             return ToolExecutionResult(
-                tool_id=tool_id,
-                success=True,
-                result=result,
-                execution_time_ms=(time.time() - start_time) * 1000
+                tool_id=tool_id, success=True, result=result, execution_time_ms=(time.time() - start_time) * 1000
             )
         except Exception as e:
             tool.record_failure()
             return ToolExecutionResult(
-                tool_id=tool_id,
-                success=False,
-                error=str(e),
-                execution_time_ms=(time.time() - start_time) * 1000
+                tool_id=tool_id, success=False, error=str(e), execution_time_ms=(time.time() - start_time) * 1000
             )
 
     def generate_tool_from_description(self, description: str, category: str = "custom") -> Optional[ToolDefinition]:
@@ -564,20 +540,20 @@ def {tool_name}({params}):
         # Simple template matching
         description_lower = description.lower()
 
-        if 'read' in description_lower and 'file' in description_lower:
-            template = self._templates.get('file_reader')
+        if "read" in description_lower and "file" in description_lower:
+            template = self._templates.get("file_reader")
             tool_id = f"dynamic_file_reader_{int(time.time())}"
             params = "path: str, encoding: str = 'utf-8'"
-        elif 'write' in description_lower and 'file' in description_lower:
-            template = self._templates.get('file_writer')
+        elif "write" in description_lower and "file" in description_lower:
+            template = self._templates.get("file_writer")
             tool_id = f"dynamic_file_writer_{int(time.time())}"
             params = "path: str, content: str"
-        elif 'search' in description_lower and 'web' in description_lower:
-            template = self._templates.get('web_search')
+        elif "search" in description_lower and "web" in description_lower:
+            template = self._templates.get("web_search")
             tool_id = f"dynamic_web_search_{int(time.time())}"
             params = "query: str, limit: int = 10"
-        elif 'transform' in description_lower or 'filter' in description_lower:
-            template = self._templates.get('data_transform')
+        elif "transform" in description_lower or "filter" in description_lower:
+            template = self._templates.get("data_transform")
             tool_id = f"dynamic_data_transform_{int(time.time())}"
             params = "data: list, transform_type: str, key: str = None, value: str = None, keys: list = None, sort_key: str = None"
         else:
@@ -586,7 +562,7 @@ def {tool_name}({params}):
             # use the same .format() placeholders as the other templates so the
             # shared formatting step below works uniformly.
             tool_id = f"dynamic_tool_{int(time.time())}"
-            func_name = tool_id.replace('-', '_')
+            func_name = tool_id.replace("-", "_")
             params = "**kwargs"
             template = '''
 def {tool_name}({params}):
@@ -598,12 +574,8 @@ def {tool_name}({params}):
             return None
 
         # Format template
-        func_name = tool_id.replace('-', '_')
-        code = template.format(
-            tool_name=func_name,
-            params=params,
-            description=description
-        )
+        func_name = tool_id.replace("-", "_")
+        code = template.format(tool_name=func_name, params=params, description=description)
 
         return ToolDefinition(
             tool_id=tool_id,
@@ -611,8 +583,8 @@ def {tool_name}({params}):
             description=description,
             category=category,
             code=code,
-            imports=['import os', 'import json', 'import urllib.parse'],
-            created_by='llm',
+            imports=["import os", "import json", "import urllib.parse"],
+            created_by="llm",
             risk_tier="TIER_3",
         )
 
@@ -643,17 +615,18 @@ def {tool_name}({params}):
         total_failure = sum(t.failure_count for t in self._tools.values())
 
         return {
-            'total_tools': total,
-            'enabled_tools': enabled,
-            'verified_tools': verified,
-            'total_usage': total_usage,
-            'total_success': total_success,
-            'total_failure': total_failure,
-            'overall_success_rate': total_success / (total_success + total_failure) if (total_success + total_failure) > 0 else 1.0,
-            'by_category': {
-                cat: len(self.get_tools_by_category(cat))
-                for cat in set(t.category for t in self._tools.values())
-            }
+            "total_tools": total,
+            "enabled_tools": enabled,
+            "verified_tools": verified,
+            "total_usage": total_usage,
+            "total_success": total_success,
+            "total_failure": total_failure,
+            "overall_success_rate": total_success / (total_success + total_failure)
+            if (total_success + total_failure) > 0
+            else 1.0,
+            "by_category": {
+                cat: len(self.get_tools_by_category(cat)) for cat in set(t.category for t in self._tools.values())
+            },
         }
 
     def _load_tools(self):
@@ -661,12 +634,12 @@ def {tool_name}({params}):
         if not self._storage_path:
             return
 
-        tools_file = os.path.join(self._storage_path, 'dynamic_tools.json')
+        tools_file = os.path.join(self._storage_path, "dynamic_tools.json")
         if os.path.exists(tools_file):
             try:
-                with open(tools_file, 'r') as f:
+                with open(tools_file, "r") as f:
                     data = json.load(f)
-                    for tdata in data.get('tools', []):
+                    for tdata in data.get("tools", []):
                         tool = ToolDefinition.from_dict(tdata)
                         self._tools[tool.tool_id] = tool
 
@@ -682,33 +655,33 @@ def {tool_name}({params}):
         if not self._storage_path or not self._dirty_tools:
             return
 
-        tools_file = os.path.join(self._storage_path, 'dynamic_tools.json')
+        tools_file = os.path.join(self._storage_path, "dynamic_tools.json")
 
         # Load existing
         existing = {}
         if os.path.exists(tools_file):
             try:
-                with open(tools_file, 'r') as f:
+                with open(tools_file, "r") as f:
                     existing = json.load(f)
             except Exception:
-                existing = {'tools': []}
+                existing = {"tools": []}
 
         # Update dirty tools
         for tid in self._dirty_tools:
             tool = self._tools.get(tid)
             if tool:
                 found = False
-                for i, tdata in enumerate(existing.get('tools', [])):
-                    if tdata.get('tool_id') == tid:
-                        existing['tools'][i] = tool.to_dict()
+                for i, tdata in enumerate(existing.get("tools", [])):
+                    if tdata.get("tool_id") == tid:
+                        existing["tools"][i] = tool.to_dict()
                         found = True
                         break
                 if not found:
-                    existing.setdefault('tools', []).append(tool.to_dict())
+                    existing.setdefault("tools", []).append(tool.to_dict())
 
         # Write back
         try:
-            with open(tools_file, 'w') as f:
+            with open(tools_file, "w") as f:
                 json.dump(existing, f)
             self._dirty_tools.clear()
         except Exception:
@@ -752,7 +725,7 @@ def greet(name: str, formal: bool = False) -> dict:
         return {"message": f"Hey, {name}!"}
 ''',
         imports=[],
-        created_by="test"
+        created_by="test",
     )
 
     success, error = builder.create_tool(tool)
@@ -763,10 +736,7 @@ def greet(name: str, formal: bool = False) -> dict:
     print(f"Execution: success={result.success}, result={result.result}")
 
     # Generate a tool from description
-    generated = builder.generate_tool_from_description(
-        "Read the contents of a file and return it",
-        category="file"
-    )
+    generated = builder.generate_tool_from_description("Read the contents of a file and return it", category="file")
     if generated:
         print(f"Generated tool: {generated.tool_id}")
         success, error = builder.create_tool(generated)

@@ -25,7 +25,7 @@ SHORTCUT_NAME = "CharlieDaemon.lnk"
 def _get_daemon_path() -> str:
     """Get the path to charlie-daemon.exe or charlie-daemon.py."""
     # Check for packaged exe first
-    if getattr(sys, 'frozen', False):
+    if getattr(sys, "frozen", False):
         exe_dir = Path(sys.executable).parent
         daemon_exe = exe_dir / "charlie-daemon.exe"
         if daemon_exe.exists():
@@ -84,6 +84,7 @@ def enable():
 
     try:
         import win32com.client
+
         shell = win32com.client.Dispatch("WScript.Shell")
         shortcut = shell.CreateShortCut(str(shortcut_path))
         if daemon_path.endswith(".exe"):

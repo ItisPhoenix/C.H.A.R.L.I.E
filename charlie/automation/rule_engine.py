@@ -1,4 +1,5 @@
 """Rule Engine — matches events against known automation rules."""
+
 from __future__ import annotations
 
 import ast
@@ -13,19 +14,38 @@ logger = logging.getLogger("charlie.automation.rule_engine")
 # Dangerous AST node types — reject these to prevent code injection.
 # Everything else is allowed (with __builtins__: {} for runtime safety).
 _UNSAFE_AST_NODES = (
-    ast.Import, ast.ImportFrom,  # import statements
-    ast.FunctionDef, ast.AsyncFunctionDef,  # function definitions
+    ast.Import,
+    ast.ImportFrom,  # import statements
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,  # function definitions
     ast.ClassDef,  # class definitions
     ast.Delete,  # del statements
     ast.Raise,  # raise statements
-    ast.Try, ast.ExceptHandler,  # try/except
-    ast.Global, ast.Nonlocal,  # scope manipulation
-    ast.Yield, ast.YieldFrom,  # generators
+    ast.Try,
+    ast.ExceptHandler,  # try/except
+    ast.Global,
+    ast.Nonlocal,  # scope manipulation
+    ast.Yield,
+    ast.YieldFrom,  # generators
     ast.Await,  # async
     ast.NamedExpr,  # walrus operator
 )
 
-_UNSAFE_NAMES = {"exec", "eval", "compile", "__import__", "open", "globals", "locals", "vars", "dir", "getattr", "setattr", "delattr", "breakpoint"}
+_UNSAFE_NAMES = {
+    "exec",
+    "eval",
+    "compile",
+    "__import__",
+    "open",
+    "globals",
+    "locals",
+    "vars",
+    "dir",
+    "getattr",
+    "setattr",
+    "delattr",
+    "breakpoint",
+}
 
 PERSIST_PATH = "charlie/config/automation_rules.json"
 
@@ -69,18 +89,50 @@ class RuleEngine:
 
     # Allowed AST node types for safe evaluation
     _SAFE_NODES = (
-        ast.Expression, ast.Constant, ast.Name, ast.Attribute,
-        ast.Compare, ast.BoolOp, ast.UnaryOp, ast.IfExp,
-        ast.List, ast.Tuple, ast.Set, ast.Dict, ast.Starred,
+        ast.Expression,
+        ast.Constant,
+        ast.Name,
+        ast.Attribute,
+        ast.Compare,
+        ast.BoolOp,
+        ast.UnaryOp,
+        ast.IfExp,
+        ast.List,
+        ast.Tuple,
+        ast.Set,
+        ast.Dict,
+        ast.Starred,
         ast.Call,  # Allowed for safe method calls only
     )
 
     # Safe method names that can be called on objects
     _SAFE_METHODS = {
-        "get", "keys", "values", "items", "lower", "upper", "strip",
-        "startswith", "endswith", "split", "join", "replace", "find",
-        "count", "index", "copy", "pop", "append", "extend", "insert",
-        "remove", "sort", "reverse", "format", "encode", "decode",
+        "get",
+        "keys",
+        "values",
+        "items",
+        "lower",
+        "upper",
+        "strip",
+        "startswith",
+        "endswith",
+        "split",
+        "join",
+        "replace",
+        "find",
+        "count",
+        "index",
+        "copy",
+        "pop",
+        "append",
+        "extend",
+        "insert",
+        "remove",
+        "sort",
+        "reverse",
+        "format",
+        "encode",
+        "decode",
     }
 
     _SAFE_OPERATORS = {

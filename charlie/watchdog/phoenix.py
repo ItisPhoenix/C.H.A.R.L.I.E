@@ -1,13 +1,11 @@
 import multiprocessing
+import multiprocessing as mp
 import os
 import platform
-import re
-import shutil
 import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
 
 import requests
 
@@ -59,36 +57,17 @@ def _consume_disabled_statuses(
 # ── Shared Entry Points ──────────────────────────────────────────────────────
 
 
-def run_audio(
-    audio_q, brain_task_q, tts_q, status_q, audio_cmd_q, heartbeat, interrupt_event
-):
-    from dotenv import load_dotenv
-    load_dotenv(override=True)
-    from charlie.config import ensure_initialized
-    ensure_initialized()
-
-    import pythoncom
-
-    from charlie.audio_proc import AudioEngine
-
-    pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
-    engine = AudioEngine(
-        brain_task_q, tts_q, status_q, audio_cmd_q, heartbeat, interrupt_event
-    )
-    engine.run()
-
-
 def run_browser(browser_req_q, browser_res_q, status_q, heartbeat):
     from dotenv import load_dotenv
+
     load_dotenv(override=True)
     from charlie.config import ensure_initialized
+
     ensure_initialized()
 
     from charlie.browser.headless_browser import HeadlessBrowserProcess
 
-    proc = HeadlessBrowserProcess(
-        browser_req_q, browser_res_q, heartbeat, status_q=status_q
-    )
+    proc = HeadlessBrowserProcess(browser_req_q, browser_res_q, heartbeat, status_q=status_q)
     proc.run()
 
 
@@ -107,12 +86,13 @@ def run_brain(
     brain_res_q=None,
 ):
     from dotenv import load_dotenv
+
     load_dotenv(override=True)
     from charlie.config import ensure_initialized
+
     ensure_initialized()
 
     import pythoncom
-
     from charlie.brain.core import Brain
 
     pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
@@ -133,40 +113,6 @@ def run_brain(
     brain.run()
 
 
-def run_telegram(brain_task_q, status_q, telegram_q, audio_cmd_q, heartbeat):
-    from dotenv import load_dotenv
-    load_dotenv(override=True)
-    from charlie.config import ensure_initialized
-    ensure_initialized()
-
-    import pythoncom
-
-    from charlie.telegram.bridge import run_bridge
-
-    pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
-    run_bridge(brain_task_q, status_q, telegram_q, audio_cmd_q, heartbeat)
-
-
-def run_vision(brain_task_q, status_q, heartbeat):
-    from dotenv import load_dotenv
-    load_dotenv(override=True)
-    from charlie.config import ensure_initialized
-    ensure_initialized()
-
-    from charlie.vision.activity_sentinel import ActivitySentinel
-    # Suppress C-level driver logs (VCAMDS/NBX hive) for the vision process
-    if os.name == 'nt':
-        try:
-            # Re-open stderr to NUL
-            null_fd = os.open('NUL', os.O_WRONLY)
-            os.dup2(null_fd, 2)
-        except Exception:
-            pass
-
-    sentinel = ActivitySentinel(brain_task_q, status_q, heartbeat)
-    sentinel.run()
-
-
 # ── Self-Repair Engine ───────────────────────────────────────────────────────
 
 
@@ -182,28 +128,37 @@ class PhoenixSupervisor:
         # Keep a reference to the Manager so stop() can shut it down (Req 14.2).
         # A LOCAL var would leak the manager process on teardown.
         self._manager = multiprocessing.Manager()
-        self.audio_q = self._manager.Queue(maxsize=100)
         self.brain_task_q = self._manager.Queue(maxsize=100)
         self.tts_q = self._manager.Queue(maxsize=100)
+        # Note: status_q swap to local Queue was reverted — Manager proxy needed
+        # for cross-process sharing across Brain + Browser producers.
         self.status_q = self._manager.Queue(maxsize=200)
-        self.audio_cmd_q = self._manager.Queue(maxsize=100)
+        # Real multiprocessing.Queue for the audio command channel (100 Hz poll).
+        self.audio_cmd_q = multiprocessing.Queue(maxsize=100)
         self.telegram_q = self._manager.Queue(maxsize=100)
 
         # Heartbeats (shared multiprocessing values)
         self.heartbeats = {
-            "Audio": multiprocessing.Value("d", time.time()),
             "Brain": multiprocessing.Value("d", time.time()),
             "Browser": multiprocessing.Value("d", time.time()),
-            "Telegram": multiprocessing.Value("d", time.time()),
-            "Vision": multiprocessing.Value("d", time.time()),
         }
 
         self.browser_req_q = self._manager.Queue(maxsize=50)
         self.browser_res_q = self._manager.Queue(maxsize=50)
 
         # Cross-process Brain RPC queues (Req 7 / Design §D)
-        self.brain_req_q = self._manager.Queue(maxsize=50)
-        self.brain_res_q = self._manager.Queue(maxsize=50)
+        # Capacity 200 (up from 50) — the dashboard home page fires
+        # fetchTasks + fetchToolLog + fetchStatus every 5s across the
+        # `Promise.all` fan-out, and any extra open tabs (e.g. /tasks,
+        # /briefing) compound the request rate. With a 50-slot queue and
+        # Manager-proxy latency on the response round-trip, the request
+        # queue fills faster than BrainRPCServer can drain it, and the
+        # blocking put() back-pressures the aiohttp handler for ~13s
+        # per call (3 retries × backoff), eventually tripping the
+        # 120s HEARTBEAT_TIMEOUT in the monitor. 200 slots = ~2 minutes
+        # of buffer at the observed 1.5 req/s burst rate.
+        self.brain_req_q = self._manager.Queue(maxsize=200)
+        self.brain_res_q = self._manager.Queue(maxsize=200)
 
         self.processes = {}
         self._processes_lock = threading.RLock()
@@ -239,11 +194,7 @@ class PhoenixSupervisor:
             return
 
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML"
-        }
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
         try:
             resp = requests.post(url, json=payload, timeout=10)
             if resp.status_code == 200:
@@ -254,14 +205,11 @@ class PhoenixSupervisor:
             logger.error(f"telegram_direct_fallback_failed | {e}")
 
     def start(self):
-        """Unified entry point to launch all processes and begin monitoring."""
+        """Unified entry point to launch processes and begin monitoring."""
         logger.info("phoenix_supervisor_ignited")
 
-        self.start_process("Audio", run_audio)
         self.start_process("Brain", run_brain)
         self.start_process("Browser", run_browser)
-        self.start_process("Telegram", run_telegram)
-        self.start_process("Vision", run_vision)
 
         try:
             self.monitor()
@@ -277,17 +225,6 @@ class PhoenixSupervisor:
 
         if args is not None:
             args = args + (heartbeat,)
-        elif name == "Audio":
-            args = (
-                self.audio_q,
-                self.brain_task_q,
-                self.tts_q,
-                self.status_q,
-                self.audio_cmd_q,
-                heartbeat,
-                self.interrupt_event,
-            )
-            daemon = False  # Audio needs to spawn child processes (playback)
         elif name == "Brain":
             args = (
                 self.brain_task_q,
@@ -307,20 +244,6 @@ class PhoenixSupervisor:
             args = (
                 self.browser_req_q,
                 self.browser_res_q,
-                self.status_q,
-                heartbeat,
-            )
-        elif name == "Telegram":
-            args = (
-                self.brain_task_q,
-                self.status_q,
-                self.telegram_q,
-                self.audio_cmd_q,
-                heartbeat,
-            )
-        elif name == "Vision":
-            args = (
-                self.brain_task_q,
                 self.status_q,
                 heartbeat,
             )
@@ -413,12 +336,8 @@ class PhoenixSupervisor:
                         if now < not_before:
                             # Still cooling down — never block the loop.
                             continue
-                        logger.info(
-                            f"phoenix_cooldown_elapsed | service={name} | restarting"
-                        )
-                        self.start_process(
-                            name, data["target"], restarts=data["restarts"]
-                        )
+                        logger.info(f"phoenix_cooldown_elapsed | service={name} | restarting")
+                        self.start_process(name, data["target"], restarts=data["restarts"])
                         continue
 
                     if p.is_alive() and is_hung:
@@ -432,31 +351,27 @@ class PhoenixSupervisor:
 
                     if p.exitcode in (0, 99):
                         # exitcode 0 or 99 = intentional shutdown, not a crash
-                        logger.info(
-                            f"intentional_shutdown_received: {name} (exit={p.exitcode})"
-                        )
+                        logger.info(f"intentional_shutdown_received: {name} (exit={p.exitcode})")
                         self.stop()
                         return
 
-                    logger.warning(
-                        f"process_failure: {name}. Strike {data['restarts'] + 1} of 3."
-                    )
+                    logger.warning(f"process_failure: {name}. Strike {data['restarts'] + 1} of 3.")
 
-                    
                     # Track restart and check for 3-strike limit (Quarantine)
                     if data["restarts"] >= 3:
-                        logger.critical(
-                            f"HALTING_RECOVERY | service={name} | strikes_exceeded | placing in quarantine"
-                        )
+                        logger.critical(f"HALTING_RECOVERY | service={name} | strikes_exceeded | placing in quarantine")
                         data["quarantined"] = True
 
                         # Exactly one quarantine alert per quarantine event
                         # (Req 15.4), guarded so later cycles never re-alert.
                         if not data.get("quarantine_alerted"):
-                            self._safe_put(self.tts_q, {
-                                "type": "SPEAK",
-                                "content": f"{name} service has crashed consecutively and is now quarantined, Sir."
-                            })
+                            self._safe_put(
+                                self.tts_q,
+                                {
+                                    "type": "SPEAK",
+                                    "content": f"{name} service has crashed consecutively and is now quarantined, Sir.",
+                                },
+                            )
                             self._safe_put(self.status_q, {"type": "PHASE", "content": "ALERT"})
 
                             # Direct Telegram fall-back alert dispatch
@@ -490,11 +405,7 @@ class PhoenixSupervisor:
             try:
                 with self._processes_lock:
                     process_snapshot = list(self.processes.values())
-                active_pids = [
-                    d["process"].pid
-                    for d in process_snapshot
-                    if d["process"].is_alive()
-                ]
+                active_pids = [d["process"].pid for d in process_snapshot if d["process"].is_alive()]
                 self.doctor.update_pids(active_pids)
                 self.doctor.perform_vitals_check()
             except Exception as e:
@@ -601,9 +512,7 @@ class PhoenixSupervisor:
             if p.is_alive():
                 # Could not confirm termination — refuse to spawn a successor so
                 # we never orphan the predecessor.
-                logger.error(
-                    f"restart_subsystem_failed | name={name} | predecessor_still_alive"
-                )
+                logger.error(f"restart_subsystem_failed | name={name} | predecessor_still_alive")
                 return False
 
         logger.info(f"restart_subsystem | name={name} | predecessor_terminated")
@@ -656,9 +565,7 @@ class PhoenixSupervisor:
             pid = p.pid
             if pid in vitals["processes"]:
                 v = vitals["processes"][pid]
-                stats.append(
-                    f"{name}: CPU {v['cpu']:.1f}% | RAM {v['ram_mb']:.1f}MB | Restarts: {restarts}"
-                )
+                stats.append(f"{name}: CPU {v['cpu']:.1f}% | RAM {v['ram_mb']:.1f}MB | Restarts: {restarts}")
             else:
                 stats.append(f"{name}: Offline/Initializing | Restarts: {restarts}")
 

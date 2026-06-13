@@ -26,6 +26,7 @@ class ContextBuilder:
         if self._tokenizer is None:
             try:
                 import tiktoken
+
                 self._tokenizer = tiktoken.get_encoding("cl100k_base")
             except ImportError:
                 logger.warning("tiktoken_not_installed | falling_back_to_char_estimate")
@@ -102,9 +103,7 @@ class ContextBuilder:
         """
         budget = self._token_budget
         system_tokens = self.count_tokens(system_prompt)
-        history_tokens = sum(
-            self.count_tokens(m.get("content", "")) + 4 for m in history
-        )
+        history_tokens = sum(self.count_tokens(m.get("content", "")) + 4 for m in history)
         memory_tokens = self.count_tokens(memory_context)
         total = system_tokens + history_tokens + memory_tokens
 
@@ -117,7 +116,7 @@ class ContextBuilder:
             f"system={system_tokens} history={history_tokens} memory={memory_tokens}"
         )
 
-        # Phase 1: Trim memory context if it's consuming too much
+        # Trim memory context if it's consuming too much
         memory_max = max(remaining // 4, 256)  # Memory gets at most 25% of remaining
         if memory_tokens > memory_max:
             # Truncate memory context text to fit
@@ -133,7 +132,7 @@ class ContextBuilder:
             memory_tokens = self.count_tokens(memory_context)
             logger.debug("memory_context_trimmed | now=%d tokens", memory_tokens)
 
-        # Phase 2: Trim oldest history messages if still over budget
+        # Trim oldest history messages if still over budget
         history_budget = remaining - memory_tokens
         if history_budget <= 0:
             # Drop all history except most recent message
@@ -150,9 +149,7 @@ class ContextBuilder:
         kept.reverse()
 
         if len(kept) < len(history):
-            logger.debug(
-                f"history_trimmed | kept={len(kept)}/{len(history)} messages"
-            )
+            logger.debug(f"history_trimmed | kept={len(kept)}/{len(history)} messages")
 
         return system_prompt, kept, memory_context
 
@@ -162,7 +159,7 @@ class ContextBuilder:
             memory = getattr(self.brain, "memory", None)
             if memory is None:
                 return ""
-            return memory.get_context_string(query)
+            return memory.get_context_injection(query)
         except Exception as e:
             logger.error("memory_context_failed | %s", e)
             return ""
@@ -174,6 +171,7 @@ class ContextBuilder:
             return self._cached_realtime_context
 
         from charlie.utils.system import get_system_vitals
+
         vitals = get_system_vitals()
         time_str = time.strftime("%A, %I:%M %p")
         cpu, ram, vram_pct = vitals["cpu"], vitals["ram"], vitals["vram_pct"]
@@ -205,7 +203,9 @@ class ContextBuilder:
         frustration = self.brain.world.frustration_score
         emotional_directive = ""
         if frustration > 0.7:
-            emotional_directive = "\nEMOTIONAL STATE: Sir is FRUSTRATED. Drop all humor. Be purely operational, concise, and efficient."
+            emotional_directive = (
+                "\nEMOTIONAL STATE: Sir is FRUSTRATED. Drop all humor. Be purely operational, concise, and efficient."
+            )
         elif frustration < 0.2:
             emotional_directive = "\nEMOTIONAL STATE: Calm. You may use dry wit or a more conversational CHARLIE tone."
 
@@ -271,6 +271,11 @@ class ContextBuilder:
         if recent_research:
             prompt += f"\n\n{recent_research}"
 
+        # Inject relevant skill content (always-mode skills + on-demand tag matches)
+        skill_ctx = self._get_skill_context()
+        if skill_ctx:
+            prompt += f"\n\n{skill_ctx}"
+
         # Inject outcome feedback (what worked, what didn't)
         outcome_ctx = self._get_outcome_context()
         if outcome_ctx:
@@ -286,37 +291,31 @@ class ContextBuilder:
             "\n- If a tool returns an error, report the error honestly — don't improvise."
         )
 
-        # Inject user profile (dialectic user model)
-        user_ctx = self._get_user_context()
-        if user_ctx:
-            prompt += f"\n\n{user_ctx}"
-
         return prompt
 
     def _get_user_profile(self) -> str:
-        """Read USER.md from project root for persistent user context."""
+        """Read USER.md from project root AND auto-learned user model for persistent context."""
+        parts = []
         try:
             user_md = os.path.join(os.getcwd(), "USER.md")
             if os.path.exists(user_md):
                 with open(user_md, "r", encoding="utf-8") as f:
                     content = f.read().strip()
                 if content:
-                    return "## User Profile (USER.md)\n" + content[:2000]
+                    parts.append(content[:2000])
         except Exception:
             pass
-        return ""
-
-    def _get_user_context(self) -> str:
-        """Get user profile from the dialectic user model."""
         try:
             user_model = getattr(self.brain, "user_model", None)
             if user_model and hasattr(user_model, "get_profile_summary"):
                 summary = user_model.get_profile_summary(max_chars=1000)
                 if summary and len(summary) > 50:
-                    return "## User Profile (Auto-Learned)\n" + summary
+                    parts.append(f"(Auto-Learned) {summary}")
         except Exception:
             pass
-        return ""
+        if not parts:
+            return ""
+        return "## User Profile\n" + "\n\n".join(parts)
 
     def _get_session_context(self) -> str:
         """Get relevant past conversation context via FTS5 search."""
@@ -343,6 +342,41 @@ class ContextBuilder:
                 lines.append(f"- [{r.get('role', '?')}] {snippet}")
             return "## Related Past Conversations\n" + "\n".join(lines)
         except Exception:
+            return ""
+
+    def _get_skill_context(self) -> str:
+        """Inject always-mode skills + on-demand skills whose tags match the
+        most recent user message. Returns "" if skill injection is disabled
+        or no skills apply.
+        """
+        try:
+            skill_injector = getattr(self.brain, "skill_injector", None)
+            skill_loader = getattr(self.brain, "skill_loader", None)
+            if skill_injector is None or skill_loader is None:
+                return ""
+
+            sections: list[str] = []
+            always_skills = skill_injector.get_always_skills()
+            if always_skills:
+                base = skill_injector.inject_skills("", always_skills).strip()
+                if base:
+                    sections.append(base)
+
+            # Match on-demand skills against the latest user message
+            history = getattr(self.brain, "history", [])
+            last_user = [m for m in history[-3:] if m.get("role") == "user"]
+            if last_user:
+                task_text = last_user[-1].get("content", "")
+                on_demand_specs = skill_loader.get_specs().values()
+                matched = skill_injector.inject_on_demand("", task_text, list(on_demand_specs)).strip()
+                if matched:
+                    sections.append(matched)
+
+            if not sections:
+                return ""
+            return "## Skills\n" + "\n\n---\n\n".join(sections)
+        except Exception as e:
+            logger.debug("skill_context_failed | %s", e)
             return ""
 
     def get_system_prompt_cached(self) -> str:
@@ -421,8 +455,11 @@ class ContextBuilder:
                     lines.append(f"- {topic}: {summary}")
             if not lines:
                 return ""
-            return "## Recent Research Context\n" + "\n".join(lines) + \
-                "\n(Use this to provide better follow-up answers and suggestions)"
+            return (
+                "## Recent Research Context\n"
+                + "\n".join(lines)
+                + "\n(Use this to provide better follow-up answers and suggestions)"
+            )
         except Exception:
             return ""
 
@@ -440,11 +477,15 @@ class ContextBuilder:
             failures = [o for o in outcomes if getattr(o, "outcome_type", "") == "failure"]
             lines = []
             if successes:
-                lines.append(f"Recent successes ({len(successes)}): " +
-                    ", ".join(getattr(o, "tool_name", None) or "?" for o in successes[:3]))
+                lines.append(
+                    f"Recent successes ({len(successes)}): "
+                    + ", ".join(getattr(o, "tool_name", None) or "?" for o in successes[:3])
+                )
             if failures:
-                lines.append(f"Recent failures ({len(failures)}): " +
-                    ", ".join(getattr(o, "tool_name", None) or "?" for o in failures[:3]))
+                lines.append(
+                    f"Recent failures ({len(failures)}): "
+                    + ", ".join(getattr(o, "tool_name", None) or "?" for o in failures[:3])
+                )
             if not lines:
                 return ""
             return "## Recent Outcome Feedback\n" + "\n".join(lines)
@@ -453,21 +494,44 @@ class ContextBuilder:
 
     def is_user_at_pc(self) -> bool:
         """Determines if Sir is physically at the workstation."""
-        from charlie.utils.system import is_system_active
-        return is_system_active(300)
+        from charlie.perception.idle import get_idle_watcher
+
+        return get_idle_watcher().is_idle(300.0) is False
 
     def vram_warning_check(self, threshold_override: Optional[float] = None, silent: bool = False) -> bool:
         """Returns True if VRAM is safe to proceed."""
         used = self.brain._get_vram_used_mb()
         if used == 0.0:
             return True
-        limit = getattr(settings.llm, "vram_limit_mb", 8192)
+        limit = settings.resources.vram_total_mb
         pct = min(100.0, (used / limit) * 100)
         target = threshold_override if threshold_override is not None else 95
         if pct > target:
             if not silent and self.brain.status_q:
-                self.brain._safe_put(self.brain.status_q, {"type": "VRAM", "content": {"pct": pct, "used_mb": used, "budget_mb": settings.resources.vram_budget_mb, "total_mb": settings.resources.vram_total_mb}})
+                self.brain._safe_put(
+                    self.brain.status_q,
+                    {
+                        "type": "VRAM",
+                        "content": {
+                            "pct": pct,
+                            "used_mb": used,
+                            "budget_mb": settings.resources.vram_budget_mb,
+                            "total_mb": settings.resources.vram_total_mb,
+                        },
+                    },
+                )
             return False
         if pct > 90 and self.brain.status_q:
-            self.brain._safe_put(self.brain.status_q, {"type": "VRAM", "content": {"pct": pct, "used_mb": used, "budget_mb": settings.resources.vram_budget_mb, "total_mb": settings.resources.vram_total_mb}})
+            self.brain._safe_put(
+                self.brain.status_q,
+                {
+                    "type": "VRAM",
+                    "content": {
+                        "pct": pct,
+                        "used_mb": used,
+                        "budget_mb": settings.resources.vram_budget_mb,
+                        "total_mb": settings.resources.vram_total_mb,
+                    },
+                },
+            )
         return True

@@ -28,9 +28,7 @@ def send_media_command(command: str):
         # LAYER 1: WinRT Broadcast (Targeting ALL sessions via PowerShell)
         if cmd_lower in ["play", "pause", "toggle", "stop", "next", "prev", "previous"]:
             try:
-                script_path = os.path.join(
-                    os.path.dirname(__file__), "media_control.ps1"
-                )
+                script_path = os.path.join(os.path.dirname(__file__), "media_control.ps1")
                 # Map 'prev' to 'previous' for the PS script
                 ps_cmd = "previous" if cmd_lower == "prev" else cmd_lower
                 subprocess.run(
@@ -52,21 +50,13 @@ def send_media_command(command: str):
         try:
             target_hwnd = win32con.HWND_BROADCAST
             if cmd_lower == "play":
-                win32gui.PostMessage(
-                    target_hwnd, WM_APPCOMMAND, 0, APPCOMMAND_MEDIA_PLAY << 16
-                )
+                win32gui.PostMessage(target_hwnd, WM_APPCOMMAND, 0, APPCOMMAND_MEDIA_PLAY << 16)
             elif cmd_lower == "pause":
-                win32gui.PostMessage(
-                    target_hwnd, WM_APPCOMMAND, 0, APPCOMMAND_MEDIA_PAUSE << 16
-                )
+                win32gui.PostMessage(target_hwnd, WM_APPCOMMAND, 0, APPCOMMAND_MEDIA_PAUSE << 16)
             elif cmd_lower == "stop":
-                win32gui.PostMessage(
-                    target_hwnd, WM_APPCOMMAND, 0, APPCOMMAND_MEDIA_STOP << 16
-                )
+                win32gui.PostMessage(target_hwnd, WM_APPCOMMAND, 0, APPCOMMAND_MEDIA_STOP << 16)
             elif cmd_lower == "toggle":
-                win32gui.PostMessage(
-                    target_hwnd, WM_APPCOMMAND, 0, APPCOMMAND_MEDIA_PLAY_PAUSE << 16
-                )
+                win32gui.PostMessage(target_hwnd, WM_APPCOMMAND, 0, APPCOMMAND_MEDIA_PLAY_PAUSE << 16)
         except Exception as e:
             logger.debug(f"media_win32_broadcast_failed | {e}")
 

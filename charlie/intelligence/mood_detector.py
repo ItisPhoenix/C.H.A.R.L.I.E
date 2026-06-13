@@ -9,10 +9,10 @@ from collections import deque
 logger = logging.getLogger("charlie.intelligence.mood")
 
 # Mood states
-MOOD_STRESSED = "stressed"    # Short, rushed messages
-MOOD_FOCUSED = "focused"      # Long, detailed messages
-MOOD_CASUAL = "casual"        # Normal interaction
-MOOD_FRUSTRATED = "frustrated" # Repeated errors, negative words
+MOOD_STRESSED = "stressed"  # Short, rushed messages
+MOOD_FOCUSED = "focused"  # Long, detailed messages
+MOOD_CASUAL = "casual"  # Normal interaction
+MOOD_FRUSTRATED = "frustrated"  # Repeated errors, negative words
 
 
 class MoodDetector:
@@ -87,15 +87,12 @@ class MoodDetector:
         times = [m["timestamp"] for m in recent if m.get("timestamp")]
         avg_gap = 0
         if len(times) >= 2:
-            gaps = [times[i+1] - times[i] for i in range(len(times)-1)]
+            gaps = [times[i + 1] - times[i] for i in range(len(times) - 1)]
             avg_gap = sum(gaps) / len(gaps)
 
         # Negative word detection
         negative_words = {"error", "fail", "broken", "wrong", "bad", "hate", "annoying", "frustrated", "stuck", "why"}
-        neg_count = sum(
-            1 for m in recent
-            if any(w in m["text"].lower() for w in negative_words)
-        )
+        neg_count = sum(1 for m in recent if any(w in m["text"].lower() for w in negative_words))
 
         # Stressed: short messages, fast responses
         if avg_length < 30 and avg_gap < 10:
@@ -127,7 +124,9 @@ class MoodDetector:
         if self.current_mood == MOOD_STRESSED:
             return "You seem to be in a rush. Need anything specific I can help with quickly?"
         elif self.current_mood == MOOD_FRUSTRATED:
-            return "I notice things might be frustrating. Want me to help troubleshoot, or should I give you some space?"
+            return (
+                "I notice things might be frustrating. Want me to help troubleshoot, or should I give you some space?"
+            )
         return "How are you doing?"
 
     def get_response_style(self) -> dict:

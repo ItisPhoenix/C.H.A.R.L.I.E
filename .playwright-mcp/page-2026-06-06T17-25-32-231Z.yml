@@ -1,0 +1,183 @@
+- generic [ref=e1]:
+  - complementary [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e6]: CHARLIE
+      - button "Collapse sidebar" [ref=e7] [cursor=pointer]:
+        - img [ref=e8]
+    - link "Idle" [ref=e12] [cursor=pointer]:
+      - /url: /
+      - img [ref=e14]
+      - generic [ref=e20]: Idle
+    - navigation [ref=e21]:
+      - generic [ref=e22]:
+        - generic [ref=e23]: Overview
+        - link "Status" [active] [ref=e24] [cursor=pointer]:
+          - /url: /status
+          - img [ref=e25]
+          - generic [ref=e27]: Status
+        - link "Briefing" [ref=e28] [cursor=pointer]:
+          - /url: /briefing
+          - img [ref=e29]
+          - generic [ref=e31]: Briefing
+        - link "Analytics" [ref=e32] [cursor=pointer]:
+          - /url: /analytics
+          - img [ref=e33]
+          - generic [ref=e35]: Analytics
+      - generic [ref=e36]:
+        - generic [ref=e37]: Intelligence
+        - link "Agents" [ref=e38] [cursor=pointer]:
+          - /url: /agents
+          - img [ref=e39]
+          - generic [ref=e42]: Agents
+        - link "Knowledge" [ref=e43] [cursor=pointer]:
+          - /url: /memory
+          - img [ref=e44]
+          - generic [ref=e48]: Knowledge
+        - link "Evolution" [ref=e49] [cursor=pointer]:
+          - /url: /evolution
+          - img [ref=e50]
+          - generic [ref=e53]: Evolution
+      - generic [ref=e54]:
+        - generic [ref=e55]: Operations
+        - link "Tasks" [ref=e56] [cursor=pointer]:
+          - /url: /tasks
+          - img [ref=e57]
+          - generic [ref=e60]: Tasks
+        - link "Approvals" [ref=e61] [cursor=pointer]:
+          - /url: /approvals
+          - img [ref=e62]
+          - generic [ref=e64]: Approvals
+        - link "Automation" [ref=e65] [cursor=pointer]:
+          - /url: /automation
+          - img [ref=e66]
+          - generic [ref=e68]: Automation
+      - generic [ref=e69]:
+        - generic [ref=e70]: Ecosystem
+        - link "MCP Servers" [ref=e71] [cursor=pointer]:
+          - /url: /mcp
+          - img [ref=e72]
+          - generic [ref=e75]: MCP Servers
+        - link "Skills" [ref=e76] [cursor=pointer]:
+          - /url: /skills
+          - img [ref=e77]
+          - generic [ref=e79]: Skills
+        - link "Integrations" [ref=e80] [cursor=pointer]:
+          - /url: /integrations
+          - img [ref=e81]
+          - generic [ref=e83]: Integrations
+        - link "Tools" [ref=e84] [cursor=pointer]:
+          - /url: /tools
+          - img [ref=e85]
+          - generic [ref=e87]: Tools
+      - generic [ref=e88]:
+        - generic [ref=e89]: Interface
+        - link "Conversation" [ref=e90] [cursor=pointer]:
+          - /url: /chat
+          - img [ref=e91]
+          - generic [ref=e93]: Conversation
+        - link "Search" [ref=e94] [cursor=pointer]:
+          - /url: /search
+          - img [ref=e95]
+          - generic [ref=e98]: Search
+        - link "Voice Control" [ref=e99] [cursor=pointer]:
+          - /url: /voice
+          - img [ref=e100]
+          - generic [ref=e103]: Voice Control
+        - link "Logs" [ref=e104] [cursor=pointer]:
+          - /url: /logs
+          - img [ref=e105]
+          - generic [ref=e108]: Logs
+        - link "Settings" [ref=e109] [cursor=pointer]:
+          - /url: /settings
+          - img [ref=e110]
+          - generic [ref=e113]: Settings
+    - generic [ref=e115] [cursor=pointer]:
+      - button [ref=e117]:
+        - img [ref=e118]
+      - generic [ref=e121]: Notifications
+  - generic [ref=e178]:
+    - generic [ref=e179]:
+      - img [ref=e180]
+      - generic [ref=e182]: Brain Disconnected
+      - generic [ref=e183]: "-- some features unavailable"
+    - button [ref=e184] [cursor=pointer]:
+      - img [ref=e185]
+  - main [ref=e122]:
+    - generic [ref=e189]:
+      - generic [ref=e191]:
+        - generic [ref=e192]:
+          - heading "System Status" [level=1] [ref=e193]
+          - paragraph [ref=e194]: "Uptime: 0h 36m 3s"
+        - generic [ref=e196]:
+          - button "Reboot" [ref=e197] [cursor=pointer]
+          - button "Shutdown" [ref=e198] [cursor=pointer]
+      - generic [ref=e200]:
+        - generic [ref=e201]:
+          - generic [ref=e202]:
+            - generic [ref=e203]: 0h 36m 3s
+            - generic [ref=e204]: Uptime
+          - generic [ref=e205]:
+            - generic [ref=e206]: 28.6%
+            - generic [ref=e207]: CPU
+          - generic [ref=e208]:
+            - generic [ref=e209]: 85.6%
+            - generic [ref=e210]: RAM
+        - generic [ref=e211]:
+          - generic [ref=e213]:
+            - generic [ref=e214]: System CPU
+            - generic [ref=e215]: 27.2%
+          - generic [ref=e219]:
+            - generic [ref=e220]: System RAM
+            - generic [ref=e221]: 85.7%
+      - generic [ref=e224]:
+        - generic [ref=e225]:
+          - generic [ref=e226]:
+            - generic [ref=e227]:
+              - 'status "Status: idle" [ref=e228]':
+                - generic [ref=e229]: "Status: idle"
+              - generic [ref=e230]: Brain
+            - generic [ref=e231]: stopped
+          - generic [ref=e232]:
+            - generic [ref=e233]:
+              - generic [ref=e234]: "27620"
+              - generic [ref=e235]: PID
+            - generic [ref=e236]:
+              - generic [ref=e237]: 0.0%
+              - generic [ref=e238]: CPU
+            - generic [ref=e239]:
+              - generic [ref=e240]: 0 MB
+              - generic [ref=e241]: RAM
+            - generic [ref=e242]:
+              - generic [ref=e243]: "3"
+              - generic [ref=e244]: Restarts
+          - generic [ref=e245]:
+            - button "Restart" [ref=e246] [cursor=pointer]
+            - button "Stop" [disabled] [ref=e247]
+        - generic [ref=e248]:
+          - generic [ref=e249]:
+            - generic [ref=e250]:
+              - 'status "Status: online" [ref=e251]':
+                - generic [ref=e252]: "Status: online"
+              - generic [ref=e253]: Browser
+            - generic [ref=e254]: running
+          - generic [ref=e255]:
+            - generic [ref=e256]:
+              - generic [ref=e257]: "17112"
+              - generic [ref=e258]: PID
+            - generic [ref=e259]:
+              - generic [ref=e260]: 0.0%
+              - generic [ref=e261]: CPU
+            - generic [ref=e262]:
+              - generic [ref=e263]: 3 MB
+              - generic [ref=e264]: RAM
+            - generic [ref=e265]:
+              - generic [ref=e266]: "0"
+              - generic [ref=e267]: Restarts
+          - generic [ref=e268]:
+            - button "Restart" [ref=e269] [cursor=pointer]
+            - button "Stop" [ref=e270] [cursor=pointer]
+  - button "Expand status bar" [ref=e169] [cursor=pointer]:
+    - generic [ref=e172]: Sync Active
+    - generic [ref=e174]: idle
+    - img [ref=e175]
+  - alert [ref=e177]

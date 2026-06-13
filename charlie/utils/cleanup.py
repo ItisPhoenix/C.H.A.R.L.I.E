@@ -1,4 +1,4 @@
-﻿"""
+"""
 charlie/utils/cleanup.py
 
 Scans for legacy/stale/committed artifacts and produces a plan

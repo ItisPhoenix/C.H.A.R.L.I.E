@@ -9,7 +9,8 @@ import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import { ErrorState } from '@/components/ui/ErrorState'
 import { EmptyState } from '@/components/ui/EmptyState'
 import * as api from '@/lib/api'
-import { useWSEvent } from '@/lib/ws'
+import { useWSEvent, useWebSocket } from '@/lib/ws'
+import { useDashboardStore } from '@/lib/store'
 import { cn, createVisibilityAwareInterval } from '@/lib/utils'
 import type { VoiceActivity } from '@/lib/types'
 
@@ -25,6 +26,7 @@ function getVoiceState(activity: VoiceActivity | null): {
   active: boolean
 } {
   if (!activity) return { label: 'Idle', status: 'idle', active: false }
+  if (activity.muted) return { label: 'Muted', status: 'idle', active: false }
   if (activity.is_speaking) return { label: 'Speaking', status: 'online', active: true }
   if (activity.is_listening) return { label: 'Listening', status: 'online', active: true }
   if (activity.wake_word_detected) return { label: 'Wake word detected', status: 'warning', active: true }
@@ -38,8 +40,9 @@ interface TranscriptEntry {
 }
 
 export default function VoicePage() {
-  const voiceActivity = useWSEvent<VoiceActivity>('voice_activity')
+  const voiceActivity = useDashboardStore((s) => s.voiceActivity)
   const transcriptEvent = useWSEvent<{ content?: string }>('user_transcript')
+  const { connected } = useWebSocket()
   const [voiceInfo, setVoiceInfo] = useState<VoiceStatusInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -107,7 +110,18 @@ export default function VoicePage() {
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
-      <PageHeader title="Voice" subtitle="Voice interaction status &amp; pipeline" />
+      <PageHeader
+        title="Voice"
+        subtitle="Voice interaction status &amp; pipeline"
+        actions={
+          <span
+            className={`text-xs font-mono ${connected ? 'text-charlie-green' : 'text-charlie-dim'}`}
+            title={connected ? 'Live WebSocket connected' : 'Live WebSocket offline (REST polling still active)'}
+          >
+            {connected ? 'live' : 'offline'}
+          </span>
+        }
+      />
 
       {/* Main status card */}
       <GlassCard className="!p-8">

@@ -38,6 +38,7 @@ class TaskEvent(str, Enum):
 @dataclass
 class TaskSpec:
     """Specification for a task to be executed."""
+
     id: str
     description: str
     priority: TaskPriority
@@ -50,6 +51,7 @@ class TaskSpec:
 @dataclass
 class TaskStatus:
     """Current status of a task."""
+
     id: str
     state: TaskState
     progress_pct: float = 0.0

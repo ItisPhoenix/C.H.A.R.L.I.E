@@ -1,4 +1,4 @@
-﻿"""
+"""
 Agent Loader — Scans charlie/agents/ for agent.json manifests.
 
 Walks the agents directory, parses each subfolder's agent.json into an
@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 # AgentSpec dataclass
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class AgentSpec:
     """Specification loaded from an agent.json manifest."""
@@ -30,7 +31,7 @@ class AgentSpec:
     tools: list[str]
     skills: list[str]
     triggers: dict  # {"keywords": [...], "intent_description": "..."}
-    config: dict    # {"max_chain_depth": 8, "timeout_seconds": 120, "priority": "NORMAL"}
+    config: dict  # {"max_chain_depth": 8, "timeout_seconds": 120, "priority": "NORMAL"}
     version: str = "1.0.0"
     enabled: bool = True
     mcp_servers: dict = field(default_factory=dict)
@@ -48,6 +49,7 @@ REQUIRED_FIELDS = ("name", "description", "system_prompt", "tools")
 # ---------------------------------------------------------------------------
 # AgentLoader
 # ---------------------------------------------------------------------------
+
 
 class AgentLoader:
     """Scans charlie/agents/ for agent.json manifests and returns AgentSpec objects."""
@@ -120,11 +122,16 @@ class AgentLoader:
                             sk, sv = stripped.split(":", 1)
                             sk, sv = sk.strip(), sv.strip()
                             if sv.startswith("[") and sv.endswith("]"):
-                                try: sv = json.loads(sv)
-                                except (json.JSONDecodeError, ValueError): pass
-                            elif sv.lower() == "true": sv = True
-                            elif sv.lower() == "false": sv = False
-                            elif sv.startswith('"') and sv.endswith('"'): sv = sv[1:-1]
+                                try:
+                                    sv = json.loads(sv)
+                                except (json.JSONDecodeError, ValueError):
+                                    pass
+                            elif sv.lower() == "true":
+                                sv = True
+                            elif sv.lower() == "false":
+                                sv = False
+                            elif sv.startswith('"') and sv.endswith('"'):
+                                sv = sv[1:-1]
                             current_sub[sk] = sv
                             continue
                         # Flush previous sub-dict
@@ -143,11 +150,16 @@ class AgentLoader:
                                 current_sub = {}
                                 continue
                             if v.startswith("[") and v.endswith("]"):
-                                try: v = json.loads(v)
-                                except (json.JSONDecodeError, ValueError): pass
-                            elif v.lower() == "true": v = True
-                            elif v.lower() == "false": v = False
-                            elif v.startswith('"') and v.endswith('"'): v = v[1:-1]
+                                try:
+                                    v = json.loads(v)
+                                except (json.JSONDecodeError, ValueError):
+                                    pass
+                            elif v.lower() == "true":
+                                v = True
+                            elif v.lower() == "false":
+                                v = False
+                            elif v.startswith('"') and v.endswith('"'):
+                                v = v[1:-1]
                             data[k] = v
                     # Flush last sub-dict
                     if current_key and current_sub:
@@ -188,9 +200,7 @@ class AgentLoader:
         """
         missing = [f for f in REQUIRED_FIELDS if f not in data]
         if missing:
-            logger.warning(
-                "Manifest %s missing required fields: %s", path, missing
-            )
+            logger.warning("Manifest %s missing required fields: %s", path, missing)
             return False
 
         # tools must be a list

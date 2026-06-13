@@ -17,6 +17,45 @@ Your skills: {skills_list}
 Execute tasks efficiently and report results clearly."""
 
 
+def _render_agent_md(manifest: dict) -> str:
+    """Render an AgentSpec dict as YAML-frontmatter AGENT.md text.
+
+    Used by both AgentFactory and AgentCreator so the loader (which reads
+    ``AGENT.md`` with frontmatter, not ``agent.json``) sees the new agent
+    on the next reload.
+    """
+    tools = manifest.get("tools") or []
+    skills = manifest.get("skills") or []
+    triggers = manifest.get("triggers") or {"keywords": [], "intent_description": ""}
+    config = manifest.get("config") or {
+        "max_chain_depth": 8,
+        "timeout_seconds": 120,
+        "priority": "NORMAL",
+    }
+    body = manifest.get("system_prompt", "").strip()
+    tools_json = json.dumps(tools, ensure_ascii=False)
+    skills_json = json.dumps(skills, ensure_ascii=False)
+    keywords_json = json.dumps(triggers.get("keywords", []), ensure_ascii=False)
+    frontmatter = (
+        "---\n"
+        f"name: {manifest.get('name', '')}\n"
+        f"description: {json.dumps(manifest.get('description', ''), ensure_ascii=False)}\n"
+        f"version: \"{manifest.get('version', '1.0.0')}\"\n"
+        f"enabled: {str(bool(manifest.get('enabled', True))).lower()}\n"
+        f"tools: {tools_json}\n"
+        f"skills: {skills_json}\n"
+        "triggers:\n"
+        f"  keywords: {keywords_json}\n"
+        f"  intent_description: {json.dumps(triggers.get('intent_description', ''), ensure_ascii=False)}\n"
+        "config:\n"
+        f"  max_chain_depth: {config.get('max_chain_depth', 8)}\n"
+        f"  timeout_seconds: {config.get('timeout_seconds', 120)}\n"
+        f"  priority: {config.get('priority', 'NORMAL')}\n"
+        "---\n"
+    )
+    return frontmatter + (("\n" + body) if body else "")
+
+
 class AgentFactory:
     """Creates new agent manifests when gaps are detected."""
 
@@ -53,16 +92,15 @@ class AgentFactory:
             "skills": skills or [],
         }
 
-        manifest_path = agent_dir / "agent.json"
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
+        # Write AGENT.md (with YAML frontmatter) so the loader
+        # finds the new agent on the next reload.
+        manifest_path = agent_dir / "AGENT.md"
+        manifest_path.write_text(_render_agent_md(manifest), encoding="utf-8")
 
         logger.info("agent_created | name=%s path=%s", name, manifest_path)
         return manifest
 
-    def detect_gap(
-        self, failed_keywords: list[str], existing_agents: list[str]
-    ) -> dict | None:
+    def detect_gap(self, failed_keywords: list[str], existing_agents: list[str]) -> dict | None:
         """Detect if a new agent is needed based on failed task keywords."""
         if not failed_keywords:
             return None
@@ -101,9 +139,7 @@ class AgentFactory:
             cap_keywords = set(cap_info["keywords"])
             overlap = failed_set & cap_keywords
             if len(overlap) >= 2 and cap_info["name"] not in existing_agents:
-                logger.info(
-                    "gap_detected | capability=%s overlap=%s", cap_key, overlap
-                )
+                logger.info("gap_detected | capability=%s overlap=%s", cap_key, overlap)
                 return cap_info
 
         return None

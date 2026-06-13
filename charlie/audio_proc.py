@@ -25,7 +25,13 @@ from charlie.utils.volume import VolumeController
 logger = get_logger(__name__)
 
 
-def _playback_worker(audio_q: multiprocessing.Queue, device_index: int, sample_rate: int, channels: int, playback_active: multiprocessing.Value):
+def _playback_worker(
+    audio_q: multiprocessing.Queue,
+    device_index: int,
+    sample_rate: int,
+    channels: int,
+    playback_active: multiprocessing.Value,
+):
     """
     Standalone process for audio playback.
     Isolated from main sensory loop to prevent library deadlocks during barge-in.
@@ -40,25 +46,22 @@ def _playback_worker(audio_q: multiprocessing.Queue, device_index: int, sample_r
     try:
         # Lower process priority to give main engine headroom
         import psutil
+
         p = psutil.Process(os.getpid())
-        if os.name == 'nt':
+        if os.name == "nt":
             p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
         else:
             p.nice(10)
 
         with sd.OutputStream(
-            samplerate=sample_rate,
-            channels=channels,
-            device=device_index,
-            blocksize=1024,
-            latency="low"
+            samplerate=sample_rate, channels=channels, device=device_index, blocksize=1024, latency="low"
         ) as stream:
             while True:
                 try:
                     # Polling get with timeout to allow flag reset
                     audio_data = audio_q.get(timeout=0.1)
                     if audio_data is None:
-                        break # Shutdown sentinel
+                        break  # Shutdown sentinel
 
                     if playback_active is not None:
                         playback_active.value = 1
@@ -144,6 +147,9 @@ class AudioEngine:
         self.last_diagnostic_time = 0
         self.is_speaking = False
         self.is_thinking = False
+        self.muted = False
+        self._hotkey_ctrl = False
+        self._hotkey_shift = False
         self._speech_hysteresis = 0
         self.conversation_active = False
         self.stt_ready = False
@@ -159,7 +165,9 @@ class AudioEngine:
         self.tts_model = None
         self.input_q = queue.Queue()
         self._ww_inference_chunks = 3
-        self._wake_confidence = getattr(settings.audio, "wake_confidence", 0.5)  # Increase chunks for better cadence capture
+        self._wake_confidence = getattr(
+            settings.audio, "wake_confidence", 0.5
+        )  # Increase chunks for better cadence capture
         self._stt_task_q = queue.Queue()  # Persistent STT worker queue (replaces thread-per-call)
         # SPEED: Pre-compute resample decision at init time — not on every frame
         self._needs_resample = self.input_rate != self.target_rate
@@ -167,19 +175,13 @@ class AudioEngine:
             _common = math.gcd(self.target_rate, self.input_rate)
             self._resample_up = self.target_rate // _common
             self._resample_down = self.input_rate // _common
-            logger.info(
-                f"audio_resample_init | up={self._resample_up} | down={self._resample_down}"
-            )
+            logger.info(f"audio_resample_init | up={self._resample_up} | down={self._resample_down}")
 
-        self.volume = VolumeController(
-            steps=settings.audio.duck_steps
-            if hasattr(settings.audio, "duck_steps")
-            else 8
-        )
+        self.volume = VolumeController(steps=settings.audio.duck_steps if hasattr(settings.audio, "duck_steps") else 8)
 
         # New: Multiprocessing Audio Playback
         self._playback_q = multiprocessing.Queue(maxsize=50)
-        self._playback_active = multiprocessing.Value('i', 0)
+        self._playback_active = multiprocessing.Value("i", 0)
         self._playback_lock = threading.Lock()
         # Attach to queue for easy passing to worker
         self._playback_q.playback_active = self._playback_active
@@ -191,19 +193,20 @@ class AudioEngine:
             return ""
 
         # 1. Remove code blocks entirely
-        text = re.sub(r'```[\s\S]*?```', '[code block]', text)
+        text = re.sub(r"```[\s\S]*?```", "[code block]", text)
 
         # 2. Remove RSS/news metadata patterns
-        text = re.sub(r'Source:\s*link\s+to\s+\S+[\s,]*', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'\bTopic:\s*[A-Z_]+\s*', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'\bSummary:\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r"Source:\s*link\s+to\s+\S+[\s,]*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bTopic:\s*[A-Z_]+\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bSummary:\s*", "", text, flags=re.IGNORECASE)
 
         # 3. Remove markdown headers (###, ##, #)
-        text = re.sub(r'#{1,6}\s+', '', text)
+        text = re.sub(r"#{1,6}\s+", "", text)
 
         # 4. Handle URLs - replace with domain name only
         def url_repl(match):
             from urllib.parse import urlparse
+
             url = match.group(0)
             try:
                 domain = urlparse(url).netloc
@@ -211,25 +214,26 @@ class AudioEngine:
             except Exception as exc:
                 logger.warning("audio_stream_read_failed | %s", exc)
                 return ""
-        text = re.sub(r'https?://\S+', url_repl, text)
+
+        text = re.sub(r"https?://\S+", url_repl, text)
 
         # 5. Clean markdown symbols
         text = text.replace("*", "").replace("_", "").replace("`", "")
 
         # 6. Clean bullet points for better flow
-        text = re.sub(r'^\s*[-*]\s+', ' ', text, flags=re.MULTILINE)
+        text = re.sub(r"^\s*[-*]\s+", " ", text, flags=re.MULTILINE)
 
         # 7. Remove "link to" leftovers from previous URL processing
-        text = re.sub(r'\blink\s+to\s+\S+', '', text, flags=re.IGNORECASE)
+        text = re.sub(r"\blink\s+to\s+\S+", "", text, flags=re.IGNORECASE)
 
         # 8. Handle decimals in numbers (e.g., 3.14 -> 3 point 14)
-        text = re.sub(r'(\d+)\.(\d+)', r'\1 point \2', text)
+        text = re.sub(r"(\d+)\.(\d+)", r"\1 point \2", text)
 
         # 9. Final cleanup of excessive whitespace and dashes
-        text = re.sub(r'\s*[-–—]\s*', '. ', text)
-        text = re.sub(r'\s+', ' ', text).strip()
-        text = re.sub(r'\.\s*\.', '.', text)  # Remove double dots
-        text = re.sub(r'^\.\s*', '', text)  # Remove leading dot
+        text = re.sub(r"\s*[-–—]\s*", ". ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"\.\s*\.", ".", text)  # Remove double dots
+        text = re.sub(r"^\.\s*", "", text)  # Remove leading dot
 
         return text
 
@@ -259,10 +263,9 @@ class AudioEngine:
         # for this child. Re-probe every 30s so a hot-plugged mic
         # comes back without a daemon restart.
         if not self._probe_mic(self.device_index):
-            self._post_disabled(
-                reason=f"mic_index={self.device_index} not found"
-            )
+            self._post_disabled(reason=f"mic_index={self.device_index} not found")
             import time as _time
+
             self.heartbeat.value = _time.time()
             stop = getattr(self, "stop_event", None) or self.interrupt_event
             if stop is None:
@@ -273,11 +276,13 @@ class AudioEngine:
                 if stop.is_set():
                     break
                 if self._probe_mic(self.device_index):
-                    self.status_q.put_nowait({
-                        "type": "SUBSYSTEM_STATUS",
-                        "name": "audio",
-                        "state": "ok",
-                    })
+                    self.status_q.put_nowait(
+                        {
+                            "type": "SUBSYSTEM_STATUS",
+                            "name": "audio",
+                            "state": "ok",
+                        }
+                    )
                     logger.info("audio_recovered | mic now available")
                     return 0
             return 0
@@ -303,12 +308,82 @@ class AudioEngine:
         """Post a SUBSYSTEM_STATUS: disabled payload to the status queue."""
         if self.status_q is None:
             return
-        self.status_q.put_nowait({
-            "type": "SUBSYSTEM_STATUS",
-            "name": "audio",
-            "state": "disabled",
-            "reason": reason,
-        })
+        self.status_q.put_nowait(
+            {
+                "type": "SUBSYSTEM_STATUS",
+                "name": "audio",
+                "state": "disabled",
+                "reason": reason,
+            }
+        )
+
+    def mute(self) -> None:
+        """Mute audio input — discard mic frames until unmute(). TTS still works."""
+        if self.muted:
+            return
+        self.muted = True
+        logger.info("audio_muted")
+        if self.status_q is not None:
+            try:
+                self.status_q.put_nowait(
+                    {
+                        "type": "VOICE_ACTIVITY",
+                        "is_speaking": self.is_speaking,
+                        "is_listening": False,
+                        "muted": True,
+                    }
+                )
+            except Exception as e:
+                # Was `pass` — the dashboard would never see the mute state and
+                # the user would have no way to diagnose it. Now we surface it.
+                logger.warning("mute_status_publish_failed | %s", e)
+
+    def unmute(self) -> None:
+        """Resume normal mic capture."""
+        if not self.muted:
+            return
+        self.muted = False
+        logger.info("audio_unmuted")
+        if self.status_q is not None:
+            try:
+                self.status_q.put_nowait(
+                    {
+                        "type": "VOICE_ACTIVITY",
+                        "is_speaking": self.is_speaking,
+                        "is_listening": self.is_listening,
+                        "muted": False,
+                    }
+                )
+            except Exception as e:
+                logger.warning("unmute_status_publish_failed | %s", e)
+
+    def get_config(self) -> dict:
+        """Return the current audio config (safe to expose via REST API)."""
+        return {
+            "muted": self.muted,
+            "wake_word": getattr(self, "wake_word_name", "charlie"),
+            "wake_word_sensitivity": getattr(self, "_wake_word_sensitivity", 0.5),
+            "mute_hotkey": "Ctrl+Shift+M",
+        }
+
+    def set_config(self, updates: dict) -> dict:
+        """Apply a subset of config updates. Returns the new full config."""
+        if "wake_word_sensitivity" in updates:
+            self._wake_word_sensitivity = float(updates["wake_word_sensitivity"])
+            logger.info(
+                "audio_config_updated | wake_word_sensitivity=%s",
+                self._wake_word_sensitivity,
+            )
+        if "wake_word" in updates:
+            self.wake_word_name = str(updates["wake_word"])
+            logger.info("audio_config_updated | wake_word=%s", self.wake_word_name)
+        return self.get_config()
+    def say(self, text: str) -> None:
+        """Queue text for TTS playback via the speaker worker."""
+        if not text or not text.strip():
+            return
+        self.tts_q.put({"type": "SPEAK", "content": text.strip()})
+        logger.info("audio_tts_queued | len=%d", len(text))
 
     def load_models(self):
         logger.info("audio_models_loading")
@@ -334,9 +409,7 @@ class AudioEngine:
                 logger.warning(
                     f"stt_load_fail | model={stt_model_name} | device={device} | error={e} | falling_back_to_tiny_cpu"
                 )
-                self.stt_model = WhisperModel(
-                    "tiny.en", device="cpu", compute_type="float32"
-                )
+                self.stt_model = WhisperModel("tiny.en", device="cpu", compute_type="float32")
 
             # 2. Wake-Word (openWakeWord) - Forced to CPU locally for stability
             try:
@@ -360,9 +433,7 @@ class AudioEngine:
                     logger.warning("attempting_cpu_fallback_after_cuda_error")
                     # Disable CUDA for this process and retry once as last resort
                     # Fallback handled via re-init without cuda params if necessary
-                    ww_paths = [
-                        os.path.abspath(p) for p in settings.audio.wakeword_models
-                    ]
+                    ww_paths = [os.path.abspath(p) for p in settings.audio.wakeword_models]
                     self.ww_model = openwakeword.Model(wakeword_model_paths=ww_paths)
                 else:
                     raise
@@ -370,6 +441,7 @@ class AudioEngine:
             # 3. Vocal Synthesis (Kokoro-82M ONNX) — GPU-accelerated
             import onnxruntime as ort
             from kokoro_onnx import Kokoro
+
             kokoro_model = os.getenv("KOKORO_MODEL_PATH", "charlie/models/kokoro-v1.0.onnx")
             kokoro_voices = os.getenv("KOKORO_VOICES_PATH", "charlie/models/voices-v1.0.bin")
 
@@ -378,7 +450,8 @@ class AudioEngine:
                 opts = ort.SessionOptions()
                 opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
                 sess = ort.InferenceSession(
-                    kokoro_model, opts,
+                    kokoro_model,
+                    opts,
                     providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
                 )
                 self.tts_model = Kokoro.from_session(sess, kokoro_voices)
@@ -403,9 +476,7 @@ class AudioEngine:
             logger.info("audio_models_ready | all_systems_go")
 
         except Exception as e:
-            err_msg = (
-                f"Sir, my audio sensory systems failed to initialize. Error: {str(e)}"
-            )
+            err_msg = f"Sir, my audio sensory systems failed to initialize. Error: {str(e)}"
             logger.error("audio_model_load_failed", error=str(e))
             self.tts_q.put({"type": "SPEAK", "content": err_msg})
             self.running = False
@@ -447,6 +518,12 @@ class AudioEngine:
             else:
                 audio_f32 = indata_mono.astype(np.float32)
 
+            # Mute gate: discard audio while muted (or while TTS is playing to avoid echo)
+            with self._playback_lock:
+                playback_on = self._playback_active.value == 1
+            if self.muted or (self.is_speaking and playback_on):
+                continue
+
             # Robust normalization: Peak-normalize if signal is out of bounds or in int16 range
             peak_raw = np.max(np.abs(audio_f32))
             if peak_raw > 1.0:
@@ -485,9 +562,7 @@ class AudioEngine:
             if now - self._last_telemetry_time > 0.05:
                 # Digital clipping warning
                 if peak >= 0.99 and not self.is_speaking:
-                    logger.warning(
-                        f"audio_signal_clipping | peak={peak:.4f} | rms={rms:.4f}"
-                    )
+                    logger.warning(f"audio_signal_clipping | peak={peak:.4f} | rms={rms:.4f}")
                     # Auto-attenuate to prevent distortion
                     self.current_gain = max(0.5, self.current_gain * 0.85)
                     logger.info(f"gain_adjusted | new_gain={self.current_gain:.2f}")
@@ -556,7 +631,7 @@ class AudioEngine:
                 # Must be clear speech AND above high threshold to stop her
                 # Added cooldown to prevent rapid-fire interrupts
                 now = time.time()
-                if not hasattr(self, '_last_barge_in'):
+                if not hasattr(self, "_last_barge_in"):
                     self._last_barge_in = 0
                 if ((is_speech and peak > ref_threshold) or (peak > 0.90)) and (now - self._last_barge_in > 1.0):
                     self._last_barge_in = now
@@ -610,7 +685,7 @@ class AudioEngine:
                                 block=False,
                             )
                         self.silence_frames = 0
-                        self.active_idle_frames = 0 # Reset inactivity on speech start
+                        self.active_idle_frames = 0  # Reset inactivity on speech start
 
                     if self.is_listening:
                         with self.buffer_lock:
@@ -621,18 +696,10 @@ class AudioEngine:
                         else:
                             self.silence_frames = 0
 
-                        max_buffer_frames = int(
-                            settings.audio.conversation_timeout
-                            * 1000
-                            / self.frame_duration
-                        )
-                        max_speech_frames = int(
-                            10000 / self.frame_duration
-                        )  # 10s max speech duration
+                        max_buffer_frames = int(settings.audio.conversation_timeout * 1000 / self.frame_duration)
+                        max_speech_frames = int(10000 / self.frame_duration)  # 10s max speech duration
 
-                        max_silence = int(
-                            settings.audio.silence_limit * 1000 / self.frame_duration
-                        )
+                        max_silence = int(settings.audio.silence_limit * 1000 / self.frame_duration)
                         if (
                             (self.silence_frames >= max_silence)
                             or (len(self.audio_buffer) > max_buffer_frames)
@@ -704,9 +771,7 @@ class AudioEngine:
                     # 1. Model score > threshold
                     # 2. RMS bypass (0.10) GATED by VAD (is_speaking) to filter thumps
                     # 3. WAKE LOCK: Prevent re-triggering for 5s to allow for greeting/stt
-                    rms_bypass = (
-                        rms > 0.10 and effective_speaking and not self.is_listening
-                    )
+                    rms_bypass = rms > 0.10 and effective_speaking and not self.is_listening
                     now = time.time()
 
                     # POST-WAKE GUARD: If we just woke up, be more strict (filter echos)
@@ -717,9 +782,7 @@ class AudioEngine:
                         # GHOST WAKE PROTECTION: Massive threshold bump while Charlie speaks
                         dynamic_threshold = max(0.45, threshold * 15.0)
                     elif time_since_wake < 5.0:
-                        dynamic_threshold = max(
-                            0.25, threshold * 5.0
-                        )  # Significant bump for echo window
+                        dynamic_threshold = max(0.25, threshold * 5.0)  # Significant bump for echo window
 
                     wake_lock = now - getattr(self, "_last_wake_trigger_time", 0) < 5.0
 
@@ -748,13 +811,9 @@ class AudioEngine:
                         # so the transcribed text ('charlie', 'hey charlie' etc.) reaches brain.
                         if self.standby_mode:
                             with self.buffer_lock:
-                                preroll = list(self.verif_buffer)[
-                                    -20:
-                                ]  # ~1.6s pre-roll
+                                preroll = list(self.verif_buffer)[-20:]  # ~1.6s pre-roll
                                 self.audio_buffer = list(preroll)
-                            self._last_standby_wake_time = (
-                                time.time()
-                            )  # WINDOW: suppress wake-word STT for 5s
+                            self._last_standby_wake_time = time.time()  # WINDOW: suppress wake-word STT for 5s
                             self.conversation_active = True
                             self.awaiting_brain = False
                             self.stt_ready = True
@@ -776,12 +835,7 @@ class AudioEngine:
                                 },
                                 block=False,
                             )
-                    elif (
-                        rms > 0.20
-                        and score < 0.01
-                        and effective_speaking
-                        and not self.standby_mode
-                    ):
+                    elif rms > 0.20 and score < 0.01 and effective_speaking and not self.standby_mode:
                         # Signal is loud but WW didn't fire - Rate limit diagnostic to 10s
                         if now - self.last_diagnostic_time > 10:
                             logger.warning(
@@ -831,9 +885,7 @@ class AudioEngine:
                     audio_f32 = audio_f32 / peak * 0.95
 
                 logger.info("STT_START | Sensory pipeline processing audio...")
-                logger.info(
-                    f"stt_transcribing | samples={len(audio_f32)} | peak={peak:.4f}"
-                )
+                logger.info(f"stt_transcribing | samples={len(audio_f32)} | peak={peak:.4f}")
 
                 initial_prompt = getattr(settings.audio, "stt_initial_prompt", "Sir,")
                 segments, info = self.stt_model.transcribe(
@@ -884,9 +936,7 @@ class AudioEngine:
                     # Strip leading "charlie" and check if anything meaningful remains
                     import re as _re
 
-                    residual = _re.sub(
-                        r"^(charlie|hey charlie)[,.\s]*", "", text_clean_check
-                    ).strip()
+                    residual = _re.sub(r"^(charlie|hey charlie)[,.\s]*", "", text_clean_check).strip()
                     standby_triggers = [
                         "stand by",
                         "standby",
@@ -896,9 +946,7 @@ class AudioEngine:
                         "",
                     ]
                     if residual in standby_triggers:
-                        logger.info(
-                            f"standby_wake_filter | suppressed='{text}' | time={time_since_wake:.1f}s"
-                        )
+                        logger.info(f"standby_wake_filter | suppressed='{text}' | time={time_since_wake:.1f}s")
                         self.stt_in_progress = False
                         # REFRESH LOCK: Prevent immediate re-trigger from same echo
                         self._last_wake_trigger_time = time.time()
@@ -907,16 +955,10 @@ class AudioEngine:
                         return
 
                 # Broadcast transcript to dashboard (persistent via WS → frontend)
-                self.status_q.put(
-                    {"type": "CHAT_MSG", "speaker": "SIR", "content": text}, block=False
-                )
-                self.status_q.put(
-                    {"type": "USER_TRANSCRIPT", "content": text}, block=False
-                )
+                self.status_q.put({"type": "CHAT_MSG", "speaker": "SIR", "content": text}, block=False)
+                self.status_q.put({"type": "USER_TRANSCRIPT", "content": text}, block=False)
                 if hasattr(self.brain_task_q, "put"):
-                    self.brain_task_q.put(
-                        {"type": "TEXT", "content": text, "source": "local"}
-                    )
+                    self.brain_task_q.put({"type": "TEXT", "content": text, "source": "local"})
             except Exception as e:
                 logger.error(f"stt_error | {e}")
                 if hasattr(self.tts_q, "put"):
@@ -944,6 +986,7 @@ class AudioEngine:
 
     def _speaker_worker(self):
         import time
+
         pythoncom.CoInitialize()
         logger.info("speaker_worker_online | voice=eve")
         self._ensure_playback_proc()
@@ -952,11 +995,7 @@ class AudioEngine:
             """Dedicated thread: kills active playback process the instant interrupt_event fires."""
             last_interrupt = 0
             while self.running:
-                if (
-                    self.interrupt_event
-                    and self.interrupt_event.is_set()
-                    and self._playback_proc
-                ):
+                if self.interrupt_event and self.interrupt_event.is_set() and self._playback_proc:
                     now = time.time()
                     if now - last_interrupt < 0.5:  # 500ms cooldown between interrupts
                         self.interrupt_event.clear()
@@ -970,7 +1009,7 @@ class AudioEngine:
                     try:
                         self._playback_proc.terminate()
                         self._playback_proc.join(timeout=1.0)
-                        self._ensure_playback_proc() # Respawn for next time
+                        self._ensure_playback_proc()  # Respawn for next time
                     except Exception as e:
                         logger.debug(f"proc_abort_failed | {e}")
                     # Flush pending TTS chunks
@@ -984,12 +1023,9 @@ class AudioEngine:
                     self.interrupt_event.clear()
                 time.sleep(0.02)
 
-        threading.Thread(
-            target=_interrupt_watcher, daemon=True, name="InterruptWatcher"
-        ).start()
+        threading.Thread(target=_interrupt_watcher, daemon=True, name="InterruptWatcher").start()
 
         # Start ambient feedback threads
-
 
         while self.running:
             try:
@@ -1024,7 +1060,7 @@ class AudioEngine:
                             self.allow_barge_in = False
 
                             if was_active and not self.standby_mode:
-                                self.conversation_active = True # Resume listening
+                                self.conversation_active = True  # Resume listening
                                 self.status_q.put(
                                     {"type": "PHASE", "content": "LISTENING", "source": "audio"},
                                     block=False,
@@ -1110,7 +1146,7 @@ class AudioEngine:
                                                     break
                                             break
 
-                                        sub_block = audio_block[i:i + block_size]
+                                        sub_block = audio_block[i : i + block_size]
 
                                         # WAVEFORM: Generate for speaker output
                                         step = max(1, len(sub_block) // 64)
@@ -1118,14 +1154,17 @@ class AudioEngine:
                                         if len(waveform) < 64:
                                             waveform.extend([0.0] * (64 - len(waveform)))
 
-                                        self.status_q.put({
-                                            "type": "VOICE_ACTIVITY",
-                                            "peak": float(np.max(np.abs(sub_block))),
-                                            "waveform": waveform,
-                                            "source": "speaker",
-                                            "is_speaking": True,
-                                            "is_listening": True,
-                                        }, block=False)
+                                        self.status_q.put(
+                                            {
+                                                "type": "VOICE_ACTIVITY",
+                                                "peak": float(np.max(np.abs(sub_block))),
+                                                "waveform": waveform,
+                                                "source": "speaker",
+                                                "is_speaking": True,
+                                                "is_listening": True,
+                                            },
+                                            block=False,
+                                        )
 
                                         # Send to playback process
                                         self._playback_q.put(sub_block)
@@ -1164,7 +1203,7 @@ class AudioEngine:
                 self.volume.unduck()
             except Exception as e:
                 logger.error(f"speaker_worker_fatal | {e}")
-                self.awaiting_brain = False # Fail-safe: release sensory loop
+                self.awaiting_brain = False  # Fail-safe: release sensory loop
                 self.is_speaking = False
                 self.volume.unduck()
 
@@ -1200,7 +1239,7 @@ class AudioEngine:
                 # Simple sine wave chunk
                 chunk_size = 1024
                 samples = (np.sin(2 * math.pi * freq * (np.arange(t, t + chunk_size) / sample_rate))).astype(np.float32)
-                samples *= 0.03 # Very quiet
+                samples *= 0.03  # Very quiet
 
                 try:
                     self._playback_q.put(samples)
@@ -1215,13 +1254,15 @@ class AudioEngine:
 
     def _run_original(self):
         import time
+
         pythoncom.CoInitialize()
         # ── PRIORITY ELEVATION ──
         # Ensure sensory loop gets priority over heavy background tasks (Vision/RAG)
         try:
             import psutil
+
             p = psutil.Process(os.getpid())
-            if os.name == 'nt':
+            if os.name == "nt":
                 p.nice(psutil.HIGH_PRIORITY_CLASS)
             else:
                 p.nice(-10)
@@ -1242,9 +1283,7 @@ class AudioEngine:
                 callback=self.audio_callback,
             )
         except Exception as e:
-            logger.warning(
-                f"audio_init_failed | rate={self.input_rate} | error={e} | falling_back_to_16k"
-            )
+            logger.warning(f"audio_init_failed | rate={self.input_rate} | error={e} | falling_back_to_16k")
             self.input_rate = 16000
             self.block_size = int(16000 * self.frame_duration / 1000)
             stream = sd.InputStream(
@@ -1260,18 +1299,12 @@ class AudioEngine:
             # Hardware rate handshake: ensure we use the actual rate the device opened with
             actual_rate = getattr(stream, "samplerate", self.input_rate)
             if actual_rate != self.input_rate:
-                logger.info(
-                    f"audio_hardware_handshake | requested={self.input_rate} | actual={actual_rate}"
-                )
+                logger.info(f"audio_hardware_handshake | requested={self.input_rate} | actual={actual_rate}")
                 self.input_rate = int(actual_rate)
 
             # Start workers and handshake only AFTER stream is confirmed
-            threading.Thread(
-                target=self._speaker_worker, daemon=True, name="SpeakerWorker"
-            ).start()
-            threading.Thread(
-                target=self._sensory_processor, daemon=True, name="SensoryProcessor"
-            ).start()
+            threading.Thread(target=self._speaker_worker, daemon=True, name="SpeakerWorker").start()
+            threading.Thread(target=self._sensory_processor, daemon=True, name="SensoryProcessor").start()
 
             # Persistent STT worker thread — drains tasks from _stt_task_q.
             # Replaces the old polling loop + thread-per-call pattern.
@@ -1285,9 +1318,7 @@ class AudioEngine:
                     except queue.Empty:
                         continue
 
-            threading.Thread(
-                target=_stt_worker, daemon=True, name="STTWorker"
-            ).start()
+            threading.Thread(target=_stt_worker, daemon=True, name="STTWorker").start()
 
             # Push-to-talk listener: Right Ctrl activates listening
             def _push_to_talk():
@@ -1295,11 +1326,40 @@ class AudioEngine:
                     from pynput import keyboard
 
                     def on_press(key):
+                        try:
+                            if key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r:
+                                self._hotkey_ctrl = True
+                            elif key == keyboard.Key.shift_l or key == keyboard.Key.shift_r:
+                                self._hotkey_shift = True
+                            elif hasattr(key, "char") and key.char == "m":
+                                if self._hotkey_ctrl and self._hotkey_shift:
+                                    if self.muted:
+                                        self.unmute()
+                                    else:
+                                        self.mute()
+                                    return
+                        except Exception:
+                            pass
                         if key == keyboard.Key.ctrl_r:
                             if not self.conversation_active:
                                 logger.info("push_to_talk_activated")
                                 self.pending_wake = True
                                 self.last_wake_time = time.time()
+
+                    def on_release(key):
+                        try:
+                            if key in (
+                                keyboard.Key.ctrl_l,
+                                keyboard.Key.ctrl_r,
+                            ):
+                                self._hotkey_ctrl = False
+                            elif key in (
+                                keyboard.Key.shift_l,
+                                keyboard.Key.shift_r,
+                            ):
+                                self._hotkey_shift = False
+                        except Exception:
+                            pass
 
                     listener = keyboard.Listener(on_press=on_press)
                     listener.daemon = True
@@ -1312,9 +1372,7 @@ class AudioEngine:
                 except Exception as e:
                     logger.debug(f"push_to_talk_error | {e}")
 
-            threading.Thread(
-                target=_push_to_talk, daemon=True, name="PushToTalk"
-            ).start()
+            threading.Thread(target=_push_to_talk, daemon=True, name="PushToTalk").start()
 
             self.brain_task_q.put({"type": "SENSORY_READY"})
             logger.info("audio_handshake_complete | sensory_ready_emitted")
@@ -1372,6 +1430,10 @@ class AudioEngine:
                         # Send sentinels to workers for clean shutdown
                         self._playback_q.put(None)
                         self._stt_task_q.put(None)
+                    elif cmd_type == "MUTE":
+                        self.mute()
+                    elif cmd_type == "UNMUTE":
+                        self.unmute()
                 except queue.Empty:
                     pass
                 time.sleep(0.01)

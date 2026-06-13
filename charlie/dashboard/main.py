@@ -11,6 +11,7 @@ ControlServer (aiohttp on :8090).
 
 Req 6.3 / 6.4 — all browser REST traffic routes through this proxy.
 """
+
 from __future__ import annotations
 
 import logging
@@ -34,19 +35,33 @@ app = FastAPI(title="Charlie Dashboard Proxy", docs_url=None, redoc_url=None)
 # Reusable async HTTP client (connection-pooled).
 _client: httpx.AsyncClient | None = None
 _control_token: str = ""
+_control_token_fetched_at: float = 0.0
+
+# Cached tokens expire after this many seconds so that if the control server
+# rotates its token (or the cached value is rejected as 401/403), the
+# dashboard re-fetches instead of replaying a stale token forever.
+_TOKEN_TTL_S = 3600.0
 
 
-async def _fetch_token() -> str:
-    """Fetch the control server token from the unauthenticated /api/token endpoint."""
-    global _control_token
-    if _control_token:
+async def _fetch_token(force: bool = False) -> str:
+    """Fetch the control server token from the unauthenticated /api/token endpoint.
+
+    Honours a TTL: if the cached token is older than ``_TOKEN_TTL_S`` a
+    fresh copy is fetched. Pass ``force=True`` to bypass the cache
+    (e.g. after the upstream returned 401/403).
+    """
+    global _control_token, _control_token_fetched_at
+    import time
+
+    if not force and _control_token and (time.time() - _control_token_fetched_at) < _TOKEN_TTL_S:
         return _control_token
     try:
         async with httpx.AsyncClient(timeout=5.0) as c:
             resp = await c.get(f"{CONTROL_BASE}/api/token")
             if resp.status_code == 200:
                 _control_token = resp.json().get("token", "")
-                logger.info("control_token_fetched")
+                _control_token_fetched_at = time.time()
+                logger.info("control_token_fetched | forced=%s", force)
     except Exception as exc:
         logger.warning("control_token_fetch_failed | error=%s", exc)
     return _control_token
@@ -99,11 +114,7 @@ async def proxy_api(path: str, request: Request) -> Response:
     if request.url.query:
         url = f"{url}?{request.url.query}"
 
-    headers = {
-        k: v
-        for k, v in request.headers.items()
-        if k.lower() not in ("host", "connection", "keep-alive")
-    }
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "connection", "keep-alive")}
     token = _control_token or await _fetch_token()
     if token:
         headers["X-Control-Token"] = token
@@ -116,11 +127,22 @@ async def proxy_api(path: str, request: Request) -> Response:
             headers=headers,
             content=body,
         )
+        # Token rotation: if the control server rejected the cached
+        # token, force a re-fetch and retry once before giving up.
+        if upstream.status_code in (401, 403) and token:
+            new_token = await _fetch_token(force=True)
+            if new_token and new_token != token:
+                headers["X-Control-Token"] = new_token
+                upstream = await client.request(
+                    method=request.method,
+                    url=url,
+                    headers=headers,
+                    content=body,
+                )
         resp_headers = {
             k: v
             for k, v in upstream.headers.items()
-            if k.lower()
-            not in ("transfer-encoding", "connection", "keep-alive", "content-encoding")
+            if k.lower() not in ("transfer-encoding", "connection", "keep-alive", "content-encoding")
         }
         resp_headers.update(_CORS_HEADERS)
         return Response(

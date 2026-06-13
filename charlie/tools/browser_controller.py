@@ -8,8 +8,14 @@ import io
 import time
 from typing import Any, Dict, Optional
 
-import pyautogui
-import pygetwindow as gw
+try:
+    import pyautogui
+except ImportError:
+    pyautogui = None  # type: ignore
+try:
+    import pygetwindow as gw
+except ImportError:
+    gw = None  # type: ignore
 
 from charlie.security.tiers import RiskTier, risk_tier
 from charlie.utils.logger import get_logger
@@ -21,8 +27,9 @@ class AdvancedBrowserController:
     """Advanced browser automation and control."""
 
     def __init__(self):
-        pyautogui.FAILSAFE = True
-        pyautogui.PAUSE = 0.5
+        if pyautogui:
+            pyautogui.FAILSAFE = True
+            pyautogui.PAUSE = 0.5
 
     def handle_control(self, args: Dict[str, Any]) -> str:
         """Universal dispatcher for browser_control tool.
@@ -35,14 +42,20 @@ class AdvancedBrowserController:
         browser = args.get("browser", "chrome")
 
         action_map = {
-            "play_pause": lambda: pyautogui.press("playpause") if self._activate_browser(browser) else f"Could not find {browser}",
+            "play_pause": lambda: (
+                pyautogui.press("playpause") if self._activate_browser(browser) else f"Could not find {browser}"
+            ),
             "search": lambda: self._activate_browser(browser) or f"Could not find {browser}",
-            "fullscreen": lambda: pyautogui.press("f11") if self._activate_browser(browser) else f"Could not find {browser}",
+            "fullscreen": lambda: (
+                pyautogui.press("f11") if self._activate_browser(browser) else f"Could not find {browser}"
+            ),
             "scroll_down": lambda: self.scroll_page({"direction": "down", "amount": 3, "browser": browser}),
             "scroll_up": lambda: self.scroll_page({"direction": "up", "amount": 3, "browser": browser}),
             "next": lambda: self.switch_tab({"direction": "next", "browser": browser}),
             "prev": lambda: self.switch_tab({"direction": "previous", "browser": browser}),
-            "mute": lambda: pyautogui.press("volumemute") if self._activate_browser(browser) else f"Could not find {browser}",
+            "mute": lambda: (
+                pyautogui.press("volumemute") if self._activate_browser(browser) else f"Could not find {browser}"
+            ),
             "close_tab": lambda: self.close_tab({"browser": browser}),
             "new_tab": lambda: self.new_tab({"browser": browser}),
         }
@@ -57,8 +70,11 @@ class AdvancedBrowserController:
 
     def _find_browser_window(self, browser_name: str = "chrome") -> Optional[Any]:
         """Find and return the browser window."""
+        if gw is None:
+            logger.warning("pygetwindow not available — cannot find browser windows")
+            return None
         try:
-            windows = gw.getWindowsWithTitle('')
+            windows = gw.getWindowsWithTitle("")
             for window in windows:
                 title_lower = window.title.lower()
                 if browser_name.lower() in title_lower and window.visible:
@@ -90,18 +106,18 @@ class AdvancedBrowserController:
             return "No URL provided."
 
         # Add protocol if missing
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
 
         if not self._activate_browser(browser):
             return f"Could not find or activate {browser} browser."
 
         try:
             # Focus address bar (Ctrl+L) and type URL
-            pyautogui.hotkey('ctrl', 'l')
+            pyautogui.hotkey("ctrl", "l")
             time.sleep(0.2)
             pyautogui.typewrite(url, interval=0.02)
-            pyautogui.press('enter')
+            pyautogui.press("enter")
             return f"Navigated to {url}"
         except Exception as e:
             return f"Failed to navigate: {e}"
@@ -115,7 +131,7 @@ class AdvancedBrowserController:
             return f"Could not find or activate {browser} browser."
 
         try:
-            pyautogui.hotkey('ctrl', 't')
+            pyautogui.hotkey("ctrl", "t")
             return "Opened new tab."
         except Exception as e:
             return f"Failed to open new tab: {e}"
@@ -129,7 +145,7 @@ class AdvancedBrowserController:
             return f"Could not find or activate {browser} browser."
 
         try:
-            pyautogui.hotkey('ctrl', 'w')
+            pyautogui.hotkey("ctrl", "w")
             return "Closed current tab."
         except Exception as e:
             return f"Failed to close tab: {e}"
@@ -145,10 +161,10 @@ class AdvancedBrowserController:
 
         try:
             if direction == "next":
-                pyautogui.hotkey('ctrl', 'tab')
+                pyautogui.hotkey("ctrl", "tab")
                 return "Switched to next tab."
             elif direction == "previous":
-                pyautogui.hotkey('ctrl', 'shift', 'tab')
+                pyautogui.hotkey("ctrl", "shift", "tab")
                 return "Switched to previous tab."
             else:
                 return "Invalid direction. Use 'next' or 'previous'."
@@ -164,7 +180,7 @@ class AdvancedBrowserController:
             return f"Could not find or activate {browser} browser."
 
         try:
-            pyautogui.hotkey('alt', 'left')
+            pyautogui.hotkey("alt", "left")
             return "Went back in history."
         except Exception as e:
             return f"Failed to go back: {e}"
@@ -178,7 +194,7 @@ class AdvancedBrowserController:
             return f"Could not find or activate {browser} browser."
 
         try:
-            pyautogui.hotkey('alt', 'right')
+            pyautogui.hotkey("alt", "right")
             return "Went forward in history."
         except Exception as e:
             return f"Failed to go forward: {e}"
@@ -236,9 +252,9 @@ class AdvancedBrowserController:
             return f"Could not find or activate {browser} browser."
 
         try:
-            if '+' in key:
+            if "+" in key:
                 # Handle key combinations like "ctrl+c"
-                keys = key.split('+')
+                keys = key.split("+")
                 pyautogui.hotkey(*keys)
             else:
                 pyautogui.press(key)
@@ -284,7 +300,7 @@ class AdvancedBrowserController:
 
             # Convert to base64
             buffer = io.BytesIO()
-            screenshot.save(buffer, format='PNG')
+            screenshot.save(buffer, format="PNG")
             base64.b64encode(buffer.getvalue()).decode()
 
             return f"Screenshot taken ({screenshot.size[0]}x{screenshot.size[1]}). Data ready for display."
@@ -302,13 +318,13 @@ class AdvancedBrowserController:
 
         try:
             if action == "in":
-                pyautogui.hotkey('ctrl', '+')
+                pyautogui.hotkey("ctrl", "+")
                 return "Zoomed in."
             elif action == "out":
-                pyautogui.hotkey('ctrl', '-')
+                pyautogui.hotkey("ctrl", "-")
                 return "Zoomed out."
             elif action == "reset":
-                pyautogui.hotkey('ctrl', '0')
+                pyautogui.hotkey("ctrl", "0")
                 return "Reset zoom to 100%."
             else:
                 return "Invalid zoom action. Use 'in', 'out', or 'reset'."
@@ -324,7 +340,7 @@ class AdvancedBrowserController:
             return f"Could not find or activate {browser} browser."
 
         try:
-            pyautogui.hotkey('ctrl', 'shift', 'o')
+            pyautogui.hotkey("ctrl", "shift", "o")
             return "Opened bookmarks."
         except Exception as e:
             return f"Failed to open bookmarks: {e}"
@@ -338,7 +354,7 @@ class AdvancedBrowserController:
             return f"Could not find or activate {browser} browser."
 
         try:
-            pyautogui.hotkey('ctrl', 'h')
+            pyautogui.hotkey("ctrl", "h")
             return "Opened browsing history."
         except Exception as e:
             return f"Failed to open history: {e}"
@@ -352,7 +368,7 @@ class AdvancedBrowserController:
             return f"Could not find or activate {browser} browser."
 
         try:
-            pyautogui.hotkey('ctrl', 'shift', 'delete')
+            pyautogui.hotkey("ctrl", "shift", "delete")
             return "Opened clear browsing data dialog."
         except Exception as e:
             return f"Failed to open clear data dialog: {e}"

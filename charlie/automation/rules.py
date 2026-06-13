@@ -1,4 +1,5 @@
 """Default automation rules."""
+
 from charlie.automation.models import AutomationRule, RiskTier
 
 

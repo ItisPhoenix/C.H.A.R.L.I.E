@@ -37,8 +37,7 @@ export function Modal({ open, onClose, title, children, className }: ModalProps)
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
       <div
         className={cn(
-          'relative glass-card p-6 max-w-md w-full mx-4 animate-slide-in rounded-2xl',
-          'border-charlie-cyan/30 shadow-neon-glow',
+          'relative glass-card p-6 max-w-md w-full mx-4 animate-slide-in rounded-2xl shadow-premium',
           className,
         )}
       >

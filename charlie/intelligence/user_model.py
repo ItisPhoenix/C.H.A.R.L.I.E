@@ -102,16 +102,20 @@ class UserModelEngine:
 
         try:
             import asyncio
-            response = asyncio.run(llm_client.complete(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=500,
-            ))
+
+            response = asyncio.run(
+                llm_client.complete(
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                    max_tokens=500,
+                )
+            )
             content = response.content.strip()
             if content.startswith("```"):
                 content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
             import json
+
             data = json.loads(content)
 
             if data.get("should_update"):

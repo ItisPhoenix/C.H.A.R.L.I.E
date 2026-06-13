@@ -109,7 +109,10 @@ class AgentRouter:
         )
 
         messages = [
-            {"role": "system", "content": "You are a precise routing assistant. Reply only with comma-separated agent names."},
+            {
+                "role": "system",
+                "content": "You are a precise routing assistant. Reply only with comma-separated agent names.",
+            },
             {"role": "user", "content": prompt},
         ]
 
@@ -130,14 +133,11 @@ class AgentRouter:
             return []
 
         # Normalise: strip whitespace, lowercase, remove quotes
-        cleaned = raw.strip().lower().strip('"\'')
+        cleaned = raw.strip().lower().strip("\"'")
         # Split on comma or space
         candidates = re.split(r"[,\s]+", cleaned)
 
-        valid_names = {
-            (a.name if hasattr(a, "name") else str(a)).lower()
-            for a in available_agents
-        }
+        valid_names = {(a.name if hasattr(a, "name") else str(a)).lower() for a in available_agents}
 
         selected = []
         for name in candidates:
@@ -198,10 +198,7 @@ class AgentRouter:
         # Prune old entries
         if len(self._cache) > 100:
             now = time.time()
-            self._cache = {
-                k: v for k, v in self._cache.items()
-                if now - v[1] < self._cache_ttl
-            }
+            self._cache = {k: v for k, v in self._cache.items() if now - v[1] < self._cache_ttl}
 
     def clear_cache(self) -> None:
         """Clear the routing cache."""
