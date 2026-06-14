@@ -37,6 +37,11 @@ from charlie.voice import VoiceEngine
 
 logger = logging.getLogger("charlie.main")
 
+# Sentence/clause splitting for early TTS dispatch
+_CLAUSE_BOUNDARY = re.compile(r'(?<=[,;:])\s+(?=[A-Z"])')
+_SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+')
+_MAX_FLUSH_CHARS = 80  # Force-flush if no boundary seen within this many chars
+
 async def main():
     logger.info("Charlie is waking up...")
     
@@ -66,24 +71,34 @@ async def main():
         # Streaming buffer
         sentence_buffer = ""
         is_first_chunk = True
+        
+        
         async for chunk in brain.chat(text):
             if is_first_chunk:
                 print("\r" + " " * 30 + "\r", end="", flush=True) # Clear thinking
                 is_first_chunk = False
             print(chunk, end="", flush=True)
             sentence_buffer += chunk
-
             
-            # Sentence splitting (Simple punctuation + space)
-            if any(p in sentence_buffer for p in [". ", "! ", "? "]):
-                # Extract complete sentences
-                parts = re.split(r'(?<=[.!?])\s+', sentence_buffer)
-                for sentence in parts[:-1]: # All but the last (potentially incomplete) one
-                    if sentence.strip():
-                        voice.speak(sentence, brain.persona.emotional_state)
-                sentence_buffer = parts[-1]
-
-        # Final TTS only — chunks already printed everything
+            # Try sentence boundary first, then clause boundary, then max-char guard
+            boundary = None
+            if ". " in sentence_buffer or "! " in sentence_buffer or "? " in sentence_buffer:
+                boundary = _SENTENCE_BOUNDARY
+            elif ", " in sentence_buffer or "; " in sentence_buffer or ": " in sentence_buffer:
+                boundary = _CLAUSE_BOUNDARY
+            elif len(sentence_buffer) >= _MAX_FLUSH_CHARS:
+                # Force-flush at max chars even without punctuation
+                boundary = re.compile(r'(?<=.)\s+')  # split on any word boundary
+            
+            if boundary:
+                parts = boundary.split(sentence_buffer)
+                if len(parts) > 1:
+                    for part in parts[:-1]:
+                        if part.strip():
+                            voice.speak(part, brain.persona.emotional_state)
+                    sentence_buffer = parts[-1]
+        
+        # Final TTS — chunks already printed everything
         if sentence_buffer.strip():
             voice.speak(sentence_buffer, brain.persona.emotional_state)
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")

@@ -1,6 +1,8 @@
 import logging
 import threading
 import os
+os.environ["ORT_LOG_LEVEL"] = "3"
+
 import time
 import urllib.request
 import numpy as np
@@ -14,6 +16,8 @@ from kokoro_onnx import Kokoro
 from collections import deque
 from charlie.personality import BACKCHANNEL_FILLERS
 from charlie.asr_worker import asr_worker_process
+import onnxruntime as ort
+ort.set_default_logger_severity(3)
 
 logger = logging.getLogger("charlie.voice")
 
@@ -26,6 +30,7 @@ class VoiceEngine:
         self.stop_tts_event = threading.Event()
         self.tts_queue = queue.Queue()
         self.tts_lock = threading.Lock()
+        self.playback_queue = queue.Queue()
         # Pre-synthesized filler audio cache (instant playback)
         self.filler_cache: dict = {}
         
@@ -34,11 +39,6 @@ class VoiceEngine:
         self.asr_output_queue = mp.Queue()
         self.asr_process = None
         
-        self.device = config.gpu_device
-        self.stop_event = threading.Event()
-        self.stop_tts_event = threading.Event()
-        self.is_speaking = threading.Event()
-        self.tts_lock = threading.Lock() # Protect TTS shared resources
         
         # Initialize Models
         self._ensure_models()
@@ -80,8 +80,6 @@ class VoiceEngine:
             logger.info("ASR warm-up: sent silent audio.")
         except Exception as e:
             logger.warning(f"ASR warm-up failed: {e}")
-        # Suppress ONNX runtime CUDA warnings (Memcpy nodes, node assignment, ScatterND)
-        os.environ["ORT_LOG_LEVEL"] = "3"
         # 3. LOCAL TTS (Kokoro) — CUDA GPU accelerated
         os.environ.setdefault("ONNX_PROVIDER", "CUDAExecutionProvider")
         model_path = os.path.join(config.kokoro_model_dir, "kokoro-v1.0.onnx")
@@ -119,15 +117,17 @@ class VoiceEngine:
             if not os.path.exists(path):
                 logger.info(f"Downloading {name} for local use...")
                 urllib.request.urlretrieve(url, path)
-
     def start(self):
         logger.info("Starting voice engine loops")
         # Audio input thread
         self.input_thread = threading.Thread(target=self._run, daemon=True, name="VoiceInputLoop")
         self.input_thread.start()
-        # TTS worker thread
+        # TTS synthesis worker thread
         self.tts_worker = threading.Thread(target=self._tts_worker_loop, daemon=True, name="TTSWorker")
         self.tts_worker.start()
+        # TTS playback worker (separate audio output thread)  
+        self.playback_worker = threading.Thread(target=self._playback_worker, daemon=True, name="TTSPlayback")
+        self.playback_worker.start()
         # Start ASR result polling thread
         self.asr_poller_thread = threading.Thread(target=self._asr_poller_loop, daemon=True)
         self.asr_poller_thread.start()
@@ -145,6 +145,14 @@ class VoiceEngine:
                 self.asr_process.terminate()
     def stop_tts(self):
         self.stop_tts_event.set()
+        # Drain pending TTS tasks
+        while not self.tts_queue.empty():
+            try: self.tts_queue.get_nowait()
+            except queue.Empty: break
+        # Drain pending playback
+        while not self.playback_queue.empty():
+            try: self.playback_queue.get_nowait()
+            except queue.Empty: break
         sd.stop()
 
     def speak(self, text: str, emotional_state: str = "neutral"):
@@ -157,6 +165,8 @@ class VoiceEngine:
         text = re.sub(r'https?://\S+', '', text)
         # Strip markdown characters
         text = re.sub(r'[*_#`~]', '', text)
+        # Convert numbers→words BEFORE symbol mapping (catches $2,000 patterns)
+        text = self._numbers_to_words(text)
         # Convert symbols → spoken words BEFORE ASCII/regex strip
         text = self._symbols_to_words(text)
         # Remove non-ASCII (em-dashes etc → nearest equivalent)
@@ -193,7 +203,61 @@ class VoiceEngine:
             self.is_speaking.clear()
         threading.Thread(target=_wait_and_clear, daemon=True).start()
 
+    def _synth(self, text: str, speed: float):
+        """Synthesize text to audio samples. Returns (samples, sample_rate) or None."""
+        text = self._sanitize_for_tts(text)
+        if not text:
+            return None
+        # Suppress noisy phonemizer fork warnings
+        phon_logger = logging.getLogger("phonemizer")
+        old_level = phon_logger.level
+        phon_logger.setLevel(logging.ERROR)
+        with self.tts_lock:
+            try:
+                tts_start = time.time()
+                samples, sample_rate = self.kokoro.create(
+                    text, voice=self.config.kokoro_voice, speed=speed, lang=self.config.kokoro_lang
+                )
+                tts_ms = (time.time() - tts_start) * 1000
+                logger.info(f"pipeline_stage | stage=tts | latency_ms={tts_ms:.1f}")
+                return (samples, sample_rate)
+            except Exception as e:
+                logger.error(f"synth_error | {e}")
+                return None
+            finally:
+                phon_logger.setLevel(old_level)
+    
+    def _playback_worker(self):
+        """Dedicated playback thread. Plays audio sequentially; blocks on each."""
+        while not self.stop_event.is_set():
+            try:
+                if self.stop_tts_event.is_set():
+                    while not self.playback_queue.empty():
+                        try: self.playback_queue.get_nowait()
+                        except queue.Empty: break
+                    self.stop_tts_event.clear()
+                
+                item = self.playback_queue.get(timeout=0.1)
+                samples, sample_rate = item
+                self.is_speaking.set()
+                sd.play(samples, samplerate=sample_rate)
+                while sd.get_stream() and sd.get_stream().active:
+                    if self.stop_tts_event.is_set():
+                        sd.stop()
+                        break
+                    time.sleep(0.01)
+                sd.wait()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"playback_error | {e}")
+            finally:
+                self.is_speaking.clear()
+    
     def _tts_worker_loop(self):
+        """TTS synthesis worker. Overlaps with playback worker: as soon as
+        one sentence is synthesized it's queued for playback and the next
+        sentence begins synthesizing immediately."""
         while not self.stop_event.is_set():
             try:
                 if self.stop_tts_event.is_set():
@@ -203,44 +267,89 @@ class VoiceEngine:
                 
                 item = self.tts_queue.get(timeout=0.1)
                 text, emotional_state = item
-                self._synth_and_play(text, emotional_state)
+                
+                speed = 1.0
+                if emotional_state == "energetic": speed = 1.05
+                elif emotional_state in ["sad", "calm"]: speed = 0.95
+                
+                audio = self._synth(text, speed)
+                if audio is not None:
+                    self.playback_queue.put(audio)
             except queue.Empty:
                 continue
             except Exception as e:
                 logger.error(f"tts_worker_error | {e}")
-
-    # ── symbol-to-word mapping for TTS ──────────────────────────────────────
-    _SYMBOL_MAP = str.maketrans({
-        '°':  ' degrees ',
-        '%':  ' percent ',
-        '$':  ' dollar ',
-        '€':  ' euro ',
-        '£':  ' pound ',
-        '+':  ' plus ',
-        '&':  ' and ',
-        '@':  ' at ',
-        '#':  ' number ',
-        '=':  ' equals ',
-        '×':  ' times ',
-        '÷':  ' divided by ',
-        '±':  ' plus minus ',
-        '‰':  ' per mille ',
-        '§':  ' section ',
-        '©':  ' copyright ',
-        '®':  ' registered ',
-        '™':  ' trademark ',
-        '•':  ' bullet ',
-        '–':  ' - ',
-        '—':  ' - ',
-        '/':  ' per ',
-        '~':  ' approximately ',
-        '‰':  ' per mil ',
-        'μ':  ' micro ',
-        'Ω':  ' ohm ',
-        '²':  ' squared ',
-        '³':  ' cubed ',
-    })
-
+    
+    # ── number-to-word conversion for TTS ──────────────────────────────────
+    @staticmethod
+    def _number_to_words(n: int) -> str:
+        """Convert integer to English words (0—999 billion)."""
+        if n == 0: return "zero"
+        ones = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+                "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+                "seventeen", "eighteen", "nineteen"]
+        tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+        def _h(n: int) -> str:
+            if n == 0: return ""
+            if n < 20: return ones[n]
+            if n < 100:
+                t = tens[n // 10]
+                r = n % 10
+                return t + (" " + ones[r] if r else "")
+            h = ones[n // 100] + " hundred"
+            r = n % 100
+            return h + (" " + _h(r) if r else "")
+        parts = []
+        if n >= 1_000_000_000:
+            b = n // 1_000_000_000
+            parts.append(_h(b) + " billion")
+            n %= 1_000_000_000
+        if n >= 1_000_000:
+            m = n // 1_000_000
+            parts.append(_h(m) + " million")
+            n %= 1_000_000
+        if n >= 1000:
+            parts.append(_h(n // 1000) + " thousand")
+            n %= 1000
+        if n > 0:
+            parts.append(_h(n))
+        return " ".join(parts) if parts else "zero"
+    
+    def _numbers_to_words(self, text: str) -> str:
+        """Convert numeric patterns (commas, currency, decimals) to English words.
+        Called BEFORE _symbols_to_words so $2,000 → number→words → then $→symbol.
+        """
+        def _replace_currency(m):
+            raw = m.group(1).replace(",", "")
+            try:
+                n = int(float(raw))
+                words = self._number_to_words(n) if n else "zero"
+                return words + " dollars" if n != 1 else words + " dollar"
+            except ValueError:
+                return m.group(0)
+        def _replace_number(m):
+            raw = m.group(0).replace(",", "")
+            try:
+                n = int(float(raw))
+                return self._number_to_words(n) if n else "zero"
+            except ValueError:
+                return m.group(0)
+        def _replace_decimal(m):
+            integer = m.group(1).replace(",", "")
+            fraction = m.group(2)
+            try:
+                int_words = self._number_to_words(int(integer)) if int(integer) else "zero"
+            except ValueError:
+                int_words = integer
+            # Each fraction digit → word ("14" → "one four")
+            frac_digits = " ".join(self._number_to_words(int(d)) if d != "0" else "zero" for d in fraction)
+            return f"{int_words} point {frac_digits}"
+        text = re.sub(r'\$(\d[\d,]*\.?\d*)', _replace_currency, text)
+        text = re.sub(r'(?<!\w)\d{1,3}(?:,\d{3})+(?!\w)', _replace_number, text)
+        text = re.sub(r'(?<!\d\.)(?<!\w)(\d{1,3}(?:,\d{3})*)\.(\d+)(?!\.\d)', _replace_decimal, text)
+        text = re.sub(r'(?<!\w)(\d{5,})(?!\.\d)(?!\w)', _replace_number, text)
+        return text
+    
     def _symbols_to_words(self, text: str) -> str:
         text = text.translate(self._SYMBOL_MAP)
         # Handle degree at start of word (e.g. "25°C" → "25 degrees C")
@@ -248,57 +357,14 @@ class VoiceEngine:
         return text
     def _sanitize_for_tts(self, text: str) -> str:
         """Final pass before phonemizer — convert symbols → words, keep punctuation for prosody."""
+        text = self._numbers_to_words(text)
         text = self._symbols_to_words(text)
+
         text = re.sub(r'[*_#`~]', '', text)
         text = re.sub(r'[^a-zA-Z0-9\s.,!?;:\'\-"]', ' ', text)
         text = re.sub(r'\s+', ' ', text).strip()
         return text
 
-    def _synth_and_play(self, text: str, emotional_state: str):
-        with self.tts_lock:
-            self.is_speaking.set()
-            try:
-                text = self._sanitize_for_tts(text)
-                if not text:
-                    return
-                speed = 1.0
-                if emotional_state == "energetic": speed = 1.05
-                elif emotional_state in ["sad", "calm"]: speed = 0.95
-
-                # Suppress noisy phonemizer fork warnings
-                phon_logger = logging.getLogger("phonemizer")
-                old_level = phon_logger.level
-                phon_logger.setLevel(logging.ERROR)
-                try:
-                    tts_start_time = time.time()
-                    samples, sample_rate = self.kokoro.create(
-                        text, 
-                        voice=self.config.kokoro_voice, 
-                        speed=speed, 
-                        lang=self.config.kokoro_lang
-                    )
-                    tts_latency_ms = (time.time() - tts_start_time) * 1000
-                    logger.info(f"pipeline_stage | stage=tts | latency_ms={tts_latency_ms:.1f}")
-                finally:
-                    phon_logger.setLevel(old_level)
-
-                
-                # Check for stop event before playing
-                if self.stop_tts_event.is_set():
-                    return
-
-                sd.play(samples, samplerate=sample_rate)
-                
-                while sd.get_stream().active:
-                    if self.stop_tts_event.is_set():
-                        sd.stop()
-                        break
-                    time.sleep(0.05)
-                sd.wait()
-            except Exception as e:
-                logger.error(f"tts_error | {e}")
-            finally:
-                self.is_speaking.clear()
 
     def _run(self):
         samplerate = 16000
