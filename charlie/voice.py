@@ -15,20 +15,21 @@ from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
 from collections import deque
 
+import queue
 logger = logging.getLogger("charlie.voice")
 
 class VoiceEngine:
     def __init__(self, config, on_speech: Callable[[str], None]):
         self.config = config
         self.on_speech = on_speech
+        self.is_speaking = threading.Event()
+        self.stop_event = threading.Event()
+        self.stop_tts_event = threading.Event()
+        self.tts_queue = queue.Queue()
+        self.tts_lock = threading.Lock()
         
-        has_cuda = torch.cuda.is_available()
-        if not has_cuda:
-            logger.warning("Torch CUDA not available. Checking ONNX...")
-            import onnxruntime
-            if 'CUDAExecutionProvider' not in onnxruntime.get_available_providers():
-                logger.error("No CUDA found (Torch or ONNX). GPU required for local voice.")
-                sys.exit(1)
+        self.vad_model = None
+        self.whisper_model = None
         
         self.device = config.gpu_device
         self.stop_event = threading.Event()
@@ -90,9 +91,13 @@ class VoiceEngine:
                 urllib.request.urlretrieve(url, path)
 
     def start(self):
-        logger.info("Starting voice engine loop")
-        self.processing_thread = threading.Thread(target=self._run, daemon=True, name="VoiceLoop")
-        self.processing_thread.start()
+        logger.info("Starting voice engine loops")
+        # Audio input thread
+        self.input_thread = threading.Thread(target=self._run, daemon=True, name="VoiceInputLoop")
+        self.input_thread.start()
+        # TTS worker thread
+        self.tts_worker = threading.Thread(target=self._tts_worker_loop, daemon=True, name="TTSWorker")
+        self.tts_worker.start()
 
     def stop(self):
         self.stop_event.set()
@@ -104,8 +109,8 @@ class VoiceEngine:
         self.stop_tts_event.set()
         sd.stop()
 
-    def speak(self, text: str):
-        # Extremely aggressive cleaning to stop Phonemizer "words count mismatch" warnings
+    def speak(self, text: str, emotional_state: str = "neutral"):
+        # Aggressive cleaning
         text = re.sub(r'TOOL:\s*\w+\(".*?"\)', '', text)
         text = re.sub(r'<(thought|thinking)>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'\[.*?\]', '', text)
@@ -118,16 +123,38 @@ class VoiceEngine:
             return
             
         self.stop_tts_event.clear()
-        threading.Thread(target=self._synth_and_play, args=(text,), daemon=True, name="TTSThread").start()
+        self.tts_queue.put((text, emotional_state))
 
-    def _synth_and_play(self, text: str):
-        with self.tts_lock: # Ensure only one synthesis happens at a time
+    def _tts_worker_loop(self):
+        while not self.stop_event.is_set():
+            try:
+                # Check for stop_tts_event to flush queue
+                if self.stop_tts_event.is_set():
+                    while not self.tts_queue.empty():
+                        self.tts_queue.get_nowait()
+                    self.stop_tts_event.clear()
+                
+                item = self.tts_queue.get(timeout=0.1)
+                text, emotional_state = item
+                self._synth_and_play(text, emotional_state)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"tts_worker_error | {e}")
+
+    def _synth_and_play(self, text: str, emotional_state: str):
+        with self.tts_lock:
             self.is_speaking.set()
             try:
+                # Emotion speed mapping
+                speed = 1.0
+                if emotional_state == "energetic": speed = 1.05
+                elif emotional_state in ["sad", "calm"]: speed = 0.95
+
                 samples, sample_rate = self.kokoro.create(
                     text, 
                     voice=self.config.kokoro_voice, 
-                    speed=1.0, 
+                    speed=speed, 
                     lang=self.config.kokoro_lang
                 )
                 

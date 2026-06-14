@@ -40,7 +40,7 @@ async def main():
     logger.info("Charlie is waking up...")
     
     try:
-        brain = Brain(config)
+        brain = Brain(config, on_thought_callback=lambda text: voice.speak(text, brain.persona.emotional_state))
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")
         return
@@ -54,24 +54,34 @@ async def main():
     async def _process(text, brain, voice):
         print(f"\rHeard: {text}", flush=True)
         if voice.is_speaking.is_set():
-            logger.debug("Barge-in event: Stopping ongoing TTS")
+            logger.info("Barge-in: User interrupted Charlie. Switching to concise mode.")
             voice.stop_tts()
+            brain.persona.response_mode = "concise"
             
         print("Charlie is thinking...", end="\r", flush=True)
         
-        response = await brain.chat(text)
-        # Brain.chat handles the tool loop internally and returns the final synthesized answer.
-        # Clear the "thinking" indicator
-        print("\r" + " " * 30 + "\r", end="", flush=True)
-        
-        if response and not response.strip().startswith("TOOL:"):
-            print(f"Charlie: {response}", flush=True)
-            voice.speak(response)
-        elif response:
-            msg = "I've gathered some data, but I'm still trying to make sense of it. Could you ask me in a different way?"
-            print(f"Charlie: {msg}", flush=True)
-            voice.speak(msg)
+        # Streaming buffer
+        sentence_buffer = ""
+        async for chunk in brain.chat(text):
+            print("\r" + " " * 30 + "\r", end="", flush=True) # Clear thinking
+            print(chunk, end="", flush=True)
+            sentence_buffer += chunk
+            
+            # Sentence splitting (Simple punctuation + space)
+            if any(p in sentence_buffer for p in [". ", "! ", "? "]):
+                # Extract complete sentences
+                parts = re.split(r'(?<=[.!?])\s+', sentence_buffer)
+                for sentence in parts[:-1]: # All but the last (potentially incomplete) one
+                    if sentence.strip():
+                        voice.speak(sentence, brain.persona.emotional_state)
+                sentence_buffer = parts[-1]
+
+        # Final flush
+        if sentence_buffer.strip():
+            print(sentence_buffer, flush=True)
+            voice.speak(sentence_buffer, brain.persona.emotional_state)
         else:
+            print("", flush=True)
             logger.warning("Brain returned empty response.")
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
@@ -80,12 +90,13 @@ async def main():
         
         # Connection test & Dynamic Welcome
         logger.debug("Requesting dynamic welcome message from LLM...")
-        welcome_msg = await brain.chat("Give me a one-sentence warm, friendly welcome message as you start up. Speak only in English.")
-        
+        welcome_msg = ""
+        async for chunk in brain.chat("Give me a one-sentence warm, friendly welcome message as you start up. Speak only in English."):
+            welcome_msg += chunk
+
         print("\n" + "="*40, flush=True)
         print("   Charlie is online and listening", flush=True)
         print("="*40 + "\n", flush=True)
-        
         print(f"Charlie: {welcome_msg}", flush=True)
         voice.speak(welcome_msg)
 
