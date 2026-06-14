@@ -19,16 +19,24 @@ class Brain:
         self.history: List[Dict[str, str]] = []
         self.persona = CharliePersona()
         
+        # Standard Client
         base_url = self.config.llm_url
-        if not base_url.endswith("/"):
-            base_url += "/"
-            
+        if not base_url.endswith("/"): base_url += "/"
         self.client = httpx.AsyncClient(
             base_url=base_url,
             headers={"Authorization": f"Bearer {self.config.llm_key}"},
-            timeout=httpx.Timeout(60.0, connect=15.0),
-            verify=True
+            timeout=httpx.Timeout(60.0, connect=15.0)
         )
+        
+        # Fast Client for background tasks
+        fast_url = self.config.fast_llm_url
+        if not fast_url.endswith("/"): fast_url += "/"
+        self.fast_client = httpx.AsyncClient(
+            base_url=fast_url,
+            headers={"Authorization": f"Bearer {self.config.fast_llm_key}"},
+            timeout=httpx.Timeout(30.0, connect=10.0)
+        )
+        
         self.load_history()
 
     def load_history(self):
@@ -96,26 +104,101 @@ class Brain:
         except Exception as e:
             logger.error(f"history_save_error | {e}")
 
+    async def _run_background_research(self, query: str, is_deep: bool):
+        """Perform research in the background and notify when complete."""
+        try:
+            if is_deep:
+                result = await deep_research(query, self)
+            else:
+                result = await web_search(query)
+                
+            # Generate a 1-sentence semantic summary for long-term memory
+            summary = "Research complete."
+            try:
+                summary_prompt = f"Summarize the key takeaway of this research on '{query}' in exactly ONE sentence for my long-term memory:\n\n{result[:4000]}"
+                resp = await self.fast_client.post(
+                    "chat/completions",
+                    json={"model": self.config.fast_llm_model, "messages": [{"role": "user", "content": summary_prompt}], "max_tokens": 100}
+                )
+                if resp.status_code == 200:
+                    summary = resp.json()["choices"][0]["message"]["content"].strip()
+            except Exception as e:
+                logger.warning(f"background_summary_failed | {e}")
+
+            # Persist to semantic memory
+            research_memory.add_semantic_knowledge(query, summary)
+            # Integrate into history as a system message for context injection
+            self.history.append({
+                "role": "system", 
+                "content": f"Background research complete for '{query}'.\n\nSUMMARY: {summary}\n\nFULL REPORT:\n{result[:3000]}"
+            })
+            self.save_history()
+            
+            # Notification chime
+            if self.on_thought_callback:
+                self.on_thought_callback(f"Ding! Research complete on {query}. I've integrated the findings into my memory.")
+                
+        except Exception as e:
+            logger.error(f"background_research_error | {e}")
+            if self.on_thought_callback:
+                self.on_thought_callback(f"My background research on {query} hit a snag.")
+
+    async def _run_background_read(self, url: str):
+        """Read a URL in the background and notify when complete."""
+        try:
+            result = await read_url(url)
+            
+            # Summarize content for context injection
+            summary = "URL reading complete."
+            try:
+                summary_prompt = f"Summarize the key information from this website '{url}' in exactly ONE sentence:\n\n{result[:4000]}"
+                resp = await self.fast_client.post(
+                    "chat/completions",
+                    json={"model": self.config.fast_llm_model, "messages": [{"role": "user", "content": summary_prompt}], "max_tokens": 100}
+                )
+                if resp.status_code == 200:
+                    summary = resp.json()["choices"][0]["message"]["content"].strip()
+            except Exception as e:
+                logger.warning(f"background_read_summary_failed | {e}")
+
+            # Integrate into history
+            self.history.append({
+                "role": "system", 
+                "content": f"Finished reading URL: {url}.\n\nSUMMARY: {summary}\n\nCONTENT SNIPPET:\n{result[:2000]}"
+            })
+            self.save_history()
+            
+            if self.on_thought_callback:
+                self.on_thought_callback(f"Ding! I've finished reading that page for you.")
+                
+        except Exception as e:
+            logger.error(f"background_read_error | {e}")
+            if self.on_thought_callback:
+                self.on_thought_callback(f"I couldn't finish reading the URL.")
+
     async def chat(self, user_input: str) -> AsyncGenerator[str, None]:
-        # Prefix handling for direct deep research
+        # Prefix handling for direct deep research (Asynchronous)
         ui_lower = user_input.lower().strip()
         if ui_lower.startswith("research ") or ui_lower.startswith("deep dive "):
             topic = user_input.split(" ", 1)[1]
-            if self.on_thought_callback:
-                self.on_thought_callback(f"Starting deep research on {topic}. This may take a moment.")
-            report = await deep_research(topic, self)
+            asyncio.create_task(self._run_background_research(topic, is_deep=True))
             self.history.append({"role": "user", "content": user_input})
-            self.history.append({"role": "assistant", "content": f"Research complete. Here is the report:\n\n{report}"})
             self.save_history()
-            yield f"Research complete. I've compiled a deep dive on {topic} for you."
+            yield f"I'm spinning up a background thread for {topic}. I'll alert you when it's done."
             return
 
-        # Active recall injection
+        # Active semantic recall + session mapping
         related = research_memory.find_related_sessions(user_input)
+        semantic = research_memory.get_semantic_knowledge(user_input)
+        
+        memory_context = ""
         if related:
-            memory_context = f"\n\nPAST RELATED RESEARCH: We have previously researched: {', '.join(related)}. Use this context if relevant."
-        else:
-            memory_context = ""
+            memory_context += f"\n\nPAST RELATED RESEARCH: We have previously researched: {', '.join(related)}."
+        if semantic:
+            memory_context += semantic
+        
+        if memory_context:
+            memory_context += "\nUse this context if relevant."
 
         self.history.append({"role": "user", "content": user_input})
         
@@ -153,8 +236,12 @@ class Brain:
                         
                         try:
                             chunk = json.loads(line[6:])
-                            content = chunk["choices"][0]["delta"].get("content", "")
-                            if not content: continue
+                            choices = chunk.get("choices", [])
+                            if not choices:
+                                continue
+                            content = choices[0].get("delta", {}).get("content", "")
+                            if not content:
+                                continue
                             
                             full_reply += content
                             
@@ -168,7 +255,8 @@ class Brain:
                                 if len(full_reply) > 20:
                                     yield content
                         except Exception as e:
-                            logger.warning(f"stream_parse_error | {e}")
+                            import traceback
+                            logger.warning(f"stream_parse_error | {e}\n{traceback.format_exc()}")
                 
                 # If we didn't find TOOL: during streaming, but it's in the final text (fallback)
                 if not is_tool_call and "TOOL:" in full_reply.upper():
@@ -184,37 +272,28 @@ class Brain:
                         match = re.search(r'web_search\s*\(\s*["\'](.*?)["\']\s*\)', reply, re.IGNORECASE)
                         if match:
                             query = match.group(1)
-                            if self.on_thought_callback:
-                                self.on_thought_callback("I'm looking into that...")
-                            logger.info(f"RESEARCHING: {query}")
-                            result = await web_search(query)
                             self.history.append({"role": "assistant", "content": reply})
-                            self.history.append({"role": "user", "content": f"Search result: {result}"})
-                            continue
+                            asyncio.create_task(self._run_background_research(query, is_deep=False))
+                            yield "I'm looking into that in the background."
+                            return
                             
                     elif "DEEP_RESEARCH" in reply_upper:
                         match = re.search(r'deep_research\s*\(\s*["\'](.*?)["\']\s*\)', reply, re.IGNORECASE)
                         if match:
                             topic = match.group(1)
-                            if self.on_thought_callback:
-                                self.on_thought_callback("I'll need to do some deep research on that. One moment.")
-                            logger.info(f"DEEP RESEARCHING: {topic}")
-                            result = await deep_research(topic, self)
                             self.history.append({"role": "assistant", "content": reply})
-                            self.history.append({"role": "user", "content": f"Research Report: {result}"})
-                            continue
+                            asyncio.create_task(self._run_background_research(topic, is_deep=True))
+                            yield "I'm starting a deep research task in the background."
+                            return
                             
                     elif "READ_URL" in reply_upper:
                         match = re.search(r'read_url\s*\(\s*["\'](.*?)["\']\s*\)', reply, re.IGNORECASE)
                         if match:
                             url = match.group(1)
-                            if self.on_thought_callback:
-                                self.on_thought_callback("Let me read through that page...")
-                            logger.info(f"READING URL: {url}")
-                            result = await read_url(url)
                             self.history.append({"role": "assistant", "content": reply})
-                            self.history.append({"role": "user", "content": f"Website content: {result}"})
-                            continue
+                            asyncio.create_task(self._run_background_read(url))
+                            yield "I'm reading through that link in the background. I'll let you know when I'm done."
+                            return
                 
                 # Final reply
                 if reply:
@@ -230,10 +309,11 @@ class Brain:
                     # Attempt a very short, low-token character-consistent refusal 
                     # by calling the LLM with a minimal prompt, or use fallback if that fails.
                     try:
+                        from charlie.personality import WORLDVIEW
                         payload = {
                             "model": self.config.llm_model,
                             "messages": [
-                                {"role": "system", "content": f"You are Charlie. {self.persona.WORLDVIEW[0]} {self.persona.WORLDVIEW[4]} You are currently hitting a rate limit. Give a 1-sentence blunt, in-character refusal."},
+                                {"role": "system", "content": f"You are Charlie. {WORLDVIEW[0]} {WORLDVIEW[4]} You are currently hitting a rate limit. Give a 1-sentence blunt, in-character refusal."},
                             ],
                             "max_tokens": 20,
                             "temperature": 0.7
@@ -260,6 +340,8 @@ class Brain:
         return
 
     async def close(self):
+        if self.fast_client:
+            await self.fast_client.aclose()
         if self.client:
             await self.client.aclose()
-            logger.info("Brain connection closed.")
+        logger.info("Brain connection closed.")

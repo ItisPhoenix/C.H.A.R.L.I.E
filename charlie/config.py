@@ -9,6 +9,9 @@ class Config:
     llm_url: str = os.getenv("LLM_URL", "https://integrate.api.nvidia.com/v1")
     llm_key: str = os.getenv("LLM_API_KEY", "no-key")
     llm_model: str = os.getenv("LLM_MODEL", "meta/llama3-70b-instruct")
+    fast_llm_url: str = os.getenv("FAST_LLM_URL", os.getenv("LLM_URL", "https://integrate.api.nvidia.com/v1"))
+    fast_llm_key: str = os.getenv("FAST_LLM_KEY", os.getenv("LLM_API_KEY", "no-key"))
+    fast_llm_model: str = os.getenv("FAST_LLM_MODEL", os.getenv("LLM_MODEL", "meta/llama3-70b-instruct"))
     
     mic_index: int = int(os.getenv("MIC_INDEX", "0"))
     output_index: int = int(os.getenv("OUTPUT_INDEX", "0"))
@@ -22,6 +25,8 @@ class Config:
     gpu_device: str = os.getenv("GPU_DEVICE", "cuda")
     history_file: str = os.getenv("HISTORY_FILE", "charlie_history.json")
     max_history: int = int(os.getenv("MAX_HISTORY", "12"))
+    searxng_url: str = os.getenv("SEARXNG_URL", "")  # e.g. "http://localhost:8080"
+    research_memory_db: str = os.getenv("RESEARCH_MEMORY_DB", "research_memory.db")
     
     default_language: str = os.getenv("DEFAULT_LANGUAGE", "en")
     kokoro_lang: str = "en-us"
