@@ -1,24 +1,20 @@
 import logging
-import warnings
 import threading
-import sys
 import os
 import time
-import tempfile
 import urllib.request
 import numpy as np
 import sounddevice as sd
-import soundfile as sf
 import torch
 import re
-from typing import Callable
-from faster_whisper import WhisperModel
-from kokoro_onnx import Kokoro
-from collections import deque
-
 import queue
 import multiprocessing as mp
+from typing import Callable
+from kokoro_onnx import Kokoro
+from collections import deque
+from charlie.personality import BACKCHANNEL_FILLERS
 from charlie.asr_worker import asr_worker_process
+
 logger = logging.getLogger("charlie.voice")
 
 class VoiceEngine:
@@ -30,6 +26,8 @@ class VoiceEngine:
         self.stop_tts_event = threading.Event()
         self.tts_queue = queue.Queue()
         self.tts_lock = threading.Lock()
+        # Pre-synthesized filler audio cache (instant playback)
+        self.filler_cache: dict = {}
         
         self.vad_model = None
         self.asr_input_queue = mp.Queue()
@@ -73,11 +71,35 @@ class VoiceEngine:
             daemon=True
         )
         self.asr_process.start()
-        # 3. LOCAL TTS (Kokoro)
+        # Warm up ASR with silent audio
+        try:
+            import time
+            time.sleep(1)  # Wait for worker to load model
+            silent_audio = np.zeros(16000, dtype=np.float32).tobytes()
+            self.asr_input_queue.put((silent_audio, 16000))
+            logger.info("ASR warm-up: sent silent audio.")
+        except Exception as e:
+            logger.warning(f"ASR warm-up failed: {e}")
+        # 3. LOCAL TTS (Kokoro) — CUDA GPU accelerated
+        os.environ.setdefault("ONNX_PROVIDER", "CUDAExecutionProvider")
         model_path = os.path.join(config.kokoro_model_dir, "kokoro-v1.0.onnx")
         voices_path = os.path.join(config.kokoro_model_dir, "voices-v1.0.bin")
         self.kokoro = Kokoro(model_path, voices_path)
         logger.info("Kokoro TTS initialized locally.")
+        # Warm up ONNX graph + pre-synthesize filler audio
+        try:
+            self.kokoro.create("Warm up", voice=self.config.kokoro_voice, speed=1.0, lang=self.config.kokoro_lang)
+            logger.info("Kokoro warm-up: ONNX graph compiled.")
+        except Exception as e:
+            logger.warning(f"Kokoro warm-up failed: {e}")
+        
+        try:
+            for phrase in BACKCHANNEL_FILLERS:
+                samples, sr = self.kokoro.create(phrase, voice=self.config.kokoro_voice, speed=1.0, lang=self.config.kokoro_lang)
+                self.filler_cache[phrase] = (samples, sr)
+            logger.info(f"Pre-synthesized {len(self.filler_cache)} filler phrases: {list(self.filler_cache.keys())}")
+        except Exception as filler_err:
+            logger.warning(f"Filler pre-synthesis failed: {filler_err}")
         
         # Use thread-safe deque for audio chunks
         self.audio_buffer = deque(maxlen=200)
@@ -124,25 +146,54 @@ class VoiceEngine:
         sd.stop()
 
     def speak(self, text: str, emotional_state: str = "neutral"):
-        # Aggressive cleaning
+        # Strip tool calls and thinking tags
         text = re.sub(r'TOOL:\s*\w+\(".*?"\)', '', text)
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
         text = re.sub(r'<(thought|thinking)>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r'\[.*?\]', '', text)
+        # Strip URLs
         text = re.sub(r'\(https?://.*?\)', '', text)
+        text = re.sub(r'https?://\S+', '', text)
+        # Strip markdown characters
+        text = re.sub(r'[*_#`~]', '', text)
+        # Convert symbols → spoken words BEFORE ASCII/regex strip
+        text = self._symbols_to_words(text)
+        # Remove non-ASCII (em-dashes etc → nearest equivalent)
+        text = text.replace('\u2014', ' -- ').replace('\u2013', ' - ')
+        text = text.replace('\u2018', "'").replace('\u2019', "'")
+        text = text.replace('\u201c', '"').replace('\u201d', '"')
         text = text.encode("ascii", "ignore").decode("ascii")
-        text = re.sub(r'[^a-zA-Z0-9\s.,!?\']', ' ', text)
+        # Keep letters, digits, spaces, and basic punctuation
+        text = re.sub(r'[^a-zA-Z0-9\s.,!?;:\'\-"]', ' ', text)
         text = re.sub(r'\s+', ' ', text).strip()
         
-        if not text:
+        if not text or len(text) < 3:
             return
             
         self.stop_tts_event.clear()
         self.tts_queue.put((text, emotional_state))
 
+    def play_filler(self):
+        """Play pre-cached backchannel filler instantly. 0ms TTS synthesis cost."""
+        if not self.filler_cache:
+            return
+        import random
+        phrase = random.choice(list(self.filler_cache.keys()))
+        samples, sr = self.filler_cache[phrase]
+        # Stop current TTS so filler can play immediately
+        self.stop_tts()
+        # Allow stop_tts to flush
+        time.sleep(0.05)
+        self.is_speaking.set()
+        sd.play(samples, samplerate=sr)
+        # Fire-and-forget: don't block caller (LLM starts in parallel)
+        def _wait_and_clear():
+            sd.wait()
+            self.is_speaking.clear()
+        threading.Thread(target=_wait_and_clear, daemon=True).start()
+
     def _tts_worker_loop(self):
         while not self.stop_event.is_set():
             try:
-                # Check for stop_tts_event to flush queue
                 if self.stop_tts_event.is_set():
                     while not self.tts_queue.empty():
                         self.tts_queue.get_nowait()
@@ -155,10 +206,49 @@ class VoiceEngine:
                 continue
             except Exception as e:
                 logger.error(f"tts_worker_error | {e}")
+
+    # ── symbol-to-word mapping for TTS ──────────────────────────────────────
+    _SYMBOL_MAP = str.maketrans({
+        '°':  ' degrees ',
+        '%':  ' percent ',
+        '$':  ' dollar ',
+        '€':  ' euro ',
+        '£':  ' pound ',
+        '+':  ' plus ',
+        '&':  ' and ',
+        '@':  ' at ',
+        '#':  ' number ',
+        '=':  ' equals ',
+        '×':  ' times ',
+        '÷':  ' divided by ',
+        '±':  ' plus minus ',
+        '‰':  ' per mille ',
+        '§':  ' section ',
+        '©':  ' copyright ',
+        '®':  ' registered ',
+        '™':  ' trademark ',
+        '•':  ' bullet ',
+        '–':  ' - ',
+        '—':  ' - ',
+        '/':  ' per ',
+        '~':  ' approximately ',
+        '‰':  ' per mil ',
+        'μ':  ' micro ',
+        'Ω':  ' ohm ',
+        '²':  ' squared ',
+        '³':  ' cubed ',
+    })
+
+    def _symbols_to_words(self, text: str) -> str:
+        text = text.translate(self._SYMBOL_MAP)
+        # Handle degree at start of word (e.g. "25°C" → "25 degrees C")
+        text = re.sub(r'(\d)\s+degrees\s+', r'\1 degrees ', text)
+        return text
     def _sanitize_for_tts(self, text: str) -> str:
-        """Final aggressive sanitization before phonemizer."""
+        """Final pass before phonemizer — convert symbols → words, keep punctuation for prosody."""
+        text = self._symbols_to_words(text)
         text = re.sub(r'[*_#`~]', '', text)
-        text = re.sub(r'[^a-zA-Z0-9 .,!?;:\'\-]', ' ', text)
+        text = re.sub(r'[^a-zA-Z0-9\s.,!?;:\'\-"]', ' ', text)
         text = re.sub(r'\s+', ' ', text).strip()
         return text
 
@@ -169,20 +259,27 @@ class VoiceEngine:
                 text = self._sanitize_for_tts(text)
                 if not text:
                     return
-                # Emotion speed mapping
                 speed = 1.0
                 if emotional_state == "energetic": speed = 1.05
                 elif emotional_state in ["sad", "calm"]: speed = 0.95
 
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", module="phonemizer")
+                # Suppress noisy phonemizer fork warnings
+                phon_logger = logging.getLogger("phonemizer")
+                old_level = phon_logger.level
+                phon_logger.setLevel(logging.ERROR)
+                try:
+                    tts_start_time = time.time()
                     samples, sample_rate = self.kokoro.create(
                         text, 
                         voice=self.config.kokoro_voice, 
                         speed=speed, 
                         lang=self.config.kokoro_lang
                     )
-                )
+                    tts_latency_ms = (time.time() - tts_start_time) * 1000
+                    logger.info(f"pipeline_stage | stage=tts | latency_ms={tts_latency_ms:.1f}")
+                finally:
+                    phon_logger.setLevel(old_level)
+
                 
                 # Check for stop event before playing
                 if self.stop_tts_event.is_set():

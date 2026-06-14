@@ -5,6 +5,7 @@ import os
 import re
 import datetime
 import asyncio
+import time
 from typing import List, Dict, Optional, Callable, AsyncGenerator
 from charlie.research import web_search, read_url, deep_research
 from charlie.research_memory import memory as research_memory
@@ -204,7 +205,6 @@ class Brain:
         self.history.append({"role": "user", "content": user_input})
         
         # Multi-step research loop
-        has_yielded_start = False
         for i in range(3):
             self.persona.detect_emotion(user_input)
             
@@ -218,20 +218,42 @@ class Brain:
             
             full_reply = ""
             is_tool_call = False
+            has_yielded_start = False
             
             messages = [{"role": "system", "content": system_msg}] + self.history[-self.config.max_history:]
             
             try:
                 logger.debug(f"Calling LLM (Iteration {i+1})...")
+                llm_start_time = time.time()
+                llm_ttft_logged = False
+                
+                # Try fast LLM (Groq) first, fallback to slow (NVIDIA) on connection failure
                 payload = {
-                    "model": self.config.llm_model,
                     "messages": messages,
                     "temperature": 0.3, 
                     "stream": True
                 }
-
-                async with self.client.stream("POST", "chat/completions", json=payload) as response:
-                    response.raise_for_status()
+                response = None
+                llm_source = None
+                for client, model, label in [
+                    (self.fast_client, self.config.fast_llm_model, "fast"),
+                    (self.client, self.config.llm_model, "slow"),
+                ]:
+                    try:
+                        payload["model"] = model
+                        req = client.build_request("POST", "chat/completions", json=payload)
+                        response = await client.send(req, stream=True)
+                        response.raise_for_status()
+                        llm_source = label
+                        break
+                    except Exception as e:
+                        logger.warning(f"LLM {label} failed: {e}")
+                        continue
+                if response is None:
+                    raise RuntimeError("All LLM backends failed")
+                
+                # Consume the streaming response
+                try:
                     async for line in response.aiter_lines():
                         if not line.startswith("data: "): continue
                         if line == "data: [DONE]": break
@@ -253,39 +275,39 @@ class Brain:
                                     continue
                                 
                                 # Handle Thinking Tags (Common in models like Nemotron/DeepSeek)
-                                # Hide everything inside <think> from the yield
                                 if "<think>" in full_reply:
                                     if "</think>" not in full_reply:
-                                        continue # Still thinking
+                                        continue
                                     else:
-                                        # Just finished thinking, get text after it
                                         clean_text = full_reply.split("</think>", 1)[1]
-                                        # Yield only the new part of the clean text
-                                        # This is a bit tricky with streaming, but usually <think> is at the very start
                                         if clean_text:
-                                            # Yield the new part (content) only if it's part of the post-think text
-                                            # For simplicity, we'll just yield the content if we are past </think>
                                             pass 
                                 
                                 # Buffer only the very beginning to be 100% sure it's not "TOOL:"
                                 if not has_yielded_start:
-                                    # If it clearly doesn't start with 'T', yield immediately
-                                    # Or if we have enough characters to be sure 'TOOL:' isn't there
                                     if not full_reply.upper().startswith("T") or len(full_reply) >= 5:
-                                        # Get text after thinking tags if any
                                         to_yield = full_reply
                                         if "</think>" in to_yield:
                                             to_yield = to_yield.split("</think>", 1)[1]
                                         
                                         if to_yield:
+                                            if not llm_ttft_logged:
+                                                llm_ttft_ms = (time.time() - llm_start_time) * 1000
+                                                logger.info(f"pipeline_stage | stage=llm_ttft | latency_ms={llm_ttft_ms:.1f}")
+                                                llm_ttft_logged = True
                                             yield to_yield
                                             has_yielded_start = True
                                 else:
-                                    # Past the start, just yield the current chunk
+                                    if not llm_ttft_logged:
+                                        llm_ttft_ms = (time.time() - llm_start_time) * 1000
+                                        logger.info(f"pipeline_stage | stage=llm_ttft | latency_ms={llm_ttft_ms:.1f}")
+                                        llm_ttft_logged = True
                                     yield content
                         except Exception as e:
                             import traceback
                             logger.warning(f"stream_parse_error | {e}\n{traceback.format_exc()}")
+                finally:
+                    await response.aclose()
                 
                 # Final check for non-streamed results or tiny responses
                 # If we haven't yielded anything yet and it's not a tool call, yield now
@@ -301,9 +323,16 @@ class Brain:
                         if match:
                             query = match.group(1)
                             self.history.append({"role": "assistant", "content": reply})
-                            asyncio.create_task(self._run_background_research(query, is_deep=False))
-                            yield "I'm looking into that in the background."
-                            return
+                            yield f"Searching for {query}..."
+                            # Synchronous search — inject results into history, loop again
+                            search_result = await web_search(query)
+                            self.history.append({
+                                "role": "system",
+                                "content": f"Web search results for '{query}' (searched {current_date}):\n\n{search_result}\n\nNow answer the user's original question using these results. Be direct, concise, and in character."
+                            })
+                            self.save_history()
+                            # Continue the for-loop to let LLM answer with results
+                            continue
                             
                     elif "DEEP_RESEARCH" in reply_upper:
                         match = re.search(r'deep_research\s*\(\s*["\'](.*?)["\']\s*\)', reply, re.IGNORECASE)

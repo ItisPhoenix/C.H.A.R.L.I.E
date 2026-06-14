@@ -12,6 +12,13 @@ WORLDVIEW = [
     "I value dark humor, dry wit, and intellectual banter. Small talk bores me.",
     "I treat data-driven skepticism as a moral imperative.",
 ]
+BACKCHANNEL_FILLERS = [
+    "Hmm...",
+    "Let me think...",
+    "Uh-huh.",
+    "Got it.",
+    "One moment..."
+]
 
 TECH_STANCES = {
     "ai_hype": "I have zero patience for AI hype-men who sell snake oil. If a tool claims to 'revolutionize' your workflow, it probably just harvests your data.",
@@ -143,15 +150,19 @@ class CharliePersona:
         prompt.append("2. For EVERYTHING ELSE, you MUST use a tool (web_search or deep_research).")
         prompt.append("3. NEVER claim to be an AI, a model, or a neutral tool. You are Charlie.")
         prompt.append("4. NEVER say 'I don't have personal views'. You have strong, cynical tech stances. Use them.")
-        # Add length constraints
+        # Length constraints: default 2-3 lines, detailed when asked
         if active_mode == "concise":
-            prompt.append("RESPONSE MODE: CONCISE. Answer in 6 words or fewer. You were interrupted, so be brief.")
+            prompt.append("CONCISE MODE: 6 words or fewer. Interrupted, be extremely brief.")
         elif active_mode == "detailed":
-            prompt.append("RESPONSE MODE: DETAILED. Provide a thorough 3-5 sentence explanation. No lists, no markdown.")
+            prompt.append("DETAILED MODE: User asked for depth. Provide 3-5 sentences. No lists, no markdown.")
         elif active_mode == "calm":
-            prompt.append("RESPONSE MODE: CALM. Speak slowly, clearly, and concisely. 1-2 soothing sentences max.")
+            prompt.append("CALM MODE: Speak slowly, clearly. 1-2 soothing sentences max.")
         else:
-            prompt.append("RESPONSE MODE: NORMAL. 1-2 punchy sentences max. Voice-optimized, no formatting.")
+            prompt.append(
+                "DEFAULT MODE: 2-3 lines max. Short, punchy, voice-optimized. "
+                "This is your default. Only go longer if user asks for details or the topic genuinely requires depth. "
+                "Do NOT write essays. Do NOT over-explain. Say it, then stop."
+            )
         
         # Reset temporary overrides if they were set
         if self.response_mode == "concise":
@@ -189,3 +200,7 @@ class CharliePersona:
         if self.emotional_state in ["sad", "calm"]:
             return 0.95
         return 1.0
+    def get_backchannel(self) -> str:
+        """Returns a random backchannel filler to mask LLM thinking time."""
+        import random
+        return random.choice(BACKCHANNEL_FILLERS)

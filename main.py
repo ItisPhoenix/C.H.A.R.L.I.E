@@ -3,6 +3,7 @@ import sys
 import io
 import os
 import logging
+import re
 
 # 1. SETUP ENVIRONMENT FIRST
 if sys.platform == 'win32':
@@ -59,6 +60,8 @@ async def main():
             brain.persona.response_mode = "concise"
             
         print("Charlie is thinking...", end="\r", flush=True)
+        # Backchannel filler to mask LLM thinking time (pre-cached audio, instant)
+        voice.play_filler()
         
         # Streaming buffer
         sentence_buffer = ""
@@ -80,13 +83,9 @@ async def main():
                         voice.speak(sentence, brain.persona.emotional_state)
                 sentence_buffer = parts[-1]
 
-        # Final flush
+        # Final TTS only — chunks already printed everything
         if sentence_buffer.strip():
-            print(sentence_buffer, flush=True)
             voice.speak(sentence_buffer, brain.persona.emotional_state)
-        else:
-            print("", flush=True)
-            logger.warning("Brain returned empty response.")
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
         voice = VoiceEngine(config, on_speech=on_speech)
