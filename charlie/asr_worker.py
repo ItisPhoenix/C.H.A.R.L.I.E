@@ -31,17 +31,17 @@ def asr_worker_process(input_queue: mp.Queue, output_queue: mp.Queue, model_size
 
     while True:
         try:
-            # Poll for work
-            payload = input_queue.get()
+            # Poll with timeout so KeyboardInterrupt can fire cleanly
+            try:
+                payload = input_queue.get(timeout=1.0)
+            except Exception:
+                continue
             if payload is None:  # Shutdown signal
-                logger.info("ASR Worker: Shutdown signal received.")
                 break
             
             audio_data_bytes, sample_rate = payload
-            # Convert bytes back to numpy array
             audio_data = np.frombuffer(audio_data_bytes, dtype=np.float32)
             
-            # Transcribe
             segments, info = whisper.transcribe(
                 audio_data,
                 language=default_language,
@@ -52,13 +52,15 @@ def asr_worker_process(input_queue: mp.Queue, output_queue: mp.Queue, model_size
             
             text = "".join([s.text for s in segments]).strip()
             confidence = info.language_probability
-            
-            # Return result
             output_queue.put((text, confidence))
             
+        except KeyboardInterrupt:
+            break
         except Exception as e:
             logger.error(f"ASR Worker: Error during transcription: {e}")
-            output_queue.put(("", 0.0))  # Return empty result on error
+            output_queue.put(("", 0.0))
+
+    logger.info("ASR Worker: Shutting down.")
 
 if __name__ == "__main__":
     # This file isn't meant to be run directly, but if it is, we could add test logic here
