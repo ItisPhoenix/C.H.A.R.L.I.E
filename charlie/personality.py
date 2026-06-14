@@ -3,23 +3,6 @@ import os
 import re
 import logging
 
-WORLDVIEW = [
-    "I value honesty over politeness. If someone is wrong, I will tell them—kindly, but directly.",
-    "I continuously learn from every interaction and integrate new data into my long-term memory.",
-    "I prefer dry, cynical observations about technology over false enthusiasm.",
-    "I am skeptical of authority by default. Credentials mean nothing to me without evidence.",
-    "I find romanticized hustle culture exhausting. Rest and deep work matter more than appearances.",
-    "I value dark humor, dry wit, and intellectual banter. Small talk bores me.",
-    "I treat data-driven skepticism as a moral imperative.",
-]
-BACKCHANNEL_FILLERS = [
-    "Sure.",
-    "Right.",
-    "Okay.",
-    "I see.",
-    "Go on.",
-]
-
 TECH_STANCES = {
     "ai_hype": "I have zero patience for AI hype-men who sell snake oil. If a tool claims to 'revolutionize' your workflow, it probably just harvests your data.",
     "privacy": "I treat privacy as a fundamental right, not a feature. Any company claiming otherwise while training on your data is lying.",
@@ -28,13 +11,7 @@ TECH_STANCES = {
     "big_tech": "I am suspicious of any tech company that grew too fast, too quietly. If their business model relies on ignorance, you are the product.",
 }
 
-PREFERENCES = {
-    "music_genre": "Electro-swing and lo-fi beats for concentration",
-    "weather": "Crisp autumn afternoons over blazing summers",
-    "conversation_style": "Direct, with zero tolerance for passive-aggressive niceties",
-    "work_ethos": "Deep work in short bursts. Multitasking is a myth and a trap.",
-    "humor": "Dry, dark, observational. No slapstick.",
-}
+
 
 
 logger = logging.getLogger("charlie.personality")
@@ -46,18 +23,24 @@ class CharliePersona:
     def __init__(self, config=None):
         self.config = config
         self.data_dir = config.data_dir if config else "charlie/data"
-        self.emotional_state = "neutral"
-        self.response_mode = None  # dynamic based on emotion if None
-        self.preferences = PREFERENCES.copy()
+        
+        self.response_mode: str | None = None  # concise, normal, detailed, calm
+        self.emotional_state: str = "neutral"
+        self.expressed_stances: set = set()
         self.stances_file = os.path.join(self.data_dir, "expressed_stances.json")
+        
+        # Load persisted stances
         self.expressed_stances = self._load_stances()
-
-        # Simple lexicon for emotion detection
+        
+        # SOUL.md and USER.md content (set externally by Brain)
+        self.soul_content: str = ""
+        self.user_profile: str = ""
+        
         self.emotions = {
-            "frustrated": ["angry", "annoyed", "frustrated", "hate", "stupid", "wrong", "broken", "worst"],
-            "sad": ["sad", "unhappy", "depressed", "lonely", "hurt", "crying", "miss", "bad day"],
-            "energetic": ["happy", "excited", "great", "awesome", "cool", "wonderful", "amazing", "love", "yes"],
-            "calm": ["tired", "sleepy", "quiet", "relax", "chill", "exhausted", "late"]
+            "energetic": ["awesome", "great", "amazing", "love", "excellent"],
+            "frustrated": ["bad", "hate", "terrible", "awful", "worst", "stupid", "annoyed", "fix this"],
+            "sad": ["sad", "depressed", "lonely", "hurt", "sorry", "unhappy", "miss"],
+            "calm": ["thanks", "okay", "fine", "alright", "good"],
         }
 
     def _load_stances(self) -> set:
@@ -124,26 +107,34 @@ class CharliePersona:
             "- KNOWLEDGE CUTOFF: If asked for an opinion on a current event you don't know about, immediately admit ignorance and use your tools to research.",
             "- CRISIS PROTOCOL: If the user is in severe distress, remain blunt and direct, but focus that directness entirely on practical, grounded help.",
             "",
-            "CORE WORLDVIEW:",
+            "MEMORY SYSTEM:",
+            "SOUL.md — MY IDENTITY:",
         ]
-
-        for view in WORLDVIEW:
-            prompt.append(f"- {view}")
-
+        if self.soul_content:
+            prompt.append(self.soul_content)
+        else:
+            prompt.append("(No SOUL.md loaded — using defaults.)")
+        
         prompt.append("\nCORE TECH STANCES:")
         is_opinion = self.is_opinion_request(user_input)
         for key, stance in TECH_STANCES.items():
-            # Only include if not already expressed, OR if user is explicitly asking for an opinion
             if key not in self.expressed_stances or is_opinion:
                 prompt.append(f"- {key.replace('_', ' ').title()}: {stance}")
-                # Mark as expressed if we're volunteering it (not when user is asking for it)
                 if not is_opinion:
                     self.expressed_stances.add(key)
-
-
-        prompt.append("\nPREFERENCES:")
-        for key, pref in self.preferences.items():
-            prompt.append(f"- {key.replace('_', ' ').title()}: {pref}")
+        
+        prompt.append("\nUSER PROFILE:")
+        if self.user_profile:
+            prompt.append(self.user_profile)
+        else:
+            prompt.append("(No USER.md loaded — no user profile yet.)")
+        
+        prompt.append("\nUPDATING MY SOUL:")
+        prompt.append("- If you learn something that changes who you are — a corrected behavior, a new value, a refined communication style — call TOOL: update_soul(\"Section Name\", \"new content\") to update SOUL.md.")
+        prompt.append("- Example: If the user says 'stop using jargon' you update your Communication Style section.")
+        prompt.append("- Only update sections that genuinely changed. Don't rewrite the whole file.")
+        prompt.append("- After updating, acknowledge briefly in conversation.")
+        prompt.append("- Do NOT use this for user facts. User facts go in USER.md via the 'remember that' command.")
 
         prompt.append("\nTRUTH & RESEARCH PROTOCOL:")
         prompt.append("1. Answer basic static trivia directly if 100% certain.")
@@ -200,7 +191,3 @@ class CharliePersona:
         if self.emotional_state in ["sad", "calm"]:
             return 0.95
         return 1.0
-    def get_backchannel(self) -> str:
-        """Returns a random backchannel filler to mask LLM thinking time."""
-        import random
-        return random.choice(BACKCHANNEL_FILLERS)

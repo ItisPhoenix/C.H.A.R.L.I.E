@@ -40,7 +40,7 @@ logger = logging.getLogger("charlie.main")
 # Sentence/clause splitting for early TTS dispatch
 _CLAUSE_BOUNDARY = re.compile(r'(?<=[,;:])\s+(?=[A-Z"])')
 _SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+')
-_MAX_FLUSH_CHARS = 80  # Force-flush if no boundary seen within this many chars
+_MAX_FLUSH_CHARS = 200  # Force-flush if no boundary seen within this many chars (~30-40 words)
 
 async def main():
     logger.info("Charlie is waking up...")
@@ -65,8 +65,6 @@ async def main():
             brain.persona.response_mode = "concise"
             
         print("Charlie is thinking...", end="\r", flush=True)
-        # Backchannel filler to mask LLM thinking time (pre-cached audio, instant)
-        voice.play_filler()
         
         # Streaming buffer
         sentence_buffer = ""
@@ -87,8 +85,17 @@ async def main():
             elif ", " in sentence_buffer or "; " in sentence_buffer or ": " in sentence_buffer:
                 boundary = _CLAUSE_BOUNDARY
             elif len(sentence_buffer) >= _MAX_FLUSH_CHARS:
-                # Force-flush at max chars even without punctuation
-                boundary = re.compile(r'(?<=.)\s+')  # split on any word boundary
+                # Force-flush: split ONCE at the last space before limit.
+                # This avoids the old pattern that split at EVERY space (word-by-word TTS).
+                idx = sentence_buffer.rfind(' ', 0, _MAX_FLUSH_CHARS)
+                if idx > 0:
+                    voice.speak(sentence_buffer[:idx], brain.persona.emotional_state)
+                    sentence_buffer = sentence_buffer[idx + 1:]
+                else:
+                    # No space found within limit — hard cut
+                    voice.speak(sentence_buffer[:_MAX_FLUSH_CHARS], brain.persona.emotional_state)
+                    sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
+                continue
             
             if boundary:
                 parts = boundary.split(sentence_buffer)

@@ -14,8 +14,9 @@ class Config:
     fast_llm_key: str = os.getenv("FAST_LLM_KEY", os.getenv("LLM_API_KEY", "no-key"))
     fast_llm_model: str = os.getenv("FAST_LLM_MODEL", os.getenv("LLM_MODEL", "meta/llama3-70b-instruct"))
     
-    mic_index: int = int(os.getenv("MIC_INDEX", "0"))
-    output_index: int = int(os.getenv("OUTPUT_INDEX", "0"))
+    # -1 = system default input/output device; ≥0 = specific device index
+    mic_index: int = int(os.getenv("MIC_INDEX", "-1"))
+    output_index: int = int(os.getenv("OUTPUT_INDEX", "-1"))
     
     whisper_model: str = os.getenv("WHISPER_MODEL", "distil-large-v3")
     silence_timeout: float = float(os.getenv("SILENCE_TIMEOUT", "0.6"))

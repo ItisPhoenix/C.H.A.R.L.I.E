@@ -14,7 +14,6 @@ import multiprocessing as mp
 from typing import Callable
 from kokoro_onnx import Kokoro
 from collections import deque
-from charlie.personality import BACKCHANNEL_FILLERS
 from charlie.asr_worker import asr_worker_process
 import onnxruntime as ort
 ort.set_default_logger_severity(3)
@@ -31,9 +30,6 @@ class VoiceEngine:
         self.tts_queue = queue.Queue()
         self.tts_lock = threading.Lock()
         self.playback_queue = queue.Queue()
-        # Pre-synthesized filler audio cache (instant playback)
-        self.filler_cache: dict = {}
-        
         self.vad_model = None
         self.asr_input_queue = mp.Queue()
         self.asr_output_queue = mp.Queue()
@@ -86,21 +82,12 @@ class VoiceEngine:
         voices_path = os.path.join(config.kokoro_model_dir, "voices-v1.0.bin")
         self.kokoro = Kokoro(model_path, voices_path)
         logger.info("Kokoro TTS initialized locally.")
-        # Warm up ONNX graph + pre-synthesize filler audio
+        # Warm up ONNX graph
         try:
             self.kokoro.create("Warm up", voice=self.config.kokoro_voice, speed=1.0, lang=self.config.kokoro_lang)
             logger.info("Kokoro warm-up: ONNX graph compiled.")
         except Exception as e:
             logger.warning(f"Kokoro warm-up failed: {e}")
-        
-        try:
-            for phrase in BACKCHANNEL_FILLERS:
-                samples, sr = self.kokoro.create(phrase, voice=self.config.kokoro_voice, speed=1.0, lang=self.config.kokoro_lang)
-                self.filler_cache[phrase] = (samples, sr)
-            logger.info(f"Pre-synthesized {len(self.filler_cache)} filler phrases: {list(self.filler_cache.keys())}")
-        except Exception as filler_err:
-            logger.warning(f"Filler pre-synthesis failed: {filler_err}")
-        
         # Use thread-safe deque for audio chunks
         self.audio_buffer = deque(maxlen=200)
         self.processing_thread = None
@@ -184,24 +171,6 @@ class VoiceEngine:
         self.stop_tts_event.clear()
         self.tts_queue.put((text, emotional_state))
 
-    def play_filler(self):
-        """Play pre-cached backchannel filler instantly. 0ms TTS synthesis cost."""
-        if not self.filler_cache:
-            return
-        import random
-        phrase = random.choice(list(self.filler_cache.keys()))
-        samples, sr = self.filler_cache[phrase]
-        # Stop current TTS so filler can play immediately
-        self.stop_tts()
-        # Allow stop_tts to flush
-        time.sleep(0.05)
-        self.is_speaking.set()
-        sd.play(samples, samplerate=sr)
-        # Fire-and-forget: don't block caller (LLM starts in parallel)
-        def _wait_and_clear():
-            sd.wait()
-            self.is_speaking.clear()
-        threading.Thread(target=_wait_and_clear, daemon=True).start()
 
     def _synth(self, text: str, speed: float):
         """Synthesize text to audio samples. Returns (samples, sample_rate) or None."""
@@ -219,7 +188,7 @@ class VoiceEngine:
                     text, voice=self.config.kokoro_voice, speed=speed, lang=self.config.kokoro_lang
                 )
                 tts_ms = (time.time() - tts_start) * 1000
-                logger.info(f"pipeline_stage | stage=tts | latency_ms={tts_ms:.1f}")
+                logger.debug(f"pipeline_stage | stage=tts | latency_ms={tts_ms:.1f}")
                 return (samples, sample_rate)
             except Exception as e:
                 logger.error(f"synth_error | {e}")
@@ -350,6 +319,18 @@ class VoiceEngine:
         text = re.sub(r'(?<!\w)(\d{5,})(?!\.\d)(?!\w)', _replace_number, text)
         return text
     
+    # Symbol-to-word mappings for {str}.translate() — maps ordinal → word
+    _SYMBOL_MAP = str.maketrans({
+        "%": " percent",
+        "&": " and",
+        "@": " at",
+        "+": " plus",
+        "=": " equals",
+        "/": " slash ",
+        "\\": " backslash ",
+        ">": " greater than ",
+        "<": " less than ",
+    })
     def _symbols_to_words(self, text: str) -> str:
         text = text.translate(self._SYMBOL_MAP)
         # Handle degree at start of word (e.g. "25°C" → "25 degrees C")
@@ -373,14 +354,19 @@ class VoiceEngine:
         silence_start = None
         phrase_start_time = None
         
+        # Resolve input device: -1 → system default
+        input_device = None if self.config.mic_index < 0 else self.config.mic_index
+        
+        
         def callback(indata, frames, time_info, status):
             if status:
                 logger.warning(f"Audio status: {status}")
             self.audio_buffer.append(bytes(indata))
 
         try:
-            with sd.RawInputStream(samplerate=samplerate, blocksize=block_size, 
-                                   dtype='int16', channels=1, callback=callback):
+            with sd.RawInputStream(samplerate=samplerate, blocksize=block_size,
+                                   dtype='int16', channels=1, callback=callback,
+                                   device=input_device):
                 while not self.stop_event.is_set():
                     if not self.audio_buffer:
                         time.sleep(0.01)
