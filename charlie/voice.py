@@ -80,6 +80,8 @@ class VoiceEngine:
             logger.info("ASR warm-up: sent silent audio.")
         except Exception as e:
             logger.warning(f"ASR warm-up failed: {e}")
+        # Suppress ONNX runtime CUDA warnings (Memcpy nodes, node assignment, ScatterND)
+        os.environ["ORT_LOG_LEVEL"] = "3"
         # 3. LOCAL TTS (Kokoro) — CUDA GPU accelerated
         os.environ.setdefault("ONNX_PROVIDER", "CUDAExecutionProvider")
         model_path = os.path.join(config.kokoro_model_dir, "kokoro-v1.0.onnx")
