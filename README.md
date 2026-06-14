@@ -1,24 +1,32 @@
 # C.H.A.R.L.I.E.
 Completely Helpful And Rather Local Intelligent Engine
 
-## Usage
-1. `uv sync`
-2. `uv run python main.py`
+A voice-first, local AI assistant with GPU-accelerated speech pipeline.
 
-## Features
- - **Isolated ASR Subprocess**: Whisper transcription runs in a dedicated process to bypass the GIL and ensure zero-latency VAD/TTS.
-- **Asynchronous Research Agent**: Non-blocking web search and deep research.
-  - Type `research <topic>` for a background report.
-  - Immediate feedback with background chime ("Ding!") when results are ready.
-- **Continuous Learning**: Semantic memory layer for long-term knowledge retention.
-- **Persistent Stance Pruning**: Remembers expressed opinions across sessions to prevent repetitive lectures.
-- **Emotion-Verbosity Matrix**: Tunable response length and tone based on current emotional state.
-- **Private Search Integration**: Native support for local SearXNG instances.
+## Quick Start
+```bash
+uv sync
+uv run python main.py
+```
 
-## Configuration
-- **Dual-Model Routing**: Define `FAST_LLM_URL` in `.env` for backend tasks (decomposition/synthesis) to reduce latency while keeping a high-reasoning model for chat.
-- **SearXNG**: To unblock local search, run:
-  ```bash
-  cd SearXNG
-  docker compose up -d
-  ```
+## Architecture
+
+### Speech Pipeline
+- **VAD**: Silero VAD (local, GPU) — real-time voice activity detection
+- **ASR**: faster-whisper `distil-large-v3` in isolated subprocess (CUDA) — ~26ms
+- **TTS**: Kokoro ONNX via `onnxruntime-gpu` (CUDA) — ~700ms per utterance
+- **Fillers**: Pre-synthesized backchannel audio, 0ms playback cost
+
+### LLM Routing
+- **Primary**: NVIDIA NIM (`nemotron-3-super-120b-a12b`) via HTTPS
+- **Fallback**: Same API, automatic retry on failure
+- **Summarization**: Shared backend model for research decomposition/synthesis
+
+### Research
+- **Web Search**: Local SearXNG instance (`docker compose up -d` in `SearXNG/`)
+- **Memory**: SQLite semantic memory layer for long-term context retention
+
+### Performance Targets
+- ASR → LLM TTFT: <500ms (sub-second)
+- TTS: <1000ms per utterance (GPU)
+- Total perceived latency: <2s from end of speech to start of reply

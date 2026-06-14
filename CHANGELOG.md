@@ -1,6 +1,22 @@
 # Changelog
 
-## [2026-06-14] - Major Personality & Research Upgrade
+## [2026-06-15] — GPU Acceleration & Latency Optimization
+
+### Added
+- **GPU TTS**: Kokoro ONNX on `onnxruntime-gpu 1.26.0` with CUDA 12.4 — ~700ms vs 7.4s CPU
+- **Pre-synthesized filler audio**: Backchannel phrases cached at startup, instant `sd.play()` bypass
+- **Per-stage timing logs**: Structured `pipeline_stage | stage=… | latency_ms=…` output for ASR, LLM TTFT, TTS
+- **Symbol-to-word conversion**: 29 symbol mappings (° → degrees, % → percent, etc.) before TTS phonemization
+- **ASR warm-up**: Silent audio sent on init to pre-compile Whisper CUDA graph
+- **ONNX log suppression**: `ORT_LOG_LEVEL=3` hides noisy CUDA provider warnings
+
+### Changed
+- **LLM routing**: Dual-path (fast/slow) with automatic fallback; fast path for summarization
+- **ASR model**: `large-v3` → `distil-large-v3`, `beam_size=1`, `best_of=1`, `vad_filter=True` — 26ms vs 150ms
+- **Response length**: Default 2-3 lines, detailed mode only when user asks or topic requires depth
+- **Backchannel fillers**: Replaced hesitant fillers with natural responses (Sure., Right., Okay., I see., Go on.)
+
+## [2026-06-14] — Major Personality & Research Upgrade
 
 ### Audit - Architectural & Behavioral improvements
 - **ASR Subprocess Isolation**: Moved Whisper transcription to a dedicated worker process via `multiprocessing` to eliminate GIL contention during voice processing.
