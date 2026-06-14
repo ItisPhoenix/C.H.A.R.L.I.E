@@ -1,4 +1,5 @@
 import logging
+import warnings
 import threading
 import sys
 import os
@@ -154,21 +155,33 @@ class VoiceEngine:
                 continue
             except Exception as e:
                 logger.error(f"tts_worker_error | {e}")
+    def _sanitize_for_tts(self, text: str) -> str:
+        """Final aggressive sanitization before phonemizer."""
+        text = re.sub(r'[*_#`~]', '', text)
+        text = re.sub(r'[^a-zA-Z0-9 .,!?;:\'\-]', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
 
     def _synth_and_play(self, text: str, emotional_state: str):
         with self.tts_lock:
             self.is_speaking.set()
             try:
+                text = self._sanitize_for_tts(text)
+                if not text:
+                    return
                 # Emotion speed mapping
                 speed = 1.0
                 if emotional_state == "energetic": speed = 1.05
                 elif emotional_state in ["sad", "calm"]: speed = 0.95
 
-                samples, sample_rate = self.kokoro.create(
-                    text, 
-                    voice=self.config.kokoro_voice, 
-                    speed=speed, 
-                    lang=self.config.kokoro_lang
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", module="phonemizer")
+                    samples, sample_rate = self.kokoro.create(
+                        text, 
+                        voice=self.config.kokoro_voice, 
+                        speed=speed, 
+                        lang=self.config.kokoro_lang
+                    )
                 )
                 
                 # Check for stop event before playing
