@@ -36,8 +36,9 @@ class CharliePersona:
     """
     Manages Charlie's identity, emotional state, and dynamic system prompts.
     """
-    def __init__(self, config=None, data_dir="charlie/data"):
+    def __init__(self, config=None):
         self.config = config
+        self.data_dir = config.data_dir if config else "charlie/data"
         self.emotional_state = "neutral"
         self.response_mode = None  # dynamic based on emotion if None
         self.preferences = PREFERENCES.copy()

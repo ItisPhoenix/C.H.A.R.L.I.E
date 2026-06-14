@@ -28,6 +28,7 @@ class Config:
     max_history: int = int(os.getenv("MAX_HISTORY", "12"))
     searxng_url: str = os.getenv("SEARXNG_URL", "")  # e.g. "http://localhost:8080"
     research_memory_db: str = os.getenv("RESEARCH_MEMORY_DB", "research_memory.db")
+    data_dir: str = os.getenv("DATA_DIR", "charlie/data")
     
     default_language: str = os.getenv("DEFAULT_LANGUAGE", "en")
     kokoro_lang: str = "en-us"
