@@ -42,7 +42,6 @@ class CharliePersona:
         self.emotional_state = "neutral"
         self.response_mode = None  # dynamic based on emotion if None
         self.preferences = PREFERENCES.copy()
-        self.data_dir = data_dir
         self.stances_file = os.path.join(self.data_dir, "expressed_stances.json")
         self.expressed_stances = self._load_stances()
 
