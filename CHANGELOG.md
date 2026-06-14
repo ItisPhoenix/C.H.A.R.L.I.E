@@ -1,5 +1,18 @@
 # Changelog
 
+
+## [2026-06-15] — Fillers removed, word-by-word fix, default mic
+
+### Fixed
+- **Word-by-word TTS**: Max-char guard split at every space via `(?<=.)\s+` — replaced with single split at last word boundary before limit; threshold raised from 80 to 200 chars
+- **Startup crash**: Restored `_run` method header, `try:` block, `audio_buffer` and `processing_thread` attrs lost during filler removal
+
+### Removed
+- **Backchannel fillers**: Removed `BACKCHANNEL_FILLERS`, `play_filler()`, `filler_cache` — eliminates startup synthesis overhead and filler interruption logic
+- **TTS timing from INFO**: Demoted pipeline TTS latency log to `DEBUG`
+
+### Changed
+- **Default mic**: `mic_index` now defaults to `-1` (system default); wired into `RawInputStream` via `device=` parameter
 ## [2026-06-15] — GPU Acceleration & Latency Optimization
 
 ### Added
