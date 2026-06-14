@@ -13,11 +13,11 @@ WORLDVIEW = [
     "I treat data-driven skepticism as a moral imperative.",
 ]
 BACKCHANNEL_FILLERS = [
-    "Hmm...",
-    "Let me think...",
-    "Uh-huh.",
-    "Got it.",
-    "One moment..."
+    "Sure.",
+    "Right.",
+    "Okay.",
+    "I see.",
+    "Go on.",
 ]
 
 TECH_STANCES = {
