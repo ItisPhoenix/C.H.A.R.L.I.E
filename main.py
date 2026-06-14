@@ -62,10 +62,14 @@ async def main():
         
         # Streaming buffer
         sentence_buffer = ""
+        is_first_chunk = True
         async for chunk in brain.chat(text):
-            print("\r" + " " * 30 + "\r", end="", flush=True) # Clear thinking
+            if is_first_chunk:
+                print("\r" + " " * 30 + "\r", end="", flush=True) # Clear thinking
+                is_first_chunk = False
             print(chunk, end="", flush=True)
             sentence_buffer += chunk
+
             
             # Sentence splitting (Simple punctuation + space)
             if any(p in sentence_buffer for p in [". ", "! ", "? "]):
@@ -97,8 +101,8 @@ async def main():
         print("\n" + "="*40, flush=True)
         print("   Charlie is online and listening", flush=True)
         print("="*40 + "\n", flush=True)
-        print(f"Charlie: {welcome_msg}", flush=True)
-        voice.speak(welcome_msg)
+        print(f"\rCharlie: {welcome_msg}", flush=True)
+        voice.speak(welcome_msg, brain.persona.emotional_state)
 
         while True:
             await asyncio.sleep(1)

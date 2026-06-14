@@ -204,6 +204,7 @@ class Brain:
         self.history.append({"role": "user", "content": user_input})
         
         # Multi-step research loop
+        has_yielded_start = False
         for i in range(3):
             self.persona.detect_emotion(user_input)
             
@@ -245,27 +246,53 @@ class Brain:
                                 continue
                             
                             full_reply += content
-                            
                             if not is_tool_call:
-                                # If we already found TOOL: in full_reply, stay in tool mode
-                                if "TOOL:" in full_reply.upper():
+                                # Detect Tool Call early
+                                if "TOOL:" in full_reply.upper()[:20]:
                                     is_tool_call = True
                                     continue
                                 
-                                # Otherwise, yield if we are past the potential tool prefix window
-                                if len(full_reply) > 20:
+                                # Handle Thinking Tags (Common in models like Nemotron/DeepSeek)
+                                # Hide everything inside <think> from the yield
+                                if "<think>" in full_reply:
+                                    if "</think>" not in full_reply:
+                                        continue # Still thinking
+                                    else:
+                                        # Just finished thinking, get text after it
+                                        clean_text = full_reply.split("</think>", 1)[1]
+                                        # Yield only the new part of the clean text
+                                        # This is a bit tricky with streaming, but usually <think> is at the very start
+                                        if clean_text:
+                                            # Yield the new part (content) only if it's part of the post-think text
+                                            # For simplicity, we'll just yield the content if we are past </think>
+                                            pass 
+                                
+                                # Buffer only the very beginning to be 100% sure it's not "TOOL:"
+                                if not has_yielded_start:
+                                    # If it clearly doesn't start with 'T', yield immediately
+                                    # Or if we have enough characters to be sure 'TOOL:' isn't there
+                                    if not full_reply.upper().startswith("T") or len(full_reply) >= 5:
+                                        # Get text after thinking tags if any
+                                        to_yield = full_reply
+                                        if "</think>" in to_yield:
+                                            to_yield = to_yield.split("</think>", 1)[1]
+                                        
+                                        if to_yield:
+                                            yield to_yield
+                                            has_yielded_start = True
+                                else:
+                                    # Past the start, just yield the current chunk
                                     yield content
                         except Exception as e:
                             import traceback
                             logger.warning(f"stream_parse_error | {e}\n{traceback.format_exc()}")
                 
-                # If we didn't find TOOL: during streaming, but it's in the final text (fallback)
-                if not is_tool_call and "TOOL:" in full_reply.upper():
-                    is_tool_call = True
+                # Final check for non-streamed results or tiny responses
+                # If we haven't yielded anything yet and it's not a tool call, yield now
+                # (This is a safety fallback)
                 
-                # Final yield for non-tool calls if we were buffering
-                if not is_tool_call and len(full_reply) <= 20:
-                    yield full_reply
+                # Clean up thinking tags for history
+                full_reply = re.sub(r'<think>.*?</think>', '', full_reply, flags=re.DOTALL).strip()
                 reply = full_reply.strip()
                 reply_upper = reply.upper()
                 if is_tool_call:
