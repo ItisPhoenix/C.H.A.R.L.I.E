@@ -16,6 +16,8 @@ from kokoro_onnx import Kokoro
 from collections import deque
 
 import queue
+import multiprocessing as mp
+from charlie.asr_worker import asr_worker_process
 logger = logging.getLogger("charlie.voice")
 
 class VoiceEngine:
@@ -29,7 +31,9 @@ class VoiceEngine:
         self.tts_lock = threading.Lock()
         
         self.vad_model = None
-        self.whisper_model = None
+        self.asr_input_queue = mp.Queue()
+        self.asr_output_queue = mp.Queue()
+        self.asr_process = None
         
         self.device = config.gpu_device
         self.stop_event = threading.Event()
@@ -54,19 +58,20 @@ class VoiceEngine:
             logger.warning(f"VAD local load failed: {e}")
             self.vad_model, self.vad_utils = torch.hub.load('snakers4/silero-vad:v3.1', 'silero_vad', onnx=True)
 
-        # 2. LOCAL STT (Whisper)
-        logger.info(f"Loading Whisper {config.whisper_model} (OFFLINE MODE)...")
-        try:
-            self.whisper = WhisperModel(
+        # 2. LOCAL STT (Whisper) - Spawned in separate process
+        logger.info(f"Spawning ASR worker process (Whisper {config.whisper_model})...")
+        self.asr_process = mp.Process(
+            target=asr_worker_process,
+            args=(
+                self.asr_input_queue,
+                self.asr_output_queue,
                 config.whisper_model,
-                device=self.device,
-                compute_type="float16",
-                local_files_only=True
-            )
-        except Exception as e:
-            logger.warning(f"Offline Whisper load failed. Downloading once... | {e}")
-            self.whisper = WhisperModel(config.whisper_model, device=self.device, compute_type="float16", local_files_only=False)
-        
+                config.gpu_device,
+                config.default_language
+            ),
+            daemon=True
+        )
+        self.asr_process.start()
         # 3. LOCAL TTS (Kokoro)
         model_path = os.path.join(config.kokoro_model_dir, "kokoro-v1.0.onnx")
         voices_path = os.path.join(config.kokoro_model_dir, "voices-v1.0.bin")
@@ -98,6 +103,9 @@ class VoiceEngine:
         # TTS worker thread
         self.tts_worker = threading.Thread(target=self._tts_worker_loop, daemon=True, name="TTSWorker")
         self.tts_worker.start()
+        # Start ASR result polling thread
+        self.asr_poller_thread = threading.Thread(target=self._asr_poller_loop, daemon=True)
+        self.asr_poller_thread.start()
 
     def stop(self):
         self.stop_event.set()
@@ -105,6 +113,11 @@ class VoiceEngine:
         if self.processing_thread and self.processing_thread.is_alive():
             self.processing_thread.join(timeout=5.0)
 
+        if self.asr_process:
+            self.asr_input_queue.put(None) # Signal shutdown
+            self.asr_process.join(timeout=2.0)
+            if self.asr_process.is_alive():
+                self.asr_process.terminate()
     def stop_tts(self):
         self.stop_tts_event.set()
         sd.stop()
@@ -233,28 +246,43 @@ class VoiceEngine:
                     time.sleep(0.001)
         except Exception as e:
             logger.error(f"InputStream error: {e}")
+    def _asr_poller_loop(self):
+        while not self.stop_event.is_set():
+            try:
+                # Check if process is still alive
+                if not self.asr_process.is_alive():
+                    logger.warning("ASR worker process died. Respawning...")
+                    self.asr_process = mp.Process(
+                        target=asr_worker_process,
+                        args=(
+                            self.asr_input_queue,
+                            self.asr_output_queue,
+                            self.config.whisper_model,
+                            self.config.gpu_device,
+                            self.config.default_language
+                        ),
+                        daemon=True
+                    )
+                    self.asr_process.start()
+
+                # Poll for results with a timeout
+                try:
+                    text, confidence = self.asr_output_queue.get(timeout=0.05)
+                    if text:
+                        logger.info(f"stt_result | {text} ({confidence:.2f})")
+                        self.on_speech(text)
+                except queue.Empty:
+                    continue
+            except Exception as e:
+                logger.error(f"asr_poller_loop_error | {e}")
+                time.sleep(1)
+
 
     def _process_phrase(self, audio_data):
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            temp_path = f.name
-        
         try:
-            sf.write(temp_path, audio_data, 16000)
-            segments, _ = self.whisper.transcribe(
-                temp_path, 
-                language=self.config.default_language,
-                initial_prompt="I am speaking to my witty and intelligent AI assistant, Charlie.",
-                beam_size=5,
-                word_timestamps=False
-            )
-            text = "".join([s.text for s in segments]).strip()
-            if text:
-                self.on_speech(text)
+            # Serialize audio data and put on queue
+            # Ensure it's float32 for Whisper
+            audio_data_f32 = audio_data.astype(np.float32)
+            self.asr_input_queue.put((audio_data_f32.tobytes(), 16000))
         except Exception as e:
-            logger.error(f"stt_error | {e}")
-        finally:
-            try:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-            except Exception as e:
-                logger.warning(f"Failed to remove temp file {temp_path}: {e}")
+            logger.error(f"process_phrase_error | {e}")

@@ -70,6 +70,7 @@ charlie/memory/chroma_db/
 memory/
 *.sqlite
 *.db
+charlie/data/
 
 # ── Models (Heavy Binaries) ──────────────────────────────────────────────────
 charlie/models/

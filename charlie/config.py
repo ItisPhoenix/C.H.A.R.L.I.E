@@ -1,3 +1,4 @@
+from typing import Dict, List
 import os
 from dataclasses import dataclass
 from dotenv import load_dotenv
@@ -32,5 +33,16 @@ class Config:
     kokoro_lang: str = "en-us"
     log_file: str = "logs/charlie.log"
     log_level: str = "INFO"
+    
+    emotion_response_map: Dict[str, List[str]] = None
+
+    def __post_init__(self):
+        self.emotion_response_map = {
+            "energetic": ["normal", "detailed"],
+            "frustrated": ["concise", "normal"],
+            "sad": ["calm", "normal"],
+            "calm": ["detailed", "normal"],
+            "neutral": ["normal", "detailed", "concise"],
+        }
 
 config = Config()

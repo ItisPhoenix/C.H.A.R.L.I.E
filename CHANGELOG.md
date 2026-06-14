@@ -2,6 +2,12 @@
 
 ## [2026-06-14] - Major Personality & Research Upgrade
 
+### Audit - Architectural & Behavioral improvements
+- **ASR Subprocess Isolation**: Moved Whisper transcription to a dedicated worker process via `multiprocessing` to eliminate GIL contention during voice processing.
+- **Persistent Stance Pruning**: Opinions expressed by Charlie are now persisted in `charlie/data/expressed_stances.json` and pruned from future prompts to reduce repetition.
+- **Emotion-Verbosity Matrix**: Config-driven mapping between emotional states and response modes (`concise`, `normal`, `detailed`).
+- **Stance Re-injection**: Added detection for explicit opinion requests to re-inject pruned stances when relevant.
+
 ### Added
 - **Asynchronous Research Pipeline**: Research tasks now run in non-blocking background threads.
 - **Immediate Feedback**: Charlie now acknowledges research requests instantly and alerts the user when complete.

@@ -17,7 +17,7 @@ class Brain:
         self.config = config
         self.on_thought_callback = on_thought_callback
         self.history: List[Dict[str, str]] = []
-        self.persona = CharliePersona()
+        self.persona = CharliePersona(config=self.config)
         
         # Standard Client
         base_url = self.config.llm_url
@@ -99,6 +99,7 @@ class Brain:
                 "emotional_state": self.persona.emotional_state,
                 "preferences": self.persona.preferences
             }
+            self.persona.save_stances()
             with open(self.config.history_file, "w") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:

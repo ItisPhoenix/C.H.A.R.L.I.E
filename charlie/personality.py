@@ -1,3 +1,6 @@
+import json
+import os
+import re
 import logging
 
 WORLDVIEW = [
@@ -33,11 +36,14 @@ class CharliePersona:
     """
     Manages Charlie's identity, emotional state, and dynamic system prompts.
     """
-    def __init__(self):
+    def __init__(self, config=None, data_dir="charlie/data"):
+        self.config = config
         self.emotional_state = "neutral"
-        self.response_mode = "normal"  # concise, normal, detailed
+        self.response_mode = None  # dynamic based on emotion if None
         self.preferences = PREFERENCES.copy()
-        self.expressed_stances = set()  # Track which stances we've volunteered this session
+        self.data_dir = data_dir
+        self.stances_file = os.path.join(self.data_dir, "expressed_stances.json")
+        self.expressed_stances = self._load_stances()
 
         # Simple lexicon for emotion detection
         self.emotions = {
@@ -47,6 +53,28 @@ class CharliePersona:
             "calm": ["tired", "sleepy", "quiet", "relax", "chill", "exhausted", "late"]
         }
 
+    def _load_stances(self) -> set:
+        """Load expressed stances from persistent storage."""
+        if not os.path.exists(self.stances_file):
+            return set()
+        try:
+            with open(self.stances_file, "r") as f:
+                data = json.load(f)
+                return set(data)
+        except Exception as e:
+            logger.warning(f"Failed to load stances: {e}")
+            return set()
+
+    def save_stances(self):
+        """Save expressed stances to persistent storage."""
+        os.makedirs(self.data_dir, exist_ok=True)
+        try:
+            with open(self.stances_file, "w") as f:
+                json.dump(list(self.expressed_stances), f)
+        except Exception as e:
+            logger.error(f"Failed to save stances: {e}")
+
+
     def detect_emotion(self, text: str):
         """Update emotional state based on user text keywords."""
         text_lower = text.lower()
@@ -55,14 +83,24 @@ class CharliePersona:
                 self.emotional_state = emotion
                 logger.info(f"Emotion detected: {emotion}")
     def build_system_prompt(self, current_date: str, current_time: str, memory_context: str, user_input: str) -> str:
-        """Constructs the refined system prompt for the LLM."""
-
-        # Determine response mode based on input
-        if self.response_mode != "concise": # Adaptive barge-in override
-            if any(word in user_input.lower() for word in ["explain", "how does", "why", "tell me about", "history"]):
-                self.response_mode = "detailed"
+        # Determine response mode based on input and emotion
+        active_mode = self.response_mode
+        
+        # If not forced, use emotion-based mapping
+        if active_mode is None:
+            if self.config and hasattr(self.config, "emotion_response_map"):
+                modes = self.config.emotion_response_map.get(self.emotional_state, ["normal"])
+                # Default to first entry unless specific trigger in input
+                if any(word in user_input.lower() for word in ["explain", "how does", "why", "tell me about", "history"]):
+                    active_mode = "detailed" if "detailed" in modes else modes[0]
+                else:
+                    active_mode = modes[0]
             else:
-                self.response_mode = "normal"
+                active_mode = "normal"
+
+        # Temporary barge-in / command overrides (if any in user_input)
+        if "be brief" in user_input.lower() or "summarize" in user_input.lower():
+            active_mode = "concise"
 
         prompt = [
             f"CORE DIRECTIVE: Today is {current_date}. The current time is {current_time}.",
@@ -86,8 +124,15 @@ class CharliePersona:
             prompt.append(f"- {view}")
 
         prompt.append("\nCORE TECH STANCES:")
+        is_opinion = self.is_opinion_request(user_input)
         for key, stance in TECH_STANCES.items():
-            prompt.append(f"- {key.replace('_', ' ').title()}: {stance}")
+            # Only include if not already expressed, OR if user is explicitly asking for an opinion
+            if key not in self.expressed_stances or is_opinion:
+                prompt.append(f"- {key.replace('_', ' ').title()}: {stance}")
+                # Mark as expressed if we're volunteering it (not when user is asking for it)
+                if not is_opinion:
+                    self.expressed_stances.add(key)
+
 
         prompt.append("\nPREFERENCES:")
         for key, pref in self.preferences.items():
@@ -98,22 +143,20 @@ class CharliePersona:
         prompt.append("2. For EVERYTHING ELSE, you MUST use a tool (web_search or deep_research).")
         prompt.append("3. NEVER claim to be an AI, a model, or a neutral tool. You are Charlie.")
         prompt.append("4. NEVER say 'I don't have personal views'. You have strong, cynical tech stances. Use them.")
-
-        prompt.append("\nCOMMUNICATION STYLE:")
-        prompt.append(f"Current Emotional Context: {self.emotional_state}. Tone: Dry, cynical, brilliant.")
-        prompt.append("Include natural verbal fillers (e.g., 'Hmm...', 'Ugh...', 'Interesting...') matching this mood.")
-
-        if self.is_opinion_request(user_input):
-            prompt.append("\nOPINION ENFORCEMENT: The user is explicitly asking for your personal view. Do not hedge. Answer directly from your own perspective.")
-
         # Add length constraints
-        if self.response_mode == "concise":
+        if active_mode == "concise":
             prompt.append("RESPONSE MODE: CONCISE. Answer in 6 words or fewer. You were interrupted, so be brief.")
-            self.response_mode = "normal"
-        elif self.response_mode == "detailed":
+        elif active_mode == "detailed":
             prompt.append("RESPONSE MODE: DETAILED. Provide a thorough 3-5 sentence explanation. No lists, no markdown.")
+        elif active_mode == "calm":
+            prompt.append("RESPONSE MODE: CALM. Speak slowly, clearly, and concisely. 1-2 soothing sentences max.")
         else:
             prompt.append("RESPONSE MODE: NORMAL. 1-2 punchy sentences max. Voice-optimized, no formatting.")
+        
+        # Reset temporary overrides if they were set
+        if self.response_mode == "concise":
+            self.response_mode = None
+
 
         if memory_context:
             prompt.append(memory_context)
@@ -124,15 +167,15 @@ class CharliePersona:
         return "\n".join(prompt)
     def is_opinion_request(self, text: str) -> bool:
         """Detect if the user is explicitly asking for Charlie's opinion."""
-        import re
-        patterns = [
-            r"what (do you|are your) (think|thought|take|opinion)s?",
-            r"do you agree",
-            r"how do you feel about",
-            r"your view on",
-            r"give me your (personal )?view"
-        ]
         text_lower = text.lower()
+        patterns = [
+            r"what (is your|do you|are your) (think|thought|take|opinion|view)s?",
+            r"tell me your (opinion|view|take|thoughts)",
+            r"how do you feel about",
+            r"give me your view",
+            r"your take on",
+            r"do you agree",
+        ]
         return any(re.search(p, text_lower) for p in patterns)
 
     def get_rate_limit_message(self) -> str:

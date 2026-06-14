@@ -6,11 +6,13 @@ Completely Helpful And Rather Local Intelligent Engine
 2. `uv run python main.py`
 
 ## Features
-- **Voice-First Interaction**: Uses faster-whisper and Kokoro-ONNX with emotional tone adaptation.
+ - **Isolated ASR Subprocess**: Whisper transcription runs in a dedicated process to bypass the GIL and ensure zero-latency VAD/TTS.
 - **Asynchronous Research Agent**: Non-blocking web search and deep research.
   - Type `research <topic>` for a background report.
   - Immediate feedback with background chime ("Ding!") when results are ready.
 - **Continuous Learning**: Semantic memory layer for long-term knowledge retention.
+- **Persistent Stance Pruning**: Remembers expressed opinions across sessions to prevent repetitive lectures.
+- **Emotion-Verbosity Matrix**: Tunable response length and tone based on current emotional state.
 - **Private Search Integration**: Native support for local SearXNG instances.
 
 ## Configuration
