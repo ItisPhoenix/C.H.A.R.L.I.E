@@ -4,8 +4,11 @@
 Charlie is a high-fidelity, voice-first local AI assistant built for speed, privacy, and agency.
 
 ## 🚀 Recent Architectural Upgrades (June 2026)
+- **Passive Activation**: Hands-free wake word detection ("Charlie") via `openWakeWord`.
 - **Hybrid Intelligence**: `LLMRouter` automatically balances local Llama-3 (Ollama) with high-reasoning cloud models.
 - **Real-world Agency**: Integrated MCP (Model Context Protocol) with support for 80+ tools.
+- **Procedural Audio**: Zero-latency non-file-based audio feedback.
+- **Smart Mode**: 15-second conversational follow-up window.
 
 ## 🛠 Core Systems
 - **Hearing**: `Whisper` (distil-large-v3) in an isolated subprocess.

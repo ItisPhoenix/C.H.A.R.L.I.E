@@ -15,15 +15,17 @@ from typing import Callable, Optional
 from kokoro_onnx import Kokoro
 from collections import deque
 from charlie.asr_worker import asr_worker_process
+from charlie.wake_word import WakeWordEngine
 import onnxruntime as ort
 ort.set_default_logger_severity(3)
 
 logger = logging.getLogger("charlie.voice")
 
 class VoiceEngine:
-    def __init__(self, config, on_speech: Callable[[str], None]):
+    def __init__(self, config, on_speech: Callable[[str], None], on_wake_word: Optional[Callable[[], None]] = None):
         self.config = config
         self.on_speech = on_speech
+        self.on_wake_word = on_wake_word
         self.is_speaking = threading.Event()
         self.stop_event = threading.Event()
         self.stop_tts_event = threading.Event()
@@ -35,6 +37,12 @@ class VoiceEngine:
         self.asr_output_queue = mp.Queue()
         self.asr_process = None
 
+        # Wake Word state
+        self._wake_word_engine: Optional[WakeWordEngine] = None
+        self._wake_listener_thread: Optional[threading.Thread] = None
+        self._listening_active = threading.Event()  # gated by wake word
+        self._smart_mode_timer: Optional[threading.Timer] = None
+        self._smart_mode_timeout: float = config.smart_mode_timeout
 
         # Initialize Models
         self._ensure_models()
@@ -119,8 +127,39 @@ class VoiceEngine:
         self.asr_poller_thread = threading.Thread(target=self._asr_poller_loop, daemon=True)
         self.asr_poller_thread.start()
 
-        # Wake word disabled. Listen continuously.
-        logger.info("Continuous listening mode active.")
+        # Wake Word engine (if enabled and model exists)
+        if self.config.enable_wake_word:
+            self._start_wake_word_listener()
+        else:
+            # Without wake word, listen continuously (push-to-talk / always-on)
+            self._listening_active.set()
+            logger.info("Wake word disabled — continuous listening mode.")
+
+    def _start_wake_word_listener(self):
+        model_path = self.config.wake_word_model_path
+        if not os.path.exists(model_path):
+            logger.warning(
+                "Wake word model not found at %s — falling back to continuous listening.",
+                model_path,
+            )
+            self._listening_active.set()
+            return
+
+        self._wake_word_engine = WakeWordEngine(
+            model_path=model_path,
+            sensitivity=self.config.wake_word_sensitivity,
+        )
+
+        if not self._wake_word_engine.is_available:
+            logger.warning("Wake word engine unavailable — continuous listening.")
+            self._listening_active.set()
+            return
+
+        # Wire suppression: suppress wake word detection while Charlie speaks
+        self._wake_word_engine.suppress = self.is_speaking
+
+        self._wake_word_engine.listen(self._on_wake_word_detected)
+        logger.info("Wake word listener active.")
 
     def stop(self):
         self.stop_event.set()
@@ -128,6 +167,9 @@ class VoiceEngine:
         if self.processing_thread and self.processing_thread.is_alive():
             self.processing_thread.join(timeout=5.0)
 
+        if self._wake_word_engine:
+            self._wake_word_engine.stop()
+        self._cancel_smart_mode_timer()
 
         if self.asr_process:
             self.asr_input_queue.put(None) # Signal shutdown
@@ -145,6 +187,78 @@ class VoiceEngine:
             try: self.playback_queue.get_nowait()
             except queue.Empty: break
         sd.stop()
+
+    # ── Procedural Audio ───────────────────────────────────────────────────
+    @staticmethod
+    def _gen_chime(freq_start: float = 440, freq_end: float = 880,
+                   duration: float = 0.25, sample_rate: int = 24000,
+                   decay: float = 3.0) -> np.ndarray:
+        """Generate a short procedural sine-wave chime (no external files needed)."""
+        t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+        freq = np.linspace(freq_start, freq_end, len(t))
+        envelope = np.exp(-decay * t / duration)  # exponential decay
+        tone = np.sin(2 * np.pi * freq * t) * envelope
+        return (tone * 0.3).astype(np.float32)
+
+    def play_wake_chime(self, tone: str = "gentle"):
+        """Play a short wake-chime asynchronously."""
+        if tone == "gentle":
+            samples = self._gen_chime(440, 880, 0.25, decay=3.0)
+        else:
+            samples = self._gen_chime(523, 1047, 0.3, decay=2.0)
+        threading.Thread(target=lambda: sd.play(samples, samplerate=24000), daemon=True).start()
+
+    def play_smart_mode_exit_chime(self):
+        """Play a descending 'power down' chime when smart mode ends."""
+        samples = self._gen_chime(660, 330, 0.3, decay=2.0)
+        threading.Thread(target=lambda: sd.play(samples, samplerate=24000), daemon=True).start()
+
+    # ── Wake Word Handler ───────────────────────────────────────────────────
+    def _on_wake_word_detected(self):
+        """Called by WakeWordEngine when wake word is detected (audio thread)."""
+        if self.stop_event.is_set():
+            return
+
+        # Barge-in: if speaking, stop TTS immediately
+        if self.is_speaking.is_set():
+            logger.info("Barge-in detected. Stopping TTS. Starting ASR...")
+            self.stop_tts()
+
+        # Activate listening
+        self._listening_active.set()
+
+        # Play wake chime
+        self.play_wake_chime()
+
+        # Cancel any pending smart mode timeout
+        self._cancel_smart_mode_timer()
+
+        if self.on_wake_word:
+            try:
+                self.on_wake_word()
+            except Exception as e:
+                logger.error(f"on_wake_word callback error: {e}")
+
+    # ── Smart Mode ───────────────────────────────────────────────────────────
+    def _cancel_smart_mode_timer(self):
+        if self._smart_mode_timer:
+            self._smart_mode_timer.cancel()
+            self._smart_mode_timer = None
+
+    def _start_smart_mode_timer(self):
+        """After TTS finishes, start a timer to exit smart mode after silence."""
+        self._cancel_smart_mode_timer()
+        self._smart_mode_timer = threading.Timer(
+            self._smart_mode_timeout, self._on_smart_mode_timeout
+        )
+        self._smart_mode_timer.daemon = True
+        self._smart_mode_timer.start()
+
+    def _on_smart_mode_timeout(self):
+        """Called when smart mode idle timer expires."""
+        logger.info("Smart mode timeout — no follow-up detected.")
+        self._listening_active.clear()
+        self.play_smart_mode_exit_chime()
 
     def speak(self, text: str, emotional_state: str = "neutral"):
         # Strip tool calls and thinking tags
@@ -226,6 +340,9 @@ class VoiceEngine:
                 logger.error(f"playback_error | {e}")
             finally:
                 self.is_speaking.clear()
+                # After TTS completes, start smart mode timer (for wake-word mode)
+                if self.config.enable_wake_word and self._listening_active.is_set():
+                    self._start_smart_mode_timer()
     
     def _tts_worker_loop(self):
         """TTS synthesis worker. Overlaps with playback worker: as soon as
@@ -384,6 +501,9 @@ class VoiceEngine:
                     audio_int16 = np.frombuffer(chunk, dtype=np.int16)
                     audio_float32 = audio_int16.astype(np.float32) / 32768.0
 
+                    # Skip VAD phrase capture if not actively listening (wake word not triggered)
+                    if not self._listening_active.is_set():
+                        continue
 
                     with torch.no_grad():
                         confidence = self.vad_model(torch.from_numpy(audio_float32), samplerate).item()
@@ -411,6 +531,9 @@ class VoiceEngine:
                                 if duration >= self.config.phrase_min_duration:
                                     # Process in a separate thread to avoid blocking VAD loop
                                     threading.Thread(target=self._process_phrase, args=(full_phrase,), daemon=True).start()
+                                    # Reset smart mode timer on new user speech
+                                    self._cancel_smart_mode_timer()
+                                    self._start_smart_mode_timer()
 
                     time.sleep(0.001)
         except Exception as e:
