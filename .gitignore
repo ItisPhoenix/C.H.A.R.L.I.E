@@ -118,3 +118,4 @@ config/scheduler_state.json
 
 # others
 ARCHITECTURE.md
+mcp_config.json
