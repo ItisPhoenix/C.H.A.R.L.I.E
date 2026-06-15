@@ -13,7 +13,6 @@ dependencies = [
     "soundfile>=0.12.0",
     "faster-whisper>=1.0.0",
     "kokoro-onnx>=0.4.0",
-    "openwakeword>=0.4.0",
     "torch>=2.0.0",
     "ddgs>=9.14.0",
     "onnxruntime-gpu==1.26.0",

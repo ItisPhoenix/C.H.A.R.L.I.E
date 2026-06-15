@@ -60,9 +60,6 @@ async def main():
         logger.info(f"Speech detected: {text}")
         asyncio.run_coroutine_threadsafe(_process(text, brain, voice), loop)
 
-    def on_wake_word():
-        """Called when wake word is detected — VoiceEngine handles listening activation."""
-        logger.info("Wake word detected — activating listening mode.")
 
     async def _process(text, brain, voice):
         print(f"\rHeard: {text}", flush=True)
@@ -115,7 +112,7 @@ async def main():
             voice.speak(sentence_buffer, brain.persona.emotional_state)
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
-        voice = VoiceEngine(config, on_speech=on_speech, on_wake_word=on_wake_word)
+        voice = VoiceEngine(config, on_speech=on_speech)
         voice.start()
 
         # Connection test & Dynamic Welcome

@@ -29,11 +29,6 @@ class Config:
     max_history: int = int(os.getenv("MAX_HISTORY", "12"))
     searxng_url: str = os.getenv("SEARXNG_URL", "")  # e.g. "http://localhost:8080"
     
-    # Wake Word Config
-    enable_wake_word: bool = os.getenv("ENABLE_WAKE_WORD", "true").lower() == "true"
-    wake_word_model_path: str = os.getenv("WAKE_WORD_MODEL", "charlie/charlie.onnx")
-    wake_word_sensitivity: float = float(os.getenv("WAKE_WORD_SENSITIVITY", "0.7"))
-    smart_mode_timeout: float = float(os.getenv("SMART_MODE_TIMEOUT", "15.0"))
     
     # Hybrid LLM Router Config
     local_llm_url: str = os.getenv("LOCAL_LLM_URL", "http://localhost:11434/v1")
