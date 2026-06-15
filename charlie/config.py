@@ -30,7 +30,7 @@ class Config:
     searxng_url: str = os.getenv("SEARXNG_URL", "")  # e.g. "http://localhost:8080"
     
     # Wake Word Config
-    enable_wake_word: bool = os.getenv("ENABLE_WAKE_WORD", "true").lower() == "true"
+    enable_wake_word: bool = os.getenv("ENABLE_WAKE_WORD", "false").lower() == "true"
     wake_word_model_path: str = os.getenv("WAKE_WORD_MODEL", "charlie/charlie.onnx")
     wake_word_sensitivity: float = float(os.getenv("WAKE_WORD_SENSITIVITY", "0.5"))
     smart_mode_timeout: float = float(os.getenv("SMART_MODE_TIMEOUT", "15.0"))
