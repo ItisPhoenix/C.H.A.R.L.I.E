@@ -437,8 +437,12 @@ class Brain:
                 async def _cloud_fn(_):
                     """Call cloud LLM (fast first, fallback to NVIDIA)."""
                     backends = []
+                    payload_size = len(json.dumps(messages))
                     if self.config.fast_llm_key and self.config.fast_llm_key != "no-key":
-                        backends.append((self.fast_client, self.config.fast_llm_model))
+                        if payload_size < 24000:
+                            backends.append((self.fast_client, self.config.fast_llm_model))
+                        else:
+                            logger.info(f"Payload too large ({payload_size} chars). Skipping fast LLM.")
                     backends.append((self.cloud_client, self.config.llm_model))
                     last_error = None
                     for client, model in backends:
