@@ -44,12 +44,15 @@ _MAX_FLUSH_CHARS = 200  # Force-flush if no boundary seen within this many chars
 
 async def main():
     logger.info("Charlie is waking up...")
-    
+
     try:
         brain = Brain(config, on_thought_callback=lambda text: voice.speak(text, brain.persona.emotional_state))
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")
         return
+
+    # Start MCP client (connects to external tools)
+    await brain.start_mcp()
 
     loop = asyncio.get_running_loop()
 
@@ -57,27 +60,31 @@ async def main():
         logger.info(f"Speech detected: {text}")
         asyncio.run_coroutine_threadsafe(_process(text, brain, voice), loop)
 
+    def on_wake_word():
+        """Called when wake word is detected — VoiceEngine handles listening activation."""
+        logger.info("Wake word detected — activating listening mode.")
+
     async def _process(text, brain, voice):
         print(f"\rHeard: {text}", flush=True)
         if voice.is_speaking.is_set():
             logger.info("Barge-in: User interrupted Charlie. Switching to concise mode.")
             voice.stop_tts()
             brain.persona.response_mode = "concise"
-            
+
         print("Charlie is thinking...", end="\r", flush=True)
-        
+
         # Streaming buffer
         sentence_buffer = ""
         is_first_chunk = True
-        
-        
+
+
         async for chunk in brain.chat(text):
             if is_first_chunk:
                 print("\r" + " " * 30 + "\r", end="", flush=True) # Clear thinking
                 is_first_chunk = False
             print(chunk, end="", flush=True)
             sentence_buffer += chunk
-            
+
             # Try sentence boundary first, then clause boundary, then max-char guard
             boundary = None
             if ". " in sentence_buffer or "! " in sentence_buffer or "? " in sentence_buffer:
@@ -86,17 +93,15 @@ async def main():
                 boundary = _CLAUSE_BOUNDARY
             elif len(sentence_buffer) >= _MAX_FLUSH_CHARS:
                 # Force-flush: split ONCE at the last space before limit.
-                # This avoids the old pattern that split at EVERY space (word-by-word TTS).
                 idx = sentence_buffer.rfind(' ', 0, _MAX_FLUSH_CHARS)
                 if idx > 0:
                     voice.speak(sentence_buffer[:idx], brain.persona.emotional_state)
                     sentence_buffer = sentence_buffer[idx + 1:]
                 else:
-                    # No space found within limit — hard cut
                     voice.speak(sentence_buffer[:_MAX_FLUSH_CHARS], brain.persona.emotional_state)
                     sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
                 continue
-            
+
             if boundary:
                 parts = boundary.split(sentence_buffer)
                 if len(parts) > 1:
@@ -104,15 +109,15 @@ async def main():
                         if part.strip():
                             voice.speak(part, brain.persona.emotional_state)
                     sentence_buffer = parts[-1]
-        
+
         # Final TTS — chunks already printed everything
         if sentence_buffer.strip():
             voice.speak(sentence_buffer, brain.persona.emotional_state)
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
-        voice = VoiceEngine(config, on_speech=on_speech)
+        voice = VoiceEngine(config, on_speech=on_speech, on_wake_word=on_wake_word)
         voice.start()
-        
+
         # Connection test & Dynamic Welcome
         logger.debug("Requesting dynamic welcome message from LLM...")
         welcome_msg = ""
@@ -136,6 +141,8 @@ async def main():
             await brain.close()
         if 'voice' in locals():
             voice.stop()
+        if 'brain' in locals():
+            await brain.mcp_client.close()
         logging.shutdown()
 
 if __name__ == "__main__":

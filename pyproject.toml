@@ -22,6 +22,7 @@ dependencies = [
     "crawl4ai>=0.8.9",
     "markdownify>=1.2.2",
     "onnxruntime>=1.26.0",
+    "mcp>=0.1.0",
 ]
 
 [tool.uv]

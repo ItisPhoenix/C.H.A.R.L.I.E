@@ -72,7 +72,7 @@ class CharliePersona:
             if any(word in text_lower for word in keywords):
                 self.emotional_state = emotion
                 logger.info(f"Emotion detected: {emotion}")
-    def build_system_prompt(self, current_date: str, current_time: str, memory_context: str, user_input: str) -> str:
+    def build_system_prompt(self, current_date: str, current_time: str, memory_context: str, user_input: str, capabilities: dict = None, system_manifest: str = "") -> str:
         # Determine response mode based on input and emotion
         active_mode = self.response_mode
         
@@ -110,6 +110,10 @@ class CharliePersona:
             "MEMORY SYSTEM:",
             "SOUL.md — MY IDENTITY:",
         ]
+        if system_manifest:
+            prompt.append(system_manifest)
+
+
         if self.soul_content:
             prompt.append(self.soul_content)
         else:

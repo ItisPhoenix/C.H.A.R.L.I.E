@@ -1,5 +1,22 @@
 # Changelog
 
+## [2026-06-16] — Passive Attention, Hybrid Routing & Tool Agency
+
+### Added
+- **Hands-free Wake Word**: Integrated `openWakeWord` with custom `charlie.onnx` model. Passive background listening with immediate "Barge-in" support.
+- **Hybrid LLM Router**: New `LLMRouter` logic that automatically shifts simple queries (time, weather, jokes) to a local Ollama model while keeping complex research in the cloud.
+- **MCP (Model Context Protocol) Client**: Native agency through external tool servers. 87 tools discovered and active (Playwright, Obsidian, FileSystem, etc.).
+- **Procedural Audio Interface**: Synthesized non-file-based chimes for wake (upward) and smart-mode-timeout (downward) signals.
+- **Smart Conversational Mode**: Continuous listening window for 15 seconds after responses, allowing follow-ups without wake-word repetition.
+- **Dynamic System Manifest**: Personality now automatically understands its own architectural state, hardware senses, and recent upgrades.
+
+### Fixed
+- **Brain Logger Crash**: Restored missing `logger` definition in `core.py` that caused startup failure.
+- **openWakeWord API Mismatch**: Corrected `wakeword_model_paths` parameter and removed invalid `inference_framework` kwarg.
+- **ASR Continuity**: Hardened the Whisper worker to handle back-to-back phrase capture in smart-mode.
+
+### Changed
+- **Dependencies**: Added `mcp` SDK and fixed `uv` environment synchronization.
 
 ## [2026-06-15] — Fillers removed, word-by-word fix, default mic
 
