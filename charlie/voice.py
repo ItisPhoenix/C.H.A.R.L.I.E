@@ -155,8 +155,6 @@ class VoiceEngine:
             self._listening_active.set()
             return
 
-        # Wire suppression: suppress wake word detection while Charlie speaks
-        self._wake_word_engine.suppress = self.is_speaking
 
         self._wake_word_engine.listen(self._on_wake_word_detected)
         logger.info("Wake word listener active.")
@@ -503,6 +501,10 @@ class VoiceEngine:
 
                     # Skip VAD phrase capture if not actively listening (wake word not triggered)
                     if not self._listening_active.is_set():
+                        continue
+
+                    # Ignore VAD if Charlie is speaking (prevents self-interruption from echo)
+                    if self.is_speaking.is_set():
                         continue
 
                     with torch.no_grad():

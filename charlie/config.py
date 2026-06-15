@@ -32,7 +32,7 @@ class Config:
     # Wake Word Config
     enable_wake_word: bool = os.getenv("ENABLE_WAKE_WORD", "true").lower() == "true"
     wake_word_model_path: str = os.getenv("WAKE_WORD_MODEL", "charlie/charlie.onnx")
-    wake_word_sensitivity: float = float(os.getenv("WAKE_WORD_SENSITIVITY", "0.7"))
+    wake_word_sensitivity: float = float(os.getenv("WAKE_WORD_SENSITIVITY", "0.5"))
     smart_mode_timeout: float = float(os.getenv("SMART_MODE_TIMEOUT", "15.0"))
     
     # Hybrid LLM Router Config
