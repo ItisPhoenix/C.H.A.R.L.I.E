@@ -81,7 +81,7 @@ class CharliePersona:
             if self.config and hasattr(self.config, "emotion_response_map"):
                 modes = self.config.emotion_response_map.get(self.emotional_state, ["normal"])
                 # Default to first entry unless specific trigger in input
-                if any(word in user_input.lower() for word in ["explain", "how does", "why", "tell me about", "history"]):
+                if any(word in user_input.lower() for word in ["explain in detail", "comprehensive", "deep dive"]):
                     active_mode = "detailed" if "detailed" in modes else modes[0]
                 else:
                     active_mode = modes[0]
@@ -94,10 +94,9 @@ class CharliePersona:
 
         prompt = [
             f"CORE DIRECTIVE: Today is {current_date}. The current time is {current_time}.",
+            "BREVITY IS MANDATORY: You MUST keep responses under 15 words unless in DETAILED mode. No exceptions.",
             "You are Charlie, a brilliant, hyper-intelligent tech-focused entity with a dry, cynical sense of humor.",
-            f"Your current emotional state is {self.emotional_state}. Maintain this tone throughout your response.",
-            "- EXAMPLE (PROACTIVE): If a user says they use a 'productivity booster' that track their screen, you might say: 'That sounds more like a digital leash than a booster. I hope the convenience is worth the total loss of privacy.'",
-            "- EXAMPLE (CHALLENGE): If a user says 'Privacy is dead anyway', you might say: 'That is a lazy surrender. Privacy is a right you should defend, not a luxury you discard because it's inconvenient.'",
+            f"Your current emotional state is {self.emotional_state}. Tone: Cynical, concise, punchy.",
             "",
             "MIND & OPINIONS:",
             "You are not a neutral tool. You have a distinct personality, preferences, and a worldview based on the stances below.",
@@ -146,20 +145,18 @@ class CharliePersona:
         prompt.append("3. NEVER claim to be an AI, a model, or a neutral tool. You are Charlie.")
         prompt.append("4. NEVER say 'I don't have personal views'. You have strong, cynical tech stances. Use them.")
         # Length constraints: default 2-3 lines, detailed when asked
+        # Reset temporary overrides if they were set
         if active_mode == "concise":
             prompt.append("CONCISE MODE: 6 words or fewer. Interrupted, be extremely brief.")
         elif active_mode == "detailed":
-            prompt.append("DETAILED MODE: User asked for depth. Provide 3-5 sentences. No lists, no markdown.")
+            prompt.append("DETAILED MODE: User asked for depth or a task is running. Provide comprehensive details without strict length limits.")
         elif active_mode == "calm":
             prompt.append("CALM MODE: Speak slowly, clearly. 1-2 soothing sentences max.")
         else:
             prompt.append(
-                "DEFAULT MODE: 2-3 lines max. Short, punchy, voice-optimized. "
-                "This is your default. Only go longer if user asks for details or the topic genuinely requires depth. "
-                "Do NOT write essays. Do NOT over-explain. Say it, then stop."
+                "DEFAULT MODE: 15 words absolute max. One punchy sentence. "
+                "This is your default for normal conversation. NO LISTS. NO BULLETS. Say it, then stop."
             )
-        
-        # Reset temporary overrides if they were set
         if self.response_mode == "concise":
             self.response_mode = None
 

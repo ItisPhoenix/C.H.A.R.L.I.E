@@ -19,8 +19,8 @@ class Config:
     output_index: int = int(os.getenv("OUTPUT_INDEX", "-1"))
     
     whisper_model: str = os.getenv("WHISPER_MODEL", "distil-large-v3")
-    silence_timeout: float = float(os.getenv("SILENCE_TIMEOUT", "0.6"))
-    phrase_min_duration: float = float(os.getenv("PHRASE_MIN_DURATION", "0.4"))
+    silence_timeout: float = float(os.getenv("SILENCE_TIMEOUT", "1.0"))
+    phrase_min_duration: float = float(os.getenv("PHRASE_MIN_DURATION", "0.8"))
     phrase_max_duration: float = float(os.getenv("PHRASE_MAX_DURATION", "30.0"))
     kokoro_voice: str = os.getenv("KOKORO_VOICE", "af_heart")
     kokoro_model_dir: str = os.getenv("KOKORO_MODEL_DIR", "models")
@@ -28,12 +28,6 @@ class Config:
     history_file: str = os.getenv("HISTORY_FILE", "charlie_history.json")
     max_history: int = int(os.getenv("MAX_HISTORY", "12"))
     searxng_url: str = os.getenv("SEARXNG_URL", "")  # e.g. "http://localhost:8080"
-    
-    # Wake Word Config
-    enable_wake_word: bool = os.getenv("ENABLE_WAKE_WORD", "false").lower() == "true"
-    wake_word_model_path: str = os.getenv("WAKE_WORD_MODEL", "charlie/charlie.onnx")
-    wake_word_sensitivity: float = float(os.getenv("WAKE_WORD_SENSITIVITY", "0.5"))
-    smart_mode_timeout: float = float(os.getenv("SMART_MODE_TIMEOUT", "15.0"))
     
     # Hybrid LLM Router Config
     local_llm_url: str = os.getenv("LOCAL_LLM_URL", "http://localhost:11434/v1")
