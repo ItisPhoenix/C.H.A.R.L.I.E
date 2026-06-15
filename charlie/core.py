@@ -239,7 +239,7 @@ class Brain:
                 "model": self.config.fast_llm_model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.0,
-                "max_tokens": 256,
+                "max_tokens": 1024,
             }
             resp = await self.fast_client.post(
                 "chat/completions",
@@ -420,20 +420,30 @@ class Brain:
                 # Use LLM Router to select backend based on input complexity
                 async def _local_fn(_):
                     """Call the local LLM with timeout/fallback."""
+                    fallback = False
                     if not self.config.enable_local_llm:
-                        raise RuntimeError("Local LLM disabled")
-                    try:
-                        async for chunk in self._call_llm_stream(
-                            self.local_client,
-                            self.config.local_llm_model,
-                            messages,
-                            timeout=httpx.Timeout(15.0, connect=10.0),
-                        ):
+                        logger.info("Local LLM disabled, falling back to cloud.")
+                        fallback = True
+                    else:
+                        try:
+                            chunks_yielded = 0
+                            async for chunk in self._call_llm_stream(
+                                self.local_client,
+                                self.config.local_llm_model,
+                                messages,
+                                timeout=httpx.Timeout(15.0, connect=10.0),
+                            ):
+                                chunks_yielded += 1
+                                yield chunk
+                            if chunks_yielded == 0:
+                                fallback = True
+                        except Exception as e:
+                            logger.warning(f"Local LLM failed (timeout/error): {e}. Falling back to cloud.")
+                            fallback = True
+                    
+                    if fallback:
+                        async for chunk in _cloud_fn(_):
                             yield chunk
-                    except Exception as e:
-                        logger.warning(f"Local LLM failed (timeout/error): {e}")
-                        raise
-
                 async def _cloud_fn(_):
                     """Call cloud LLM (fast first, fallback to NVIDIA)."""
                     backends = []
