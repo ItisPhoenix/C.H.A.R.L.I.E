@@ -1,10 +1,15 @@
 # ── Temp / Scratch ────────────────────────────────────────────────────────────
 temp/
+scratch/
+plans/
+*.tmp
+*.bak
+*.swp
+*.swo
 
 # ── Compiled Python ───────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
-*.pyc
 *$py.class
 *.so
 .Python
@@ -38,7 +43,6 @@ logs/
 .ruff_cache/
 .mypy_cache/
 .hypothesis/
-.spotify_cache
 .graphify*
 graphify-out/
 
@@ -53,36 +57,41 @@ desktop.ini
 .claude/
 .openclaude/
 .kilo/
-./kiro
 .roo/
 .roomodes
 .obsidian/
-plans/
 .understand-anything/
-scratch/
-hotpatches/
-Charlie.spec
 .commandcode/
-.hypothesis/
 .playwright-mcp/
 
-
-# ── Memory & Database (Local Data) ───────────────────────────────────────────
-charlie/memory/*.json
-charlie/memory/*.jsonl
-charlie/memory/chroma_db/
-memory/
+# ── Memory & Local Data (Privacy) ─────────────────────────────────────────────
+charlie/data/
+charlie_history.json
+USER.md
+charlie_memory.db
+research_memory.db
+smoke_memory.db
+memory.db
+expressed_stances.json
 *.sqlite
 *.db
-charlie/data/
-docs/
+*-shm
+*-wal
+mcp_config.json
+
+# ── Configuration Templates (Keep these!) ─────────────────────────────────────
+!mcp_config.json.example
+!.env.example
 
 # ── Models (Heavy Binaries) ──────────────────────────────────────────────────
 models/
 *.weights
 *.bin
+*.onnx
+.cache/
+torch/
 
-# ── Visual Artifacts & Privacy ────────────────────────────────────────────────
+# ── Media & Artifacts ────────────────────────────────────────────────────────
 *.png
 *.jpg
 *.jpeg
@@ -92,30 +101,7 @@ models/
 screenshot_*.png
 webcam_*.jpg
 
-# ── Tests (audit-generated, removed for v0.1) ─────────────────────────────────
-tests/
-
-# ── Temporary & System ────────────────────────────────────────────────────────
-*.tmp
-*.bak
-*.swp
-*.swo
-apply_fixes*.py
-Vision part.txt
-charlie/bin/
-charlie_history.json
-
+# ── Reports ──────────────────────────────────────────────────────────────────
 reports/
 charlie/reports/
 test_reports/
-config/secure/
-
-
-# ── Config (may contain secrets) ────────────────────────────────────────────
-charlie_config.json
-skills-lock.json
-config/scheduler_state.json
-
-# others
-ARCHITECTURE.md
-mcp_config.json

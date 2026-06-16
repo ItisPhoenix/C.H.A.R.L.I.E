@@ -1,0 +1,16 @@
+# USER.md — Your Profile
+This file tells Charlie who you are. He uses it to personalize his interactions.
+
+## Identity
+- **Name:** Your Name
+- **Role:** Your Profession/Interest
+- **Location:** Your City (for weather/time context)
+
+## Preferences
+- **Interests:** Coding, AI, Space, History...
+- **Tech Stack:** Python, Rust, TypeScript...
+- **Communication:** Very concise, sarcastic, professional...
+
+## Knowledge
+- **Skills:** Expert in Python, Beginner in C++...
+- **Current Projects:** Working on a local AI assistant...

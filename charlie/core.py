@@ -15,6 +15,8 @@ from charlie.profile_manager import ProfileManager
 from charlie.llm_router import LLMRouter
 from charlie.mcp_client import CharlieMCPClient
 from charlie.discovery import SystemDiscovery
+from charlie.bridge import CharlieBridge
+from charlie.ui_launcher import UILauncher
 
 logger = logging.getLogger("charlie.core")
 
@@ -28,6 +30,8 @@ class Brain:
         # Protect shared conversation state against concurrent background tasks
         self._history_lock = asyncio.Lock()
 
+        # Barge-in: signals the chat generator to stop yielding
+        self.cancel_chat_event = asyncio.Event()
         
         # Cloud LLM Client (NVIDIA)
         cloud_url = self.config.llm_url
@@ -77,6 +81,17 @@ class Brain:
         )
         self.persona.soul_content = self.profile_manager.load_soul()
         self.persona.user_profile = self.profile_manager.load_user_profile()
+
+        # WebSocket Bridge for Buddy UI
+        self.bridge = CharlieBridge(brain=self, port=self.config.buddy_port)
+        self.bridge_task = None
+
+        # UI Launcher for Electron app
+        self.ui_launcher = None
+        if self.config.enable_buddy_ui:
+            self.ui_launcher = UILauncher()
+            self.ui_launcher.start()
+
 
     def load_history(self):
         if os.path.exists(self.config.history_file):
@@ -243,7 +258,6 @@ class Brain:
             }
             resp = await self.fast_client.post(
                 "chat/completions",
-                headers={"Authorization": f"Bearer {self.config.fast_llm_key}", "Content-Type": "application/json"},
                 json=payload,
                 timeout=30,
             )
@@ -280,7 +294,6 @@ class Brain:
             }
             resp = await self.fast_client.post(
                 "chat/completions",
-                headers={"Authorization": f"Bearer {self.config.fast_llm_key}", "Content-Type": "application/json"},
                 json=payload,
                 timeout=30,
             )
@@ -468,6 +481,10 @@ class Brain:
 
                 # Consume the router-streamed response
                 async for content in self.llm_router.route(user_input, _local_fn, _cloud_fn):
+                    # Barge-in: stop yielding if user interrupted
+                    if self.cancel_chat_event.is_set():
+                        self.cancel_chat_event.clear()
+                        return
                     full_reply += content
                     if not is_tool_call:
                         # Detect Tool Call early
@@ -501,10 +518,6 @@ class Brain:
                                 logger.info(f"pipeline_stage | stage=llm_ttft | latency_ms={llm_ttft_ms:.1f}")
                                 llm_ttft_logged = True
                             yield content
-                # Final check for non-streamed results or tiny responses
-                # If we haven't yielded anything yet and it's not a tool call, yield now
-                # (This is a safety fallback)
-                
                 # Clean up thinking tags for history
                 full_reply = re.sub(r'<think>.*?</think>', '', full_reply, flags=re.DOTALL).strip()
                 reply = full_reply.strip()
@@ -650,7 +663,15 @@ class Brain:
                 return
         
         return
+    def cancel_chat(self):
+        """Signal the chat generator to stop yielding (barge-in)."""
+        self.cancel_chat_event.set()
+
     async def close(self):
+        if hasattr(self, 'ui_launcher') and self.ui_launcher:
+            self.ui_launcher.stop()
+        if hasattr(self, 'bridge_task') and self.bridge_task:
+            self.bridge_task.cancel()
         if self.fast_client:
             await self.fast_client.aclose()
         if self.cloud_client:

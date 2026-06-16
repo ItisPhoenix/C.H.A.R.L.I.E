@@ -56,6 +56,20 @@ class Config:
     kokoro_lang: str = "en-us"
     log_file: str = "logs/charlie.log"
     log_level: str = "INFO"
+    embedding_model: str = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    embedding_dimension: int = int(os.getenv("EMBEDDING_DIMENSION", "384"))
+    enable_semantic_memory: bool = os.getenv("ENABLE_SEMANTIC_MEMORY", "true").lower() == "true"
+    # VAD Configuration
+    vad_threshold: float = float(os.getenv("VAD_THRESHOLD", "0.75"))
+    vad_silence_timeout: float = float(os.getenv("VAD_SILENCE_TIMEOUT", "1.2"))
+    
+    # Barge-in Configuration
+    enable_barge_in: bool = os.getenv("ENABLE_BARGE_IN", "true").lower() == "true"
+
+    # Buddy UI Configuration
+    enable_buddy_ui: bool = os.getenv("ENABLE_BUDDY_UI", "true").lower() == "true"
+    buddy_port: int = int(os.getenv("BUDDY_PORT", "8765"))
+
     
     emotion_response_map: Dict[str, List[str]] = None
 

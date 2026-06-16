@@ -54,21 +54,24 @@ async def main():
     # Start MCP client (connects to external tools)
     await brain.start_mcp()
 
+    # Start WebSocket bridge for Buddy UI
+    if config.enable_buddy_ui:
+        brain.bridge_task = asyncio.create_task(brain.bridge.start())
+
+
     loop = asyncio.get_running_loop()
 
     def on_speech(text: str):
         logger.info(f"Speech detected: {text}")
         asyncio.run_coroutine_threadsafe(_process(text, brain, voice), loop)
 
-    def on_wake_word():
-        """Called when wake word is detected — VoiceEngine handles listening activation."""
-        logger.info("Wake word detected — activating listening mode.")
 
     async def _process(text, brain, voice):
         print(f"\rHeard: {text}", flush=True)
         if voice.is_speaking.is_set():
-            logger.info("Barge-in: User interrupted Charlie. Switching to concise mode.")
+            logger.info("Barge-in: User interrupted Charlie. Stopping TTS and cancelling chat.")
             voice.stop_tts()
+            brain.cancel_chat()
             brain.persona.response_mode = "concise"
 
         print("Charlie is thinking...", end="\r", flush=True)
@@ -115,7 +118,7 @@ async def main():
             voice.speak(sentence_buffer, brain.persona.emotional_state)
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
-        voice = VoiceEngine(config, on_speech=on_speech, on_wake_word=on_wake_word)
+        voice = VoiceEngine(config, on_speech=on_speech, bridge=brain.bridge)
         voice.start()
 
         # Connection test & Dynamic Welcome

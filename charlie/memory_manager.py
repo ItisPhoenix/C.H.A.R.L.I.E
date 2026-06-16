@@ -1,3 +1,7 @@
+import numpy as np
+from charlie.embedder import LocalEmbedder
+from charlie.config import config
+
 import sqlite3
 import logging
 import re
@@ -21,10 +25,18 @@ class MemoryManager:
     """
 
     def __init__(self, db_path: str = None):
-        self.db_path = db_path or "charlie_memory.db"
+        self.db_path = db_path or config.memory_db_path
         self._conn: sqlite3.Connection | None = None
+        self.embedder = None
+        self._embedding_dim = config.embedding_dimension
+        if config.enable_semantic_memory:
+            try:
+                self.embedder = LocalEmbedder()
+                self.embedder._load()
+                logger.info("Embedder loaded synchronously.")
+            except Exception as e:
+                logger.error(f"Failed to load embedder: {e}. Semantic memory disabled.")
         self._init_db()
-
     # ── internal helpers ──────────────────────────────────────────────
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -56,6 +68,11 @@ class MemoryManager:
             CREATE INDEX IF NOT EXISTS idx_keyword ON memory_keywords(keyword);
             CREATE INDEX IF NOT EXISTS idx_type ON memories(type);
         """)
+        cursor = conn.execute("PRAGMA table_info(memories)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "embedding" not in columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN embedding BLOB")
+            logger.info("Added embedding column to memories table")
         conn.commit()
 
     def _extract_keywords(self, text: str) -> list[str]:
@@ -80,46 +97,94 @@ class MemoryManager:
             "INSERT INTO memory_keywords (memory_id, keyword) VALUES (?, ?)",
             [(mem_id, kw) for kw in keywords],
         )
+        if self.embedder:
+            try:
+                embedding = self.embedder.embed_single(content)
+                conn.execute(
+                    "UPDATE memories SET embedding = ? WHERE id = ?",
+                    (embedding.tobytes(), mem_id),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to store embedding for memory {mem_id}: {e}")
         conn.commit()
         logger.debug(f"stored_memory | id={mem_id} type={type} category={category}")
         return mem_id
 
     def search(self, query: str, type: str = None, limit: int = 5) -> list[dict]:
-        """Keyword search across memory_keywords.
-
-        Extracts keywords from *query*, finds matching memory_id rows,
-        groups by id, orders by last_accessed DESC, and returns up to *limit*.
-        """
+        conn = self._get_conn()
         keywords = self._extract_keywords(query)
-        if not keywords:
+
+        keyword_rows = []
+        if keywords:
+            placeholders = ",".join("?" for _ in keywords)
+            sql = (
+                f"SELECT m.id, m.type, m.category, m.content, m.confidence "
+                f"FROM memories m "
+                f"INNER JOIN memory_keywords mk ON mk.memory_id = m.id "
+                f"WHERE mk.keyword IN ({placeholders})"
+            )
+            params = list(keywords)
+            if type:
+                sql += " AND m.type = ?"
+                params.append(type)
+            sql += " GROUP BY m.id ORDER BY m.last_accessed DESC, COUNT(mk.keyword) DESC LIMIT ?"
+            params.append(limit * 3)
+            keyword_rows = conn.execute(sql, params).fetchall()
+
+        vector_rows = []
+        if self.embedder:
+            try:
+                query_emb = self.embedder.embed_single(query)
+                sql = "SELECT id, embedding FROM memories WHERE embedding IS NOT NULL"
+                params = []
+                if type:
+                    sql += " AND type = ?"
+                    params.append(type)
+                sql += " LIMIT 1000"
+                rows = conn.execute(sql, params).fetchall()
+
+                if rows:
+                    ids = []
+                    embeddings = []
+                    for row in rows:
+                        ids.append(row["id"])
+                        embeddings.append(np.frombuffer(row["embedding"], dtype=np.float32))
+                    embeddings = np.array(embeddings)
+
+                    similarities = np.dot(embeddings, query_emb)
+                    top_indices = np.argsort(similarities)[::-1][:limit * 3]
+
+                    top_ids = [ids[i] for i in top_indices]
+                    if top_ids:
+                        placeholders = ",".join("?" for _ in top_ids)
+                        vector_rows = conn.execute(
+                            f"SELECT id, type, category, content, confidence FROM memories WHERE id IN ({placeholders})",
+                            top_ids,
+                        ).fetchall()
+            except Exception as e:
+                logger.warning(f"Vector search failed: {e}")
+
+        from collections import defaultdict
+        scored = defaultdict(float)
+
+        for rank, row in enumerate(keyword_rows):
+            scored[row["id"]] += 1.0 / (60 + rank + 1)
+        for rank, row in enumerate(vector_rows):
+            scored[row["id"]] += 1.0 / (60 + rank + 1)
+
+        all_ids = sorted(scored.keys(), key=lambda x: scored[x], reverse=True)[:limit]
+        if not all_ids:
             return []
 
-        conn = self._get_conn()
-        placeholders = ",".join("?" for _ in keywords)
-        sql = (
-            f"SELECT m.id, m.type, m.category, m.content, m.confidence "
-            f"FROM memories m "
-            f"INNER JOIN memory_keywords mk ON mk.memory_id = m.id "
-            f"WHERE mk.keyword IN ({placeholders})"
-        )
-        params = list(keywords)
-        if type:
-            sql += " AND m.type = ?"
-            params.append(type)
-        sql += " GROUP BY m.id ORDER BY MAX(m.last_accessed) DESC LIMIT ?"
-        params.append(limit)
+        placeholders = ",".join("?" for _ in all_ids)
+        final_rows = conn.execute(
+            f"SELECT id, type, category, content, confidence FROM memories WHERE id IN ({placeholders})",
+            all_ids,
+        ).fetchall()
 
-        rows = conn.execute(sql, params).fetchall()
-        # Bump last_accessed for returned rows
-        ids = [r["id"] for r in rows]
-        if ids:
-            conn.executemany(
-                "UPDATE memories SET last_accessed = CURRENT_TIMESTAMP WHERE id = ?",
-                [(i,) for i in ids],
-            )
-            conn.commit()
-
-        return [dict(r) for r in rows]
+        id_to_score = {mid: scored[mid] for mid in all_ids}
+        final_rows = sorted(final_rows, key=lambda r: id_to_score.get(r["id"], 0), reverse=True)
+        return [dict(r) for r in final_rows]
 
     def get_core_facts(self, limit: int = 20) -> list[str]:
         """Return *content* for rows where type='fact', ordered by last_accessed DESC."""
@@ -140,7 +205,3 @@ class MemoryManager:
         cur = conn.execute("DELETE FROM memories WHERE content = ?", (content_substring,))
         conn.commit()
         return cur.rowcount > 0
-
-    def consolidate_old_summaries(self, older_than_days: int = 7) -> str:
-        """Stub — real body implemented in Step 5 of the plan."""
-        return "consolidate_old_summaries not yet implemented"

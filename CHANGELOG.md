@@ -1,19 +1,29 @@
 # Changelog
 
+## [2026-06-17] — Audio Pipeline Hardening & Hardware Recovery
+
+### Added
+- **Resilient TTS Provider**: Automated CUDA 13.x detection in `voice.py`. Automatically falls back to `CPUExecutionProvider` if `cublasLt64_13.dll` is missing, preventing ONNX Runtime initialization crashes.
+- **Mic Health Check**: Real-time variance monitoring of microphone signal. Charlie now detects and logs alerts for "Dead/Static" signals (e.g., constant hum) which prevents silent speech detection failure.
+
+### Fixed
+- **VAD Model Corruption**: Restored the correct Silero VAD v3.1 ONNX model (797KB, `h0/c0` interface) after it was accidentally replaced by an incompatible v5 model.
+- **High-Speed Research**: Verified and optimized SearXNG connectivity. JSON format access is now fully operational, providing Charlie with unrestricted high-speed search results.
+
+### Changed
+- **Logs**: Cleared logs and pruned temporary diagnostic files for a fresh system state.
+
+---
+
 ## [2026-06-16] — Passive Attention, Hybrid Routing & Tool Agency
 
 ### Added
-- **Hands-free Wake Word**: Integrated `openWakeWord` with custom `charlie.onnx` model. Passive background listening with immediate "Barge-in" support.
 - **Hybrid LLM Router**: New `LLMRouter` logic that automatically shifts simple queries (time, weather, jokes) to a local Ollama model while keeping complex research in the cloud.
 - **MCP (Model Context Protocol) Client**: Native agency through external tool servers. 87 tools discovered and active (Playwright, Obsidian, FileSystem, etc.).
-- **Procedural Audio Interface**: Synthesized non-file-based chimes for wake (upward) and smart-mode-timeout (downward) signals.
-- **Smart Conversational Mode**: Continuous listening window for 15 seconds after responses, allowing follow-ups without wake-word repetition.
 - **Dynamic System Manifest**: Personality now automatically understands its own architectural state, hardware senses, and recent upgrades.
 
 ### Fixed
 - **Brain Logger Crash**: Restored missing `logger` definition in `core.py` that caused startup failure.
-- **openWakeWord API Mismatch**: Corrected `wakeword_model_paths` parameter and removed invalid `inference_framework` kwarg.
-- **ASR Continuity**: Hardened the Whisper worker to handle back-to-back phrase capture in smart-mode.
 
 ### Changed
 - **Dependencies**: Added `mcp` SDK and fixed `uv` environment synchronization.

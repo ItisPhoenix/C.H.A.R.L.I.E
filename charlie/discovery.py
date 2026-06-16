@@ -41,7 +41,7 @@ class SystemDiscovery:
             "senses": {
                 "hearing": f"Whisper ASR ({self.config.whisper_model})",
                 "voice": "Kokoro TTS (Local, GPU Accelerated)",
-                "attention": "Wake Word Passive Listening" if self.config.enable_wake_word else "Push-to-Talk / Always-on"
+                "attention": "Continuous Listening"
             },
             "brain": {
                 "architecture": "Hybrid Local/Cloud Router",

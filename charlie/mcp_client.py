@@ -1,7 +1,8 @@
 import json
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
+from contextlib import AbstractAsyncContextManager
 from mcp import ClientSession, StdioServerParameters, stdio_client
 
 logger = logging.getLogger("charlie.mcp")
@@ -19,6 +20,8 @@ class CharlieMCPClient:
         self._sessions: Dict[str, ClientSession] = {}
         self._tools: Dict[str, Any] = {}  # "server/tool_name" -> tool metadata
         self._available = False
+        # Track context managers that must stay alive for sessions to work
+        self._contexts: Dict[str, Tuple[AbstractAsyncContextManager, AbstractAsyncContextManager]] = {}
 
     async def start(self):
         """Load config, connect to servers, discover tools."""
@@ -64,21 +67,30 @@ class CharlieMCPClient:
             env=env,
         )
 
-        async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.list_tools()
-                for tool in result.tools:
-                    key = f"{name}/{tool.name}"
-                    self._tools[key] = {
-                        "server": name,
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "inputSchema": tool.inputSchema or {},
-                    }
-                    logger.info("MCP tool registered: %s", key)
-                # Keep session alive
-                self._sessions[name] = session
+        # Enter context managers manually — we MUST keep them alive
+        # for the session to remain usable. Using `async with` would
+        # close the transport when _connect_server returns.
+        transport_ctx = stdio_client(server_params)
+        read, write = await transport_ctx.__aenter__()
+
+        session_ctx = ClientSession(read, write)
+        session = await session_ctx.__aenter__()
+        await session.initialize()
+
+        self._contexts[name] = (transport_ctx, session_ctx)
+
+        result = await session.list_tools()
+        for tool in result.tools:
+            key = f"{name}/{tool.name}"
+            self._tools[key] = {
+                "server": name,
+                "name": tool.name,
+                "description": tool.description or "",
+                "inputSchema": tool.inputSchema or {},
+            }
+            logger.info("MCP tool registered: %s", key)
+
+        self._sessions[name] = session
 
     async def call_tool(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool and return its result (truncated to prevent context explosion)."""
@@ -110,7 +122,9 @@ class CharlieMCPClient:
             return ""
 
         lines = ["\n\nAvailable MCP tools (use TOOL: server/tool_name({...}) to invoke):"]
-        for key, info in sorted(self._tools.items()):
+        # Payload limit: only inject first 15 tools to stay under Groq/TPM limits
+        MAX_TOOLS = 15
+        for key, info in sorted(self._tools.items())[:MAX_TOOLS]:
             desc = info["description"][:120] if info["description"] else "No description"
             schema = info["inputSchema"]
             params = json.dumps(schema.get("properties", {})) if schema else "{}"
@@ -126,11 +140,17 @@ class CharlieMCPClient:
         return self._available
 
     async def close(self):
-        for name, session in self._sessions.items():
+        # Exit context managers in reverse order (session first, then transport)
+        for name, (transport_ctx, session_ctx) in self._contexts.items():
             try:
-                await session.__aexit__(None, None, None)
+                await session_ctx.__aexit__(None, None, None)
             except Exception:
                 pass
+            try:
+                await transport_ctx.__aexit__(None, None, None)
+            except Exception:
+                pass
+        self._contexts.clear()
         self._sessions.clear()
         self._tools.clear()
         self._available = False
