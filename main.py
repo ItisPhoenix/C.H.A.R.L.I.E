@@ -69,6 +69,15 @@ async def main():
     async def _process(text, brain, voice):
         print(f"\rHeard: {text}", flush=True)
         if voice.is_speaking.is_set():
+            # Ignore barge-in if it's just 1-2 words (likely an echo or short noise)
+            # AND Charlie just started speaking.
+            word_count = len(text.split())
+            time_since_speech = time.time() - voice.speech_start_time
+            
+            if word_count <= 3 and time_since_speech < 2.0:
+                logger.info(f"Potential echo ignored: {text}")
+                return
+
             logger.info("Barge-in: User interrupted Charlie. Stopping TTS and cancelling chat.")
             voice.stop_tts()
             brain.cancel_chat()

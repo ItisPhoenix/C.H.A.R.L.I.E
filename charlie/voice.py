@@ -488,7 +488,10 @@ class VoiceEngine:
                     with torch.no_grad():
                         vad_confidence = self.vad_model(torch.from_numpy(audio_float32), samplerate).item()
 
-                    if vad_confidence > 0.4: # Lower threshold for sensitivity
+                    # Dynamic VAD threshold: be less sensitive during playback to avoid self-triggering
+                    current_vad_threshold = 0.9 if self.tts_active.is_set() else 0.4
+
+                    if vad_confidence > current_vad_threshold:
                         speech_frame_count += 1
                     else:
                         speech_frame_count = 0
@@ -511,16 +514,11 @@ class VoiceEngine:
                             duration = time.time() - phrase_start_time
                             silence_duration = time.time() - silence_start
 
-                            if silence_duration > self.config.vad_silence_timeout or duration > self.config.phrase_max_duration:
-                                # Barge-in: cut TTS if user is speaking during playback
-                                if self.config.enable_barge_in and self.tts_active.is_set():
-                                    if (time.time() - self.speech_start_time) > 1.5:
-                                        logger.info("Barge-in: user speaking during TTS. Cutting audio.")
-                                        self.stop_tts()
-                                        sd.stop()
-                                        self.barge_in_event.set()
-                                    else:
-                                        logger.debug("Barge-in ignored during lockout period.")
+                            # Adaptive timeout: allow longer pauses for longer sentences
+                            dynamic_silence_timeout = self.config.vad_silence_timeout
+                            if duration > 3.0: dynamic_silence_timeout *= 1.5
+
+                            if silence_duration > dynamic_silence_timeout or duration > self.config.phrase_max_duration:
 
                                 full_phrase = np.concatenate(phrase_buffer)
                                 phrase_buffer = []
