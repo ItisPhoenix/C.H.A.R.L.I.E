@@ -35,7 +35,7 @@ class VoiceEngine:
         self.asr_input_queue = mp.Queue()
         self.asr_output_queue = mp.Queue()
         self.asr_process = None
-
+        self.speech_start_time = 0.0
         # Initialize Models
         self._ensure_models()
         # 1. LOCAL VAD (Silero)
@@ -211,6 +211,7 @@ class VoiceEngine:
                 item = self.playback_queue.get(timeout=0.1)
                 samples, sample_rate = item
                 self.is_speaking.set()
+                self.speech_start_time = time.time()
                 sd.play(samples, samplerate=sample_rate)
                 while sd.get_stream() and sd.get_stream().active:
                     if self.stop_tts_event.is_set():
@@ -391,8 +392,11 @@ class VoiceEngine:
         silence_start = None
         phrase_start_time = None
         
+        # Noise gate state
+        self.noise_floor = 0.001  # Start with a low baseline
+        self.speech_frame_count = 0  # Consecutive speech frames
+        
         # Resolve input device: -1 → system default
-        input_device = None if self.config.mic_index < 0 else self.config.mic_index
         
         
         def callback(indata, frames, time_info, status):
@@ -408,21 +412,42 @@ class VoiceEngine:
                     if not self.audio_buffer:
                         time.sleep(0.01)
                         continue
-                    
                     try:
                         chunk = self.audio_buffer.popleft()
                     except IndexError:
                         continue
-
+                    
                     audio_int16 = np.frombuffer(chunk, dtype=np.int16)
                     audio_float32 = audio_int16.astype(np.float32) / 32768.0
+                    
+                    # --- NOISE GATE ---
+                    # Calculate RMS energy
+                    rms = np.sqrt(np.mean(audio_float32**2))
+                    
+                    # Slowly adapt noise floor when not in active speech
+                    if rms < self.noise_floor * 3:
+                        # Below threshold: update noise floor (very slow adaptation)
+                        self.noise_floor = self.noise_floor * 0.99 + rms * 0.01
+                    
+                    # Gate threshold: 6dB above noise floor (~2x RMS)
+                    gate_threshold = self.noise_floor * 2.0
+                    
+                    # Only run VAD if audio passes energy gate
+                    vad_confidence = 0.0
+                    if rms > gate_threshold:
+                        with torch.no_grad():
+                            vad_confidence = self.vad_model(torch.from_numpy(audio_float32), samplerate).item()
 
 
 
-                    with torch.no_grad():
-                        confidence = self.vad_model(torch.from_numpy(audio_float32), samplerate).item()
-
-                    if confidence > 0.7:
+                    if vad_confidence > 0.7:
+                        self.speech_frame_count += 1
+                    else:
+                        self.speech_frame_count = 0
+                    
+                    # Require 3+ consecutive VAD frames to count as speech
+                    # This filters out transient noise spikes (mouse clicks, keyboard taps)
+                    if self.speech_frame_count >= 3:
                         if not phrase_buffer:
                             phrase_start_time = time.time()
                         phrase_buffer.append(audio_int16)
@@ -438,8 +463,13 @@ class VoiceEngine:
                             if silence_duration > self.config.silence_timeout or duration > self.config.phrase_max_duration:
                                 # Barge-in: if speaking, stop TTS only after phrase ends
                                 if self.is_speaking.is_set():
-                                    logger.info("Barge-in detected via endpointing. Stopping TTS.")
-                                    self.stop_tts()
+                                    # Barge-in Lockout: ignore interruptions in the first 1.5s of speaking
+                                    # to prevent echo or accidental trigger from stopping flow
+                                    if (time.time() - self.speech_start_time) > 1.5:
+                                        logger.info("Barge-in detected via endpointing. Stopping TTS.")
+                                        self.stop_tts()
+                                    else:
+                                        logger.debug("Barge-in detected but ignored during lockout period.")
                                 
                                 full_phrase = np.concatenate(phrase_buffer)
                                 phrase_buffer = []
