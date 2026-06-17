@@ -7,12 +7,12 @@ load_dotenv(override=True)
 
 @dataclass
 class Config:
-    llm_url: str = os.getenv("LLM_URL", "https://integrate.api.nvidia.com/v1")
+    llm_url: str = os.getenv("LLM_URL", "")
     llm_key: str = os.getenv("LLM_API_KEY", "no-key")
-    llm_model: str = os.getenv("LLM_MODEL", "meta/llama3-70b-instruct")
-    fast_llm_url: str = os.getenv("FAST_LLM_URL", os.getenv("LLM_URL", "https://integrate.api.nvidia.com/v1"))
-    fast_llm_key: str = os.getenv("FAST_LLM_KEY", os.getenv("LLM_API_KEY", "no-key"))
-    fast_llm_model: str = os.getenv("FAST_LLM_MODEL", os.getenv("LLM_MODEL", "meta/llama3-70b-instruct"))
+    llm_model: str = os.getenv("LLM_MODEL", "")
+    fast_llm_url: str = os.getenv("FAST_LLM_URL", "")
+    fast_llm_key: str = os.getenv("FAST_LLM_KEY", "no-key")
+    fast_llm_model: str = os.getenv("FAST_LLM_MODEL", "")
     
     # -1 = system default input/output device; ≥0 = specific device index
     mic_index: int = int(os.getenv("MIC_INDEX", "-1"))
@@ -30,11 +30,6 @@ class Config:
     searxng_url: str = os.getenv("SEARXNG_URL", "")  # e.g. "http://localhost:8080"
     
     # Hybrid LLM Router Config
-    local_llm_url: str = os.getenv("LOCAL_LLM_URL", "http://localhost:11434/v1")
-    local_llm_model: str = os.getenv("LOCAL_LLM_MODEL", "llama3.1:8b")
-    local_llm_key: str = os.getenv("LOCAL_LLM_KEY", "no-key")
-    enable_local_llm: bool = os.getenv("ENABLE_LOCAL_LLM", "true").lower() == "true"
-    hybrid_routing_type: str = os.getenv("HYBRID_ROUTING", "keyword")
     
     # MCP Client Config
     mcp_config_path: str = os.getenv("MCP_CONFIG_PATH", "mcp_config.json")

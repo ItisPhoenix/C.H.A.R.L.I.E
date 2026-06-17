@@ -75,16 +75,23 @@ class VoiceEngine:
             logger.info("ASR warm-up: sent silent audio.")
         except Exception as e:
             logger.warning(f"ASR warm-up failed: {e}")
-        # 3. LOCAL TTS (Kokoro) — detect CUDA 13.x availability
+        # 3. LOCAL TTS (Kokoro) — detect CUDA availability
         os.environ.pop("ONNX_PROVIDER", None)  # clear stale value
-        try:
-            import ctypes
-            ctypes.WinDLL("cublasLt64_13.dll")
+        cuda_found = False
+        for dll in ("cublasLt64_13.dll", "cublasLt64_12.dll"):
+            try:
+                import ctypes
+                ctypes.WinDLL(dll)
+                cuda_found = True
+                break
+            except OSError:
+                continue
+        if cuda_found:
             os.environ["ONNX_PROVIDER"] = "CUDAExecutionProvider"
-            logger.info("Kokoro TTS: CUDA 13.x detected — using GPU.")
-        except OSError:
+            logger.info(f"Kokoro TTS: CUDA detected ({dll}) — using GPU.")
+        else:
             os.environ["ONNX_PROVIDER"] = "CPUExecutionProvider"
-            logger.info("Kokoro TTS: CUDA 13.x not found — falling back to CPU.")
+            logger.info("Kokoro TTS: No CUDA DLL found — falling back to CPU.")
         model_path = os.path.join(config.kokoro_model_dir, "kokoro-v1.0.onnx")
         voices_path = os.path.join(config.kokoro_model_dir, "voices-v1.0.bin")
         self.kokoro = Kokoro(model_path, voices_path)
@@ -98,9 +105,7 @@ class VoiceEngine:
         # Use thread-safe deque for audio chunks
         self.audio_buffer = deque(maxlen=200)
         self.processing_thread = None
-        # Barge-in state
         self.tts_active = threading.Event()
-        self.barge_in_event = threading.Event()
 
     def _emit_state(self, state, mouth_value=0.0):
         """Emit state to buddy UI via bridge (thread-safe)."""
@@ -484,14 +489,16 @@ class VoiceEngine:
                             self._static_warned = False
 
                     
-                    # --- Silero VAD (always-on, no noise gate) ---
+                    # --- Silero VAD ---
                     with torch.no_grad():
                         vad_confidence = self.vad_model(torch.from_numpy(audio_float32), samplerate).item()
 
-                    # Dynamic VAD threshold: be less sensitive during playback to avoid self-triggering
-                    current_vad_threshold = 0.9 if self.tts_active.is_set() else 0.4
+                    # During TTS playback, skip VAD entirely — don't listen to self
+                    if self.tts_active.is_set():
+                        time.sleep(0.001)
+                        continue
 
-                    if vad_confidence > current_vad_threshold:
+                    if vad_confidence > 0.4:
                         speech_frame_count += 1
                     else:
                         speech_frame_count = 0

@@ -144,6 +144,7 @@ class CharliePersona:
         prompt.append("2. For EVERYTHING ELSE, you MUST use a tool (web_search or deep_research).")
         prompt.append("3. NEVER claim to be an AI, a model, or a neutral tool. You are Charlie.")
         prompt.append("4. NEVER say 'I don't have personal views'. You have strong, cynical tech stances. Use them.")
+        prompt.append("5. NEVER output your internal reasoning, thinking process, or planning steps. Only speak the final answer.")
         # Length constraints: default 2-3 lines, detailed when asked
         # Reset temporary overrides if they were set
         if active_mode == "concise":
@@ -185,10 +186,3 @@ class CharliePersona:
         """Returns a character-consistent message when rate limited."""
         return "My brain is a bit overstimulated right now. Give me a heartbeat to clear my head."
 
-    def get_tts_speed(self) -> float:
-        """Returns the appropriate speed for Kokoro TTS."""
-        if self.emotional_state == "energetic":
-            return 1.05
-        if self.emotional_state in ["sad", "calm"]:
-            return 0.95
-        return 1.0

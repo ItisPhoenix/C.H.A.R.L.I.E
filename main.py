@@ -45,13 +45,18 @@ _MAX_FLUSH_CHARS = 200  # Force-flush if no boundary seen within this many chars
 async def main():
     logger.info("Charlie is waking up...")
 
+    voice = None
+
+    def speaking_callback(text):
+        if voice:
+            voice.speak(text, brain.persona.emotional_state)
+
     try:
-        brain = Brain(config, on_thought_callback=lambda text: voice.speak(text, brain.persona.emotional_state))
+        brain = Brain(config, on_thought_callback=speaking_callback)
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")
         return
 
-    # Start MCP client (connects to external tools)
     await brain.start_mcp()
 
     # Start WebSocket bridge for Buddy UI
@@ -133,8 +138,17 @@ async def main():
         # Connection test & Dynamic Welcome
         logger.debug("Requesting dynamic welcome message from LLM...")
         welcome_msg = ""
-        async for chunk in brain.chat("Give me a one-sentence warm, friendly welcome message as you start up. Speak only in English."):
-            welcome_msg += chunk
+        # Wrap the generator in a timeout to avoid hangs if LLM IP is unreachable
+        try:
+            async with asyncio.timeout(25.0):
+                async for chunk in brain.chat("Give me a one-sentence warm, friendly welcome message as you start up. Speak only in English."):
+                    welcome_msg += chunk
+        except asyncio.TimeoutError:
+            logger.warning("Dynamic welcome timed out after 25s. Using fallback.")
+            welcome_msg = "Welcome, Sir; I'm online and ready to help."
+        except Exception as e:
+            logger.warning(f"Dynamic welcome failed: {type(e).__name__}: {e}. Using fallback.")
+            welcome_msg = "Welcome, Sir; I'm online and ready to help."
 
         print("\n" + "="*40, flush=True)
         print("   Charlie is online and listening", flush=True)
@@ -145,20 +159,22 @@ async def main():
         while True:
             await asyncio.sleep(1)
     except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        logger.info("Interrupt received, shutting down...")
     except Exception as e:
         logger.exception(f"Fatal error: {e}")
     finally:
-        if 'brain' in locals():
-            await brain.close()
         if 'voice' in locals():
             voice.stop()
         if 'brain' in locals():
-            await brain.mcp_client.close()
+            await brain.close()
+        
         logging.shutdown()
+        # Force exit to ensure background threads don't hang the process on Windows
+        os._exit(0)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        os._exit(0)
+

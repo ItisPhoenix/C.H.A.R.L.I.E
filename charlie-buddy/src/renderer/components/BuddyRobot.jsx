@@ -14,7 +14,7 @@ const STATES = {
 
 // Bright & saturated per-emotion palette
 const PALETTE = {
-  idle:     { body: '#5a6b80', face: '#1a202c', glow: '#a0aec0', antenna: '#9ca3af', feet: '#3d4f63' },
+  idle:     { body: '#06b6d4', face: '#083344', glow: '#22d3ee', antenna: '#06b6d4', feet: '#0e7490' },
   listening:{ body: '#22c55e', face: '#064e3b', glow: '#4ade80', antenna: '#22c55e', feet: '#166534' },
   thinking: { body: '#3b82f6', face: '#1e3a5a', glow: '#60a5fa', antenna: '#3b82f6', feet: '#1e3a8a' },
   speaking: { body: '#f97316', face: '#7c2d12', glow: '#fb923c', antenna: '#f97316', feet: '#9a3412' },
@@ -121,6 +121,25 @@ export default function BuddyRobot({ state = 'idle', mouthValue = 0.0, lastText 
     window.addEventListener('mousemove', handleMouseMove);
     return () => window.removeEventListener('mousemove', handleMouseMove);
   }, []);
+  // Global shortcut listener (Ctrl+Shift+Space)
+  useEffect(() => {
+    window.electronAPI?.onToggleExpandKey?.(() => {
+      window.electronAPI?.toggleExpand();
+    });
+  }, []);
+
+  // Custom drag: mousedown starts, mousemove sends IPC
+  const handleDragStart = (e) => {
+    if (e.button !== 0) return; // left click only
+    window.electronAPI?.dragStart(e.screenX, e.screenY);
+    const onMove = (ev) => window.electronAPI?.dragMove(ev.screenX, ev.screenY);
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   // EMO-style Head Pose & Idle Animation
   useEffect(() => {
@@ -265,19 +284,16 @@ export default function BuddyRobot({ state = 'idle', mouthValue = 0.0, lastText 
       }}
       onMouseEnter={() => window.electronAPI?.setIgnoreMouseEvents(false)}
       onMouseLeave={() => window.electronAPI?.setIgnoreMouseEvents(true)}
-      onDoubleClick={() => window.electronAPI?.toggleExpand()}
     >
       {/* Speech bubble above buddy */}
       <SpeechBubble text={lastText} />
-      {/* Draggable area wrapping the SVG */}
-      <div
-        style={{ WebkitAppRegion: 'drag' }}
-      >
         <svg
           ref={svgRef}
           viewBox="0 0 200 200"
           preserveAspectRatio="xMidYMid meet"
-          style={{ width: 200, height: 200, overflow: 'visible' }}
+          style={{ width: 200, height: 200, overflow: 'visible', cursor: 'grab' }}
+          onMouseDown={handleDragStart}
+          onDoubleClick={() => window.electronAPI?.toggleExpand()}
         >
           <defs>
             <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
@@ -393,7 +409,6 @@ export default function BuddyRobot({ state = 'idle', mouthValue = 0.0, lastText 
             <rect x="110" y="165" width="25" height="10" rx="5" fill={palette.feet} />
           </g>
         </svg>
-      </div>
     </div>
   );
 }

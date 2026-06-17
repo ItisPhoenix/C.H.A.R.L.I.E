@@ -1,5 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
-const path = require('path');
+const { app, BrowserWindow, ipcMain, globalShortcut, screen } = require('electron');
 
 let mainWindow;
 let isExpanded = false;
@@ -14,7 +13,6 @@ function createWindow() {
     frame: false,
     transparent: true,
     alwaysOnTop: true,
-    focusable: false,
     skipTaskbar: true,
     resizable: false,
     x: 20,
@@ -56,9 +54,29 @@ ipcMain.on('toggle-expand', () => {
   isExpanded = !isExpanded;
 });
 
-app.whenReady().then(createWindow);
+// Custom drag: renderer sends start/move/end, main moves window
+let dragOffset = { x: 0, y: 0 };
+ipcMain.on('drag-start', (event, { mouseX, mouseY }) => {
+  if (!mainWindow) return;
+  const winBounds = mainWindow.getBounds();
+  dragOffset.x = mouseX - winBounds.x;
+  dragOffset.y = mouseY - winBounds.y;
+});
+ipcMain.on('drag-move', (event, { mouseX, mouseY }) => {
+  if (!mainWindow) return;
+  mainWindow.setPosition(mouseX - dragOffset.x, mouseY - dragOffset.y);
+});
+
+app.whenReady().then(() => {
+  createWindow();
+  // Global shortcut to toggle dashboard
+  globalShortcut.register('CommandOrControl+Shift+Space', () => {
+    if (mainWindow) mainWindow.webContents.send('toggle-expand-key');
+  });
+});
 
 app.on('window-all-closed', () => {
+  globalShortcut.unregisterAll();
   app.quit();
 });
 

@@ -19,6 +19,21 @@ from charlie.bridge import CharlieBridge
 from charlie.ui_launcher import UILauncher
 
 logger = logging.getLogger("charlie.core")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+# Compiled once — not per-token
+_REASONING_RE = re.compile(
+    r'(?:'
+    r'(?:I\s+(?:should|need|will|can|must|have\s+to)\s+[^.!?]{1,60}?[.!?]\s*)'
+    r'|(?:Let\s+me\s+[^.!?]{1,60}?[.!?]\s*)'
+    r'|(?:First(?:ly)?[,:]?\s+[^.!?]{1,40}?[.!?]\s*)'
+    r'|(?:Based\s+on\s+(?:my\s+)?(?:research|analysis|data|experience|knowledge)[,:]?\s*)'
+    r'|(?:Searching\s+for\s+[^.!?]{1,40}?[.!?]\s*)'
+    r"|(?:I'll\s+[^.!?]{1,40}?[.!?]\s*)"
+    r"|(?:Here(?:'s| is)\s+(?:what|the)[^.!?]{1,40}?[.!?]\s*)"
+    r'|(?:To answer that,\s*)'
+    r'|(?:The user is\s+(?:asking|looking)[^.!?]{1,40}?[.!?]\s*)'
+    r')+', re.IGNORECASE
+)
 
 class Brain:
     def __init__(self, config, on_thought_callback: Optional[Callable[[str], None]] = None):
@@ -33,11 +48,11 @@ class Brain:
         # Barge-in: signals the chat generator to stop yielding
         self.cancel_chat_event = asyncio.Event()
         
-        # Cloud LLM Client (NVIDIA)
-        cloud_url = self.config.llm_url
-        if not cloud_url.endswith("/"): cloud_url += "/"
-        self.cloud_client = httpx.AsyncClient(
-            base_url=cloud_url,
+        # Main LLM Client (OpenRouter)
+        main_url = self.config.llm_url
+        if not main_url.endswith("/"): main_url += "/"
+        self.main_client = httpx.AsyncClient(
+            base_url=main_url,
             headers={"Authorization": f"Bearer {self.config.llm_key}"},
             timeout=httpx.Timeout(60.0, connect=15.0)
         )
@@ -54,17 +69,6 @@ class Brain:
             timeout=httpx.Timeout(30.0, connect=10.0)
         )
 
-        # Local LLM Client (Ollama / local OpenAI-compatible endpoint)
-        local_url = self.config.local_llm_url
-        if not local_url.endswith("/"): local_url += "/"
-        local_headers = {}
-        if self.config.local_llm_key and self.config.local_llm_key != "no-key":
-            local_headers["Authorization"] = f"Bearer {self.config.local_llm_key}"
-        self.local_client = httpx.AsyncClient(
-            base_url=local_url,
-            headers=local_headers,
-            timeout=httpx.Timeout(15.0, connect=5.0)  # stricter timeout for local
-        )
 
         self.llm_router = LLMRouter(config)
 
@@ -430,57 +434,31 @@ class Brain:
                 llm_start_time = time.time()
                 llm_ttft_logged = False
                 
-                # Use LLM Router to select backend based on input complexity
-                async def _local_fn(_):
-                    """Call the local LLM with timeout/fallback."""
-                    fallback = False
-                    if not self.config.enable_local_llm:
-                        logger.info("Local LLM disabled, falling back to cloud.")
-                        fallback = True
-                    else:
-                        try:
-                            chunks_yielded = 0
-                            async for chunk in self._call_llm_stream(
-                                self.local_client,
-                                self.config.local_llm_model,
-                                messages,
-                                timeout=httpx.Timeout(15.0, connect=10.0),
-                            ):
-                                chunks_yielded += 1
-                                yield chunk
-                            if chunks_yielded == 0:
-                                fallback = True
-                        except Exception as e:
-                            logger.warning(f"Local LLM failed (timeout/error): {e}. Falling back to cloud.")
-                            fallback = True
-                    
-                    if fallback:
-                        async for chunk in _cloud_fn(_):
-                            yield chunk
-                async def _cloud_fn(_):
-                    """Call cloud LLM (fast first, fallback to NVIDIA)."""
+                async def _fast_fn(_):
+                    """Fast LLM: try local Ollama, fallback to main."""
                     backends = []
                     payload_size = len(json.dumps(messages))
-                    if self.config.fast_llm_key and self.config.fast_llm_key != "no-key":
-                        if payload_size < 24000:
-                            backends.append((self.fast_client, self.config.fast_llm_model))
+                    if self.config.fast_llm_url:
+                        if payload_size < 48000:
+                            backends.insert(0, (self.fast_client, self.config.fast_llm_model))
                         else:
                             logger.info(f"Payload too large ({payload_size} chars). Skipping fast LLM.")
-                    backends.append((self.cloud_client, self.config.llm_model))
+                    backends.append((self.main_client, self.config.llm_model))
                     last_error = None
                     for client, model in backends:
                         try:
                             async for chunk in self._call_llm_stream(client, model, messages):
                                 yield chunk
-                            return  # success — stop
+                            return
                         except Exception as e:
-                            logger.warning(f"Cloud LLM {model} failed: {e}")
+                            logger.warning(f"LLM {model} failed: {e}")
                             last_error = e
                             continue
-                    raise RuntimeError(f"All cloud backends failed: {last_error}")
+                    raise RuntimeError(f"All LLM backends failed: {last_error}")
 
-                # Consume the router-streamed response
-                async for content in self.llm_router.route(user_input, _local_fn, _cloud_fn):
+                # Consume the LLM response
+                _pending_think = ""  # buffer for <think> tags split across chunks
+                async for content in self.llm_router.route(user_input, _fast_fn):
                     # Barge-in: stop yielding if user interrupted
                     if self.cancel_chat_event.is_set():
                         self.cancel_chat_event.clear()
@@ -492,32 +470,40 @@ class Brain:
                             is_tool_call = True
                             continue
 
-                        # Handle Thinking Tags (Common in models like Nemotron/DeepSeek)
-                        if "<think>" in full_reply:
-                            if "</think>" not in full_reply:
-                                continue
-                            # fall through: thinking block is closed, content follows
+                        # Accumulate and strip <think> blocks (handles cross-chunk splits)
+                        _pending_think += content
+                        # Strip complete <think>...</think> blocks
+                        while "<think>" in _pending_think and "</think>" in _pending_think:
+                            before, _, after = _pending_think.partition("</think>")
+                            _pending_think = re.sub(r'<think>[^>]*>', '', before) + after
+                        # If still has unclosed <think>, don't yield anything
+                        if "<think>" in _pending_think:
+                            continue
+                        chunk_clean = _pending_think
+                        _pending_think = ""
+                        if not chunk_clean:
+                            continue
 
-                        # Buffer only the very beginning to be 100% sure it's not "TOOL:"
+                        # Strip untagged reasoning from the first yield only
                         if not has_yielded_start:
-                            if not full_reply.upper().startswith("T") or len(full_reply) >= 5:
-                                to_yield = full_reply
-                                if "</think>" in to_yield:
-                                    to_yield = to_yield.split("</think>", 1)[1]
-
-                                if to_yield:
-                                    if not llm_ttft_logged:
-                                        llm_ttft_ms = (time.time() - llm_start_time) * 1000
-                                        logger.info(f"pipeline_stage | stage=llm_ttft | latency_ms={llm_ttft_ms:.1f}")
-                                        llm_ttft_logged = True
-                                    yield to_yield
-                                    has_yielded_start = True
+                            stripped = _REASONING_RE.sub('', full_reply)
+                            if not stripped.strip():
+                                continue
+                            # Buffer beginning to be 100% sure it's not "TOOL:"
+                            to_yield = re.sub(r'<think>.*?</think>', '', stripped, flags=re.DOTALL).strip()
+                            if to_yield and (not to_yield.upper().startswith("T") or len(to_yield) >= 5):
+                                if not llm_ttft_logged:
+                                    llm_ttft_ms = (time.time() - llm_start_time) * 1000
+                                    logger.info(f"pipeline_stage | stage=llm_ttft | latency_ms={llm_ttft_ms:.1f}")
+                                    llm_ttft_logged = True
+                                yield to_yield
+                                has_yielded_start = True
                         else:
                             if not llm_ttft_logged:
                                 llm_ttft_ms = (time.time() - llm_start_time) * 1000
                                 logger.info(f"pipeline_stage | stage=llm_ttft | latency_ms={llm_ttft_ms:.1f}")
                                 llm_ttft_logged = True
-                            yield content
+                            yield chunk_clean
                 # Clean up thinking tags for history
                 full_reply = re.sub(r'<think>.*?</think>', '', full_reply, flags=re.DOTALL).strip()
                 reply = full_reply.strip()
@@ -644,7 +630,7 @@ class Brain:
                             "max_tokens": 20,
                             "temperature": 0.7
                         }
-                        response = await self.cloud_client.post("chat/completions", json=payload, timeout=5.0)
+                        response = await self.main_client.post("chat/completions", json=payload, timeout=5.0)
                         if response.status_code == 200:
                             yield response.json()["choices"][0]["message"]["content"].strip()
                             return
@@ -671,11 +657,14 @@ class Brain:
         if hasattr(self, 'ui_launcher') and self.ui_launcher:
             self.ui_launcher.stop()
         if hasattr(self, 'bridge_task') and self.bridge_task:
-            self.bridge_task.cancel()
+            try:
+                self.bridge_task.cancel()
+            except Exception:
+                pass
+        if hasattr(self, 'mcp_client') and self.mcp_client:
+            await self.mcp_client.close()
         if self.fast_client:
             await self.fast_client.aclose()
-        if self.cloud_client:
-            await self.cloud_client.aclose()
-        if self.local_client:
-            await self.local_client.aclose()
+        if self.main_client:
+            await self.main_client.aclose()
         logger.info("Brain connection closed.")
