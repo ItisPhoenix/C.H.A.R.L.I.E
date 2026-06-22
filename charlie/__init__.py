@@ -1,19 +1,10 @@
 from .config import config
-from .llm_router import LLMRouter
-from .mcp_client import CharlieMCPClient
-from .discovery import SystemDiscovery
-from .widget_bridge import WidgetBridge
-from .screen_context import ScreenContextMonitor
-from .proactive_remark import ProactiveRemarkEngine
 
 def __getattr__(name: str):
-    """Lazy imports for heavy modules (torch, PySide6) to avoid import during multiprocessing spawn."""
+    """Lazy imports for heavy modules (torch) to avoid unnecessary imports."""
     if name == "Brain":
         from .core import Brain
         return Brain
-    if name == "VoiceBrain":
-        from .brain import VoiceBrain
-        return VoiceBrain
     if name == "VoiceEngine":
         from .voice import VoiceEngine
         return VoiceEngine
@@ -21,14 +12,7 @@ def __getattr__(name: str):
 
 __all__ = [
     "config",
-    "LLMRouter",
-    "CharlieMCPClient",
-    "SystemDiscovery",
-    "WidgetBridge",
-    "ScreenContextMonitor",
-    "ProactiveRemarkEngine",
     "Brain",
-    "VoiceBrain",
     "VoiceEngine",
 ]
 

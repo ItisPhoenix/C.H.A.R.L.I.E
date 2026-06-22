@@ -17,8 +17,6 @@ from kokoro_onnx import Kokoro
 from collections import deque
 from charlie.asr_worker import asr_worker_process
 
-from charlie.audio_analysis import analyze_wave_mouth_values
-from charlie.pipeline_instrumentation import PipelineTimer
 from charlie.core import strip_internal_reasoning
 
 logger = logging.getLogger("charlie.voice")
@@ -124,9 +122,8 @@ class VoiceEngine:
         self._pending_warmup_text = ""
         self._last_warmup_time = 0.0
         self._warmup_lock = threading.Lock()
-        self.timer = PipelineTimer()
-        self._widget_callback: Optional[Callable[[str], None]] = None
-        self._rms_callback: Optional[Callable[[float], None]] = None
+        self._widget_callback = None
+        self._rms_callback = None
         self.barge_in_enabled: bool = True
 
     def set_widget_callback(self, cb: Callable[[str], None]) -> None:
@@ -230,7 +227,7 @@ class VoiceEngine:
                     )
                     tts_ms = (time.time() - tts_start) * 1000
                     logger.debug(f"pipeline_stage | stage=tts | latency_ms={tts_ms:.1f}")
-                    mouth_values = analyze_wave_mouth_values(samples, sample_rate)
+                    mouth_values = []
                     return (samples, sample_rate, mouth_values)
                 except Exception as e:
                     logger.error(f"synth_error | {e}")
@@ -279,10 +276,6 @@ class VoiceEngine:
                 self.is_speaking.set()
                 self.tts_active.set()
                 self.speech_start_time = time.time()
-                if self._widget_callback:
-                    try: self._widget_callback("speaking")
-                    except Exception: pass
-
                 # Start lip-sync thread
                 def sync_mouth():
                     for mv in mouth_values:
@@ -306,9 +299,6 @@ class VoiceEngine:
             except Exception as e:
                 logger.error(f"playback_error | {e}")
             finally:
-                if self.tts_active.is_set() and self._widget_callback:
-                    try: self._widget_callback("idle")
-                    except Exception: pass
                 self.is_speaking.clear()
                 self.tts_active.clear()
     
@@ -556,9 +546,6 @@ class VoiceEngine:
                             # Add pre-roll to the start of the phrase to catch initial words
                             phrase_buffer.extend(list(pre_roll))
                             pre_roll.clear()
-                            if self._widget_callback:
-                                try: self._widget_callback("listening")
-                                except Exception: pass
                         phrase_buffer.append(audio_int16)
                         silence_start = None
                     else:
@@ -583,8 +570,6 @@ class VoiceEngine:
                                 phrase_buffer = []
                                 silence_start = None
 
-                                self.timer.mark("speech_end")
-                                self.timer.mark("asr_start")
                                 if duration >= self.config.phrase_min_duration:
                                     threading.Thread(target=self._process_phrase, args=(full_phrase,), daemon=True).start()
 
@@ -663,8 +648,6 @@ class VoiceEngine:
                 is_final = not flags.get("is_warmup", False)
                 if is_final:
                     if text:
-                        self.timer.mark("asr_done")
-                        self.timer.log_delta("speech_end", "asr_done", "speech_end_to_asr")
                         logger.info(f"stt_result | {text} ({confidence:.2f})")
                         with self._warmup_lock:
                             self._pending_warmup_text = ""
