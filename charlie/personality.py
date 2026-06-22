@@ -2,6 +2,7 @@ import json
 import os
 import re
 import logging
+from typing import Optional, Callable
 
 TECH_STANCES = {
     "ai_hype": "I have zero patience for AI hype-men who sell snake oil. If a tool claims to 'revolutionize' your workflow, it probably just harvests your data.",
@@ -29,6 +30,7 @@ class CharliePersona:
         self.expressed_stances: set = set()
         self.stances_file = os.path.join(self.data_dir, "expressed_stances.json")
         
+        self._stance_callback: Optional[Callable[[str], None]] = None
         # Load persisted stances
         self.expressed_stances = self._load_stances()
         
@@ -125,6 +127,8 @@ class CharliePersona:
                 prompt.append(f"- {key.replace('_', ' ').title()}: {stance}")
                 if not is_opinion:
                     self.expressed_stances.add(key)
+                    if self._stance_callback:
+                        self._stance_callback(key)
         
         prompt.append("\nUSER PROFILE:")
         if self.user_profile:

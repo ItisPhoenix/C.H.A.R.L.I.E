@@ -1,5 +1,4 @@
 import pytest
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 from charlie.research import web_search, read_url, get_search_urls, deep_research
 

@@ -140,17 +140,47 @@ async def read_url(url: str) -> str:
 async def deep_research(topic: str, brain) -> str:
     """Comprehensive multi-step research with synthesis and persistence."""
     logger.info(f"Starting Deep Research: {topic}")
-    
-    # 1. Decomposition
-    sub_questions = [topic] # Default
-    try:
-        prompt = f"Decompose the research topic '{topic}' into 3 specific, search-friendly sub-questions. Output ONLY the questions, one per line."
-        resp = await brain.fast_client.post(
+
+    # Helper: try fast LLM first, fall back to main
+    async def _llm(prompt: str, temperature: float = 0.0) -> dict:
+        """Returns dict with 'content' on success, raises on failure."""
+        if brain.config.fast_llm_key and brain.config.fast_llm_key not in ("no-key", "no_key"):
+            try:
+                resp = await brain.fast_client.post(
+                    "chat/completions",
+                    json={
+                        "model": brain.config.fast_llm_model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": temperature,
+                    },
+                    timeout=30.0,
+                )
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]
+            except Exception:
+                logger.debug("deep_research | fast LLM failed, falling back to main")
+
+        resp = await brain.client.post(
             "chat/completions",
-            json={"model": brain.config.fast_llm_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.0}
+            json={
+                "model": brain.config.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+            },
+            timeout=30.0,
         )
         resp.raise_for_status()
-        text = resp.json()["choices"][0]["message"]["content"]
+        return resp.json()["choices"][0]["message"]
+
+    # 1. Decomposition
+    sub_questions = [topic]  # Default
+    try:
+        prompt = (
+            f"Decompose the research topic '{topic}' into 3 specific, search-friendly "
+            "sub-questions. Output ONLY the questions, one per line."
+        )
+        msg = await _llm(prompt, temperature=0.0)
+        text = msg["content"]
         sub_questions = [q.strip() for q in text.splitlines() if q.strip()][:3]
         if not sub_questions:
             sub_questions = [topic]
@@ -159,7 +189,7 @@ async def deep_research(topic: str, brain) -> str:
 
     # 2. Parallel Fetch
     semaphore = asyncio.Semaphore(3)
-    
+
     async def fetch_and_extract(url):
         async with semaphore:
             content = await read_url(url)
@@ -169,32 +199,29 @@ async def deep_research(topic: str, brain) -> str:
     for q in sub_questions:
         urls = await get_search_urls(q, max_results=2)
         all_urls.extend(urls)
-    
-    all_urls = list(set(all_urls))[:6] # Unique URLs, max 6
+
+    all_urls = list(set(all_urls))[:6]  # Unique URLs, max 6
     tasks = [fetch_and_extract(u) for u in all_urls]
     scraped_data = await asyncio.gather(*tasks)
-    
+
     # 3. Synthesis
     context_blocks = []
     for item in scraped_data:
         context_blocks.append(f"SOURCE: {item['url']}\nCONTENT: {item['content'][:2000]}")
-    
+
     context_str = "\n\n---\n\n".join(context_blocks)
     synthesis_prompt = (
         f"Topic: {topic}\n\n"
         "Based on the following research data, write a CONCISE, well-structured research report in Markdown. "
-        "Focus on technical accuracy and speed. Include an executive summary, key findings, and a conclusion. Cite the source URLs provided.\n\n"
+        "Focus on technical accuracy and speed. Include an executive summary, key findings, and a conclusion. "
+        "Cite the source URLs provided.\n\n"
         f"{context_str}"
     )
-    
+
     report = "Synthesis failed."
     try:
-        resp = await brain.fast_client.post(
-            "chat/completions",
-            json={"model": brain.config.fast_llm_model, "messages": [{"role": "user", "content": synthesis_prompt}], "temperature": 0.3}
-        )
-        resp.raise_for_status()
-        report = resp.json()["choices"][0]["message"]["content"]
+        msg = await _llm(synthesis_prompt, temperature=0.3)
+        report = msg["content"]
     except Exception as e:
         logger.error(f"Synthesis failed: {e}")
         report = f"Research complete for {topic}, but synthesis failed. Found {len(all_urls)} sources."
@@ -203,7 +230,6 @@ async def deep_research(topic: str, brain) -> str:
     try:
         session_id = research_memory.create_session(topic)
         for item in scraped_data:
-            # Try to get a title from the content if possible (first line or first 50 chars)
             title = item['content'].splitlines()[0][:100] if item['content'] else "No Title"
             research_memory.add_snippet(session_id, item['url'], title, item['content'])
     except Exception as e:

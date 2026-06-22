@@ -1,6 +1,6 @@
 import sqlite3
 import logging
-from typing import List, Dict
+from typing import List
 from .config import config
 
 logger = logging.getLogger("charlie.memory")

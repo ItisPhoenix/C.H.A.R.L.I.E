@@ -1,7 +1,7 @@
 import os
 import logging
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 logger = logging.getLogger("charlie.discovery")
 
@@ -44,9 +44,9 @@ class SystemDiscovery:
                 "attention": "Continuous Listening"
             },
             "brain": {
-                "architecture": "Hybrid Local/Cloud Router",
-                "local_model": self.config.local_llm_model if self.config.enable_local_llm else "Disabled",
-                "cloud_model": self.config.llm_model,
+                "architecture": "Dual LLM Router (Fast + Main)",
+                "fast_model": self.config.fast_llm_model or "Not configured",
+                "main_model": self.config.llm_model or "Not configured",
                 "memory": "SQLite Long-term Semantic Storage"
             },
             "agency": {
@@ -67,7 +67,7 @@ class SystemDiscovery:
         lines.append(f"- SENSES: {s['hearing']} | {s['voice']} | {s['attention']}")
         
         b = manifest["brain"]
-        lines.append(f"- INTELLIGENCE: {b['architecture']} (Local: {b['local_model']} | Cloud: {b['cloud_model']})")
+        lines.append(f"- INTELLIGENCE: {b['architecture']} (Fast: {b['fast_model']} | Main: {b['main_model']})")
         
         a = manifest["agency"]
         lines.append(f"- AGENCY: {a['mcp_status']} ({a['tools_available']} tools active) | {a['web_intelligence']}")

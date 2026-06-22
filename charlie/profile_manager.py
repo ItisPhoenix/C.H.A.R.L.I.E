@@ -219,3 +219,26 @@ class ProfileManager:
             if stripped.startswith("- ") and not stripped.startswith("- <!--"):
                 facts.append(stripped[2:])
         return facts
+    def get_user_name(self) -> str | None:
+        """Extract the user's name from USER.md or SOUL.md.
+
+        Looks for '## Name' or 'Name:' patterns in USER.md first,
+        then falls back to 'your name is <X>' in SOUL.md.
+        """
+        import re as _re
+        content = self.load_user_profile()
+        if content:
+            # Look for a Name section
+            name_match = _re.search(r'^##\s+Name\s*\n+(.+)', content, _re.MULTILINE)
+            if name_match:
+                return name_match.group(1).strip().strip('*_')
+            # Look for "Name: value" pattern
+            name_match = _re.search(r'(?:Name|name)\s*[:=]\s*(.+)', content)
+            if name_match:
+                return name_match.group(1).strip().strip('*_"\'')
+        soul = self.load_soul()
+        if soul:
+            name_match = _re.search(r'your name is (\w+)', soul, _re.IGNORECASE)
+            if name_match:
+                return name_match.group(1).strip()
+        return None

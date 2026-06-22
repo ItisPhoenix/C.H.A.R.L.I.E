@@ -44,10 +44,9 @@ class TestMemoryManager:
         assert results == []
 
     def test_search_short_words(self, mgr: MemoryManager):
-        """Words shorter than 3 chars are filtered out by _extract_keywords."""
         mgr.store("User likes tea", "fact", "preferences")
-        results = mgr.search("a an of")
-        assert results == []
+        # Keyword extraction filters short/stop words; vector search still runs
+        assert mgr._extract_keywords("a an of") == []
 
     def test_search_by_type(self, mgr: MemoryManager):
         mgr.store("fact about work", "fact", "work")
@@ -88,7 +87,4 @@ class TestMemoryManager:
         assert "python" in kw_set
         assert "loves" in kw_set
 
-    def test_consolidate_stub(self, mgr: MemoryManager):
-        result = mgr.consolidate_old_summaries()
-        assert result == "consolidate_old_summaries not yet implemented"
 

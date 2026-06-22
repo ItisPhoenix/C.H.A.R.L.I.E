@@ -1,4 +1,5 @@
 import logging
+import asyncio
 import threading
 import os
 os.environ["ORT_LOG_LEVEL"] = "3"
@@ -11,21 +12,21 @@ import torch
 import re
 import queue
 import multiprocessing as mp
-import asyncio
-from typing import Callable
+from typing import Callable, Optional
 from kokoro_onnx import Kokoro
 from collections import deque
 from charlie.asr_worker import asr_worker_process
 
 from charlie.audio_analysis import analyze_wave_mouth_values
+from charlie.pipeline_instrumentation import PipelineTimer
+from charlie.core import strip_internal_reasoning
 
 logger = logging.getLogger("charlie.voice")
 
 class VoiceEngine:
-    def __init__(self, config, on_speech: Callable[[str], None], bridge=None):
+    def __init__(self, config, on_speech: Callable[[str], None]):
         self.config = config
         self.on_speech = on_speech
-        self.bridge = bridge  # WebSocket bridge for state emission
         self.is_speaking = threading.Event()
         self.stop_event = threading.Event()
         self.stop_tts_event = threading.Event()
@@ -77,10 +78,15 @@ class VoiceEngine:
             logger.warning(f"ASR warm-up failed: {e}")
         # 3. LOCAL TTS (Kokoro) — detect CUDA availability
         os.environ.pop("ONNX_PROVIDER", None)  # clear stale value
+        import ctypes
+        _CUDA_DLLS = (
+            "cublasLt64_14.dll", "cublasLt64_13.dll", "cublasLt64_12.dll",
+            "cublas64_14.dll", "cublas64_13.dll", "cublas64_12.dll",
+            "cudart64_12.dll", "cudart64_11_0.dll",
+        )
         cuda_found = False
-        for dll in ("cublasLt64_13.dll", "cublasLt64_12.dll"):
+        for dll in _CUDA_DLLS:
             try:
-                import ctypes
                 ctypes.WinDLL(dll)
                 cuda_found = True
                 break
@@ -91,11 +97,21 @@ class VoiceEngine:
             logger.info(f"Kokoro TTS: CUDA detected ({dll}) — using GPU.")
         else:
             os.environ["ONNX_PROVIDER"] = "CPUExecutionProvider"
-            logger.info("Kokoro TTS: No CUDA DLL found — falling back to CPU.")
+            logger.info("Kokoro TTS: No CUDA runtime found — using CPU.")
+
         model_path = os.path.join(config.kokoro_model_dir, "kokoro-v1.0.onnx")
         voices_path = os.path.join(config.kokoro_model_dir, "voices-v1.0.bin")
-        self.kokoro = Kokoro(model_path, voices_path)
-        logger.info("Kokoro TTS initialized locally.")
+        try:
+            self.kokoro = Kokoro(model_path, voices_path)
+            logger.info("Kokoro TTS initialized locally.")
+        except Exception as e:
+            if cuda_found:
+                logger.warning(f"Kokoro TTS: CUDA init failed ({e}), retrying on CPU.")
+                os.environ["ONNX_PROVIDER"] = "CPUExecutionProvider"
+                self.kokoro = Kokoro(model_path, voices_path)
+                logger.info("Kokoro TTS: initialized on CPU after CUDA failure.")
+            else:
+                raise
         # Warm up ONNX graph
         try:
             self.kokoro.create("Warm up", voice=self.config.kokoro_voice, speed=1.0, lang=self.config.kokoro_lang)
@@ -104,43 +120,19 @@ class VoiceEngine:
             logger.warning(f"Kokoro warm-up failed: {e}")
         # Use thread-safe deque for audio chunks
         self.audio_buffer = deque(maxlen=200)
-        self.processing_thread = None
         self.tts_active = threading.Event()
+        self._pending_warmup_text = ""
+        self._last_warmup_time = 0.0
+        self._warmup_lock = threading.Lock()
+        self.timer = PipelineTimer()
+        self._widget_callback: Optional[Callable[[str], None]] = None
+        self._rms_callback: Optional[Callable[[float], None]] = None
+        self.barge_in_enabled: bool = True
 
-    def _emit_state(self, state, mouth_value=0.0):
-        """Emit state to buddy UI via bridge (thread-safe)."""
-        if self.bridge:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        self.bridge.emit_state(state, mouth_value), loop
-                    )
-            except Exception:
-                pass  # Don't let state emission break audio pipeline
+    def set_widget_callback(self, cb: Callable[[str], None]) -> None:
+        """Register callback for mode changes (listening/speaking/idle)."""
+        self._widget_callback = cb
 
-    def _emit_emotion(self, emotion: str):
-        """Emit emotional state to buddy UI via bridge (thread-safe)."""
-        if self.bridge:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        self.bridge.emit_emotion(emotion), loop
-                    )
-            except Exception:
-                pass
-    def _emit_text(self, text: str):
-        """Emit spoken text to buddy UI via bridge (thread-safe)."""
-        if self.bridge:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        self.bridge.emit_text(text), loop
-                    )
-            except Exception:
-                pass
     def _ensure_models(self):
         os.makedirs(self.config.kokoro_model_dir, exist_ok=True)
         base_url = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
@@ -173,11 +165,13 @@ class VoiceEngine:
     def stop(self):
         self.stop_event.set()
         self.stop_tts()
-        if self.processing_thread and self.processing_thread.is_alive():
-            self.processing_thread.join(timeout=5.0)
+        # Wait for all worker threads
+        for thread in (self.input_thread, self.tts_worker, self.playback_worker, self.asr_poller_thread):
+            if thread and thread.is_alive():
+                thread.join(timeout=5.0)
 
         if self.asr_process:
-            self.asr_input_queue.put(None) # Signal shutdown
+            self.asr_input_queue.put(None)  # Signal shutdown
             self.asr_process.join(timeout=2.0)
             if self.asr_process.is_alive():
                 self.asr_process.terminate()
@@ -196,10 +190,8 @@ class VoiceEngine:
 
     def speak(self, text: str, emotional_state: str = "neutral"):
         """Sanitize text for TTS and enqueue. Non-blocking."""
-        # Strip tool calls and thinking tags
-        text = re.sub(r'TOOL:\s*\w+\(".*?"\)', '', text)
-        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-        text = re.sub(r'<(thought|thinking)>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        # Strip reasoning tags using shared helper
+        text = strip_internal_reasoning(text)
         # Strip URLs
         text = re.sub(r'\(https?://.*?\)', '', text)
         text = re.sub(r'https?://\S+', '', text)
@@ -208,9 +200,6 @@ class VoiceEngine:
         text = text.replace('\u2018', "'").replace('\u2019', "'")
         text = text.replace('\u201c', '"').replace('\u201d', '"')
         text = text.encode("ascii", "ignore").decode("ascii")
-        self._emit_emotion(emotional_state)
-        self._emit_state('speaking', mouth_value=1.0)
-        self._emit_text(text)
         text = self._numbers_to_words(text)
         text = self._symbols_to_words(text)
         text = re.sub(r'[*_#`~]', '', text)
@@ -232,19 +221,48 @@ class VoiceEngine:
         phon_logger = logging.getLogger("phonemizer")
         old_level = phon_logger.level
         phon_logger.setLevel(logging.ERROR)
-        with self.tts_lock:
-            try:
-                tts_start = time.time()
-                samples, sample_rate = self.kokoro.create(
-                    text, voice=self.config.kokoro_voice, speed=speed, lang=self.config.kokoro_lang
-                )
-                tts_ms = (time.time() - tts_start) * 1000
-                logger.debug(f"pipeline_stage | stage=tts | latency_ms={tts_ms:.1f}")
-                mouth_values = analyze_wave_mouth_values(samples, sample_rate)
-                return (samples, sample_rate, mouth_values)
-            except Exception as e:
-                logger.error(f"synth_error | {e}")
-                return None
+        try:
+            with self.tts_lock:
+                try:
+                    tts_start = time.time()
+                    samples, sample_rate = self.kokoro.create(
+                        text, voice=self.config.kokoro_voice, speed=speed, lang=self.config.kokoro_lang
+                    )
+                    tts_ms = (time.time() - tts_start) * 1000
+                    logger.debug(f"pipeline_stage | stage=tts | latency_ms={tts_ms:.1f}")
+                    mouth_values = analyze_wave_mouth_values(samples, sample_rate)
+                    return (samples, sample_rate, mouth_values)
+                except Exception as e:
+                    logger.error(f"synth_error | {e}")
+                    return None
+        finally:
+            phon_logger.setLevel(old_level)
+    async def _synth_stream(self, text: str, speed: float):
+        """Yield (samples, sample_rate) chunks from kokoro.create_stream().
+
+        Falls back to batch _synth() as a single-chunk generator if the
+        installed kokoro-onnx version lacks create_stream.
+        """
+        if not text:
+            return
+        phon_logger = logging.getLogger("phonemizer")
+        old_level = phon_logger.level
+        phon_logger.setLevel(logging.ERROR)
+        try:
+            if not hasattr(self.kokoro, "create_stream"):
+                logger.debug("kokoro has no create_stream; falling back to batch")
+                result = self._synth(text, speed)
+                if result is not None:
+                    samples, sr, _mouth = result
+                    yield (samples, sr)
+                return
+            stream = self.kokoro.create_stream(
+                text, voice=self.config.kokoro_voice, speed=speed, lang=self.config.kokoro_lang
+            )
+            async for samples, sr in stream:
+                yield (samples, sr)
+        finally:
+            phon_logger.setLevel(old_level)
     def _playback_worker(self):
         """Dedicated playback thread. Plays audio sequentially; blocks on each."""
         while not self.stop_event.is_set():
@@ -261,13 +279,15 @@ class VoiceEngine:
                 self.is_speaking.set()
                 self.tts_active.set()
                 self.speech_start_time = time.time()
+                if self._widget_callback:
+                    try: self._widget_callback("speaking")
+                    except Exception: pass
 
                 # Start lip-sync thread
                 def sync_mouth():
                     for mv in mouth_values:
                         if self.stop_tts_event.is_set():
                             break
-                        self._emit_state('speaking', mouth_value=mv)
                         time.sleep(0.05) # 50ms chunks
 
                 mouth_thread = threading.Thread(target=sync_mouth, daemon=True)
@@ -286,35 +306,45 @@ class VoiceEngine:
             except Exception as e:
                 logger.error(f"playback_error | {e}")
             finally:
+                if self.tts_active.is_set() and self._widget_callback:
+                    try: self._widget_callback("idle")
+                    except Exception: pass
                 self.is_speaking.clear()
                 self.tts_active.clear()
-                self._emit_state('idle')
     
     def _tts_worker_loop(self):
-        """TTS synthesis worker. Overlaps with playback worker: as soon as
-        one sentence is synthesized it's queued for playback and the next
-        sentence begins synthesizing immediately."""
+        """TTS synthesis worker. Streams audio chunks to the playback queue
+        as they become available, enabling low-latency first-audio."""
         while not self.stop_event.is_set():
             try:
                 if self.stop_tts_event.is_set():
                     while not self.tts_queue.empty():
                         self.tts_queue.get_nowait()
                     self.stop_tts_event.clear()
-                
+
                 item = self.tts_queue.get(timeout=0.1)
                 text, emotional_state = item
-                
+
                 speed = 1.0
-                if emotional_state == "energetic": speed = 1.05
-                elif emotional_state in ["sad", "calm"]: speed = 0.95
-                
-                audio = self._synth(text, speed)
-                if audio is not None:
-                    self.playback_queue.put(audio)
+                if emotional_state == "energetic":
+                    speed = 1.05
+                elif emotional_state in ("sad", "calm"):
+                    speed = 0.95
+
+                # Drive async streaming synth in a fresh event loop (thread context)
+                asyncio.run(self._tts_stream_and_queue(text, speed))
             except queue.Empty:
                 continue
             except Exception as e:
                 logger.error(f"tts_worker_error | {e}")
+
+    async def _tts_stream_and_queue(self, text: str, speed: float):
+        """Consume _synth_stream and push each chunk to playback_queue."""
+        async for samples, sr in self._synth_stream(text, speed):
+            if self.stop_tts_event.is_set():
+                break
+            # playback_worker expects (samples, sr, mouth_values); use [] for streaming
+            self.playback_queue.put((samples, sr, []))
     
     # ── number-to-word conversion for TTS ──────────────────────────────────
     @staticmethod
@@ -458,11 +488,19 @@ class VoiceEngine:
             self.audio_buffer.append(bytes(indata))
 
         try:
-            with sd.RawInputStream(samplerate=samplerate, blocksize=block_size,
-                                   dtype='int16', channels=1, callback=callback,
-                                   device=input_device):
+            try:
+                stream = sd.RawInputStream(samplerate=samplerate, blocksize=block_size,
+                                          dtype='int16', channels=1, callback=callback,
+                                          device=input_device)
+            except sd.PortAudioError:
+                if input_device is not None and input_device != -1:
+                    logger.warning(f"Mic device {input_device} invalid. Falling back to default.")
+                    stream = sd.RawInputStream(samplerate=samplerate, blocksize=block_size,
+                                              dtype='int16', channels=1, callback=callback)
+                else:
+                    raise
+            with stream:
                 while not self.stop_event.is_set():
-                    self._emit_state('listening')  # Always listening when in run loop
                     if not self.audio_buffer:
                         time.sleep(0.01)
                         continue
@@ -476,6 +514,11 @@ class VoiceEngine:
                     audio_float32 = audio_int16.astype(np.float32) / 32768.0
                     # Mic Health Check: detect static/dead signal
                     rms = np.sqrt(np.mean(audio_float32**2))
+                    if self._rms_callback:
+                        try:
+                            self._rms_callback(rms)
+                        except Exception:
+                            pass
                     if not hasattr(self, '_rms_history'):
                         self._rms_history = deque(maxlen=50)
                     self._rms_history.append(rms)
@@ -493,24 +536,29 @@ class VoiceEngine:
                     with torch.no_grad():
                         vad_confidence = self.vad_model(torch.from_numpy(audio_float32), samplerate).item()
 
-                    # During TTS playback, skip VAD entirely — don't listen to self
+                    # Contextual VAD threshold: higher during TTS to avoid echo
                     if self.tts_active.is_set():
-                        time.sleep(0.001)
-                        continue
+                        vad_threshold = 0.60
+                        required_vad_frames = 10  # ~300 ms sustained speech
+                    else:
+                        vad_threshold = 0.40
+                        required_vad_frames = 3   # ~90 ms
 
-                    if vad_confidence > 0.4:
+                    if vad_confidence > vad_threshold:
                         speech_frame_count += 1
                     else:
                         speech_frame_count = 0
 
-                    # Require 3+ consecutive VAD frames to start a phrase
-                    # This filters transient noise (clicks, taps)
-                    if speech_frame_count >= 3:
+                    # Require sustained VAD frames to start a phrase
+                    if speech_frame_count >= required_vad_frames:
                         if not phrase_buffer:
                             phrase_start_time = time.time()
                             # Add pre-roll to the start of the phrase to catch initial words
                             phrase_buffer.extend(list(pre_roll))
                             pre_roll.clear()
+                            if self._widget_callback:
+                                try: self._widget_callback("listening")
+                                except Exception: pass
                         phrase_buffer.append(audio_int16)
                         silence_start = None
                     else:
@@ -521,9 +569,13 @@ class VoiceEngine:
                             duration = time.time() - phrase_start_time
                             silence_duration = time.time() - silence_start
 
-                            # Adaptive timeout: allow longer pauses for longer sentences
-                            dynamic_silence_timeout = self.config.vad_silence_timeout
-                            if duration > 3.0: dynamic_silence_timeout *= 1.5
+                            base = self.config.vad_silence_timeout
+                            if duration < 2.0:
+                                dynamic_silence_timeout = base
+                            elif duration < 5.0:
+                                dynamic_silence_timeout = base * 0.67
+                            else:
+                                dynamic_silence_timeout = base * 0.50
 
                             if silence_duration > dynamic_silence_timeout or duration > self.config.phrase_max_duration:
 
@@ -531,19 +583,59 @@ class VoiceEngine:
                                 phrase_buffer = []
                                 silence_start = None
 
+                                self.timer.mark("speech_end")
+                                self.timer.mark("asr_start")
                                 if duration >= self.config.phrase_min_duration:
-                                    self._emit_state('thinking')
                                     threading.Thread(target=self._process_phrase, args=(full_phrase,), daemon=True).start()
 
+                            elif silence_duration > 0.4 and duration > 2.0:
+                                # Snapshot current buffer for warm-up ASR, keep collecting
+                                # Debounce: max 1 warmup submission per second
+                                if time.time() - self._last_warmup_time >= 1.0 and phrase_buffer:
+                                    self._last_warmup_time = time.time()
+                                    warmup_phrase = np.concatenate(phrase_buffer)
+                                    threading.Thread(
+                                        target=self._process_phrase,
+                                        args=(warmup_phrase, {"is_warmup": True}),
+                                        daemon=True
+                                    ).start()
+
                     time.sleep(0.001)
+        except sd.PortAudioError as e:
+            logger.error(f"Mic fatal error: {e}")
+            return
         except Exception as e:
             logger.error(f"InputStream error: {e}")
     def _asr_poller_loop(self):
+        respawn_count = 0
+        max_respawns = 10
         while not self.stop_event.is_set():
             try:
                 # Check if process is still alive
                 if not self.asr_process.is_alive():
-                    logger.warning("ASR worker process died. Respawning...")
+                    if respawn_count >= max_respawns:
+                        logger.error(f"ASR worker died {max_respawns} times. Giving up.")
+                        break
+                    respawn_count += 1
+                    backoff = min(respawn_count * 2, 30)
+                    logger.warning(f"ASR worker died. Respawning in {backoff}s... (attempt {respawn_count}/{max_respawns})")
+                    time.sleep(backoff)
+                    # Drain stale items from input queue to prevent immediate shutdown
+                    drained = 0
+                    while not self.asr_input_queue.empty():
+                        try:
+                            self.asr_input_queue.get_nowait()
+                            drained += 1
+                        except Exception:
+                            break
+                    if drained:
+                        logger.info(f"Drained {drained} stale items from ASR input queue")
+                    # Drain stale output
+                    while not self.asr_output_queue.empty():
+                        try:
+                            self.asr_output_queue.get_nowait()
+                        except Exception:
+                            break
                     self.asr_process = mp.Process(
                         target=asr_worker_process,
                         args=(
@@ -556,25 +648,47 @@ class VoiceEngine:
                         daemon=True
                     )
                     self.asr_process.start()
+                    respawn_count = 0  # Reset on successful restart
 
                 # Poll for results with a timeout
                 try:
-                    text, confidence = self.asr_output_queue.get(timeout=0.05)
-                    if text:
-                        logger.info(f"stt_result | {text} ({confidence:.2f})")
-                        self.on_speech(text)
+                    result = self.asr_output_queue.get(timeout=0.05)
                 except queue.Empty:
                     continue
+                if len(result) == 3:
+                    text, confidence, flags = result
+                else:
+                    text, confidence = result
+                    flags = {}
+                is_final = not flags.get("is_warmup", False)
+                if is_final:
+                    if text:
+                        self.timer.mark("asr_done")
+                        self.timer.log_delta("speech_end", "asr_done", "speech_end_to_asr")
+                        logger.info(f"stt_result | {text} ({confidence:.2f})")
+                        with self._warmup_lock:
+                            self._pending_warmup_text = ""
+                        self.on_speech(text)
+                else:
+                    if text:
+                        logger.info(f"warmup_asr | {text} ({confidence:.2f})")
+                        with self._warmup_lock:
+                            self._pending_warmup_text = text
             except Exception as e:
                 logger.error(f"asr_poller_loop_error | {e}")
                 time.sleep(1)
 
 
-    def _process_phrase(self, audio_data):
+    def _process_phrase(self, audio_data, flags=None):
         try:
+            flags = flags or {}
+            # For final (non-warmup) calls, seed with warm-up text
+            if not flags.get("is_warmup") and self._pending_warmup_text:
+                with self._warmup_lock:
+                    flags["warmup_context"] = self._pending_warmup_text
             # Serialize audio data and put on queue
             # Ensure it's float32 for Whisper
             audio_data_f32 = audio_data.astype(np.float32) / 32768.0
-            self.asr_input_queue.put((audio_data_f32.tobytes(), 16000))
+            self.asr_input_queue.put((audio_data_f32.tobytes(), 16000, flags))
         except Exception as e:
             logger.error(f"process_phrase_error | {e}")

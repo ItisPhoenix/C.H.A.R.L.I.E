@@ -22,10 +22,13 @@ dependencies = [
     "markdownify>=1.2.2",
     "onnxruntime>=1.26.0",
     "mcp>=0.1.0",
-    "python-socketio[asyncio-server]>=5.0.0",
-    "fastapi>=0.100.0",
-    "uvicorn>=0.20.0",
+    "torchaudio>=2.5.1",
+    "PySide6>=6.6.0",
+    "pynput>=1.7.6",
 ]
+
+[tool.setuptools.packages.find]
+include = ["charlie*"]
 
 [tool.uv]
 managed = true

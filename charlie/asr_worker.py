@@ -1,4 +1,3 @@
-import os
 import logging
 import numpy as np
 from faster_whisper import WhisperModel
@@ -46,33 +45,44 @@ def asr_worker_process(input_queue: mp.Queue, output_queue: mp.Queue, model_size
                 continue
             if payload is None:  # Shutdown signal
                 break
-            
-            audio_data_bytes, sample_rate = payload
+
+            # Backward-compatible: 2-tuple or 3-tuple
+            if len(payload) == 3:
+                audio_data_bytes, sample_rate, flags = payload
+            else:
+                audio_data_bytes, sample_rate = payload
+                flags = {}
+            is_warmup = flags.get("is_warmup", False)
+
             audio_data = np.frombuffer(audio_data_bytes, dtype=np.float32)
-            
+
             start_time = time.time()
-            segments, info = whisper.transcribe(
-                audio_data,
+
+            # Fast-path for warm-up: beam=1, best_of=1, no VAD filter
+            transcribe_kwargs = dict(
                 language=default_language,
-                initial_prompt="I am speaking to my witty and intelligent AI assistant, Charlie.",
-                beam_size=5,
-                best_of=5,
-                vad_filter=True,
+                initial_prompt=flags.get("warmup_context", "I am speaking to my witty and intelligent AI assistant, Charlie."),
                 word_timestamps=False,
                 condition_on_previous_text=False,
             )
-            
+            if is_warmup:
+                transcribe_kwargs.update(beam_size=1, best_of=1, vad_filter=False)
+            else:
+                transcribe_kwargs.update(beam_size=5, best_of=5, vad_filter=True)
+
+            segments, info = whisper.transcribe(audio_data, **transcribe_kwargs)
+
             text = "".join([s.text for s in segments]).strip()
             confidence = info.language_probability
             latency_ms = (time.time() - start_time) * 1000
-            logger.info(f"pipeline_stage | stage=asr | latency_ms={latency_ms:.1f}")
-            output_queue.put((text, confidence))
+            logger.info(f"pipeline_stage | stage=asr | latency_ms={latency_ms:.1f} | warmup={is_warmup}")
+            output_queue.put((text, confidence, {"is_warmup": is_warmup}))
             
         except KeyboardInterrupt:
             break
         except Exception as e:
             logger.error(f"ASR Worker: Error during transcription: {e}")
-            output_queue.put(("", 0.0))
+            output_queue.put(("", 0.0, {"is_warmup": False}))
 
     logger.info("ASR Worker: Shutting down.")
 

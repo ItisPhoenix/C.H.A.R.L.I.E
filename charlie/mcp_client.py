@@ -122,7 +122,7 @@ class CharlieMCPClient:
             return ""
 
         lines = ["\n\nAvailable MCP tools (use TOOL: server/tool_name({...}) to invoke):"]
-        # Payload limit: only inject first 15 tools to stay under Groq/TPM limits
+        # Payload limit: only inject first 15 tools to stay under token-per-minute limits
         MAX_TOOLS = 15
         for key, info in sorted(self._tools.items())[:MAX_TOOLS]:
             desc = info["description"][:120] if info["description"] else "No description"
@@ -144,12 +144,12 @@ class CharlieMCPClient:
         for name, (transport_ctx, session_ctx) in self._contexts.items():
             try:
                 await session_ctx.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"mcp_session_close_error | {name} | {type(e).__name__}: {e}")
             try:
                 await transport_ctx.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"mcp_transport_close_error | {name} | {type(e).__name__}: {e}")
         self._contexts.clear()
         self._sessions.clear()
         self._tools.clear()

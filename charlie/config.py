@@ -60,10 +60,14 @@ class Config:
     
     # Barge-in Configuration
     enable_barge_in: bool = os.getenv("ENABLE_BARGE_IN", "true").lower() == "true"
+    # LLM Timeouts — local (private network) gets short timeout; cloud gets longer
+    local_llm_timeout_sec: float = float(os.getenv("LOCAL_LLM_TIMEOUT_SEC", "8.0"))
+    cloud_llm_timeout_sec: float = float(os.getenv("CLOUD_LLM_TIMEOUT_SEC", "15.0"))
+    # Reasoning/thinking toggle — disable for fast-path latency
+    llm_disable_reasoning: bool = os.getenv("LLM_DISABLE_REASONING", "true").lower() == "true"
+    fast_llm_disable_reasoning: bool = os.getenv("FAST_LLM_DISABLE_REASONING", "true").lower() == "true"
 
-    # Buddy UI Configuration
-    enable_buddy_ui: bool = os.getenv("ENABLE_BUDDY_UI", "true").lower() == "true"
-    buddy_port: int = int(os.getenv("BUDDY_PORT", "8765"))
+
 
     
     emotion_response_map: Dict[str, List[str]] = None
