@@ -50,12 +50,18 @@ def asr_worker_process(input_queue: mp.Queue, output_queue: mp.Queue, model_size
             if payload is None:  # Shutdown signal
                 break
 
-            # Backward-compatible: 2-tuple or 3-tuple
-            if len(payload) == 3:
-                audio_data_bytes, sample_rate, flags = payload
-            else:
-                audio_data_bytes, sample_rate = payload
+            # Robust unpacking: 3-tuple, 2-tuple, or raw numpy array
+            if isinstance(payload, tuple) and len(payload) == 3:
+                audio_data_bytes, _, flags = payload
+            elif isinstance(payload, tuple) and len(payload) == 2:
+                audio_data_bytes, _ = payload
                 flags = {}
+            elif isinstance(payload, np.ndarray):
+                audio_data_bytes = payload.tobytes()
+                flags = {}
+            else:
+                logger.error(f"ASR Worker: Invalid payload type: {type(payload)}")
+                continue
             is_warmup = flags.get("is_warmup", False)
 
             audio_data = np.frombuffer(audio_data_bytes, dtype=np.float32)

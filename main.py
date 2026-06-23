@@ -6,6 +6,10 @@ import logging
 import re
 import time
 import asyncio
+# Windows: pyzmq needs Selector event loop, not Proactor
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+import subprocess
 
 
 # --- Text normalization for multi-app commands ---
@@ -54,9 +58,37 @@ def _normalize_app_list(text: str) -> str:
 from pathlib import Path
 
 # 1. SETUP ENVIRONMENT FIRST
+class SafeStreamWrapper:
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, data):
+        try:
+            return self.stream.write(data)
+        except OSError as e:
+            if e.errno not in (22, 32, 9):
+                raise
+        except ValueError:
+            pass
+
+    def flush(self):
+        try:
+            return self.stream.flush()
+        except OSError as e:
+            if e.errno not in (22, 32, 9):
+                raise
+        except ValueError:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
 if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True, write_through=True)
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True, write_through=True)
+    sys.stdout = SafeStreamWrapper(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True, write_through=True))
+    sys.stderr = SafeStreamWrapper(io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True, write_through=True))
+else:
+    sys.stdout = SafeStreamWrapper(sys.stdout)
+    sys.stderr = SafeStreamWrapper(sys.stderr)
 
 os.makedirs("logs", exist_ok=True)
 LOG_FILE = "logs/charlie.log"
@@ -82,8 +114,9 @@ root_logger.addHandler(console_handler)
 from charlie.config import config
 from charlie.session_store import SessionStore
 from charlie.core import Brain
-from charlie.voice import VoiceEngine
 from charlie.personality import get_emotion_for_context, parse_voice_command
+from charlie.voice import VoiceEngine
+from charlie.ipc import EventBus
 
 logger = logging.getLogger("charlie.main")
 
@@ -92,13 +125,13 @@ logger = logging.getLogger("charlie.main")
 _SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+')
 _CLAUSE_BOUNDARY = re.compile(r'(?<=[,;:])\s+(?=[A-Z"])')
 _MAX_FLUSH_CHARS = 100  # Force-flush if no boundary seen
-
 async def main():
     logger.info("Charlie is waking up...")
     voice = None
     store = None
     speech_echo_cooldown = 0.0
     last_emotion = "neutral"
+    web_proc = None
 
     try:
         store = SessionStore(config.session_db_path)
@@ -120,6 +153,9 @@ async def main():
 
     loop = asyncio.get_running_loop()
 
+    # Placeholder for event_bus (set later in async context)
+    event_bus = None
+
     def on_speech(text: str):
         text = _normalize_app_list(text)
         logger.info(f"Speech detected: {text}")
@@ -130,6 +166,10 @@ async def main():
         if time.time() < speech_echo_cooldown:
             logger.info(f"Echo suppressed: {text}")
             return
+
+        # Emit transcript event
+        if event_bus:
+            asyncio.create_task(event_bus.emit("transcript", {"text": text, "source": "voice"}))
 
         print(f"\rHeard: {text}", flush=True)
         if voice.is_speaking.is_set():
@@ -200,6 +240,10 @@ async def main():
             sparkle = sparkle_map.get(detected_emotion, "")
         last_emotion = detected_emotion
 
+        # Emit thinking event
+        if event_bus:
+            asyncio.create_task(event_bus.emit("thinking", {}))
+
         print("Charlie is thinking...", end="\r", flush=True)
 
         # Streaming buffer
@@ -214,6 +258,10 @@ async def main():
             print(chunk, end="", flush=True)
             sentence_buffer += chunk
             full_reply_buffer += chunk
+
+            # Emit token event
+            if event_bus:
+                asyncio.create_task(event_bus.emit("token", {"text": chunk}))
 
             # Progressive flush: sentence > clause > char limit.
             # Each tier checks independently so partial matches don't block.
@@ -242,6 +290,10 @@ async def main():
         # Final TTS -- chunks already printed everything
         if sentence_buffer.strip():
             voice.speak(sparkle + sentence_buffer, detected_emotion)
+
+        # Emit response_done event
+        if event_bus:
+            asyncio.create_task(event_bus.emit("response_done", {}))
 
         # Archive assistant reply
         if full_reply_buffer.strip():
@@ -277,9 +329,49 @@ async def main():
             # Fire-and-forget: learning runs in background, doesn't block user
             asyncio.create_task(_background_learn(text, full_reply_buffer))
 
+    async def consume_web_commands(event_bus, brain, voice):
+        """Read commands from the web UI and dispatch them."""
+        while True:
+            try:
+                cmd = await event_bus.next_command()
+                print(f"[ZMQ] Received command: {cmd}", flush=True)
+                if cmd.get("type") == "chat":
+                    await _process(cmd["text"], brain, voice)
+                elif cmd.get("type") == "stop":
+                    voice.stop_tts()
+                    brain.cancel_chat()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error handling web command: {e}", exc_info=True)
+
+    # Start web server subprocess
+    try:
+        web_entry = os.path.join(os.path.dirname(__file__), "charlie", "web_server_entry.py")
+        web_proc = subprocess.Popen(
+            [sys.executable, web_entry],
+            cwd=os.path.dirname(__file__),
+        )
+        logger.info(f"Web server subprocess started (PID: {web_proc.pid})")
+    except Exception as e:
+        logger.warning(f"Failed to start web server: {e}")
+
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
-        voice = VoiceEngine(config, on_speech=on_speech)
+        # TTS lifecycle callbacks for IPC events
+        def on_tts_start():
+            if event_bus:
+                asyncio.run_coroutine_threadsafe(event_bus.emit("speaking_start", {}), loop)
+
+        def on_tts_stop():
+            if event_bus:
+                asyncio.run_coroutine_threadsafe(event_bus.emit("speaking_stop", {}), loop)
+        voice = VoiceEngine(
+            config,
+            on_speech=on_speech,
+            on_tts_start=on_tts_start,
+            on_tts_stop=on_tts_stop,
+        )
         voice.start()
 
         # Connection test & Dynamic Welcome
@@ -303,10 +395,17 @@ async def main():
         print(f"\rCharlie: {welcome_msg}", flush=True)
         voice.speak(welcome_msg, "neutral")
 
-        while True:
-            await asyncio.sleep(1)
+        # Run voice loop + web command consumer concurrently via ZeroMQ
+        async with EventBus(pub_port=5555, pull_port=5556, is_producer=True) as bus:
+            event_bus = bus
+            await asyncio.gather(
+                _voice_loop_idle(voice),
+                consume_web_commands(bus, brain, voice),
+            )
     except KeyboardInterrupt:
         logger.info("Interrupt received, shutting down...")
+    except asyncio.CancelledError:
+        pass
     except Exception as e:
         logger.exception(f"Fatal error: {e}")
     finally:
@@ -316,10 +415,25 @@ async def main():
             await brain.close()
         if 'store' in locals() and store is not None:
             store.close()
+        if web_proc is not None:
+            web_proc.terminate()
+            try:
+                web_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                web_proc.kill()
 
         logging.shutdown()
         # Force exit to ensure background threads don't hang the process on Windows
         os._exit(0)
+
+
+async def _voice_loop_idle(voice):
+    """Keep the main coroutine alive while voice threads run."""
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        pass
 
 if __name__ == "__main__":
     try:

@@ -17,7 +17,7 @@ import sounddevice as sd
 import re
 import queue
 import multiprocessing as mp
-from typing import Callable
+from typing import Callable, Optional
 from kokoro_onnx import Kokoro
 from collections import deque
 from charlie.asr_worker import asr_worker_process
@@ -93,9 +93,13 @@ _CONTRACTIONS = {
 
 
 class VoiceEngine:
-    def __init__(self, config, on_speech: Callable[[str], None]):
+    def __init__(self, config, on_speech: Callable[[str], None],
+                 on_tts_start: Optional[Callable[[], None]] = None,
+                 on_tts_stop: Optional[Callable[[], None]] = None):
         self.config = config
         self.on_speech = on_speech
+        self._on_tts_start = on_tts_start
+        self._on_tts_stop = on_tts_stop
         self.is_speaking = threading.Event()
         self.tts_active = threading.Event()
         self.stop_event = threading.Event()
@@ -370,6 +374,7 @@ class VoiceEngine:
 
     def _playback_worker(self):
         """Dedicated playback thread."""
+        tts_started_fired = False
         while not self.stop_event.is_set():
             try:
                 if self.stop_tts_event.is_set():
@@ -381,8 +386,22 @@ class VoiceEngine:
                     self.stop_tts_event.clear()
                     self.is_speaking.clear()
                     self.tts_active.clear()
+                    if tts_started_fired and self._on_tts_stop:
+                        try:
+                            self._on_tts_stop()
+                        except Exception:
+                            pass
+                    tts_started_fired = False
 
                 samples, sample_rate, mouth_values = self.playback_queue.get(timeout=0.01)
+                if not self.is_speaking.is_set():
+                    # First chunk of a new TTS run
+                    tts_started_fired = True
+                    if self._on_tts_start:
+                        try:
+                            self._on_tts_start()
+                        except Exception:
+                            pass
                 self.is_speaking.set()
                 self.tts_active.set()
 
@@ -409,9 +428,16 @@ class VoiceEngine:
             except Exception as e:
                 logger.error(f"playback_error | {e}")
             finally:
+                was_speaking = self.is_speaking.is_set()
                 self.is_speaking.clear()
                 self.tts_active.clear()
                 self._last_speech_end = time.time()
+                if was_speaking and tts_started_fired and self._on_tts_stop:
+                    try:
+                        self._on_tts_stop()
+                    except Exception:
+                        pass
+                    tts_started_fired = False
 
     # -----------------------------------------------------------------------
     # Number and symbol -> word conversion

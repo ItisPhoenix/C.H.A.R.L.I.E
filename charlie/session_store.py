@@ -55,6 +55,14 @@ class SessionStore:
                         turn_id INTEGER
                     );
                 """)
+                # Sessions metadata table
+                self.conn.execute("""
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        session_id TEXT PRIMARY KEY,
+                        title TEXT NOT NULL DEFAULT 'New Chat',
+                        created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
+                    );
+                """)
                 
                 # Check for FTS5 support before creating virtual table
                 fts5_supported = True
@@ -160,6 +168,66 @@ class SessionStore:
             except sqlite3.Error as e:
                 logger.error(f"Search failed: {e}")
                 return []
+
+    def get_recent(self, limit: int = 20, session_id: str = "default") -> List[Tuple[str, str]]:
+        """Returns the most recent messages for a session, oldest first."""
+        retries = 2
+        for attempt in range(retries):
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                    (session_id, limit),
+                )
+                rows = cursor.fetchall()
+                return list(reversed(rows))
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e) and attempt < retries - 1:
+                    logger.warning("Database locked during get_recent, retrying...")
+                    time.sleep(0.05)
+                else:
+                    logger.error(f"get_recent failed: {e}")
+                    return []
+            except sqlite3.Error as e:
+                logger.error(f"get_recent failed: {e}")
+                return []
+    def create_session(self, session_id: str, title: str = "New Chat") -> None:
+        """Creates a new session metadata entry."""
+        try:
+            with self.conn:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO sessions (session_id, title) VALUES (?, ?)",
+                    (session_id, title),
+                )
+        except sqlite3.Error as e:
+            logger.error(f"create_session failed: {e}")
+
+    def get_sessions(self) -> List[Tuple[str, str, str]]:
+        """Returns all sessions as (session_id, title, created_at), newest first."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT session_id, title, created_at FROM sessions ORDER BY created_at DESC"
+            )
+            return cursor.fetchall()
+        except sqlite3.Error as e:
+            logger.error(f"get_sessions failed: {e}")
+            return []
+
+    def update_session_title(self, session_id: str, title: str) -> None:
+        """Updates the title of a session."""
+        try:
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE sessions SET title = ? WHERE session_id = ?",
+                    (title, session_id),
+                )
+        except sqlite3.Error as e:
+            logger.error(f"update_session_title failed: {e}")
+
+    def get_session_messages(self, session_id: str, limit: int = 50) -> List[Tuple[str, str]]:
+        """Returns messages for a specific session, oldest first."""
+        return self.get_recent(limit=limit, session_id=session_id)
 
     def close(self) -> None:
         """Closes connection cleanly."""

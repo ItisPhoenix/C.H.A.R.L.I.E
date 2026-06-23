@@ -1,0 +1,4 @@
+fastapi>=0.110.4
+hypercorn>=0.14.4
+python-multipart>=0.0.9
+pyzmq>=25.0
