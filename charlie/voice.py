@@ -12,7 +12,7 @@ import torch
 import re
 import queue
 import multiprocessing as mp
-from typing import Callable, Optional
+from typing import Callable
 from kokoro_onnx import Kokoro
 from collections import deque
 from charlie.asr_worker import asr_worker_process
@@ -36,6 +36,11 @@ class VoiceEngine:
         self.asr_output_queue = mp.Queue()
         self.asr_process = None
         self.speech_start_time = 0.0
+        self._last_speech_time = 0.0
+        self._last_speech_text = ""
+        self.speech_echo_window = 2.0
+        self.speech_echo_max_words = 3
+        self._last_speech_end = time.time()
         # Initialize Models
         self._ensure_models()
         # 1. LOCAL VAD (Silero)
@@ -90,12 +95,9 @@ class VoiceEngine:
                 break
             except OSError:
                 continue
-        if cuda_found:
-            os.environ["ONNX_PROVIDER"] = "CUDAExecutionProvider"
-            logger.info(f"Kokoro TTS: CUDA detected ({dll}) — using GPU.")
-        else:
-            os.environ["ONNX_PROVIDER"] = "CPUExecutionProvider"
-            logger.info("Kokoro TTS: No CUDA runtime found — using CPU.")
+        # Force Kokoro to CPU to prevent concurrent CUDA context deadlocks with Whisper ASR
+        os.environ["ONNX_PROVIDER"] = "CPUExecutionProvider"
+        logger.info("Kokoro TTS: Forced to CPU to avoid CUDA conflicts.")
 
         model_path = os.path.join(config.kokoro_model_dir, "kokoro-v1.0.onnx")
         voices_path = os.path.join(config.kokoro_model_dir, "voices-v1.0.bin")
@@ -176,12 +178,16 @@ class VoiceEngine:
         self.stop_tts_event.set()
         # Drain pending TTS tasks
         while not self.tts_queue.empty():
-            try: self.tts_queue.get_nowait()
-            except queue.Empty: break
+            try:
+                self.tts_queue.get_nowait()
+            except queue.Empty:
+                break
         # Drain pending playback
         while not self.playback_queue.empty():
-            try: self.playback_queue.get_nowait()
-            except queue.Empty: break
+            try:
+                self.playback_queue.get_nowait()
+            except queue.Empty:
+                break
         sd.stop()
 
 
@@ -189,6 +195,15 @@ class VoiceEngine:
         """Sanitize text for TTS and enqueue. Non-blocking."""
         # Strip reasoning tags using shared helper
         text = strip_internal_reasoning(text)
+        now = time.time()
+        if now - getattr(self, "_last_speech_time", 0.0) < self.speech_echo_window:
+            new_words = set(text.lower().split())
+            old_words = set(getattr(self, "_last_speech_text", "").lower().split())
+            if (len(new_words) <= self.speech_echo_max_words and
+                    new_words and new_words.issubset(old_words)):
+                return ""
+        self._last_speech_time = now
+        self._last_speech_text = text
         # Strip URLs
         text = re.sub(r'\(https?://.*?\)', '', text)
         text = re.sub(r'https?://\S+', '', text)
@@ -266,8 +281,10 @@ class VoiceEngine:
             try:
                 if self.stop_tts_event.is_set():
                     while not self.playback_queue.empty():
-                        try: self.playback_queue.get_nowait()
-                        except queue.Empty: break
+                        try:
+                            self.playback_queue.get_nowait()
+                        except queue.Empty:
+                            break
                     self.stop_tts_event.clear()
                     self.tts_active.clear()
 
@@ -291,6 +308,7 @@ class VoiceEngine:
                     if self.stop_tts_event.is_set():
                         sd.stop()
                         break
+                    self._last_speech_end = time.time()
                     time.sleep(0.01)
                 sd.wait()
                 mouth_thread.join(timeout=0.1)
@@ -301,6 +319,7 @@ class VoiceEngine:
             finally:
                 self.is_speaking.clear()
                 self.tts_active.clear()
+                self._last_speech_end = time.time()
     
     def _tts_worker_loop(self):
         """TTS synthesis worker. Streams audio chunks to the playback queue
@@ -340,14 +359,17 @@ class VoiceEngine:
     @staticmethod
     def _number_to_words(n: int) -> str:
         """Convert integer to English words (0—999 billion)."""
-        if n == 0: return "zero"
+        if n == 0:
+            return "zero"
         ones = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
                 "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
                 "seventeen", "eighteen", "nineteen"]
         tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
         def _h(n: int) -> str:
-            if n == 0: return ""
-            if n < 20: return ones[n]
+            if n == 0:
+                return ""
+            if n < 20:
+                return ones[n]
             if n < 100:
                 t = tens[n // 10]
                 r = n % 10
@@ -377,10 +399,14 @@ class VoiceEngine:
         """
         def _get_suffix_word(s):
             s = s.lower()
-            if s == "k": return " thousand"
-            if s == "m": return " million"
-            if s == "b": return " billion"
-            if s == "t": return " trillion"
+            if s == "k":
+                return " thousand"
+            if s == "m":
+                return " million"
+            if s == "b":
+                return " billion"
+            if s == "t":
+                return " trillion"
             return ""
 
         def _replace_currency(m):
@@ -434,7 +460,8 @@ class VoiceEngine:
                 int_words = self._number_to_words(int(integer)) if integer and integer != "0" else "zero"
                 frac_digits = " ".join(self._number_to_words(int(d)) for d in fraction)
                 return f"{int_words} point {frac_digits}"
-            except ValueError: return m.group(0)
+            except ValueError:
+                return m.group(0)
         text = re.sub(r'(?<!\d\.)(?<!\w)(\d{1,3}(?:,\d{3})*)\.(\d+)(?!\.\d)', _replace_decimal_simple, text)
         
         # 5. Long standalone numbers: 12345
@@ -504,9 +531,10 @@ class VoiceEngine:
                     audio_float32 = audio_int16.astype(np.float32) / 32768.0
                     # Mic Health Check: detect static/dead signal
                     rms = np.sqrt(np.mean(audio_float32**2))
-                    if self._rms_callback:
+                    rms_cb = getattr(self, '_rms_callback', None)
+                    if rms_cb:
                         try:
-                            self._rms_callback(rms)
+                            rms_cb(rms)
                         except Exception:
                             pass
                     if not hasattr(self, '_rms_history'):

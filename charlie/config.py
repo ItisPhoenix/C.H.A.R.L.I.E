@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
@@ -35,4 +36,18 @@ class Config:
     
     llm_disable_reasoning: bool = os.getenv("LLM_DISABLE_REASONING", "true").lower() == "true"
 
+    memory_file: str = os.getenv("MEMORY_FILE", "MEMORY.md")
+    user_file: str = os.getenv("USER_FILE", "USER.md")
+    prompt_memory_max: int = int(os.getenv("PROMPT_MEMORY_MAX", "2200"))
+    session_db_path: str = os.getenv("SESSION_DB_PATH", "sessions.db")
 config = Config()
+
+# Load SOUL.md into config.soul at startup
+_SOUL_PATH = Path("SOUL.md")
+_DEFAULT_SOUL = (
+    "You are Charlie. You are warm but efficient. You get to the point fast, then offer warmth."
+    " No fluff. No sycophancy. You speak like a trusted colleague who actually cares."
+)
+if not _SOUL_PATH.exists():
+    _SOUL_PATH.write_text(_DEFAULT_SOUL, encoding="utf-8")
+config.soul = _SOUL_PATH.read_text(encoding="utf-8")
