@@ -8,7 +8,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Current State
 Charlie is a headless, voice-first local AI assistant running on Windows 11.
 Pipeline: **VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> playback**.
-Single explicit LLM backend via async httpx (OpenAI-compatible API).
+Primary LLM via async httpx (OpenAI-compatible API) with automatic fallback to secondary provider.
+### App & Website Opening
+- SOUL.md instructs the LLM to use `shell_execute` with Windows `start` command for opening apps and websites.
+- "Open YouTube" maps to `shell_execute("start https://youtube.com")`.
+- "Open Calculator" maps to `shell_execute("start calc")`.
+
+### Semantic Memory (`memory` tool)
+- New `memory` tool for persistent memory management (MEMORY.md and USER.md).
+- Actions: `add` (append), `replace` (swap substring), `remove` (delete substring).
+- Enforces char limits: MEMORY.md max 2200 chars, USER.md max 1375 chars.
+- System prompt explicitly tells the LLM to use memory for "remember X" and "what do you know about me" queries.
+
+### Episodic Memory (`session_search` tool)
+- New `session_search` tool queries SQLite FTS5 index for past conversation turns.
+- Returns top 5 matching messages formatted as `[role]: content`.
+- Falls back to SQL LIKE if FTS5 unavailable.
+
+### Provider Fallback
+- Automatic failover to secondary LLM provider on connection/timeout/rate-limit errors.
+- Configurable via `FALLBACK_LLM_URL`, `FALLBACK_LLM_API_KEY`, `FALLBACK_LLM_MODEL` env vars.
+- Both initial and tool-followup requests have fallback.
+- No behavior change when fallback vars are unset.
+
+### Text-Based Tool Parser Fix
+- `_extract_tool_calls` now parses multi-argument tool calls from text format.
+- `memory("add", "user", "text")` correctly maps positional args to named parameters.
+- Added `memory` and `session_search` to `_TOOL_PARAM_NAMES` map.
 
 ### Tool Loop Hardening
 - **Silent content kill fix**: If no tool calls detected after stream ends, yield accumulated content immediately instead of returning nothing.
@@ -63,7 +89,7 @@ Single explicit LLM backend via async httpx (OpenAI-compatible API).
 - Session store: SQLite with FTS5 search (falls back to SQL LIKE).
 
 ### Testing
-- 32/32 pytest passing.
+- 34/34 pytest passing.
 - ruff lint clean.
 - AST parse clean across all Python files.
 

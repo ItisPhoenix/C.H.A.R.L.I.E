@@ -9,7 +9,7 @@ from charlie.tools import registry, ToolRegistry, web_search, shell_execute, fil
 def test_registry_registration_and_schema():
     definitions = registry.get_tool_definitions()
     names = {d["function"]["name"] for d in definitions}
-    assert names == {"web_search", "shell_execute", "file_read", "file_write"}
+    assert names == {"web_search", "shell_execute", "file_read", "file_write", "memory", "session_search"}
     assert any(d["function"]["parameters"]["required"] == ["query"] for d in definitions)
 
 

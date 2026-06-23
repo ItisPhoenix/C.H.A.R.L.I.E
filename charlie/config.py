@@ -10,6 +10,10 @@ class Config:
     llm_url: str = os.getenv("LLM_URL", "")
     llm_key: str = os.getenv("LLM_API_KEY", "no-key")
     llm_model: str = os.getenv("LLM_MODEL", "")
+    # Fallback LLM provider (used when primary LLM fails)
+    fallback_llm_url: str = os.getenv("FALLBACK_LLM_URL", "")
+    fallback_llm_key: str = os.getenv("FALLBACK_LLM_API_KEY", "no-key")
+    fallback_llm_model: str = os.getenv("FALLBACK_LLM_MODEL", "")
     
     # -1 = system default input/output device; >=0 = specific device index
     mic_index: int = int(os.getenv("MIC_INDEX", "-1"))
@@ -36,12 +40,17 @@ class Config:
     
     llm_disable_reasoning: bool = os.getenv("LLM_DISABLE_REASONING", "true").lower() == "true"
 
+    # Iteration Budget & Context Compression
+    iteration_budget_max: int = int(os.getenv("ITERATION_BUDGET_MAX", "12"))
+    context_window: int = int(os.getenv("CONTEXT_WINDOW", "8192"))
+    compression_threshold: float = float(os.getenv("COMPRESSION_THRESHOLD", "0.8"))
     memory_file: str = os.getenv("MEMORY_FILE", "MEMORY.md")
     user_file: str = os.getenv("USER_FILE", "USER.md")
     prompt_memory_max: int = int(os.getenv("PROMPT_MEMORY_MAX", "2200"))
     session_db_path: str = os.getenv("SESSION_DB_PATH", "sessions.db")
     # Search provider (SearXNG self-hosted)
     searxng_url: str = os.getenv("SEARXNG_URL", "")
+    soul: str = ""
 config = Config()
 
 # Load SOUL.md into config.soul at startup

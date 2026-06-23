@@ -16,7 +16,7 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 - **Voice-first**: Continuous listening, speaks responses aloud. No keyboard needed.
 - **Streaming TTS**: Speaks as the LLM generates -- no waiting for full replies.
 - **Barge-in**: Interrupt Charlie mid-sentence. Say "stop", "wait", or just start talking.
-- **Tool calling**: Web search (SearXNG/Exa/Tavily/DuckDuckGo), shell commands, file I/O.
+- **Tool calling**: Web search, shell commands, file I/O, persistent memory, session history search.
 - **Emotional tone**: Adapts speech speed and energy based on your mood.
 - **Persistent memory**: Remembers facts across sessions via `MEMORY.md` and `USER.md`.
 - **Local-first**: All speech processing runs locally. Only the LLM call goes to the network.
@@ -31,7 +31,7 @@ main.py                   Entry point, logging, voice loop, TTS flush
 charlie/
   core.py                 Brain class -- LLM orchestration, tool loop, streaming
   voice.py                VoiceEngine -- VAD, ASR, TTS (Kokoro), audio I/O
-  tools.py                ToolRegistry -- web_search, shell_execute, file_read/write
+  tools.py                ToolRegistry -- web_search, shell_execute, file_read/write, memory, session_search
   config.py               Config dataclass from .env
   personality.py          Emotion classification + voice command parsing
   asr_worker.py           Whisper ASR subprocess
@@ -84,6 +84,11 @@ LLM_MODEL=your-model-id
 # Optional: Self-hosted SearXNG for private web search
 SEARXNG_URL=http://localhost:8080
 
+# Optional: Fallback LLM (auto-failover when primary fails)
+# FALLBACK_LLM_URL=https://your-fallback-endpoint/v1
+# FALLBACK_LLM_API_KEY=your-key
+# FALLBACK_LLM_MODEL=your-model
+
 # Optional: Hardware overrides
 MIC_INDEX=-1          # -1 = system default, >=0 = specific device
 OUTPUT_INDEX=-1
@@ -116,6 +121,9 @@ All settings are via environment variables (`.env` file). See `.env.example` for
 | `SILENCE_TIMEOUT` | `1.0` | Seconds of silence before processing |
 | `ENABLE_BARGE_IN` | `true` | Allow interrupting Charlie mid-response |
 | `LLM_DISABLE_REASONING` | `true` | Disable chain-of-thought for lower latency |
+| `FALLBACK_LLM_URL` | (empty) | Secondary LLM endpoint for automatic failover |
+| `FALLBACK_LLM_API_KEY` | `no-key` | API key for the fallback LLM |
+| `FALLBACK_LLM_MODEL` | (empty) | Model ID for the fallback LLM |
 
 ---
 
@@ -207,6 +215,7 @@ When the LLM wants to use a tool (e.g., web search):
 3. LLM generates a final answer from the result
 4. Max 4 tool rounds per question
 5. Text normalization: multi-app commands (e.g., "Open Chrome calculator notepad") get "and" inserted between app names before LLM call
+6. Multi-argument tools (memory, session_search) parsed from text-based TOOL: format
 
 ### Barge-in
 When you speak during Charlie's response:

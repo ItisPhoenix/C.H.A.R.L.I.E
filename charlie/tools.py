@@ -14,6 +14,9 @@ import httpx
 
 from typing import Callable, Dict, Any, List
 
+from charlie.config import config
+from charlie.session_store import SessionStore
+
 logger = logging.getLogger("charlie.tools")
 
 # --- Search tuning ---
@@ -74,12 +77,13 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: Dict[str, Dict[str, Any]] = {}
 
-    def register_tool(self, name: str, description: str, schema: Dict[str, Any]):
+    def register_tool(self, name: str, description: str, schema: Dict[str, Any], is_interactive: bool = False):
         def decorator(func: Callable[..., Any]):
             self._tools[name] = {
                 "func": func,
                 "description": description,
                 "schema": schema,
+                "is_interactive": is_interactive,
             }
             return func
         return decorator
@@ -96,6 +100,9 @@ class ToolRegistry:
             }
             for name, info in self._tools.items()
         ]
+
+    def is_interactive(self, name: str) -> bool:
+        return self._tools.get(name, {}).get("is_interactive", False)
 
     def build_tool_prompt(self) -> str:
         """Build a plain-text tool description for the system prompt."""
@@ -307,6 +314,7 @@ def web_search(query: str) -> str:
         },
         "required": ["command"],
     },
+    is_interactive=True,
 )
 def shell_execute(command: str) -> str:
     _BLOCKED_KEYWORDS = ("rm -rf", "mkfs", "dd if=", "format ", "shutdown", "reboot", "poweroff")
@@ -417,3 +425,134 @@ def file_write(path: str, content: str) -> str:
     except Exception as e:
         logger.exception("File write error: %s", path)
         return f"Error writing file: {e}"
+
+
+_MEMORY_MAX_CHARS = {
+    "memory": 2200,
+    "user": 1375,
+}
+
+
+@registry.register_tool(
+    name="memory",
+    description="Manage persistent memory files (MEMORY.md for system context, USER.md for user preferences). Actions: add appends text, replace swaps old_text with content, remove deletes a substring match.",
+    schema={
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["add", "replace", "remove"],
+                "description": "The action to perform: add appends, replace swaps a substring, remove deletes a substring."
+            },
+            "target": {
+                "type": "string",
+                "enum": ["memory", "user"],
+                "description": "Which file to modify: memory = MEMORY.md (system context, max 2200 chars), user = USER.md (user preferences, max 1375 chars)."
+            },
+            "content": {
+                "type": "string",
+                "description": "Text content to add or use as replacement (required for add/replace, ignored for remove)."
+            },
+            "old_text": {
+                "type": "string",
+                "description": "Substring to find and replace or remove (required for replace/remove, ignored for add)."
+            }
+        },
+        "required": ["action", "target"]
+    },
+)
+def memory(action: str, target: str, content: str = "", old_text: str = "") -> str:
+    if target not in _MEMORY_MAX_CHARS:
+        return f"Error: target must be 'memory' or 'user', got '{target}'."
+
+    max_chars = _MEMORY_MAX_CHARS[target]
+    path = config.memory_file if target == "memory" else config.user_file
+
+    try:
+        existing = ""
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as handle:
+                existing = handle.read()
+
+        if action == "add":
+            updated = existing + content if existing else content
+        elif action == "replace":
+            if not old_text:
+                return "Error: old_text is required for replace actions."
+            if old_text not in existing:
+                return f"Error: old_text not found in {path}."
+            matches = existing.count(old_text)
+            if matches > 1:
+                return (
+                    f"Error: old_text matched {matches} times in {path}; "
+                    "provide a more specific string."
+                )
+            updated = existing.replace(old_text, content, 1)
+        elif action == "remove":
+            if not old_text:
+                return "Error: old_text is required for remove actions."
+            if old_text not in existing:
+                return f"Error: old_text not found in {path}."
+            matches = existing.count(old_text)
+            if matches > 1:
+                return (
+                    f"Error: old_text matched {matches} times in {path}; "
+                    "provide a more specific string."
+                )
+            updated = existing.replace(old_text, "", 1)
+        else:
+            return f"Error: Unsupported action '{action}'."
+
+        if len(updated) > max_chars:
+            return (
+                f"Error: {path} would be {len(updated)} chars (max {max_chars}). "
+                "Consolidate entries before adding more."
+            )
+
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(updated)
+
+        return f"Updated {path}: {len(updated)}/{max_chars} chars."
+    except Exception as e:
+        logger.exception("Memory tool error: action=%s target=%s", action, target)
+        return f"Error updating memory: {e}"
+
+
+@registry.register_tool(
+    name="session_search",
+    description="Search past conversation history stored in the session database. Returns matching messages from previous sessions.",
+    schema={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search query to find in past conversations."
+            }
+        },
+        "required": ["query"]
+    },
+)
+def session_search(query: str) -> str:
+    store = None
+    try:
+        store = SessionStore(db_path=config.session_db_path)
+        results = store.search(query, limit=5)
+    except Exception as e:
+        logger.exception("Session search error: %s", query)
+        return f"Error searching session history: {e}"
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                logger.debug("Session store close failed", exc_info=True)
+
+    if not results:
+        return "No matching history found."
+
+    lines = []
+    for item in results:
+        role = item.get("role", "unknown")
+        message = item.get("message", "")
+        lines.append(f"- [{role}]: {message}")
+    return "\n".join(lines)
