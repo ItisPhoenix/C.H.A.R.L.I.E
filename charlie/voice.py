@@ -161,7 +161,7 @@ class VoiceEngine:
         if self.asr_process:
             self.asr_input_queue.put(None)
             self.asr_process.join(timeout=2.0)
-            if self.asr_process.is_set():
+            if self.asr_process.is_alive():
                 self.asr_process.terminate()
 
     def stop_tts(self):
@@ -570,7 +570,13 @@ class VoiceEngine:
         # Start ASR worker process
         self.asr_process = mp.Process(
             target=asr_worker_process,
-            args=(self.asr_input_queue, self.asr_output_queue),
+            args=(
+                self.asr_input_queue,
+                self.asr_output_queue,
+                self.config.whisper_model,
+                self.config.gpu_device,
+                self.config.default_language,
+            ),
             daemon=True,
         )
         self.asr_process.start()
@@ -645,7 +651,8 @@ class VoiceEngine:
             try:
                 result = self.asr_output_queue.get(timeout=0.1)
                 if result and self.on_speech:
-                    text = result.get("text", "").strip()
+                    # Worker sends (text, confidence, flags_dict) tuples
+                    text = result[0].strip() if isinstance(result, tuple) else str(result).strip()
                     if text:
                         self.on_speech(text)
             except queue.Empty:

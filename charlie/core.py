@@ -39,6 +39,37 @@ _TOOL_PARAM_NAMES: Dict[str, str] = {
     "file_read": "path",
     "file_write": "path",
 }
+# --- Fast-path: time/date queries answered from system clock (zero LLM) ---
+_TIME_DATE_RE = re.compile(
+    r"(?:what(?:'s|\s+is|\s+s)?\s+(?:the\s+)?(?:current\s+)?(?:time|date|day|today))"
+    r"|(?:tell\s+(?:me\s+)?(?:the\s+)?(?:time|date|day))"
+    r"|(?:what\s+(?:time|date|day)\s+is\s+it)"
+    r"|(?:what\s+(?:day\s+of\s+the\s+week|month|year)\s+is\s+it)"
+    r"|(?:what(?:'s|\s+is|\s+s)?\s+today(?:'s\s+date)?)"
+    r"|(?:(?:current|right\s+now)\s+(?:time|date))",
+    re.IGNORECASE,
+)
+
+
+def _answer_time_date(query: str) -> Optional[str]:
+    """Answer time/date queries directly from system clock. Returns None if not a time/date query."""
+    if not _TIME_DATE_RE.search(query):
+        return None
+    now = __import__("datetime").datetime.now()
+    q = query.lower().strip()
+    if "time" in q:
+        return f"It's {now.strftime('%I:%M %p')}."
+    if "date" in q or "today" in q:
+        return f"Today is {now.strftime('%A, %B %d, %Y')}."
+    if "month" in q:
+        return f"It's {now.strftime('%B')}."
+    if "year" in q:
+        return f"It's {now.strftime('%Y')}."
+    if "week" in q:
+        return f"Today is {now.strftime('%A')}."
+    if "day" in q:
+        return f"Today is {now.strftime('%A, %B %d, %Y')}."
+    return None
 
 
 def strip_internal_reasoning(text: str) -> str:
@@ -79,6 +110,12 @@ class Brain:
         from datetime import datetime
 
         generation = self._chat_generation
+        # --- Fast-path: time/date queries bypass LLM entirely ---
+        fast = _answer_time_date(user_input)
+        if fast is not None:
+            logger.info("Fast-path time/date: %s -> %s", user_input, fast)
+            yield fast
+            return
 
         # Read MEMORY.md and USER.md
         memory_content = ""
@@ -205,36 +242,37 @@ class Brain:
         # Duplicate tool call cache
         _seen_tool_calls: Dict[str, str] = {}
 
+        # Concurrent tool execution helper
+        async def _exec_one(call: Dict[str, Any]) -> str:
+            ck = f"{call['name']}({json.dumps(call['arguments'], sort_keys=True)})"
+            if ck in _seen_tool_calls:
+                logger.info(f"Tool {call['name']} already executed, reusing result")
+                return _seen_tool_calls[ck]
+            try:
+                r = await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        None, tool_registry.execute_tool, call['name'], call['arguments']
+                    ),
+                    timeout=_TOOL_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                r = f"Error: Tool '{call['name']}' timed out after {_TOOL_TIMEOUT_SEC}s"
+                logger.warning(f"Tool {call['name']} timed out")
+            _seen_tool_calls[ck] = r
+            return r
+
         i = 0
         while i < _MAX_TOOL_ROUNDS:
             if not tool_calls:
                 break
 
-            # Tool execution with per-call timeout + duplicate guard
-            tool_results = []
-            for call in tool_calls:
-                cache_key = f"{call['name']}({json.dumps(call['arguments'], sort_keys=True)})"
-                if cache_key in _seen_tool_calls:
-                    result = _seen_tool_calls[cache_key]
-                    logger.info(f"Tool call {call['name']} already executed, reusing result")
-                else:
-                    try:
-                        result = await asyncio.wait_for(
-                            asyncio.get_running_loop().run_in_executor(
-                                None, tool_registry.execute_tool, call['name'], call['arguments']
-                            ),
-                            timeout=_TOOL_TIMEOUT_SEC,
-                        )
-                    except asyncio.TimeoutError:
-                        result = f"Error: Tool '{call['name']}' timed out after {_TOOL_TIMEOUT_SEC}s"
-                        logger.warning(f"Tool {call['name']} timed out")
-                    _seen_tool_calls[cache_key] = result
-                tool_results.append({
-                    "tool_call_id": call.get("id"),
-                    "role": "tool",
-                    "name": call["name"],
-                    "content": result,
-                })
+            exec_results = await asyncio.gather(
+                *[_exec_one(c) for c in tool_calls]
+            )
+            tool_results = [
+                {"tool_call_id": c.get("id"), "role": "tool", "name": c["name"], "content": r}
+                for c, r in zip(tool_calls, exec_results)
+            ]
 
             # Text-based tool calls (Ollama) vs native function calling
             is_text_based = any(c.get("id") is None for c in tool_calls)

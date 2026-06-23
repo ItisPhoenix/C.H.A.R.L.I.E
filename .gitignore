@@ -28,3 +28,7 @@ models/
 # OS
 .DS_Store
 Thumbs.db
+# Personal data - contains user preferences and memory
+MEMORY.md
+USER.md
+SOUL.md
