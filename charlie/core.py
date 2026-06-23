@@ -277,17 +277,30 @@ class Brain:
             # Text-based tool calls (Ollama) vs native function calling
             is_text_based = any(c.get("id") is None for c in tool_calls)
             if is_text_based:
-                tool_summary = "Tool results:\n"
+                tool_summary = ""
                 for c, r in zip(tool_calls, tool_results):
-                    tool_summary += (
-                        f"{c['name']}({c['arguments']}) returned: "
-                        f"{r['content'][:_TOOL_RESULT_MAX_CHARS]}\n"
-                    )
+                    result_content = r['content'][:_TOOL_RESULT_MAX_CHARS]
+                    # Add explicit confirmation for shell_execute
+                    if c['name'] == 'shell_execute':
+                        cmd = c.get('arguments', '')
+                        if 'Command executed successfully' in result_content:
+                            tool_summary += (
+                                f"shell_execute{cmd} executed successfully. "
+                                f"The command is now running.\n"
+                            )
+                        else:
+                            tool_summary += (
+                                f"shell_execute{cmd} returned: {result_content}\n"
+                            )
+                    else:
+                        tool_summary += (
+                            f"{c['name']}({c['arguments']}) returned: {result_content}\n"
+                        )
                 tool_summary += (
-                    "\nIMPORTANT: Use the tool results above to answer the user's question. "
-                    "Do NOT call any more tools. Reply with the answer now."
+                    "\nIMPORTANT: The tools above have been executed. "
+                    "Confirm to the user what was done. Do NOT call any more tools."
                 )
-                messages.append({"role": "assistant", "content": tool_summary})
+                messages.append({"role": "tool", "content": tool_summary})
             else:
                 messages.append({
                     "role": "assistant",

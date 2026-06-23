@@ -94,7 +94,7 @@ Use the exact tuple `("no-key", "no_key")`. Never `== "no-key"` alone -- this ha
 | `charlie/personality.py` | Emotion classification + voice command parsing. Pure keyword matching. | LLM calls or I/O. |
 | `charlie/asr_worker.py` | Subprocess entry for Whisper. Only file that imports `faster_whisper`. | Other Charlie modules. |
 | `charlie/session_store.py` | SQLite + FTS5 session history. | Anything outside session scope. |
-| `main.py` | Entry point. Logging setup, voice loop, TTS flush logic, barge-in. | Feature code -- delegate to modules. |
+| `main.py` | Entry point. Logging setup, voice loop, TTS flush logic, barge-in, text normalization for multi-app commands. | Feature code -- delegate to modules. |
 
 ---
 
@@ -105,7 +105,7 @@ Use the exact tuple `("no-key", "no_key")`. Never `== "no-key"` alone -- this ha
 - **TTS flush**: Sentence boundaries first, then clause, then force-flush at 100 chars.
 - **Text humanization** runs in `voice.py:speak()` before queuing to Kokoro. Strip markdown, normalize unicode, convert dashes to commas, remove wrapper quotes.
 - **Streaming-first**: All data flows as generators. Time-To-First-Audio must be prioritized.
-- **Never allocate avoidably**: No needless copies, no unnecessary preprocessing.
+- **Text normalization**: `_normalize_app_list()` in `main.py` inserts "and" between app names in multi-app commands before LLM call.
 
 ---
 
@@ -164,3 +164,14 @@ use a full file rewrite with `write` instead of sequential `edit` calls.
 Ollama models do NOT support native function calling (`tools`/`tool_choice` payload).
 Inject tool descriptions into system prompt text and parse text-based tool invocations.
 Native `tool_calls` format only works with OpenAI/Claude-class models.
+
+### Tool Result Format for Local Models
+Local models (Ollama) expect tool results as `{"role": "tool", "content": ...}`, NOT `{"role": "assistant", "content": ...}`.
+Using "assistant" causes models to deny capability after successfully executing tools.
+Also add explicit confirmation in tool summary (e.g., "executed successfully, now running") so the model understands the action completed.
+
+### Multi-App Voice Commands
+STT transcriptions often omit conjunctions between items (e.g., "Open Chrome calculator notepad").
+Small LLMs treat this as one entity. Fix: insert "and" between known app names BEFORE sending to LLM.
+Implementation: `_normalize_app_list()` in `main.py` uses regex + known-app set to add conjunctions.
+Cost: zero LLM calls, works with any model. Apply in `on_speech()` before `_process()`.

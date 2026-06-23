@@ -13,7 +13,9 @@ Single explicit LLM backend via async httpx (OpenAI-compatible API).
 ### Tool Loop Hardening
 - **Silent content kill fix**: If no tool calls detected after stream ends, yield accumulated content immediately instead of returning nothing.
 - **Follow-up TOOL: leak fix**: Gated follow-up stream yields to prevent raw `TOOL:` text leaking into TTS.
-- **Stop-calling-tools guard**: Post-tool-result injection appends `IMPORTANT: Do NOT call any more tools. Reply with the answer now.`
+- **Tool result format**: Use `{"role": "tool", "content": ...}` instead of `{"role": "assistant", ...}` for tool results -- local models expect this format.
+- **Tool result confirmation**: Explicit success message after `shell_execute` ("executed successfully, now running") prevents model from denying capability.
+- **Multi-app text normalization**: `_normalize_app_list()` in `main.py` inserts "and" between app names in commands like "Open Chrome calculator notepad" before LLM call. Zero-cost, model-agnostic.
 - **Duplicate tool call guard**: `_seen_tool_calls` dict caches by `name(sorted_args_json)`, reuses result on duplicate.
 - **Tool timeout**: `asyncio.wait_for(run_in_executor(...), timeout=15.0)` prevents infinite hangs.
 - **Generation counter for cancel**: Monotonically increasing `_chat_generation` counter avoids race conditions between old/new `chat_stream` calls.

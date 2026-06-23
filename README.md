@@ -203,9 +203,10 @@ Charlie does not wait for the full LLM response before speaking. As tokens arriv
 ### Tool Loop
 When the LLM wants to use a tool (e.g., web search):
 1. Tool executes with a 15-second timeout
-2. Result is injected into the conversation
+2. Result is injected into the conversation as `{"role": "tool", "content": ...}`
 3. LLM generates a final answer from the result
 4. Max 4 tool rounds per question
+5. Text normalization: multi-app commands (e.g., "Open Chrome calculator notepad") get "and" inserted between app names before LLM call
 
 ### Barge-in
 When you speak during Charlie's response:

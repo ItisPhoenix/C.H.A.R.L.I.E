@@ -346,7 +346,7 @@ class VoiceEngine:
                         self.tts_queue.get_nowait()
                     self.stop_tts_event.clear()
 
-                item = self.tts_queue.get(timeout=0.1)
+                item = self.tts_queue.get(timeout=0.01)
                 text, emotional_state = item
 
                 speed = 1.0
@@ -382,7 +382,7 @@ class VoiceEngine:
                     self.is_speaking.clear()
                     self.tts_active.clear()
 
-                samples, sample_rate, mouth_values = self.playback_queue.get(timeout=0.1)
+                samples, sample_rate, mouth_values = self.playback_queue.get(timeout=0.01)
                 self.is_speaking.set()
                 self.tts_active.set()
 
