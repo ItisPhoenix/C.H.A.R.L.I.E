@@ -153,16 +153,20 @@ class VoiceEngine:
         logger.info("Continuous listening mode active.")
 
     def stop(self):
+        """Shut down voice engine. Called from main.py finally block."""
+        logger.info("Voice engine stopping...")
         self.stop_event.set()
         self.stop_tts()
         for thread in (self.input_thread, self.tts_worker, self.playback_worker, self.asr_poller_thread):
             if thread and thread.is_alive():
-                thread.join(timeout=5.0)
+                thread.join(timeout=1.0)
         if self.asr_process:
             self.asr_input_queue.put(None)
-            self.asr_process.join(timeout=2.0)
+            self.asr_process.join(timeout=1.0)
             if self.asr_process.is_alive():
                 self.asr_process.terminate()
+                self.asr_process.join(timeout=1.0)
+        logger.info("Voice engine stopped.")
 
     def stop_tts(self):
         self.stop_tts_event.set()
@@ -567,6 +571,13 @@ class VoiceEngine:
             logger.error(f"Failed to open audio stream: {e}")
             return
 
+        try:
+            dev_info = sd.query_devices(input_device)
+            dev_name = dev_info.get('name', str(input_device)) if isinstance(dev_info, dict) else str(input_device)
+        except Exception:
+            dev_name = str(input_device)
+        logger.info(f"Audio stream opened: device={dev_name} rate={samplerate} block={block_size}")
+
         # Start ASR worker process
         self.asr_process = mp.Process(
             target=asr_worker_process,
@@ -594,6 +605,8 @@ class VoiceEngine:
         speech_start_time = 0.0
         last_speech_time = 0.0
         speech_buffer = []
+        _frame_count = 0
+        _rms_log_interval = int(3.0 * samplerate / block_size)  # log every ~3s
 
         while not self.stop_event.is_set():
             try:
@@ -602,6 +615,11 @@ class VoiceEngine:
                 continue
 
             rms = float(np.sqrt(np.mean(data ** 2) + 1e-10))
+            _frame_count += 1
+
+            # Periodic RMS logging for mic level diagnostics
+            if _frame_count % _rms_log_interval == 0:
+                logger.debug(f"vad_rms | rms={rms:.4f} threshold={_vad_threshold} speech={is_speech}")
 
             # Pre-roll: always keep a sliding window of recent audio
             _pre_roll_buffer.append(data.copy())
@@ -611,6 +629,7 @@ class VoiceEngine:
                     is_speech = True
                     speech_start_time = time.time()
                     last_speech_time = time.time()
+                    logger.info(f"vad_speech_onset | rms={rms:.4f} threshold={_vad_threshold}")
                     # Prepend pre-roll buffer to prevent clipping first words
                     speech_buffer = list(_pre_roll_buffer)
                     speech_buffer.append(data.copy())
@@ -636,13 +655,15 @@ class VoiceEngine:
                 is_speech = False
                 audio = np.concatenate(speech_buffer)
                 speech_buffer = []
+                duration_ms = duration * 1000
+                logger.info(f"vad_speech_offset | duration_ms={duration_ms:.0f} samples={len(audio)}")
 
                 # Don't process if TTS is playing (unless barge-in enabled)
                 if self.is_speaking.is_set() and not self.barge_in_enabled:
                     continue
 
-                # Send to ASR
-                self.asr_input_queue.put(audio)
+                # Send to ASR (must be tuple: bytes, sample_rate)
+                self.asr_input_queue.put((audio.tobytes(), samplerate))
                 time.sleep(0.05)
 
     def _asr_poller_loop(self):

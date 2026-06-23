@@ -358,7 +358,7 @@ def shell_execute(command: str) -> str:
             parts.append(f"STDOUT:\n{process.stdout.strip()}")
         if process.stderr and process.stderr.strip():
             parts.append(f"STDERR:\n{process.stderr.strip()}")
-        return "\n".join(parts) or "(no output)"
+        return "\n".join(parts) or "Command executed successfully (no output)."
     except subprocess.TimeoutExpired:
         return f"Error: Command timed out after {SHELL_TIMEOUT}s."
     except Exception as e:
