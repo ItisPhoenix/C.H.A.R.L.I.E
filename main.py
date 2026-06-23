@@ -42,10 +42,11 @@ from charlie.personality import get_emotion_for_context, parse_voice_command
 
 logger = logging.getLogger("charlie.main")
 
-# Sentence/clause splitting for early TTS dispatch
-_CLAUSE_BOUNDARY = re.compile(r'(?<=[,;:])\s+(?=[A-Z"])')
+# Streaming TTS flush thresholds (chars, not words)
+# Industry benchmark: ~100 chars = 15-20 words = ~1s of speech
 _SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+')
-_MAX_FLUSH_CHARS = 200  # Force-flush if no boundary seen within this many chars (~30-40 words)
+_CLAUSE_BOUNDARY = re.compile(r'(?<=[,;:])\s+(?=[A-Z"])')
+_MAX_FLUSH_CHARS = 100  # Force-flush if no boundary seen
 
 async def main():
     logger.info("Charlie is waking up...")
@@ -86,7 +87,7 @@ async def main():
 
         print(f"\rHeard: {text}", flush=True)
         if voice.is_speaking.is_set():
-            # Command words that trigger barge-in even during TTS
+            # Barge-in detection: command words always interrupt immediately
             _BARGE_COMMANDS = {"stop", "wait", "no", "cancel", "quiet", "shut", "enough"}
             words = set(text.lower().strip().split())
             if words & _BARGE_COMMANDS:
@@ -94,9 +95,24 @@ async def main():
                 voice.stop_tts()
                 speech_echo_cooldown = time.time() + 1.5
             else:
-                # Everything else during TTS is echo — suppress
-                logger.info(f"Echo suppressed (during TTS): {text}")
-                return
+                # Echo detection: is this a subset of what Charlie is currently saying?
+                _tts_text = getattr(voice, "_last_speech_text", "").lower()
+                spoken_words = set(_tts_text.split()) if _tts_text else set()
+                new_words = set(text.lower().strip().split())
+                is_echo = (
+                    new_words
+                    and spoken_words
+                    and len(new_words) <= 4
+                    and new_words.issubset(spoken_words)
+                )
+                if is_echo:
+                    logger.info(f"Echo suppressed (during TTS): {text}")
+                    return
+                # New content during TTS -- barge in (cancel current turn)
+                logger.info("Barge-in: New user input during TTS. Canceling.")
+                voice.stop_tts()
+                brain.cancel_chat()
+                speech_echo_cooldown = time.time() + 0.8
 
         # Route !search command
         if text.strip().startswith("!search "):
@@ -153,32 +169,31 @@ async def main():
             sentence_buffer += chunk
             full_reply_buffer += chunk
 
-            # Try sentence boundary first, then clause boundary, then max-char guard
-            boundary = None
-            if ". " in sentence_buffer or "! " in sentence_buffer or "? " in sentence_buffer:
-                boundary = _SENTENCE_BOUNDARY
-            elif ", " in sentence_buffer or "; " in sentence_buffer or ": " in sentence_buffer:
-                boundary = _CLAUSE_BOUNDARY
-            elif len(sentence_buffer) >= _MAX_FLUSH_CHARS:
-                # Force-flush: split ONCE at the last space before limit.
+            # Progressive flush: sentence > clause > char limit.
+            # Each tier checks independently so partial matches don't block.
+            flushed = False
+            for boundary in (_SENTENCE_BOUNDARY, _CLAUSE_BOUNDARY):
+                if boundary.search(sentence_buffer):
+                    parts = boundary.split(sentence_buffer)
+                    if len(parts) > 1:
+                        for part in parts[:-1]:
+                            if part.strip():
+                                voice.speak(part.strip(), detected_emotion)
+                        sentence_buffer = parts[-1]
+                        flushed = True
+                        break  # re-check with new buffer on next chunk
+
+            if not flushed and len(sentence_buffer) >= _MAX_FLUSH_CHARS:
+                # Force-flush at word boundary to avoid mid-word splits
                 idx = sentence_buffer.rfind(' ', 0, _MAX_FLUSH_CHARS)
                 if idx > 0:
-                    voice.speak(sentence_buffer[:idx], detected_emotion)
-                    sentence_buffer = sentence_buffer[idx + 1:]
-                else:
-                    voice.speak(sentence_buffer[:_MAX_FLUSH_CHARS], detected_emotion)
+                    voice.speak(sentence_buffer[:idx].strip(), detected_emotion)
+                    sentence_buffer = sentence_buffer[idx:].lstrip()
+                elif sentence_buffer.strip():
+                    voice.speak(sentence_buffer[:_MAX_FLUSH_CHARS].strip(), detected_emotion)
                     sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
-                continue
 
-            if boundary:
-                parts = boundary.split(sentence_buffer)
-                if len(parts) > 1:
-                    for part in parts[:-1]:
-                        if part.strip():
-                            voice.speak(part, detected_emotion)
-                    sentence_buffer = parts[-1]
-
-        # Final TTS — chunks already printed everything
+        # Final TTS -- chunks already printed everything
         if sentence_buffer.strip():
             voice.speak(sparkle + sentence_buffer, detected_emotion)
 
@@ -189,28 +204,33 @@ async def main():
             except Exception as e:
                 logger.warning(f"Failed to archive assistant message: {e}")
 
-        # Learning loop: extract 0-1 user preferences via fast LLM
+        # Learning loop: deferred to background -- doesn't block next turn
         if full_reply_buffer.strip() and text.strip():
-            try:
-                learning_prompt = (
-                    f"User said: {text}\n"
-                    f"Charlie replied: {full_reply_buffer}\n"
-                    "Extract 0-1 new user preferences (e.g., 'prefers short answers'). "
-                    "Output ONLY the preference line, or output nothing if nothing new."
-                )
-                learning = ""
-                async for chunk in brain.chat_stream(learning_prompt):
-                    learning += chunk
-                learning = learning.strip() if learning.strip() else ""
-                if learning:
-                    u_path = Path(config.user_file)
-                    existing = u_path.read_text(encoding="utf-8") if u_path.exists() else ""
-                    if learning not in existing:
-                        with open(u_path, "a", encoding="utf-8") as f:
-                            f.write(f"\n{learning}")
-                        logger.info(f"Learning: {learning}")
-            except Exception as e:
-                logger.debug(f"Learning loop skipped: {e}")
+            async def _background_learn(user_text: str, reply_text: str):
+                try:
+                    learning_prompt = (
+                        f"User said: {user_text}\n"
+                        f"Charlie replied: {reply_text}\n"
+                        "Extract 0-1 new user preferences (e.g., 'prefers short answers'). "
+                        "Output ONLY the preference line, or output nothing if nothing new."
+                    )
+                    learning = ""
+                    async for chunk in brain.chat_stream(learning_prompt):
+                        learning += chunk
+                    learning = learning.strip() if learning.strip() else ""
+                    if learning:
+                        u_path = Path(config.user_file)
+                        existing = u_path.read_text(encoding="utf-8") if u_path.exists() else ""
+                        if learning not in existing:
+                            with open(u_path, "a", encoding="utf-8") as f:
+                                f.write(f"\n{learning}")
+                            logger.info(f"Learning: {learning}")
+                except Exception as e:
+                    logger.debug(f"Learning loop skipped: {e}")
+
+            # Fire-and-forget: learning runs in background, doesn't block user
+            asyncio.create_task(_background_learn(text, full_reply_buffer))
+
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
         voice = VoiceEngine(config, on_speech=on_speech)

@@ -11,7 +11,7 @@ class Config:
     llm_key: str = os.getenv("LLM_API_KEY", "no-key")
     llm_model: str = os.getenv("LLM_MODEL", "")
     
-    # -1 = system default input/output device; ≥0 = specific device index
+    # -1 = system default input/output device; >=0 = specific device index
     mic_index: int = int(os.getenv("MIC_INDEX", "-1"))
     output_index: int = int(os.getenv("OUTPUT_INDEX", "-1"))
     
@@ -40,6 +40,8 @@ class Config:
     user_file: str = os.getenv("USER_FILE", "USER.md")
     prompt_memory_max: int = int(os.getenv("PROMPT_MEMORY_MAX", "2200"))
     session_db_path: str = os.getenv("SESSION_DB_PATH", "sessions.db")
+    # Search provider (SearXNG self-hosted)
+    searxng_url: str = os.getenv("SEARXNG_URL", "")
 config = Config()
 
 # Load SOUL.md into config.soul at startup

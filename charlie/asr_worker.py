@@ -1,4 +1,5 @@
 import logging
+import queue
 import numpy as np
 from faster_whisper import WhisperModel
 import multiprocessing as mp
@@ -41,7 +42,10 @@ def asr_worker_process(input_queue: mp.Queue, output_queue: mp.Queue, model_size
             # Poll with timeout so KeyboardInterrupt can fire cleanly
             try:
                 payload = input_queue.get(timeout=1.0)
-            except Exception:
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.warning(f"ASR input queue error: {e}")
                 continue
             if payload is None:  # Shutdown signal
                 break

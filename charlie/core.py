@@ -1,3 +1,9 @@
+"""Charlie brain -- LLM orchestration, tool loop, streaming.
+
+Single explicit backend (async httpx). No provider names in code.
+"""
+
+import asyncio
 import logging
 import re
 import json
@@ -10,26 +16,33 @@ logger = logging.getLogger("charlie.core")
 if TYPE_CHECKING:
     from charlie.config import Config
 
+# --- LLM tuning ---
+_LLM_TEMPERATURE = 0.3
+_MAX_TOOL_ROUNDS = 4
+_TOOL_TIMEOUT_SEC = 15.0
+_TOOL_RESULT_MAX_CHARS = 2000
 
-# Shared thinking-tag/reasoning patterns for output cleanups
+# --- Reasoning tag pattern (shared) ---
 _REASONING_RE = re.compile(
     r'(?:'
     r'(?:I\s+(?:should|need|will|can|must|have\s+to)\s+[^.!?]{1,60}?[.!?]\s*)'
-    r'|(?:Let\s+me\s+[^.!?]{1,60}?[.!?]\s*)'
-    r'|(?:First(?:ly)?[,:]?\s+[^.!?]{1,40}?[.!?]\s*)'
-    r'|(?:Based\s+on\s+(?:my\s+)?(?:research|analysis|data|experience|knowledge)[,:]?\s*)'
-    r'|(?:Searching\s+for\s+[^.!?]{1,40}?[.!?]\s*)'
-    r"|(?:I'll\s+[^.!?]{1,40}?[.!?]\s*)"
     r"|(?:Here(?:'s| is)\s+(?:what|the)[^.!?]{1,40}?[.!?]\s*)"
     r'|(?:To answer that,\s*)'
     r'|(?:The user is\s+(?:asking|looking)[^.!?]{1,40}?[.!?]\s*)'
     r')+', re.IGNORECASE
 )
 
+# --- Tool param name map (text-based extraction) ---
+_TOOL_PARAM_NAMES: Dict[str, str] = {
+    "web_search": "query",
+    "shell_execute": "command",
+    "file_read": "path",
+    "file_write": "path",
+}
+
 
 def strip_internal_reasoning(text: str) -> str:
     """Remove model reasoning/thinking tags before user-facing output."""
-    text = re.sub(r'  思考.*?  思考结束', '', text, flags=re.DOTALL)
     text = re.sub(r'<(thought|thinking|longcat_tool_call)>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = _REASONING_RE.sub('', text)
     return text.strip()
@@ -47,13 +60,25 @@ class Brain:
             headers={"Authorization": f"Bearer {config.llm_key}"},
             timeout=60.0,
         )
+        self._chat_generation = 0
 
-    async def close(self):
+    def cancel_chat(self) -> None:
+        """Cancel the current chat generation (barge-in support).
+
+        Increments a monotonic counter. Streaming loops check this counter
+        and break early when it changes -- no event race conditions.
+        """
+        self._chat_generation += 1
+
+    async def close(self) -> None:
         """Close the HTTP client."""
         await self.client.aclose()
 
     async def chat_stream(self, user_input: str) -> AsyncGenerator[str, None]:
         from pathlib import Path
+        from datetime import datetime
+
+        generation = self._chat_generation
 
         # Read MEMORY.md and USER.md
         memory_content = ""
@@ -78,15 +103,23 @@ class Brain:
 
         soul_text = self.config.soul or "You are Charlie. Be concise and warm."
         tools_text = tool_registry.build_tool_prompt()
+        now = datetime.now()
         system_msg = (
             f"{soul_text}\n\n"
+            f"Current date: {now.strftime('%A, %B %d, %Y')}. "
+            f"Current time: {now.strftime('%I:%M %p')}.\n"
             "Output rules: short spoken sentences. No markdown. No lists. No emojis.\n\n"
             f"You have access to these tools:\n{tools_text}\n\n"
             "To use a tool, output a line exactly like:\n"
             'TOOL: tool_name("argument")\n'
-            'Example: TOOL: web_search("latest news")\n'
-            "The system will run the tool and give you the result before you reply.\n"
-            "Only use a tool when you genuinely need external data. Do not guess when you can search.\n\n"
+            'Example: TOOL: web_search("latest news")\n\n'
+            "CRITICAL RULES for tool use:\n"
+            "- Use a tool ONLY when the user explicitly asks for live/external data you cannot know.\n"
+            "- NEVER use tools for: time, date, calculations, math, or general knowledge.\n"
+            "- The current time and date are provided above -- use them directly.\n"
+            "- Use a tool at MOST ONCE per question. Never repeat the same tool call.\n"
+            "- After receiving tool results, answer immediately using those results.\n"
+            "- Do NOT call tools if you already have the answer from prior results.\n\n"
             f"[MEMORY]\n{memory_content}\n\n"
             f"[USER]\n{user_content}"
         )
@@ -95,10 +128,10 @@ class Brain:
             {"role": "user", "content": user_input},
         ]
         tools = tool_registry.get_tool_definitions()
-        payload = {
+        payload: Dict[str, Any] = {
             "model": self.config.llm_model,
             "messages": messages,
-            "temperature": 0.3,
+            "temperature": _LLM_TEMPERATURE,
             "stream": True,
             "tools": tools,
             "tool_choice": "auto",
@@ -114,6 +147,9 @@ class Brain:
             ) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
+                    if self._chat_generation != generation:
+                        logger.info("Chat generation cancelled (barge-in)")
+                        return
                     if not line.startswith("data: "):
                         continue
                     if line.strip() == "data: [DONE]":
@@ -124,7 +160,6 @@ class Brain:
                         content = delta.get("content", "")
                         if content:
                             accumulated += content
-                        # Accumulate streamed tool-call deltas
                         for tc in delta.get("tool_calls", []):
                             idx = tc.get("index", 0)
                             if idx not in _tool_calls_by_index:
@@ -160,15 +195,40 @@ class Brain:
         tool_calls = streamed_tool_calls
         if not tool_calls and accumulated:
             tool_calls = self._extract_tool_calls(accumulated)
+
+        # If no tool calls, yield accumulated content and return
+        if not tool_calls:
+            if accumulated:
+                yield accumulated
+            return
+
+        # Duplicate tool call cache
+        _seen_tool_calls: Dict[str, str] = {}
+
         i = 0
-        max_tool_rounds = 4
-        while i < max_tool_rounds:
+        while i < _MAX_TOOL_ROUNDS:
             if not tool_calls:
                 break
 
+            # Tool execution with per-call timeout + duplicate guard
             tool_results = []
             for call in tool_calls:
-                result = tool_registry.execute_tool(call["name"], call["arguments"])
+                cache_key = f"{call['name']}({json.dumps(call['arguments'], sort_keys=True)})"
+                if cache_key in _seen_tool_calls:
+                    result = _seen_tool_calls[cache_key]
+                    logger.info(f"Tool call {call['name']} already executed, reusing result")
+                else:
+                    try:
+                        result = await asyncio.wait_for(
+                            asyncio.get_running_loop().run_in_executor(
+                                None, tool_registry.execute_tool, call['name'], call['arguments']
+                            ),
+                            timeout=_TOOL_TIMEOUT_SEC,
+                        )
+                    except asyncio.TimeoutError:
+                        result = f"Error: Tool '{call['name']}' timed out after {_TOOL_TIMEOUT_SEC}s"
+                        logger.warning(f"Tool {call['name']} timed out")
+                    _seen_tool_calls[cache_key] = result
                 tool_results.append({
                     "tool_call_id": call.get("id"),
                     "role": "tool",
@@ -176,16 +236,21 @@ class Brain:
                     "content": result,
                 })
 
-            # Check if these are text-based tool calls (no native IDs)
+            # Text-based tool calls (Ollama) vs native function calling
             is_text_based = any(c.get("id") is None for c in tool_calls)
             if is_text_based:
-                # For Ollama models: inject tool results as plain text
                 tool_summary = "Tool results:\n"
                 for c, r in zip(tool_calls, tool_results):
-                    tool_summary += f"{c['name']}({c['arguments']}) returned: {r['content'][:2000]}\n"
+                    tool_summary += (
+                        f"{c['name']}({c['arguments']}) returned: "
+                        f"{r['content'][:_TOOL_RESULT_MAX_CHARS]}\n"
+                    )
+                tool_summary += (
+                    "\nIMPORTANT: Use the tool results above to answer the user's question. "
+                    "Do NOT call any more tools. Reply with the answer now."
+                )
                 messages.append({"role": "assistant", "content": tool_summary})
             else:
-                # For native function-calling models
                 messages.append({
                     "role": "assistant",
                     "content": None,
@@ -203,10 +268,10 @@ class Brain:
                 })
                 messages.extend(tool_results)
 
-            followup_payload = {
+            followup_payload: Dict[str, Any] = {
                 "model": self.config.llm_model,
                 "messages": messages,
-                "temperature": 0.3,
+                "temperature": _LLM_TEMPERATURE,
                 "stream": True,
                 "tools": tools,
                 "tool_choice": "auto",
@@ -222,6 +287,9 @@ class Brain:
                 ) as response:
                     response.raise_for_status()
                     async for line in response.aiter_lines():
+                        if self._chat_generation != generation:
+                            logger.info("Tool follow-up cancelled (barge-in)")
+                            return
                         if not line.startswith("data: "):
                             continue
                         if line.strip() == "data: [DONE]":
@@ -232,7 +300,8 @@ class Brain:
                             content = delta.get("content", "")
                             if content:
                                 accumulated += content
-                                yield content
+                                if not content.strip().startswith("TOOL:"):
+                                    yield content
                             for tc in delta.get("tool_calls", []):
                                 idx = tc.get("index", 0)
                                 if idx not in followup_tc_by_index:
@@ -262,12 +331,7 @@ class Brain:
             i += 1
 
     def _extract_tool_calls(self, text: str) -> List[Dict[str, Any]]:
-        """Extract tool calls from both JSON and text-based TOOL: format.
-
-        Handles:
-        - Native function calling JSON deltas
-        - Text format: TOOL: web_search("query")
-        """
+        """Extract tool calls from both JSON and text-based TOOL: format."""
         calls = []
         if not text:
             return calls
@@ -294,19 +358,12 @@ class Brain:
             except json.JSONDecodeError:
                 pass
 
-        # 2. Try text-based TOOL: format (Ollama models that can't use native tools)
-        # Matches: TOOL: web_search("query") or TOOL:web_search("query")
+        # 2. Try text-based TOOL: format (Ollama models)
         tool_pattern = re.compile(r'TOOL:\s*(\w+)\(\s*["\'](.+?)["\']\s*\)')
         for match in tool_pattern.finditer(text):
             tool_name = match.group(1)
             tool_arg = match.group(2)
-            # Map tool to its primary argument name
-            param_name = {
-                "web_search": "query",
-                "shell_execute": "command",
-                "file_read": "path",
-                "file_write": "path",
-            }.get(tool_name, "query")
+            param_name = _TOOL_PARAM_NAMES.get(tool_name, "query")
             calls.append({
                 "id": None,
                 "name": tool_name,

@@ -1,12 +1,12 @@
 """Lightweight personality and emotion detection for Charlie.
 
 Provides zero-latency keyword-based emotion classification and explicit
-voice command parsing. No LLM calls — pure regex/keyword matching.
+voice command parsing. No LLM calls -- pure regex/keyword matching.
 """
 import re
 from typing import Optional
 
-# ── Emotion keyword maps ──────────────────────────────────────────────────
+# -- Emotion keyword maps --------------------------------------------------
 
 _ENERGETIC_RE = re.compile(
     r"\b(?:urgent|emergency|crash|asap|now|broken|help|happy|amazing|awesome|yay|love|great news|excited)\b",
@@ -17,7 +17,7 @@ _SAD_CALM_RE = re.compile(
     r"\b(?:sad|sorry|terrible|depressed|lonely|miss|unfortunately|bad day|frustrat\w*|annoyed|hate|stupid|why won't|useless)\b",
     re.IGNORECASE,
 )
-# ── Voice command patterns ────────────────────────────────────────────────
+# -- Voice command patterns ------------------------------------------------
 
 _VOICE_COMMANDS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(?:be energetic|speak faster|cheer up)\b", re.IGNORECASE), "energetic"),
@@ -29,15 +29,15 @@ def get_emotion_for_context(user_text: str, history: list) -> str:
     """Classify user intent into an emotion tag via keyword heuristic.
 
     Returns one of: "neutral", "energetic", or "calm".
-    Zero latency — no LLM call.
+    Zero latency -- no LLM call.
     """
     if not user_text or not user_text.strip():
         return "neutral"
 
-    # Frustrated/annoyed → calm (skip validation, just fix it)
-    # Urgent/emergency → energetic
-    # Happy/excited → energetic
-    # Sad/depressed → calm
+    # Frustrated/annoyed -> calm (skip validation, just fix it)
+    # Urgent/emergency -> energetic
+    # Happy/excited -> energetic
+    # Sad/depressed -> calm
     if _SAD_CALM_RE.search(user_text):
         return "calm"
     if _ENERGETIC_RE.search(user_text):
