@@ -198,7 +198,7 @@ def _decompose_query(query: str) -> List[str]:
             f"{b}{context}",
         ]
     else:
-        # Pattern: "X or Y" or "X and Y" — split on the conjunction
+        # Pattern: "X or Y" or "X and Y" - split on the conjunction
         or_match = re.search(r'^(.+?)\s+or\s+(.+?)(?:\s+for\s+.+)?$', q_lower)
         and_match = re.search(r'^(.+?)\s+and\s+(.+?)(?:\s+for\s+.+)?$', q_lower)
         match = or_match or and_match
@@ -211,7 +211,7 @@ def _decompose_query(query: str) -> List[str]:
                 f"{b}{context}",
             ]
         else:
-            # No clear pattern — return original
+            # No clear pattern - return original
             return [query]
 
     return sub_queries[:_DECOMPOSE_MAX_QUERIES]

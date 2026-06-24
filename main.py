@@ -7,7 +7,7 @@ import re
 import time
 import asyncio
 # Windows: pyzmq needs Selector event loop, not Proactor.
-# Suppress the pyzmq RuntimeWarning about add_reader — tornado 6.x
+# Suppress the pyzmq RuntimeWarning about add_reader - tornado 6.x
 # already provides the fallback, but the warning fires on first use.
 import warnings
 if sys.platform == "win32":
@@ -344,7 +344,7 @@ async def main():
                 web_buffer = parts[-1]
 
             # Progressive flush: sentence boundary > force-flush safety net.
-            # Clause boundaries removed — they cause awkward mid-sentence pauses.
+            # Clause boundaries removed - they cause awkward mid-sentence pauses.
             flushed = False
 
             # Early first-flush: wait for first sentence boundary, or force at 150 chars
@@ -387,7 +387,7 @@ async def main():
                     voice.speak(sentence_buffer[:_MAX_FLUSH_CHARS].strip(), detected_emotion)
                     sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
 
-        # Final web UI flush — emit any remaining text stuck in web_buffer
+        # Final web UI flush - emit any remaining text stuck in web_buffer
         if event_bus and web_buffer.strip():
             asyncio.create_task(event_bus.emit("token", {"text": web_buffer.strip(), "session_id": session_id}))
 

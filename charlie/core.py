@@ -399,7 +399,7 @@ _TOOL_RULES = (
     "- Use the session_search tool when the user asks about past conversations.\n"
     "- When the user asks 'what do you know about me', summarize the [USER] section above.\n"
     "- NEVER use tools for: time, date, calculations, math, or general knowledge.\n"
-    "- The current time and date are provided above — use them directly.\n"
+    "- The current time and date are provided above - use them directly.\n"
     "- Use a tool at MOST ONCE per question. Never repeat the same tool call.\n"
     "- After receiving tool results, answer immediately using those results.\n"
     "- Do NOT call tools if you already have the answer from prior results.\n"
@@ -429,7 +429,7 @@ def _build_stable_tier(soul_text: str, use_native_tools: bool) -> str:
     """Build the stable tier: identity, skills, security, tool rules.
     This tier is byte-identical across turns for maximum cache hits."""
     parts = [soul_text, _SKILLS_INDEX, _SECURITY_DIRECTIVES]
-    # Always include text tool instructions — local models ignore native tools payload
+    # Always include text tool instructions - local models ignore native tools payload
     parts.append(_TEXT_TOOL_INSTRUCTIONS)
     parts.append(_TOOL_RULES)
     return "\n\n".join(parts)
@@ -491,12 +491,12 @@ class Brain:
         self._history_max_turns = 5
 
         # --- Hybrid tool calling: detect native support ---
-        # Auto-detect local models (Ollama, LM Studio) — they ignore native tools payload
+        # Auto-detect local models (Ollama, LM Studio) - they ignore native tools payload
         _url = config.llm_url.lower()
         _is_local = any(h in _url for h in ("127.0.0.1", "localhost", ":11434", ":1234"))
         if _is_local:
             self._use_native_tools = False
-            logger.info("Local model detected — using text-based tool calling")
+            logger.info("Local model detected - using text-based tool calling")
         else:
             self._use_native_tools: bool = getattr(config, "native_tool_calling", True)
 
