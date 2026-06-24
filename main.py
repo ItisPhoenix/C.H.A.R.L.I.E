@@ -6,9 +6,13 @@ import logging
 import re
 import time
 import asyncio
-# Windows: pyzmq needs Selector event loop, not Proactor
+# Windows: pyzmq needs Selector event loop, not Proactor.
+# Suppress the pyzmq RuntimeWarning about add_reader — tornado 6.x
+# already provides the fallback, but the warning fires on first use.
+import warnings
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    warnings.filterwarnings("ignore", message=".*add_reader.*", category=RuntimeWarning)
 import subprocess
 
 
@@ -121,11 +125,19 @@ from charlie.ipc import EventBus
 logger = logging.getLogger("charlie.main")
 
 # Streaming TTS flush thresholds (chars, not words)
-# Industry benchmark: ~100 chars = 15-20 words = ~1s of speech
+# First sentence: speak after first sentence boundary. Force-flush at 200 chars if no boundary.
 _SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+')
-_CLAUSE_BOUNDARY = re.compile(r'(?<=[,;:])\s+(?=[A-Z"])')
-_MAX_FLUSH_CHARS = 100  # Force-flush if no boundary seen
+_MAX_FLUSH_CHARS = 200  # Force-flush at word boundary if no sentence boundary seen
 async def main():
+    # Suppress pyzmq CancelledError traceback on Windows shutdown.
+    # See web_server_entry.py for full explanation.
+    loop = asyncio.get_running_loop()
+    _orig_handler = loop.call_exception_handler
+    def _guarded_handler(ctx):
+        if not isinstance(ctx.get("exception"), asyncio.CancelledError):
+            _orig_handler(ctx)
+    loop.call_exception_handler = _guarded_handler
+
     logger.info("Charlie is waking up...")
     voice = None
     store = None
@@ -143,25 +155,81 @@ async def main():
         if voice:
             voice.speak(text, last_emotion)
 
+    loop = asyncio.get_running_loop()
+
+    def on_tool_call(name, args):
+        if event_bus:
+            asyncio.run_coroutine_threadsafe(
+                event_bus.emit("tool_call", {"name": name, "args": args}), loop
+            )
+
+    def on_tool_result(name, result):
+        if event_bus:
+            asyncio.run_coroutine_threadsafe(
+                event_bus.emit("tool_result", {"name": name, "text": result}), loop
+            )
+
     try:
-        brain = Brain(config, on_thought_callback=speaking_callback, session_store=store)
+        brain = Brain(
+            config,
+            on_thought_callback=speaking_callback,
+            session_store=store,
+            on_tool_call=on_tool_call,
+            on_tool_result=on_tool_result
+        )
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")
         if store:
             store.close()
         return
 
-    loop = asyncio.get_running_loop()
-
     # Placeholder for event_bus (set later in async context)
     event_bus = None
+    # Use the session id provided by the web UI when available; otherwise default
+    current_web_session_id = "default"
+
+    def ensure_session_ready(session_id: str):
+        if not session_id:
+            return
+        try:
+            store.create_session(session_id, title="New Chat")
+        except Exception as exc:
+            logger.debug(f"ensure_session_ready skipped: {exc}")
+
+    def update_session_title_from_text(session_id: str, user_text: str) -> None:
+        if not session_id or not user_text:
+            return
+        try:
+            rows = store.get_sessions()
+            session_map = {row[0]: row for row in rows}
+            session = session_map.get(session_id)
+            if not session:
+                return
+            current_title = session[1] or "New Chat"
+            if current_title != "New Chat":
+                return
+            candidate = " ".join(user_text.strip().split()[:6]).strip()
+            if not candidate:
+                return
+            store.update_session_title(session_id, candidate)
+            if event_bus:
+                asyncio.run_coroutine_threadsafe(
+                    event_bus.emit("session_update", {"session_id": session_id, "title": candidate}), loop
+                )
+        except Exception as exc:
+            logger.debug(f"update_session_title_from_text skipped: {exc}")
 
     def on_speech(text: str):
+        nonlocal current_web_session_id
         text = _normalize_app_list(text)
         logger.info(f"Speech detected: {text}")
-        asyncio.run_coroutine_threadsafe(_process(text, brain, voice), loop)
+        session_id = "default"
+        if current_web_session_id not in (None, "default", ""):
+            session_id = current_web_session_id
+        ensure_session_ready(session_id)
+        asyncio.run_coroutine_threadsafe(_process(text, brain, voice, session_id=session_id), loop)
 
-    async def _process(text, brain, voice):
+    async def _process(text, brain, voice, session_id="default", platform="voice"):
         nonlocal speech_echo_cooldown, last_emotion
         if time.time() < speech_echo_cooldown:
             logger.info(f"Echo suppressed: {text}")
@@ -169,7 +237,7 @@ async def main():
 
         # Emit transcript event
         if event_bus:
-            asyncio.create_task(event_bus.emit("transcript", {"text": text, "source": "voice"}))
+            asyncio.create_task(event_bus.emit("transcript", {"text": text, "source": platform, "session_id": session_id}))
 
         print(f"\rHeard: {text}", flush=True)
         if voice.is_speaking.is_set():
@@ -218,7 +286,7 @@ async def main():
 
         # Store user message
         try:
-            store.append("user", text)
+            store.append("user", text, session_id=session_id)
         except Exception as e:
             logger.warning(f"Failed to archive user message: {e}")
         # Voice command detection (before LLM call)
@@ -248,34 +316,61 @@ async def main():
 
         # Streaming buffer
         sentence_buffer = ""
+        web_buffer = ""  # sentence buffer for web UI token events
         full_reply_buffer = ""
         is_first_chunk = True
 
-        async for chunk in brain.chat_stream(text):
+        is_first_flush = True
+        async for chunk in brain.chat_stream(text, platform=platform):
             if is_first_chunk:
                 print("\r" + " " * 30 + "\r", end="", flush=True) # Clear thinking
                 is_first_chunk = False
             print(chunk, end="", flush=True)
             sentence_buffer += chunk
             full_reply_buffer += chunk
+            web_buffer += chunk
 
-            # Emit token event
-            if event_bus:
-                asyncio.create_task(event_bus.emit("token", {"text": chunk}))
+            # Emit web UI token: buffer until sentence boundary for coherent display
+            if event_bus and _SENTENCE_BOUNDARY.search(web_buffer):
+                parts = _SENTENCE_BOUNDARY.split(web_buffer)
+                for part in parts[:-1]:
+                    if part.strip():
+                        asyncio.create_task(event_bus.emit("token", {"text": part.strip() + ". ", "session_id": session_id}))
+                web_buffer = parts[-1]
 
-            # Progressive flush: sentence > clause > char limit.
-            # Each tier checks independently so partial matches don't block.
+            # Progressive flush: sentence boundary > force-flush safety net.
+            # Clause boundaries removed — they cause awkward mid-sentence pauses.
             flushed = False
-            for boundary in (_SENTENCE_BOUNDARY, _CLAUSE_BOUNDARY):
-                if boundary.search(sentence_buffer):
-                    parts = boundary.split(sentence_buffer)
+
+            # Early first-flush: wait for first sentence boundary, or force at 150 chars
+            if is_first_flush:
+                if _SENTENCE_BOUNDARY.search(sentence_buffer):
+                    parts = _SENTENCE_BOUNDARY.split(sentence_buffer)
+                    if len(parts) > 1:
+                        first_sentence = parts[0].strip()
+                        if first_sentence:
+                            voice.speak(first_sentence, detected_emotion)
+                            sentence_buffer = parts[-1]  # keep remainder (next sentence start)
+                            flushed = True
+                            is_first_flush = False
+                elif len(sentence_buffer) >= 150:
+                    idx = sentence_buffer.rfind(' ', 0, 150)
+                    if idx > 0:
+                        voice.speak(sentence_buffer[:idx].strip(), detected_emotion)
+                        sentence_buffer = sentence_buffer[idx:].lstrip()
+                    is_first_flush = False
+                    flushed = True
+
+            if not flushed:
+                # Sentence boundary flush: split on .!? and speak complete sentences
+                if _SENTENCE_BOUNDARY.search(sentence_buffer):
+                    parts = _SENTENCE_BOUNDARY.split(sentence_buffer)
                     if len(parts) > 1:
                         for part in parts[:-1]:
                             if part.strip():
                                 voice.speak(part.strip(), detected_emotion)
                         sentence_buffer = parts[-1]
                         flushed = True
-                        break  # re-check with new buffer on next chunk
 
             if not flushed and len(sentence_buffer) >= _MAX_FLUSH_CHARS:
                 # Force-flush at word boundary to avoid mid-word splits
@@ -287,18 +382,22 @@ async def main():
                     voice.speak(sentence_buffer[:_MAX_FLUSH_CHARS].strip(), detected_emotion)
                     sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
 
+        # Final web UI flush — emit any remaining text stuck in web_buffer
+        if event_bus and web_buffer.strip():
+            asyncio.create_task(event_bus.emit("token", {"text": web_buffer.strip(), "session_id": session_id}))
+
         # Final TTS -- chunks already printed everything
         if sentence_buffer.strip():
             voice.speak(sparkle + sentence_buffer, detected_emotion)
 
         # Emit response_done event
         if event_bus:
-            asyncio.create_task(event_bus.emit("response_done", {}))
+            asyncio.create_task(event_bus.emit("response_done", {"session_id": session_id}))
 
         # Archive assistant reply
         if full_reply_buffer.strip():
             try:
-                store.append("assistant", full_reply_buffer)
+                store.append("assistant", full_reply_buffer, session_id=session_id)
             except Exception as e:
                 logger.warning(f"Failed to archive assistant message: {e}")
 
@@ -313,7 +412,7 @@ async def main():
                         "Output ONLY the preference line, or output nothing if nothing new."
                     )
                     learning = ""
-                    async for chunk in brain.chat_stream(learning_prompt):
+                    async for chunk in brain.chat_stream(learning_prompt, skip_pre_search=True):
                         learning += chunk
                     learning = learning.strip() if learning.strip() else ""
                     if learning:
@@ -334,9 +433,9 @@ async def main():
         while True:
             try:
                 cmd = await event_bus.next_command()
-                print(f"[ZMQ] Received command: {cmd}", flush=True)
+                logger.debug(f"ZMQ received command: {cmd}")
                 if cmd.get("type") == "chat":
-                    await _process(cmd["text"], brain, voice)
+                    await _process(cmd["text"], brain, voice, session_id=cmd.get("session_id", "default"), platform="web")
                 elif cmd.get("type") == "stop":
                     voice.stop_tts()
                     brain.cancel_chat()

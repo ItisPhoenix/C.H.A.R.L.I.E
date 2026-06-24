@@ -225,6 +225,8 @@ class VoiceEngine:
         text = _RE_HASH_HEADER.sub('', text)
         text = _RE_BOLD_ITALIC.sub(r'\1', text)  # *bold* -> bold
         text = _RE_INLINE_CODE.sub(r'\1', text)  # `code` -> code
+        # Strip all remaining bold/italic asterisks/underscores to prevent TTS reading them
+        text = text.replace('**', '').replace('*', '').replace('_', '')
 
         # 5. Wrapper quotes: "Hello world" -> Hello world
         m = _RE_WRAPPER_QUOTES.match(text)
@@ -378,66 +380,70 @@ class VoiceEngine:
         while not self.stop_event.is_set():
             try:
                 if self.stop_tts_event.is_set():
+                    # Drain pending chunks
                     while not self.playback_queue.empty():
                         try:
                             self.playback_queue.get_nowait()
                         except queue.Empty:
                             break
                     self.stop_tts_event.clear()
-                    self.is_speaking.clear()
-                    self.tts_active.clear()
+                    # Fire stop callback if we were speaking
                     if tts_started_fired and self._on_tts_stop:
                         try:
                             self._on_tts_stop()
                         except Exception:
                             pass
+                    self.is_speaking.clear()
+                    self.tts_active.clear()
                     tts_started_fired = False
+                    continue
 
-                samples, sample_rate, mouth_values = self.playback_queue.get(timeout=0.01)
-                if not self.is_speaking.is_set():
-                    # First chunk of a new TTS run
+                try:
+                    samples, sample_rate, mouth_values = self.playback_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                # First chunk of a new TTS run
+                if not tts_started_fired:
                     tts_started_fired = True
+                    self.is_speaking.set()
+                    self.tts_active.set()
                     if self._on_tts_start:
                         try:
                             self._on_tts_start()
                         except Exception:
                             pass
-                self.is_speaking.set()
-                self.tts_active.set()
-
-                def sync_mouth():
-                    for mv in mouth_values:
-                        if self.stop_tts_event.is_set():
-                            break
-                        time.sleep(0.05)
-
-                mouth_thread = threading.Thread(target=sync_mouth, daemon=True)
-                mouth_thread.start()
 
                 sd.play(samples, samplerate=sample_rate)
                 while sd.get_stream() and sd.get_stream().active:
                     if self.stop_tts_event.is_set():
                         sd.stop()
                         break
-                    self._last_speech_end = time.time()
                     time.sleep(0.01)
                 sd.wait()
-                mouth_thread.join(timeout=0.1)
-            except queue.Empty:
-                continue
+                self._last_speech_end = time.time()
+
+                # Check if more chunks are queued — if not, TTS run is done
+                if self.playback_queue.empty() and not self.stop_tts_event.is_set():
+                    if tts_started_fired and self._on_tts_stop:
+                        try:
+                            self._on_tts_stop()
+                        except Exception:
+                            pass
+                    self.is_speaking.clear()
+                    self.tts_active.clear()
+                    tts_started_fired = False
+
             except Exception as e:
                 logger.error(f"playback_error | {e}")
-            finally:
-                was_speaking = self.is_speaking.is_set()
-                self.is_speaking.clear()
-                self.tts_active.clear()
-                self._last_speech_end = time.time()
-                if was_speaking and tts_started_fired and self._on_tts_stop:
+                if tts_started_fired and self._on_tts_stop:
                     try:
                         self._on_tts_stop()
                     except Exception:
                         pass
-                    tts_started_fired = False
+                self.is_speaking.clear()
+                self.tts_active.clear()
+                tts_started_fired = False
 
     # -----------------------------------------------------------------------
     # Number and symbol -> word conversion

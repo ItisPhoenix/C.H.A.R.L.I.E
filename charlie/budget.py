@@ -39,3 +39,8 @@ class IterationBudget:
 
     def is_exhausted(self) -> bool:
         return self.turns_used >= self.max_turns
+
+    @property
+    def remaining(self) -> int:
+        """Number of budget units left."""
+        return max(0, self.max_turns - self.turns_used)

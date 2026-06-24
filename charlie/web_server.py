@@ -8,8 +8,10 @@ import asyncio
 import sys
 
 # Windows: pyzmq needs Selector event loop, not Proactor (must be before any zmq import)
+import warnings as _warnings
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    _warnings.filterwarnings("ignore", message=".*add_reader.*", category=RuntimeWarning)
 
 import json
 import logging
@@ -51,7 +53,7 @@ async def _event_bridge():
         return
 
     async def on_event(event: dict):
-        print(f"[ZMQ] Event received: {event}", flush=True)
+        logger.debug(f"Event received: {event}")
         global pipeline_state
         etype = event.get("type", "")
         # Update pipeline state for status endpoint
@@ -102,12 +104,12 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         while True:
             data = await ws.receive_text()
-            print(f"[WS] Received: {data}", flush=True)
+            logger.debug(f"WS received: {data}")
             try:
                 msg = json.loads(data)
                 if event_bus:
                     await event_bus.send_command(msg)
-                    print(f"[WS] Forwarded command: {msg}", flush=True)
+                    logger.debug(f"WS forwarded command: {msg}")
             except json.JSONDecodeError:
                 logger.warning(f"Invalid JSON from client: {data}")
     except WebSocketDisconnect:
@@ -212,9 +214,9 @@ def start_server(pub_port: int = DEFAULT_EVENT_PORT,
     """Entry point for the web server subprocess."""
     import uvicorn
     logger.info("Starting web server on 0.0.0.0:8000")
-    config = uvicorn.Config(
+    server_config = uvicorn.Config(
         app, host="0.0.0.0", port=8000, log_level="info",
         loop="asyncio",
     )
-    server = uvicorn.Server(config)
+    server = uvicorn.Server(server_config)
     server.run()

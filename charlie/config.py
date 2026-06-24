@@ -39,6 +39,9 @@ class Config:
     enable_barge_in: bool = os.getenv("ENABLE_BARGE_IN", "true").lower() == "true"
     
     llm_disable_reasoning: bool = os.getenv("LLM_DISABLE_REASONING", "true").lower() == "true"
+    # Enable native JSON tool calling for compatible remote APIs (OpenAI, Anthropic).
+    # When False, falls back to text-based TOOL: parsing for local models.
+    native_tool_calling: bool = os.getenv("NATIVE_TOOL_CALLING", "true").lower() == "true"
 
     # Iteration Budget & Context Compression
     iteration_budget_max: int = int(os.getenv("ITERATION_BUDGET_MAX", "12"))

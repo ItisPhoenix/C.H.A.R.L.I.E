@@ -10,6 +10,7 @@ function App() {
   const [currentSessionId, setCurrentSessionId] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
+  const [initialMessages, setInitialMessages] = useState([]);
   const wsUrl = `ws://${window.location.hostname}:8000/ws`;
   const { send, onMessage, readyState } = useWebSocket(wsUrl);
 
@@ -20,8 +21,7 @@ function App() {
       const data = await res.json();
       const sessionList = data.sessions || [];
       setSessions(sessionList);
-      
-      // Auto-select first session if none selected
+
       if (sessionList.length > 0 && !currentSessionId) {
         setCurrentSessionId(sessionList[0].id);
       }
@@ -32,11 +32,37 @@ function App() {
     }
   }, [currentSessionId]);
 
+  const fetchMessages = useCallback(async () => {
+    if (!currentSessionId) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/messages`);
+      const data = await res.json();
+      const normalized = (data.messages || []).map((m) => ({
+        role: String(m.role ?? m.role),
+        content: typeof m.content === 'string' ? m.content : '',
+      }));
+      setInitialMessages(normalized);
+    } catch (err) {
+      console.error('Failed to fetch session messages:', err);
+    }
+  }, [currentSessionId]);
+
   useEffect(() => {
     fetchSessions();
+    const timer = setInterval(fetchSessions, 5000);
+    return () => clearInterval(timer);
   }, [fetchSessions]);
 
-  // Update status based on events
+  useEffect(() => {
+    if (!currentSessionId) {
+      setInitialMessages([]);
+      return;
+    }
+    fetchMessages();
+  }, [currentSessionId, fetchMessages]);
+
   const wrappedOnMessage = useCallback(
     (handler) => {
       return onMessage((event) => {
@@ -95,14 +121,11 @@ function App() {
   }, []);
 
   return (
-    <div className="h-screen flex flex-col bg-gray-900 text-gray-100">
-      {/* Status Bar */}
+    <div className="h-screen flex flex-col bg-[var(--surface)] text-[var(--text-primary)]">
       <StatusBar status={status} wsConnected={readyState === WebSocket.OPEN} />
 
-      {/* Main Content */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar (hidden on mobile) */}
-        <div className="hidden md:block w-64 shrink-0">
+        <div className="hidden md:block w-72 shrink-0">
           <Sidebar
             sessions={sessions}
             loading={loadingSessions}
@@ -113,20 +136,19 @@ function App() {
           />
         </div>
 
-        {/* Chat + Tools */}
         <div className="flex-1 flex flex-col min-w-0">
-          {/* Chat Panel */}
           <div className="flex-1 overflow-hidden">
             <ChatPanel
               onMessage={wrappedOnMessage}
               onSend={handleSend}
               onStop={handleStop}
               status={status}
+              currentSessionId={currentSessionId}
+              initialMessages={initialMessages}
             />
           </div>
 
-          {/* Tool Log */}
-          <ToolLog onMessage={wrappedOnMessage} />
+          <ToolLog onMessage={wrappedOnMessage} currentSessionId={currentSessionId} />
         </div>
       </div>
     </div>

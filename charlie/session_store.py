@@ -24,7 +24,7 @@ class SessionStore:
                 if db_dir and not os.path.exists(db_dir):
                     os.makedirs(db_dir, exist_ok=True)
                 
-                conn = sqlite3.connect(self.db_path, timeout=5.0)
+                conn = sqlite3.connect(self.db_path, timeout=5.0, check_same_thread=False)
                 # Enable foreign keys and set WAL mode for better concurrency
                 conn.execute("PRAGMA foreign_keys = ON;")
                 conn.execute("PRAGMA journal_mode = WAL;")

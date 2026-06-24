@@ -13,8 +13,10 @@ import sys
 from typing import Callable, Optional
 
 # Windows: pyzmq needs Selector event loop, not Proactor
+import warnings as _warnings
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    _warnings.filterwarnings("ignore", message=".*add_reader.*", category=RuntimeWarning)
 
 import zmq
 import zmq.asyncio
