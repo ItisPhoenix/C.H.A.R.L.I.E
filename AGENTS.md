@@ -131,6 +131,7 @@ Additional checks for significant changes:
 - Never execute destructive shell commands without explicit user approval.
 - The `_BLOCKED_KEYWORDS` list in `tools.py` must not be weakened.
 - Shell command blocklist: no `rm -rf`, no `format`, no `shutdown`, no `pkill`/`killall`.
+- NEVER use `write` on an existing code file. `write` overwrites the entire file and destroys its contents. Use the `edit` tool for surgical changes. If `edit` fails on a multi-hunk change, use `eval` with `str.replace` on a narrow old→new block. `write` is ONLY for new files that do not yet exist. There is no undo for `write`.
 
 ---
 

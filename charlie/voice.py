@@ -582,9 +582,19 @@ class VoiceEngine:
         def _callback(indata, frames, time_info, status):
             if status:
                 logger.warning(f"AudioStream status: {status}")
-            self._audio_queue.put(indata.copy())
+            try:
+                self._audio_queue.put_nowait(indata.copy())
+            except queue.Full:
+                try:
+                    self._audio_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._audio_queue.put_nowait(indata.copy())
+                except queue.Full:
+                    pass  # drop oldest frame on overflow
 
-        self._audio_queue: queue.Queue = queue.Queue()
+        self._audio_queue: queue.Queue = queue.Queue(maxsize=32)
 
         # Resolve input device: -1 -> system default
         input_device = None if self.config.mic_index == -1 else self.config.mic_index
