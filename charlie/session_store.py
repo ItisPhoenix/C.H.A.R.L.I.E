@@ -2,7 +2,7 @@ import os
 import sqlite3
 import logging
 import time
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger("charlie.session_store")
 
@@ -63,6 +63,25 @@ class SessionStore:
                         created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
                     );
                 """)
+                # Migration: add updated_at column if missing (existing DBs)
+                try:
+                    self.conn.execute(
+                        "ALTER TABLE sessions ADD COLUMN updated_at TEXT DEFAULT NULL"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+                # Migration: add session-isolation columns for launch identity and lineage
+                for col, coltype in (
+                    ("source", "TEXT DEFAULT 'voice'"),
+                    ("launch_id", "TEXT DEFAULT NULL"),
+                    ("parent_session_id", "TEXT DEFAULT NULL"),
+                ):
+                    try:
+                        self.conn.execute(
+                            f"ALTER TABLE sessions ADD COLUMN {col} {coltype}"
+                        )
+                    except sqlite3.OperationalError:
+                        pass  # Column already exists
                 
                 # Check for FTS5 support before creating virtual table
                 fts5_supported = True
@@ -191,23 +210,56 @@ class SessionStore:
             except sqlite3.Error as e:
                 logger.error(f"get_recent failed: {e}")
                 return []
-    def create_session(self, session_id: str, title: str = "New Chat") -> None:
-        """Creates a new session metadata entry."""
+    def create_session(
+        self,
+        session_id: str,
+        title: str = "New Chat",
+        source: str = "voice",
+        launch_id: Optional[str] = None,
+        parent_session_id: Optional[str] = None,
+    ) -> None:
+        """Creates a session metadata row with origin tracking."""
         try:
             with self.conn:
                 self.conn.execute(
-                    "INSERT OR IGNORE INTO sessions (session_id, title) VALUES (?, ?)",
-                    (session_id, title),
+                    "INSERT OR IGNORE INTO sessions "
+                    "(session_id, title, source, launch_id, parent_session_id) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (session_id, title, source, launch_id, parent_session_id),
+                )
+                # If the row already exists but source/launch_id were NULL,
+                # backfill them so filtering works for sessions created before this migration.
+                self.conn.execute(
+                    "UPDATE sessions SET source = COALESCE(source, ?), "
+                    " launch_id = COALESCE(launch_id, ?) WHERE session_id = ?",
+                    (source, launch_id, session_id),
                 )
         except sqlite3.Error as e:
             logger.error(f"create_session failed: {e}")
 
-    def get_sessions(self) -> List[Tuple[str, str, str]]:
-        """Returns all sessions as (session_id, title, created_at), newest first."""
+    def get_sessions(
+        self,
+        source: Optional[str] = None,
+        launch_id: Optional[str] = None,
+    ) -> List[Tuple[str, str, str, str, str]]:
+        """Returns matching sessions as (session_id, title, created_at, updated_at, launch_id), newest first.
+        
+        Pass source and/or launch_id to filter. Pass neither to list all.
+        """
         try:
             cursor = self.conn.cursor()
+            clauses: List[str] = []
+            params: List[str] = []
+            if source is not None:
+                clauses.append("source = ?")
+                params.append(source)
+            if launch_id is not None:
+                clauses.append("launch_id = ?")
+                params.append(launch_id)
+            where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
             cursor.execute(
-                "SELECT session_id, title, created_at FROM sessions ORDER BY created_at DESC"
+                f"SELECT session_id, title, created_at, updated_at, launch_id FROM sessions{where} ORDER BY created_at DESC",
+                params,
             )
             return cursor.fetchall()
         except sqlite3.Error as e:
@@ -215,15 +267,26 @@ class SessionStore:
             return []
 
     def update_session_title(self, session_id: str, title: str) -> None:
-        """Updates the title of a session."""
+        """Updates the title and updated_at of a session."""
         try:
             with self.conn:
                 self.conn.execute(
-                    "UPDATE sessions SET title = ? WHERE session_id = ?",
+                    "UPDATE sessions SET title = ?, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE session_id = ?",
                     (title, session_id),
                 )
         except sqlite3.Error as e:
             logger.error(f"update_session_title failed: {e}")
+
+    def touch_session(self, session_id: str) -> None:
+        """Updates updated_at timestamp for a session (marks last activity)."""
+        try:
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE sessions SET updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE session_id = ?",
+                    (session_id,),
+                )
+        except sqlite3.Error as e:
+            logger.error(f"touch_session failed: {e}")
 
     def get_session_messages(self, session_id: str, limit: int = 50) -> List[Tuple[str, str]]:
         """Returns messages for a specific session, oldest first."""

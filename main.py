@@ -14,6 +14,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     warnings.filterwarnings("ignore", message=".*add_reader.*", category=RuntimeWarning)
 import subprocess
+import uuid
 
 
 # --- Text normalization for multi-app commands ---
@@ -123,6 +124,10 @@ from charlie.voice import VoiceEngine
 from charlie.ipc import EventBus
 
 logger = logging.getLogger("charlie.main")
+# Unique launch identity -- every main() invocation gets one so the sidebar can
+# filter "this launch" vs "all history" (Hermes-style single-DB isolation).
+_LAUNCH_ID: str = str(uuid.uuid4())
+
 
 # Streaming TTS flush thresholds (chars, not words)
 # First sentence: speak after first sentence boundary. Force-flush at 200 chars if no boundary.
@@ -192,7 +197,7 @@ async def main():
         if not session_id:
             return
         try:
-            store.create_session(session_id, title="New Chat")
+            store.create_session(session_id, title="New Chat", source="voice", launch_id=_LAUNCH_ID)
         except Exception as exc:
             logger.debug(f"ensure_session_ready skipped: {exc}")
 
@@ -447,9 +452,12 @@ async def main():
     # Start web server subprocess
     try:
         web_entry = os.path.join(os.path.dirname(__file__), "charlie", "web_server_entry.py")
+        _web_env = os.environ.copy()
+        _web_env["CHARLIE_LAUNCH_ID"] = _LAUNCH_ID
         web_proc = subprocess.Popen(
             [sys.executable, web_entry],
             cwd=os.path.dirname(__file__),
+            env=_web_env,
         )
         logger.info(f"Web server subprocess started (PID: {web_proc.pid})")
     except Exception as e:

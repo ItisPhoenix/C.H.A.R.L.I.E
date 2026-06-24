@@ -42,12 +42,16 @@ SHELL_TIMEOUT = 10.0
 _TIME_SENSITIVE_KEYWORDS = ("today", "new", "recent", "latest", "breaking")
 _NEWS_KEYWORDS = ("news", "headline", "story", "stories")
 
+# --- Query decomposition ---
+_DECOMPOSE_KEYWORDS = ("compare", "versus", "vs", "or", "and")
+_DECOMPOSE_MIN_WORDS = 10
+_DECOMPOSE_MAX_QUERIES = 3
+
 
 # Pre-compiled regex for stripping conversational fluff from search queries.
 _FLUFF_WORDS = re.compile(
     r'\b(please|could you|can you|tell me|what are|what is|what\'s|show me|find me|'
-    r'i want to know|i need|i\'m looking for|the latest|from today|right now|currently|'
-    r'breaking|just|top|best|good|great)\b',
+    r'i want to know|i need|i\'m looking for|right now|currently)\b',
     re.IGNORECASE,
 )
 
@@ -145,6 +149,11 @@ registry = ToolRegistry()
 def _clean_search_query(query: str) -> str:
     """Strip conversational fluff from a search query."""
     cleaned = _FLUFF_WORDS.sub("", query).strip()
+    # Strip trailing punctuation (question marks, exclamation, etc.)
+    cleaned = re.sub(r'[?!.,;:]+$', '', cleaned).strip()
+    # Strip leading articles
+    cleaned = re.sub(r'^(?:the|a|an)\s+', '', cleaned, flags=re.IGNORECASE).strip()
+    # Collapse multiple spaces
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     return cleaned if len(cleaned.split()) >= MIN_CLEANED_WORDS else query
 
@@ -156,6 +165,81 @@ def _is_ddg_result_valid(text: str) -> bool:
 
 def _truncate(text: str, limit: int = CONTENT_MAX_CHARS) -> str:
     return text[:limit] + "..." if len(text) > limit else text
+
+def _needs_decomposition(query: str) -> bool:
+    """Check if a query is complex enough to benefit from decomposition."""
+    words = query.lower().split()
+    if len(words) > _DECOMPOSE_MIN_WORDS:
+        return True
+    return any(kw in query.lower() for kw in _DECOMPOSE_KEYWORDS)
+
+
+def _decompose_query(query: str) -> List[str]:
+    """Break a complex query into 2-3 sub-queries for better coverage.
+    Returns [original] if decomposition is not needed."""
+    if not _needs_decomposition(query):
+        return [query]
+
+    q_lower = query.lower()
+    sub_queries = []
+
+    # Pattern: "compare X and Y" or "X versus Y" or "X vs Y"
+    compare_match = re.search(
+        r'(?:compare|versus|vs\.?)\s+(.+?)\s+(?:and|vs\.?|versus)\s+(.+?)(?:\s+for\s+.+)?$',
+        q_lower,
+    )
+    if compare_match:
+        a, b = compare_match.group(1).strip(), compare_match.group(2).strip()
+        # Extract the context (e.g., "for web development")
+        context_match = re.search(r'\s+for\s+(.+)$', q_lower)
+        context = f" for {context_match.group(1)}" if context_match else ""
+        sub_queries = [
+            f"{a}{context}",
+            f"{b}{context}",
+        ]
+    else:
+        # Pattern: "X or Y" or "X and Y" — split on the conjunction
+        or_match = re.search(r'^(.+?)\s+or\s+(.+?)(?:\s+for\s+.+)?$', q_lower)
+        and_match = re.search(r'^(.+?)\s+and\s+(.+?)(?:\s+for\s+.+)?$', q_lower)
+        match = or_match or and_match
+        if match:
+            a, b = match.group(1).strip(), match.group(2).strip()
+            context_match = re.search(r'\s+for\s+(.+)$', q_lower)
+            context = f" for {context_match.group(1)}" if context_match else ""
+            sub_queries = [
+                f"{a}{context}",
+                f"{b}{context}",
+            ]
+        else:
+            # No clear pattern — return original
+            return [query]
+
+    return sub_queries[:_DECOMPOSE_MAX_QUERIES]
+
+
+def _merge_search_results(results: List[str]) -> str:
+    """Merge multiple search result strings, deduplicating by URL."""
+    seen_urls: set = set()
+    merged: List[str] = []
+
+    for result_block in results:
+        # Split by double newline to get individual results
+        for result in result_block.split("\n\n"):
+            result = result.strip()
+            if not result:
+                continue
+            # Extract URL for deduplication
+            url_match = re.search(r'URL:\s*(.+)', result)
+            url = url_match.group(1).strip() if url_match else result[:100]
+            if url not in seen_urls:
+                seen_urls.add(url)
+                merged.append(result)
+
+    # Truncate total length
+    output = "\n\n".join(merged)
+    if len(output) > 2000:
+        output = output[:2000] + "..."
+    return output
 
 
 @registry.register_tool(
@@ -173,6 +257,24 @@ def _truncate(text: str, limit: int = CONTENT_MAX_CHARS) -> str:
     },
 )
 def web_search(query: str) -> str:
+    # Check if query needs decomposition
+    sub_queries = _decompose_query(query)
+    if len(sub_queries) > 1:
+        logger.info("Decomposing query into %d sub-queries: %s", len(sub_queries), sub_queries)
+        # Execute sub-queries in parallel using thread pool
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=len(sub_queries)) as executor:
+            futures = [executor.submit(_single_search, q) for q in sub_queries]
+            results = [f.result() for f in futures if f.result()]
+        if results:
+            merged = _merge_search_results(results)
+            return f"[Multi-query search: {len(sub_queries)} sub-queries]\n\n{merged}" if merged else "No results found."
+        return "No results found for any sub-query."
+    return _single_search(query)
+
+
+def _single_search(query: str) -> str:
+    """Execute a single search query across all providers."""
     cleaned = _clean_search_query(query)
 
     searxng_url = os.getenv("SEARXNG_URL", "")
@@ -430,12 +532,13 @@ def file_write(path: str, content: str) -> str:
 _MEMORY_MAX_CHARS = {
     "memory": 2200,
     "user": 1375,
+    "opinions": 800,
 }
 
 
 @registry.register_tool(
     name="memory",
-    description="Manage persistent memory files (MEMORY.md for system context, USER.md for user preferences). Actions: add appends text, replace swaps old_text with content, remove deletes a substring match.",
+    description="Manage persistent memory files (MEMORY.md for system context, USER.md for user preferences, OPINIONS.md for personal opinions). Actions: add appends text, replace swaps old_text with content, remove deletes a substring match.",
     schema={
         "type": "object",
         "properties": {
@@ -446,8 +549,8 @@ _MEMORY_MAX_CHARS = {
             },
             "target": {
                 "type": "string",
-                "enum": ["memory", "user"],
-                "description": "Which file to modify: memory = MEMORY.md (system context, max 2200 chars), user = USER.md (user preferences, max 1375 chars)."
+                "enum": ["memory", "user", "opinions"],
+                "description": "Which file to modify: memory = MEMORY.md (system context, max 2200 chars), user = USER.md (user preferences, max 1375 chars), opinions = OPINIONS.md (personal opinions, max 800 chars)."
             },
             "content": {
                 "type": "string",
@@ -463,10 +566,10 @@ _MEMORY_MAX_CHARS = {
 )
 def memory(action: str, target: str, content: str = "", old_text: str = "") -> str:
     if target not in _MEMORY_MAX_CHARS:
-        return f"Error: target must be 'memory' or 'user', got '{target}'."
+        return f"Error: target must be 'memory', 'user', or 'opinions', got '{target}'."
 
     max_chars = _MEMORY_MAX_CHARS[target]
-    path = config.memory_file if target == "memory" else config.user_file
+    path = config.memory_file if target == "memory" else config.opinions_file if target == "opinions" else config.user_file
 
     try:
         existing = ""

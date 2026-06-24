@@ -11,13 +11,29 @@ function App() {
   const [sessions, setSessions] = useState([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [initialMessages, setInitialMessages] = useState([]);
+  const [launchId, setLaunchId] = useState(null);
+  const [filterMode, setFilterMode] = useState('launch'); // 'launch' or 'all'
   const wsUrl = `ws://${window.location.hostname}:8000/ws`;
   const { send, onMessage, readyState } = useWebSocket(wsUrl);
+
+  // Fetch launch_id from backend on mount
+  useEffect(() => {
+    fetch('/api/status')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.launch_id) setLaunchId(data.launch_id);
+      })
+      .catch(() => {});
+  }, []);
 
   const fetchSessions = useCallback(async () => {
     setLoadingSessions(true);
     try {
-      const res = await fetch('/api/sessions');
+      let url = '/api/sessions';
+      if (filterMode === 'launch' && launchId) {
+        url += `?launch_id=${encodeURIComponent(launchId)}`;
+      }
+      const res = await fetch(url);
       const data = await res.json();
       const sessionList = data.sessions || [];
       setSessions(sessionList);
@@ -30,7 +46,7 @@ function App() {
     } finally {
       setLoadingSessions(false);
     }
-  }, [currentSessionId]);
+  }, [currentSessionId, filterMode, launchId]);
 
   const fetchMessages = useCallback(async () => {
     if (!currentSessionId) {
@@ -80,13 +96,17 @@ function App() {
           case 'response_done':
             setStatus('idle');
             break;
+          case 'session_update':
+            // Title or metadata changed -- refresh sidebar immediately
+            fetchSessions();
+            break;
           default:
             break;
         }
         handler(event);
       });
     },
-    [onMessage],
+    [onMessage, fetchSessions],
   );
 
   const handleSend = useCallback(
@@ -106,7 +126,7 @@ function App() {
       const res = await fetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ launch_id: launchId, source: 'web' }),
       });
       const data = await res.json();
       setCurrentSessionId(data.session_id);
@@ -114,7 +134,7 @@ function App() {
     } catch (err) {
       console.error('Failed to create session:', err);
     }
-  }, [fetchSessions]);
+  }, [fetchSessions, launchId]);
 
   const handleSelectSession = useCallback((sessionId) => {
     setCurrentSessionId(sessionId);
@@ -133,6 +153,8 @@ function App() {
             currentSessionId={currentSessionId}
             onSelectSession={handleSelectSession}
             onNewChat={handleNewChat}
+            filterMode={filterMode}
+            onFilterModeChange={setFilterMode}
           />
         </div>
 

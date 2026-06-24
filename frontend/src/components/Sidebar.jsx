@@ -11,7 +11,7 @@ function groupSessionsByDate(sessions) {
   const groups = { Today: [], Yesterday: [], 'Last 7 Days': [], Older: [] };
 
   sessions.forEach((session) => {
-    const d = new Date(session.created_at);
+    const d = new Date(session.updated_at || session.created_at);
     if (d >= today) groups.Today.push(session);
     else if (d >= yesterday) groups.Yesterday.push(session);
     else if (d >= lastWeek) groups['Last 7 Days'].push(session);
@@ -21,12 +21,23 @@ function groupSessionsByDate(sessions) {
   return Object.entries(groups).filter(([, s]) => s.length > 0);
 }
 
-function formatTime(ts) {
-  const d = new Date(ts);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function formatRelativeTime(ts) {
+  if (!ts) return '';
+  const now = Date.now();
+  const then = new Date(ts).getTime();
+  if (isNaN(then)) return '';
+  const diffSec = Math.floor((now - then) / 1000);
+  if (diffSec < 60) return 'just now';
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.floor(diffHr / 24);
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-export function Sidebar({ sessions = [], loading = false, onRefresh, currentSessionId, onSelectSession, onNewChat }) {
+export function Sidebar({ sessions = [], loading = false, onRefresh, currentSessionId, onSelectSession, onNewChat, filterMode = 'launch', onFilterModeChange }) {
   const grouped = groupSessionsByDate(sessions);
 
   return (
@@ -54,6 +65,32 @@ export function Sidebar({ sessions = [], loading = false, onRefresh, currentSess
         >
           <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
         </button>
+      </div>
+
+      {/* Filter Toggle */}
+      <div className="px-4 py-2 border-b border-zinc-900/30">
+        <div className="flex bg-zinc-900/40 rounded-lg p-0.5">
+          <button
+            onClick={() => onFilterModeChange && onFilterModeChange('launch')}
+            className={`flex-1 text-[10px] font-semibold py-1.5 px-2 rounded-md transition-all duration-200 ${
+              filterMode === 'launch'
+                ? 'bg-zinc-800 text-white shadow-sm'
+                : 'text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            This Launch
+          </button>
+          <button
+            onClick={() => onFilterModeChange && onFilterModeChange('all')}
+            className={`flex-1 text-[10px] font-semibold py-1.5 px-2 rounded-md transition-all duration-200 ${
+              filterMode === 'all'
+                ? 'bg-zinc-800 text-white shadow-sm'
+                : 'text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            All
+          </button>
+        </div>
       </div>
 
       {/* Session List */}
@@ -96,7 +133,7 @@ export function Sidebar({ sessions = [], loading = false, onRefresh, currentSess
                           </p>
                           <p className="text-[9px] text-zinc-500 mt-0.5 flex items-center gap-1.5 font-mono">
                             <Clock size={8} />
-                            {formatTime(session.created_at)}
+                            {formatRelativeTime(session.updated_at || session.created_at)}
                           </p>
                         </div>
                       </div>

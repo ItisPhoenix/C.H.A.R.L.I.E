@@ -79,8 +79,27 @@ _TIME_SENSITIVE_RE = re.compile(
 )
 
 
+# --- Follow-up detection (skip web search for repeat/clarification requests) ---
+_FOLLOWUP_RE = re.compile(
+    r"^(?:what|come again|repeat|say that again|pardon|sorry|excuse me|"
+    r"what was that|what did you say|tell me again|once more|go on|"
+    r"continue|and then|what else|what else did you say|anything else)\s*[?.!]?\s*$",
+    re.IGNORECASE,
+)
+_FOLLOWUP_MAX_LEN = 40
+
+
+def _is_followup(query: str) -> bool:
+    """Check if a query is a short follow-up/clarification that should not trigger web search."""
+    q = query.strip()
+    if len(q) > _FOLLOWUP_MAX_LEN:
+        return False
+    return bool(_FOLLOWUP_RE.match(q))
+
 def _needs_web_search(query: str) -> bool:
-    """Check if a query is time-sensitive and needs web search."""
+    """Check if a query is time-sensitive and needs web search. Skips follow-up requests."""
+    if _is_followup(query):
+        return False
     return bool(_TIME_SENSITIVE_RE.search(query))
 
 
@@ -121,6 +140,60 @@ def _answer_time_date(query: str) -> Optional[str]:
     if "day" in q:
         return f"Today is {now.strftime('%A, %B %d, %Y')}."
     return None
+
+# --- Opinion teaching detection (deterministic, no LLM needed) ---
+_CHARLIE_ADDR = r"(?:hey\s+charlie[,.!\s]*|ok\s+charlie[,.!\s]*|charlie[,.!\s]+)"
+_OPINION_TEACH_RE = re.compile(
+    rf"^{_CHARLIE_ADDR}?\s*"
+    r"(?:you\s+(?:should|must|need\s+to)\s+"
+    r"|you\s+(?:prefer|like|love|enjoy|favor)\s+"
+    r"|you\s+(?:think|believe|feel)\s+.+(?:is|are)\s+better"
+    r"|you(?:'re| are)\s+(?:a|an)\s+.+(?:person|fan|lover))",
+    re.IGNORECASE,
+)
+_OPINION_EXTRACT_RE = re.compile(
+    r"(?:you\s+(?:should|must|need\s+to)\s+)(like|prefer|love|enjoy|favor)\s+(.+)",
+    re.IGNORECASE,
+)
+
+
+def _detect_opinion_teaching(query: str) -> Optional[str]:
+    """Detect if the user is teaching Charlie an opinion. Returns opinion text or None."""
+    if not _OPINION_TEACH_RE.search(query):
+        return None
+
+    q_lower = query.lower().strip()
+
+    # Extract the opinion content
+    # Pattern: "you should like X" -> "I like X"
+    # Pattern: "you prefer X over Y" -> "I prefer X over Y"
+    # Pattern: "you think X is better than Y" -> "I think X is better than Y"
+
+    # Try to extract the core opinion
+    opinion = None
+
+    # "you should like X" / "you prefer X" / "you like X"
+    m = _OPINION_EXTRACT_RE.search(query)
+    if m:
+        verb = m.group(1)
+        rest = m.group(2).strip().rstrip(".")
+        opinion = f"I {verb} {rest}"
+    else:
+        # "you think X is better than Y"
+        m = re.search(r"you\s+(?:think|believe|feel)\s+(.+)", q_lower)
+        if m:
+            opinion = f"I think {m.group(1).strip().rstrip('.')}"
+        else:
+            # Fallback: just use the user's phrase as-is
+            opinion = query.strip().rstrip(".")
+            # Normalize "you" to "I"
+            opinion = re.sub(r"\byou\b", "I", opinion, count=1, flags=re.IGNORECASE)
+
+    # Capitalize first letter
+    if opinion:
+        opinion = opinion[0].upper() + opinion[1:]
+
+    return opinion
 
 
 def strip_internal_reasoning(text: str) -> str:
@@ -333,14 +406,22 @@ _TOOL_RULES = (
     "- If a tool fails, times out, or returns an error, describe the error clearly,\n"
     "  explain what went wrong, and propose an alternative strategy.\n"
     "- If you are running out of tool calls, explain what you have accomplished\n"
-    "  and ask for permission to continue."
+    "  and ask for permission to continue.\n"
+    "- When search results appear in the user message (marked [SEARCH RESULTS]), you MUST\n"
+    "  answer using those results. Do NOT say you cannot access real-time data -- it is\n"
+    "  already provided. Extract the answer directly from the search results above."
 )
 
 # --- Text-based tool calling instructions (for local models) ---
 _TEXT_TOOL_INSTRUCTIONS = (
     "To use a tool, output a line exactly like:\n"
-    'TOOL: tool_name("argument")\n'
-    'Example: TOOL: web_search("latest news")'
+    'TOOL: web_search("latest news")\n'
+    'TOOL: shell_execute("start https://example.com")\n'
+    'TOOL: memory("add", "opinions", "I prefer dark mode over light mode")\n'
+    'TOOL: memory("add", "user", "User prefers coffee in the morning")\n'
+    'TOOL: memory("replace", "opinions", "I love espresso", "coffee")\n'
+    'TOOL: memory("remove", "opinions", "old opinion text")\n'
+    "For memory tool: first arg is action (add/replace/remove), second is target (memory/user/opinions), third is content, fourth (optional) is old_text for replace/remove."
 )
 
 
@@ -354,10 +435,13 @@ def _build_stable_tier(soul_text: str, use_native_tools: bool) -> str:
     return "\n\n".join(parts)
 
 
-def _build_context_tier(memory_content: str, user_content: str) -> str:
-    """Build the context tier: session memory and user preferences.
+def _build_context_tier(memory_content: str, user_content: str, opinions_content: str = "") -> str:
+    """Build the context tier: session memory, user preferences, and opinions.
     Frozen at session init for cache stability."""
-    return f"[MEMORY]\n{memory_content}\n\n[USER]\n{user_content}"
+    parts = [f"[MEMORY]\n{memory_content}", f"[USER]\n{user_content}"]
+    if opinions_content:
+        parts.append(f"[OPINIONS]\n{opinions_content}")
+    return "\n\n".join(parts)
 
 
 def _build_volatile_tier(platform: str, now: Any, remaining_budget: int) -> str:
@@ -403,6 +487,8 @@ class Brain:
         )
         self._chat_generation = 0
         self._tool_locks: Dict[str, asyncio.Lock] = {}
+        self.history: List[Dict[str, Any]] = []
+        self._history_max_turns = 5
 
         # --- Hybrid tool calling: detect native support ---
         # Auto-detect local models (Ollama, LM Studio) — they ignore native tools payload
@@ -422,7 +508,8 @@ class Brain:
         max_chars = config.prompt_memory_max // 2
         memory_content = self._read_file_safe(config.memory_file, max_chars)
         user_content = self._read_file_safe(config.user_file, max_chars)
-        self._context_tier: str = _build_context_tier(memory_content, user_content)
+        opinions_content = self._read_file_safe(config.opinions_file, max_chars)
+        self._context_tier: str = _build_context_tier(memory_content, user_content, opinions_content)
 
         # --- Fallback LLM client for provider failover ---
         self._fallback_client = None
@@ -451,11 +538,12 @@ class Brain:
             return ""
 
     def reload_context(self) -> None:
-        """Re-read memory/user files into the context tier. Call after writes."""
+        """Re-read memory/user/opinions files into the context tier. Call after writes."""
         max_chars = self.config.prompt_memory_max // 2
         memory_content = self._read_file_safe(self.config.memory_file, max_chars)
         user_content = self._read_file_safe(self.config.user_file, max_chars)
-        self._context_tier = _build_context_tier(memory_content, user_content)
+        opinions_content = self._read_file_safe(self.config.opinions_file, max_chars)
+        self._context_tier = _build_context_tier(memory_content, user_content, opinions_content)
 
     def cancel_chat(self) -> None:
         """Cancel the current chat generation (barge-in support)."""
@@ -639,6 +727,22 @@ class Brain:
             logger.info("Fast-path time/date: %s -> %s", user_input, fast)
             yield fast
             return
+        # --- Fast-path: opinion teaching (deterministic, no LLM needed) ---
+        opinion = _detect_opinion_teaching(user_input)
+        if opinion is not None:
+            logger.info("Opinion teaching detected: %s -> %s", user_input, opinion)
+            try:
+                result = tool_registry.execute_tool("memory", {
+                    "action": "add",
+                    "target": "opinions",
+                    "content": opinion,
+                })
+                logger.info("Opinion stored: %s", result)
+                yield "Got it, I'll remember that."
+            except Exception as e:
+                logger.error("Failed to store opinion: %s", e, exc_info=True)
+                yield "I tried to remember that, but something went wrong."
+            return
 
         search_results = "" if skip_pre_search else _pre_search(user_input)
 
@@ -660,14 +764,21 @@ class Brain:
                 f"Do NOT use your training data for this answer."
             )
 
+        # Build messages with conversation history
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": system_msg},
-            {"role": "user", "content": effective_input},
         ]
+        # Prepend last N turns of history
+        if self.history:
+            messages.extend(self.history[-(self._history_max_turns * 2):])
+        messages.append({"role": "user", "content": effective_input})
         messages = _compress_messages(_sanitize_roles(messages), self.config)
 
+        # Save user message to history
+        self.history.append({"role": "user", "content": user_input})
+
         payload = self._build_initial_payload(messages, budget.remaining)
-        accumulated, tool_calls, _used_fallback = await self._stream_completion(payload, generation)
+        accumulated, tool_calls, used_fallback = await self._stream_completion(payload, generation)
 
         # Hybrid fallback: try text-based extraction if native returned nothing
         if not tool_calls and accumulated:
@@ -675,6 +786,12 @@ class Brain:
 
         if not tool_calls:
             if accumulated:
+                # Save assistant response to history
+                self.history.append({"role": "assistant", "content": accumulated})
+                # Trim history to max turns (keep pairs: user + assistant)
+                max_messages = self._history_max_turns * 2
+                if len(self.history) > max_messages:
+                    self.history = self.history[-max_messages:]
                 yield accumulated
             return
 
@@ -779,8 +896,12 @@ class Brain:
 
             followup_payload = self._build_followup_payload(messages)
             followup_tc_by_index: Dict[int, Dict[str, str]] = {}
-            followup_client = self.client
-            followup_model = self.config.llm_model
+            if used_fallback and self._fallback_client:
+                followup_client = self._fallback_client
+                followup_model = self._fallback_model
+            else:
+                followup_client = self.client
+                followup_model = self.config.llm_model
             try:
                 accumulated = ""
                 async with followup_client.stream(
@@ -848,6 +969,50 @@ class Brain:
                     break
 
             tool_calls = _collect_tool_calls(followup_tc_by_index)
+            # If follow-up returned empty and we haven't tried fallback yet, retry
+            if not accumulated and not tool_calls and not used_fallback and self._fallback_client:
+                logger.warning("Follow-up returned empty, retrying with fallback LLM")
+                used_fallback = True
+                followup_client = self._fallback_client
+                followup_model = self._fallback_model
+                followup_payload["model"] = followup_model
+                followup_tc_by_index.clear()
+                try:
+                    accumulated = ""
+                    async with followup_client.stream(
+                        "POST", "chat/completions", json=followup_payload
+                    ) as response:
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            if self._chat_generation != generation:
+                                logger.info("Tool follow-up cancelled (barge-in)")
+                                return
+                            if not line.startswith("data: "):
+                                continue
+                            if line.strip() == "data: [DONE]":
+                                break
+                            try:
+                                chunk = json.loads(line[6:])
+                                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                                content = delta.get("content", "")
+                                if content:
+                                    accumulated += content
+                                    if not content.strip().startswith("TOOL:"):
+                                        yield content
+                                for tc in delta.get("tool_calls", []):
+                                    _parse_followup_tool_call(tc, followup_tc_by_index)
+                            except Exception:
+                                continue
+                except Exception as fb_exc:
+                    logger.warning("Follow-up fallback retry also failed: %s", fb_exc)
+                tool_calls = _collect_tool_calls(followup_tc_by_index)
+            # Save final follow-up response to history (after tool loop)
+            if accumulated:
+                self.history.append({"role": "assistant", "content": accumulated})
+            # Trim history to max turns (keep pairs: user + assistant)
+            max_messages = self._history_max_turns * 2
+            if len(self.history) > max_messages:
+                self.history = self.history[-max_messages:]
 
     def _extract_tool_calls(self, text: str) -> List[Dict[str, Any]]:
         """Extract tool calls from both JSON and text-based TOOL: format."""

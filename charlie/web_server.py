@@ -6,6 +6,7 @@ Communicates with the voice process via ZeroMQ (EventBus).
 
 import asyncio
 import sys
+import os
 
 # Windows: pyzmq needs Selector event loop, not Proactor (must be before any zmq import)
 import warnings as _warnings
@@ -17,17 +18,19 @@ import json
 import logging
 from pathlib import Path
 from typing import Set
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from charlie.ipc import EventBus, DEFAULT_EVENT_PORT, DEFAULT_COMMAND_PORT
+from charlie.config import config
 
 logger = logging.getLogger("charlie.web_server")
 
 # Module-level state
 active_connections: Set[WebSocket] = set()
 event_bus: EventBus | None = None
+LAUNCH_ID: str = os.environ.get("CHARLIE_LAUNCH_ID", "")
 pipeline_state: str = "idle"
 
 app = FastAPI(title="Charlie Dashboard")
@@ -123,7 +126,7 @@ async def websocket_endpoint(ws: WebSocket):
 @app.get("/api/history")
 async def history(limit: int = 50):
     from charlie.session_store import SessionStore
-    store = SessionStore()
+    store = SessionStore(config.session_db_path)
     try:
         messages = store.get_recent(limit=limit)
         return {"messages": [{"role": r, "content": c} for r, c in messages]}
@@ -133,15 +136,28 @@ async def history(limit: int = 50):
 
 @app.get("/api/status")
 async def status():
-    return {"state": pipeline_state}
+    return {"state": pipeline_state, "launch_id": LAUNCH_ID}
 @app.get("/api/sessions")
-async def list_sessions():
-    """List all sessions with metadata."""
+async def list_sessions(request: Request):
+    """List sessions, optionally filtered by launch_id or source."""
     from charlie.session_store import SessionStore
-    store = SessionStore()
+    store = SessionStore(config.session_db_path)
     try:
-        sessions = store.get_sessions()
-        return {"sessions": [{"id": s[0], "title": s[1], "created_at": s[2]} for s in sessions]}
+        launch_id = request.query_params.get("launch_id")
+        source = request.query_params.get("source")
+        sessions = store.get_sessions(source=source, launch_id=launch_id)
+        return {
+            "sessions": [
+                {
+                    "id": s[0],
+                    "title": s[1],
+                    "created_at": s[2],
+                    "updated_at": s[3],
+                    "launch_id": s[4],
+                }
+                for s in sessions
+            ]
+        }
     finally:
         store.close()
 
@@ -150,22 +166,23 @@ async def list_sessions():
 async def create_session(data: dict):
     """Create a new session."""
     from charlie.session_store import SessionStore
-    import uuid
-    session_id = data.get("session_id", str(uuid.uuid4()))
+    import uuid as _uuid
+    session_id = data.get("session_id", str(_uuid.uuid4()))
     title = data.get("title", "New Chat")
-    store = SessionStore()
+    source = data.get("source", "web")
+    launch_id = data.get("launch_id")
+    store = SessionStore(config.session_db_path)
     try:
-        store.create_session(session_id, title)
-        return {"session_id": session_id, "title": title}
+        store.create_session(session_id, title, source=source, launch_id=launch_id)
+        return {"session_id": session_id, "title": title, "source": source, "launch_id": launch_id}
     finally:
         store.close()
-
 
 @app.get("/api/sessions/{session_id}/messages")
 async def session_messages(session_id: str, limit: int = 50):
     """Get messages for a specific session."""
     from charlie.session_store import SessionStore
-    store = SessionStore()
+    store = SessionStore(config.session_db_path)
     try:
         messages = store.get_session_messages(session_id, limit=limit)
         return {"messages": [{"role": r, "content": c} for r, c in messages]}
@@ -178,9 +195,11 @@ async def update_session(session_id: str, data: dict):
     """Update session title."""
     from charlie.session_store import SessionStore
     title = data.get("title", "New Chat")
-    store = SessionStore()
+    store = SessionStore(config.session_db_path)
     try:
         store.update_session_title(session_id, title)
+        # Broadcast title update to all connected WebSocket clients
+        await broadcast({"type": "session_update", "payload": {"session_id": session_id, "title": title}})
         return {"session_id": session_id, "title": title}
     finally:
         store.close()

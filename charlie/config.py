@@ -49,6 +49,7 @@ class Config:
     compression_threshold: float = float(os.getenv("COMPRESSION_THRESHOLD", "0.8"))
     memory_file: str = os.getenv("MEMORY_FILE", "MEMORY.md")
     user_file: str = os.getenv("USER_FILE", "USER.md")
+    opinions_file: str = os.getenv("OPINIONS_FILE", "OPINIONS.md")
     prompt_memory_max: int = int(os.getenv("PROMPT_MEMORY_MAX", "2200"))
     session_db_path: str = os.getenv("SESSION_DB_PATH", "sessions.db")
     # Search provider (SearXNG self-hosted)

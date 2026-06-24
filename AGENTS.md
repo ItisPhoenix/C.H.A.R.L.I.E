@@ -93,7 +93,7 @@ Use the exact tuple `("no-key", "no_key")`. Never `== "no-key"` alone -- this ha
 | `charlie/config.py` | `Config` dataclass + singleton. Single source of `.env` keys. | Business logic. |
 | `charlie/personality.py` | Emotion classification + voice command parsing. Pure keyword matching. | LLM calls or I/O. |
 | `charlie/asr_worker.py` | Subprocess entry for Whisper. Only file that imports `faster_whisper`. | Other Charlie modules. |
-| `charlie/session_store.py` | SQLite + FTS5 session history. | Anything outside session scope. |
+| `charlie/session_store.py` | SQLite + FTS5 session history. Session isolation via `launch_id` column. | Anything outside session scope. |
 | `main.py` | Entry point. Logging setup, voice loop, TTS flush logic, barge-in, text normalization for multi-app commands. | Feature code -- delegate to modules. |
 
 ---
@@ -159,7 +159,7 @@ Use regex prefix matching (not exact string match) to translate them to PowerShe
 
 ### Edit Tool Limitations
 The `edit` tool fails on multi-hunk changes to single files. For 3+ simultaneous changes to one file,
-use a full file rewrite with `write` instead of sequential `edit` calls.
+use `eval` with `str.replace` on narrow old->new blocks instead of sequential `edit` calls. NEVER use `write` to overwrite an existing file -- it destroys the entire file content and session history.
 
 ### Ollama Models
 Ollama models do NOT support native function calling (`tools`/`tool_choice` payload).
@@ -176,3 +176,15 @@ STT transcriptions often omit conjunctions between items (e.g., "Open Chrome cal
 Small LLMs treat this as one entity. Fix: insert "and" between known app names BEFORE sending to LLM.
 Implementation: `_normalize_app_list()` in `main.py` uses regex + known-app set to add conjunctions.
 Cost: zero LLM calls, works with any model. Apply in `on_speech()` before `_process()`.
+
+### Subprocess Shared State via Env Vars
+When a parent process (main.py) spawns a child (web_server.py) and they need to share state
+(e.g., launch_id for session isolation), pass it as an environment variable via the `env` param
+to `subprocess.Popen`. Do NOT try to import shared module-level constants -- uuid4 generates
+different values at import time in each process. The child reads `os.environ["CHARLIE_LAUNCH_ID"]`.
+
+### Session Isolation Architecture
+Every main.py invocation gets a `_LAUNCH_ID` (uuid4). This is passed to the web server subprocess
+via env var. Sessions created during that launch are tagged with `launch_id`. The frontend fetches
+launch_id from `/api/status` on mount and can filter sidebar to "This Launch" or "All". Backend
+filtering happens in `SessionStore.get_sessions(launch_id=...)`.

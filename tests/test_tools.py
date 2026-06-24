@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from charlie.tools import registry, ToolRegistry, web_search, shell_execute, file_read, file_write
+from charlie.tools import registry, ToolRegistry, web_search, shell_execute, file_read, file_write, memory, _needs_decomposition, _decompose_query, _merge_search_results
 
 
 def test_registry_registration_and_schema():
@@ -43,3 +43,107 @@ def test_web_search_returns_fallback_without_api_keys(monkeypatch):
     result = web_search("unit-test-only-query")
     assert isinstance(result, str)
     assert len(result) > 0
+
+
+
+
+def test_memory_add_opinions(tmp_path, monkeypatch):
+    """Test adding an opinion via the memory tool."""
+    opinions_file = tmp_path / "OPINIONS.md"
+    monkeypatch.setattr("charlie.tools.config.opinions_file", str(opinions_file))
+    result = memory("add", "opinions", "I prefer dark chocolate over milk chocolate.")
+    assert "Updated" in result
+    assert opinions_file.exists()
+    content = opinions_file.read_text(encoding="utf-8")
+    assert "dark chocolate" in content
+
+
+def test_memory_replace_opinions(tmp_path, monkeypatch):
+    """Test replacing text in opinions."""
+    opinions_file = tmp_path / "OPINIONS.md"
+    opinions_file.write_text("I like coffee.", encoding="utf-8")
+    monkeypatch.setattr("charlie.tools.config.opinions_file", str(opinions_file))
+    result = memory("replace", "opinions", "I love espresso.", old_text="coffee")
+    assert "Updated" in result
+    content = opinions_file.read_text(encoding="utf-8")
+    assert "espresso" in content
+    assert "coffee" not in content
+
+
+def test_memory_remove_opinions(tmp_path, monkeypatch):
+    """Test removing text from opinions."""
+    opinions_file = tmp_path / "OPINIONS.md"
+    opinions_file.write_text("I like tea and coffee.", encoding="utf-8")
+    monkeypatch.setattr("charlie.tools.config.opinions_file", str(opinions_file))
+    result = memory("remove", "opinions", old_text=" and coffee")
+    assert "Updated" in result
+    content = opinions_file.read_text(encoding="utf-8")
+    assert content.strip() == "I like tea."
+
+
+def test_memory_opinions_max_chars(tmp_path, monkeypatch):
+    """Test that opinions max char limit is enforced."""
+    opinions_file = tmp_path / "OPINIONS.md"
+    opinions_file.write_text("x" * 800, encoding="utf-8")
+    monkeypatch.setattr("charlie.tools.config.opinions_file", str(opinions_file))
+    result = memory("add", "opinions", "y")
+    assert "Error" in result
+    assert "max" in result
+
+
+def test_memory_invalid_target():
+    """Test that invalid target returns error."""
+    result = memory("add", "invalid_target", "content")
+    assert "Error" in result
+    assert "must be" in result
+
+
+
+def test_needs_decomposition_compare():
+    """Test that 'compare X and Y' triggers decomposition."""
+    assert _needs_decomposition("compare React and Vue")
+
+
+def test_needs_decomposition_long_query():
+    """Test that long queries trigger decomposition."""
+    assert _needs_decomposition("what is the best framework for building web apps")
+
+
+def test_needs_decomposition_simple():
+    """Test that simple queries do not trigger decomposition."""
+    assert not _needs_decomposition("latest news")
+
+
+def test_decompose_query_compare():
+    """Test decomposition of comparison queries."""
+    result = _decompose_query("compare React and Vue for web development")
+    assert len(result) == 2
+    assert "react" in result[0].lower()
+    assert "vue" in result[1].lower()
+    assert "web development" in result[0].lower()
+
+
+def test_decompose_query_or():
+    """Test decomposition of 'or' queries."""
+    result = _decompose_query("Python or JavaScript for beginners")
+    assert len(result) == 2
+    assert "python" in result[0].lower()
+    assert "javascript" in result[1].lower()
+
+
+def test_decompose_query_simple_returns_original():
+    """Test that simple queries return original."""
+    result = _decompose_query("latest news")
+    assert result == ["latest news"]
+
+
+def test_merge_search_results_dedup():
+    """Test that merge deduplicates by URL."""
+    results = [
+        "Title: A\nURL: https://example.com\nContent: Content A",
+        "Title: A\nURL: https://example.com\nContent: Content A again",
+        "Title: B\nURL: https://other.com\nContent: Content B",
+    ]
+    merged = _merge_search_results(results)
+    assert merged.count("https://example.com") == 1
+    assert "https://other.com" in merged
