@@ -2,8 +2,21 @@ import { useState, useCallback, useEffect } from 'react';
 import { useWebSocket } from './hooks/useWebSocket';
 import { ChatPanel } from './components/ChatPanel';
 import { StatusBar } from './components/StatusBar';
-import { ToolLog } from './components/ToolLog';
 import { Sidebar } from './components/Sidebar';
+import { VoiceDock } from './components/VoiceDock';
+import { SmartPanel } from './components/SmartPanel';
+import { AnimatePresence } from 'framer-motion';
+
+function useMediaQuery(query) {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const handler = (e) => setMatches(e.matches);
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
+  }, [query]);
+  return matches;
+}
 
 function App() {
   const [status, setStatus] = useState('idle');
@@ -12,7 +25,21 @@ function App() {
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [initialMessages, setInitialMessages] = useState([]);
   const [launchId, setLaunchId] = useState(null);
-  const [filterMode, setFilterMode] = useState('launch'); // 'launch' or 'all'
+  const [filterMode, setFilterMode] = useState('launch');
+  const [smartPanelVisible, setSmartPanelVisible] = useState(true);
+
+  const isDesktop = useMediaQuery('(min-width: 1024px)');
+  const isTablet = useMediaQuery('(min-width: 768px) and (max-width: 1023px)');
+  const isUnsupported = useMediaQuery('(max-width: 767px)');
+
+  const sidebarCollapsed = isTablet;
+
+  // Close smart panel on tablet if it was open
+  useEffect(() => {
+    if (isTablet) setSmartPanelVisible(false);
+    if (isDesktop) setSmartPanelVisible(true);
+  }, [isTablet, isDesktop]);
+
   const wsUrl = `ws://${window.location.hostname}:8000/ws`;
   const { send, onMessage, readyState } = useWebSocket(wsUrl);
 
@@ -97,7 +124,6 @@ function App() {
             setStatus('idle');
             break;
           case 'session_update':
-            // Title or metadata changed -- refresh sidebar immediately
             fetchSessions();
             break;
           default:
@@ -140,25 +166,41 @@ function App() {
     setCurrentSessionId(sessionId);
   }, []);
 
+  const toggleSmartPanel = useCallback(() => {
+    setSmartPanelVisible((prev) => !prev);
+  }, []);
+
+  // Unsupported screen
+  if (isUnsupported) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-[var(--surface)]">
+        <p className="text-sm text-[var(--text-muted)] text-center px-8">
+          Charlie requires a tablet or desktop screen.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen flex flex-col bg-[var(--surface)] text-[var(--text-primary)]">
       <StatusBar status={status} wsConnected={readyState === WebSocket.OPEN} />
 
-      <div className="flex flex-1 overflow-hidden">
-        <div className="hidden md:block w-72 shrink-0">
-          <Sidebar
-            sessions={sessions}
-            loading={loadingSessions}
-            onRefresh={fetchSessions}
-            currentSessionId={currentSessionId}
-            onSelectSession={handleSelectSession}
-            onNewChat={handleNewChat}
-            filterMode={filterMode}
-            onFilterModeChange={setFilterMode}
-          />
-        </div>
+      <div className="flex flex-1 overflow-hidden min-h-0">
+        {/* Sidebar */}
+        <Sidebar
+          sessions={sessions}
+          loading={loadingSessions}
+          onRefresh={fetchSessions}
+          currentSessionId={currentSessionId}
+          onSelectSession={handleSelectSession}
+          onNewChat={handleNewChat}
+          filterMode={filterMode}
+          onFilterModeChange={setFilterMode}
+          collapsed={sidebarCollapsed}
+        />
 
-        <div className="flex-1 flex flex-col min-w-0">
+        {/* Center: Chat + Voice Dock */}
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           <div className="flex-1 overflow-hidden">
             <ChatPanel
               onMessage={wrappedOnMessage}
@@ -167,11 +209,18 @@ function App() {
               status={status}
               currentSessionId={currentSessionId}
               initialMessages={initialMessages}
+              onToggleSmartPanel={toggleSmartPanel}
             />
           </div>
-
-          <ToolLog onMessage={wrappedOnMessage} currentSessionId={currentSessionId} />
+          <VoiceDock status={status} />
         </div>
+
+        {/* Right: Smart Panel */}
+        <AnimatePresence>
+          {smartPanelVisible && isDesktop && (
+            <SmartPanel visible={smartPanelVisible} onClose={toggleSmartPanel} onMessage={wrappedOnMessage} currentSessionId={currentSessionId} />
+          )}
+        </AnimatePresence>
       </div>
     </div>
   );

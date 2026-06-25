@@ -174,13 +174,24 @@ async def main():
                 event_bus.emit("tool_result", {"name": name, "text": result}), loop
             )
 
+    def on_thinking_update(name, args):
+        if event_bus:
+            desc = f"I'll use the {name} tool"
+            if args:
+                summary = str(args)[:80]
+                desc += f" with {summary}"
+            asyncio.run_coroutine_threadsafe(
+                event_bus.emit("thinking_update", {"text": desc}), loop
+            )
+
     try:
         brain = Brain(
             config,
             on_thought_callback=speaking_callback,
             session_store=store,
             on_tool_call=on_tool_call,
-            on_tool_result=on_tool_result
+            on_tool_result=on_tool_result,
+            on_thinking_update=on_thinking_update,
         )
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")

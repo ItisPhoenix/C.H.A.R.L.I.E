@@ -474,12 +474,14 @@ class Brain:
         session_store=None,
         on_tool_call: Optional[callable] = None,
         on_tool_result: Optional[callable] = None,
+        on_thinking_update: Optional[callable] = None,
     ):
         self.config = config
         self.on_thought_callback = on_thought_callback
         self.session_store = session_store
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
+        self.on_thinking_update = on_thinking_update
         self.client = httpx.AsyncClient(
             base_url=config.llm_url,
             headers={"Authorization": f"Bearer {config.llm_key}"},
@@ -813,6 +815,8 @@ class Brain:
                     None, tool_registry.execute_tool, call["name"], call["arguments"]
                 )
 
+            if self.on_thinking_update:
+                self.on_thinking_update(call["name"], call["arguments"])
             if self.on_tool_call:
                 self.on_tool_call(call["name"], call["arguments"])
 
