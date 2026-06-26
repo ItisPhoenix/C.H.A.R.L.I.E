@@ -121,10 +121,10 @@ All settings are via environment variables (`.env` file). See `.env.example` for
 | `LLM_API_KEY` | (required) | API key for the LLM |
 | `LLM_MODEL` | (required) | Model ID to use |
 | `SEARXNG_URL` | (empty) | Self-hosted SearXNG URL for private search |
-| `WHISPER_MODEL` | `distil-large-v3` | Whisper model for ASR |
+| `WHISPER_MODEL` | `large-v3` | Whisper model for ASR |
 | `KOKORO_VOICE` | `af_heart` | Kokoro TTS voice |
-| `VAD_THRESHOLD` | `0.75` | Voice activity detection sensitivity |
-| `SILENCE_TIMEOUT` | `1.0` | Seconds of silence before processing |
+| `VAD_THRESHOLD` | `0.25` | Voice activity detection sensitivity (RMS) |
+| `SILENCE_TIMEOUT` | `0.6` | Seconds of silence before processing |
 | `ENABLE_BARGE_IN` | `true` | Allow interrupting Charlie mid-response |
 | `LLM_DISABLE_REASONING` | `true` | Disable chain-of-thought for lower latency |
 | `FALLBACK_LLM_URL` | (empty) | Secondary LLM endpoint for automatic failover |

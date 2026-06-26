@@ -16,6 +16,7 @@ def asr_worker_process(
     model_size: str,
     device: str,
     default_language: str,
+    asr_config: dict | None = None,
 ):
     """
     Worker process that handles Whisper transcription.
@@ -88,15 +89,38 @@ def asr_worker_process(
                 language=default_language,
                 initial_prompt=flags.get(
                     "warmup_context",
-                    "I am speaking to my witty and intelligent AI assistant, Charlie.",
+                    "This is Charlie, a voice assistant. Short conversational English with real words.",
                 ),
                 word_timestamps=False,
                 condition_on_previous_text=False,
             )
             if is_warmup:
-                transcribe_kwargs.update(beam_size=1, best_of=1, vad_filter=False)
+                transcribe_kwargs.update(
+                    beam_size=1,
+                    best_of=1,
+                    vad_filter=False,
+                )
             else:
-                transcribe_kwargs.update(beam_size=5, best_of=5, vad_filter=True)
+                _ac = asr_config or {}
+                transcribe_kwargs.update(
+                    beam_size=_ac.get("beam_size", 6),
+                    best_of=_ac.get("best_of", 6),
+                    vad_filter=True,
+                    vad_parameters=dict(
+                        threshold=_ac.get("vad_threshold", 0.45),
+                        min_speech_duration_ms=_ac.get("min_speech_duration_ms", 120),
+                        max_speech_duration_s=_ac.get("max_speech_duration_s", 60),
+                        min_silence_duration_ms=_ac.get("min_silence_duration_ms", 480),
+                        speech_pad_ms=_ac.get("speech_pad_ms", 320),
+                    ),
+                    condition_on_previous_text=True,
+                    repetition_penalty=_ac.get("repetition_penalty", 1.15),
+                    no_repeat_ngram_size=3,
+                    hotwords=(
+                        "Charlie open close start stop search weather time date "
+                        "notepad chrome calculator python code youtube"
+                    ),
+                )
 
             segments, info = whisper.transcribe(audio_data, **transcribe_kwargs)
 

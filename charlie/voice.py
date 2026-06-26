@@ -767,11 +767,10 @@ class VoiceEngine:
 
     def _run(self):
         samplerate = 16000
-        block_size = 512
+        block_size = 1024
 
         def _callback(indata, frames, time_info, status):
-            if status:
-                logger.warning(f"AudioStream status: {status}")
+            # Avoid logging on the audio thread; check status flag silently or log on debug
             try:
                 self._audio_queue.put_nowait(indata.copy())
             except queue.Full:
@@ -817,6 +816,16 @@ class VoiceEngine:
         )
 
         # Start ASR worker process
+        _asr_config = {
+            "beam_size": self.config.asr_beam_size,
+            "best_of": self.config.asr_best_of,
+            "repetition_penalty": self.config.asr_repetition_penalty,
+            "vad_threshold": 0.45,
+            "min_speech_duration_ms": self.config.vad_min_speech_duration_ms,
+            "max_speech_duration_s": self.config.vad_max_speech_duration_s,
+            "min_silence_duration_ms": self.config.vad_min_silence_duration_ms,
+            "speech_pad_ms": self.config.vad_speech_pad_ms,
+        }
         self.asr_process = mp.Process(
             target=asr_worker_process,
             args=(
@@ -825,6 +834,7 @@ class VoiceEngine:
                 self.config.whisper_model,
                 self.config.gpu_device,
                 self.config.default_language,
+                _asr_config,
             ),
             daemon=True,
         )

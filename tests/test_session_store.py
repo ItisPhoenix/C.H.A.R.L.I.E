@@ -65,14 +65,16 @@ def test_session_metadata_ops():
         store.touch_session("sess_1")
         sessions = store.get_sessions()
         assert sessions[0][3] is not None  # updated_at should now be set
-        first_touch = sessions[0][3]
-
+        # Explicitly modify first_touch to bypass millisecond-level clock collisions in testing environments
+        first_touch = "2026-06-26 00:00:00.000000"
+        with store.conn:
+            store.conn.execute("UPDATE sessions SET updated_at = ? WHERE session_id = ?", (first_touch, "sess_1"))
+        
         # 4. Update session title and verify
         store.update_session_title("sess_1", "Updated Title")
         sessions = store.get_sessions()
         assert sessions[0][1] == "Updated Title"
         assert sessions[0][3] != first_touch  # updated_at should have changed
-
         # 5. Delete session and verify
         store.append("user", "test msg", session_id="sess_1")
         messages = store.get_session_messages("sess_1")

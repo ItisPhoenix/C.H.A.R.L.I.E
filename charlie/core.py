@@ -1182,8 +1182,21 @@ class Brain:
         user_input: str,
         platform: str = "voice",
         skip_pre_search: bool = False,
+        session_id: str = "default",
     ) -> AsyncGenerator[str, None]:
         from datetime import datetime
+
+        # Load session-specific history from SQLite store at the start of the turn
+        if self.session_store:
+            try:
+                raw_messages = self.session_store.get_session_messages(session_id, limit=self._history_max_turns)
+                self.history = []
+                for role, content in raw_messages:
+                    self.history.append({"role": role, "content": content})
+                logger.debug("Loaded %d history messages for session: %s", len(self.history), session_id)
+            except Exception as e:
+                logger.warning("Failed to load session history for %s: %s", session_id, e)
+
 
         generation = self._chat_generation
         fast = _answer_time_date(user_input)
@@ -1212,14 +1225,14 @@ class Brain:
             return
 
         # --- Fast-path: close app (deterministic, no LLM needed) ---
-        close_res = _detect_close_app(user_input)
+        close_res = await asyncio.to_thread(_detect_close_app, user_input)
         if close_res is not None:
             logger.info("Fast-path close app result: %s -> %s", user_input, close_res)
             yield close_res
             return
 
         # --- Fast-path: open app (deterministic, no LLM needed) ---
-        open_res = _detect_open_app(user_input)
+        open_res = await asyncio.to_thread(_detect_open_app, user_input)
         if open_res is not None:
             logger.info("Fast-path open app result: %s -> %s", user_input, open_res)
             yield open_res

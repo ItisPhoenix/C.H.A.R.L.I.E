@@ -20,10 +20,11 @@ class Config:
     mic_index: int = int(os.getenv("MIC_INDEX", "-1"))
     output_index: int = int(os.getenv("OUTPUT_INDEX", "-1"))
 
-    whisper_model: str = os.getenv("WHISPER_MODEL", "distil-large-v3")
-    silence_timeout: float = float(os.getenv("SILENCE_TIMEOUT", "1.0"))
-    phrase_min_duration: float = float(os.getenv("PHRASE_MIN_DURATION", "0.8"))
-    phrase_max_duration: float = float(os.getenv("PHRASE_MAX_DURATION", "30.0"))
+    # Speech / ASR / TTS
+    whisper_model: str = os.getenv("WHISPER_MODEL", "large-v3")
+    silence_timeout: float = float(os.getenv("SILENCE_TIMEOUT", "0.6"))
+    phrase_min_duration: float = float(os.getenv("PHRASE_MIN_DURATION", "0.35"))
+    phrase_max_duration: float = float(os.getenv("PHRASE_MAX_DURATION", "45.0"))
     kokoro_voice: str = os.getenv("KOKORO_VOICE", "af_heart")
     kokoro_model_dir: str = os.getenv("KOKORO_MODEL_DIR", "models")
     gpu_device: str = os.getenv("GPU_DEVICE", "cuda")
@@ -32,9 +33,16 @@ class Config:
     log_file: str = "logs/charlie.log"
     log_level: str = "INFO"
 
-    # VAD Configuration
-    vad_threshold: float = float(os.getenv("VAD_THRESHOLD", "0.75"))
-    vad_silence_timeout: float = float(os.getenv("VAD_SILENCE_TIMEOUT", "1.2"))
+    # VAD / ASR tuning
+    vad_threshold: float = float(os.getenv("VAD_THRESHOLD", "0.25"))
+    vad_silence_timeout: float = float(os.getenv("VAD_SILENCE_TIMEOUT", "0.6"))
+    vad_min_speech_duration_ms: int = int(os.getenv("VAD_MIN_SPEECH_DURATION_MS", "120"))
+    vad_max_speech_duration_s: int = int(os.getenv("VAD_MAX_SPEECH_DURATION_S", "60"))
+    vad_min_silence_duration_ms: int = int(os.getenv("VAD_MIN_SILENCE_DURATION_MS", "480"))
+    vad_speech_pad_ms: int = int(os.getenv("VAD_SPEECH_PAD_MS", "320"))
+    asr_beam_size: int = int(os.getenv("ASR_BEAM_SIZE", "6"))
+    asr_best_of: int = int(os.getenv("ASR_BEST_OF", "6"))
+    asr_repetition_penalty: float = float(os.getenv("ASR_REPETITION_PENALTY", "1.15"))
 
     # Barge-in Configuration
     enable_barge_in: bool = os.getenv("ENABLE_BARGE_IN", "true").lower() == "true"
@@ -71,8 +79,8 @@ class Config:
     # --- Vector Memory Configuration ---
     memory_db_path: str = os.getenv("MEMORY_DB_PATH", "charlie_memory_db")
     memory_relevance_threshold: float = float(os.getenv("MEMORY_RELEVANCE_THRESHOLD", "0.3"))
-    memory_embedding_model: str = os.getenv("MEMORY_EMBEDDING_MODEL", "nomic-embed-text:v1.5")
-    memory_embedding_url: str = os.getenv("MEMORY_EMBEDDING_URL", "http://localhost:11434")
+    memory_embedding_model: str = os.getenv("MEMORY_EMBEDDING_MODEL", "text-embedding-nomic-embed-text-v1.5")
+    memory_embedding_url: str = os.getenv("MEMORY_EMBEDDING_URL", "http://127.0.0.1:1234/v1")
     memory_auto_extract: bool = os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true"
     # Memory capacity management
     memory_nudge_interval: int = int(os.getenv("MEMORY_NUDGE_INTERVAL", "5"))
