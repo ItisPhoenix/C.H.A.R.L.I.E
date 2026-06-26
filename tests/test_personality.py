@@ -5,12 +5,15 @@ from charlie.personality import get_emotion_for_context, parse_voice_command
 
 # ── get_emotion_for_context ────────────────────────────────────────────────
 
+
 class TestGetEmotionForContext:
     def test_urgent_keywords(self):
         assert get_emotion_for_context("system crash! help ASAP", []) == "energetic"
 
     def test_emergency_keyword(self):
-        assert get_emotion_for_context("emergency in the server room", []) == "energetic"
+        assert (
+            get_emotion_for_context("emergency in the server room", []) == "energetic"
+        )
 
     def test_broken_keyword(self):
         assert get_emotion_for_context("my code is broken", []) == "energetic"
@@ -56,6 +59,7 @@ class TestGetEmotionForContext:
 
 
 # ── parse_voice_command ────────────────────────────────────────────────────
+
 
 class TestParseVoiceCommand:
     def test_be_energetic(self):

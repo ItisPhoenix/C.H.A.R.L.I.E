@@ -1,4 +1,5 @@
 import { Mic, Brain, Volume2, Wifi, WifiOff } from 'lucide-react';
+import { motion } from 'framer-motion';
 
 const STATUS_CONFIG = {
   idle: { label: 'Idle', color: 'bg-zinc-400', glow: '', icon: Wifi, text: 'text-zinc-400' },
@@ -12,13 +13,19 @@ export function StatusBar({ status, wsConnected }) {
   const Icon = config.icon;
 
   return (
-    <header className="relative flex items-center justify-between px-6 py-4 backdrop-blur-md border-b border-white/[0.06] sticky top-0 z-50 after:content-[''] after:absolute after:bottom-0 after:left-0 after:right-0 after:h-[1px] after:bg-gradient-to-r after:from-transparent after:via-white/[0.04] after:to-transparent">
+    <motion.header
+      initial={{ y: -20, opacity: 0 }}
+      animate={{ y: 0, opacity: 1 }}
+      transition={{ duration: 0.4, ease: [0.25, 0.1, 0.25, 1] }}
+      className="relative flex items-center justify-between px-6 py-4 backdrop-blur-md border-b border-white/[0.06] sticky top-0 z-50 after:content-[''] after:absolute after:bottom-0 after:left-0 after:right-0 after:h-[1px] after:bg-gradient-to-r after:from-transparent after:via-white/[0.04] after:to-transparent">
       {/* Brand */}
       <div className="flex items-center gap-3">
-        <div className="relative flex items-center justify-center w-8 h-8 rounded-xl bg-white/[0.06] border border-white/[0.08] shadow-inner">
+        <motion.div
+          whileHover={{ scale: 1.05, boxShadow: '0 0 16px rgba(167,139,250,0.2)' }}
+          className="relative flex items-center justify-center w-8 h-8 rounded-xl bg-white/[0.06] border border-white/[0.08] shadow-inner">
           <span className="text-xs font-bold text-white tracking-widest">C</span>
           <div className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-[var(--accent)] animate-pulse" />
-        </div>
+        </motion.div>
         <div>
           <h1 className="text-base font-semibold text-[var(--text-primary)] tracking-tight">C.H.A.R.L.I.E.</h1>
           <p className="text-[11px] text-[var(--text-muted)] uppercase tracking-widest font-medium">Truth Engine</p>
@@ -27,7 +34,14 @@ export function StatusBar({ status, wsConnected }) {
 
       {/* Center status badge */}
       <div className="flex items-center gap-2.5 px-4 py-1.5 rounded-full border border-white/[0.06] shadow-[0_4px_12px_rgba(0,0,0,0.2)] backdrop-blur-lg">
-        <div className={`w-2 h-2 rounded-full ${config.color} ${config.glow} animate-pulse`} />
+        <motion.div
+          animate={{
+            scale: status === 'idle' ? 1 : [1, 1.4, 1],
+            opacity: status === 'idle' ? 0.6 : [0.6, 1, 0.6],
+          }}
+          transition={{ duration: 1.2, repeat: Infinity, ease: 'easeInOut' }}
+          className={`w-2 h-2 rounded-full ${config.color} ${config.glow}`}
+        />
         <Icon size={12} className={`${config.text} shrink-0`} />
         <span className="text-xs font-medium text-[var(--text-primary)] opacity-80">{config.label}</span>
       </div>
@@ -50,6 +64,6 @@ export function StatusBar({ status, wsConnected }) {
           </>
         )}
       </div>
-    </header>
+    </motion.header>
   );
 }

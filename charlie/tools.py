@@ -12,12 +12,15 @@ import logging
 
 import httpx
 
-from typing import Callable, Dict, Any, List
+from typing import Any, Callable, Dict, List
 
 from charlie.config import config
 from charlie.session_store import SessionStore
 
 logger = logging.getLogger("charlie.tools")
+
+# --- Vector memory store (set via set_memory_store at init) ---
+_memory_store = None  # type: Optional[Any]
 
 # --- Search tuning ---
 SEARCH_RESULT_LIMIT = 5
@@ -50,8 +53,8 @@ _DECOMPOSE_MAX_QUERIES = 3
 
 # Pre-compiled regex for stripping conversational fluff from search queries.
 _FLUFF_WORDS = re.compile(
-    r'\b(please|could you|can you|tell me|what are|what is|what\'s|show me|find me|'
-    r'i want to know|i need|i\'m looking for|right now|currently)\b',
+    r"\b(please|could you|can you|tell me|what are|what is|what\'s|show me|find me|"
+    r"i want to know|i need|i\'m looking for|right now|currently)\b",
     re.IGNORECASE,
 )
 
@@ -60,19 +63,23 @@ _FLUFF_WORDS = re.compile(
 # prompt for user input.  Each entry: (compiled regex, PowerShell replacement).
 # Using prefix patterns so "date +%H:%M" matches just like "date".
 _WIN_CMD_PATTERNS = [
-    (re.compile(r'^date\b', re.IGNORECASE),
-     'powershell -NoProfile -Command "Get-Date -Format \\"yyyy-MM-dd HH:mm:ss\\""'),
-    (re.compile(r'^time\b', re.IGNORECASE),
-     'powershell -NoProfile -Command "Get-Date -Format \\"HH:mm:ss\\""'),
+    (
+        re.compile(r"^date\b", re.IGNORECASE),
+        'powershell -NoProfile -Command "Get-Date -Format \\"yyyy-MM-dd HH:mm:ss\\""',
+    ),
+    (
+        re.compile(r"^time\b", re.IGNORECASE),
+        'powershell -NoProfile -Command "Get-Date -Format \\"HH:mm:ss\\""',
+    ),
 ]
 
 
 # Cross-platform volume command translations (wrong OS -> Windows equivalent)
 _AMIXER_SET_RE = re.compile(r"amixer\s+set\s+Master\s+(\d+)\%", re.IGNORECASE)
 _AMIXER_DOWN_RE = re.compile(r"amixer\s+set\s+Master\s+(\d+)\%-", re.IGNORECASE)
-_OSCRIPT_VOL_RE = re.compile(r"osascript\s.*[Ss]et\s+[Vv]olume\s+([\d.]+)", re.IGNORECASE)
-
-
+_OSCRIPT_VOL_RE = re.compile(
+    r"osascript\s.*[Ss]et\s+[Vv]olume\s+([\d.]+)", re.IGNORECASE
+)
 
 
 class ToolRegistry:
@@ -81,7 +88,13 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: Dict[str, Dict[str, Any]] = {}
 
-    def register_tool(self, name: str, description: str, schema: Dict[str, Any], is_interactive: bool = False):
+    def register_tool(
+        self,
+        name: str,
+        description: str,
+        schema: Dict[str, Any],
+        is_interactive: bool = False,
+    ):
         def decorator(func: Callable[..., Any]):
             self._tools[name] = {
                 "func": func,
@@ -90,6 +103,7 @@ class ToolRegistry:
                 "is_interactive": is_interactive,
             }
             return func
+
         return decorator
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
@@ -137,6 +151,11 @@ class ToolRegistry:
             logger.exception("Error executing tool '%s': %s", name, e)
             return f"Error executing tool '{name}': {e}"
 
+    def set_memory_store(self, store: Any) -> None:
+        """Inject vector memory store for vector_memory tool."""
+        global _memory_store
+        _memory_store = store
+
 
 # Global tool registry
 registry = ToolRegistry()
@@ -146,13 +165,14 @@ registry = ToolRegistry()
 # Built-in tools
 # ---------------------------------------------------------------------------
 
+
 def _clean_search_query(query: str) -> str:
     """Strip conversational fluff from a search query."""
     cleaned = _FLUFF_WORDS.sub("", query).strip()
     # Strip trailing punctuation (question marks, exclamation, etc.)
-    cleaned = re.sub(r'[?!.,;:]+$', '', cleaned).strip()
+    cleaned = re.sub(r"[?!.,;:]+$", "", cleaned).strip()
     # Strip leading articles
-    cleaned = re.sub(r'^(?:the|a|an)\s+', '', cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"^(?:the|a|an)\s+", "", cleaned, flags=re.IGNORECASE).strip()
     # Collapse multiple spaces
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     return cleaned if len(cleaned.split()) >= MIN_CLEANED_WORDS else query
@@ -165,6 +185,7 @@ def _is_ddg_result_valid(text: str) -> bool:
 
 def _truncate(text: str, limit: int = CONTENT_MAX_CHARS) -> str:
     return text[:limit] + "..." if len(text) > limit else text
+
 
 def _needs_decomposition(query: str) -> bool:
     """Check if a query is complex enough to benefit from decomposition."""
@@ -185,13 +206,13 @@ def _decompose_query(query: str) -> List[str]:
 
     # Pattern: "compare X and Y" or "X versus Y" or "X vs Y"
     compare_match = re.search(
-        r'(?:compare|versus|vs\.?)\s+(.+?)\s+(?:and|vs\.?|versus)\s+(.+?)(?:\s+for\s+.+)?$',
+        r"(?:compare|versus|vs\.?)\s+(.+?)\s+(?:and|vs\.?|versus)\s+(.+?)(?:\s+for\s+.+)?$",
         q_lower,
     )
     if compare_match:
         a, b = compare_match.group(1).strip(), compare_match.group(2).strip()
         # Extract the context (e.g., "for web development")
-        context_match = re.search(r'\s+for\s+(.+)$', q_lower)
+        context_match = re.search(r"\s+for\s+(.+)$", q_lower)
         context = f" for {context_match.group(1)}" if context_match else ""
         sub_queries = [
             f"{a}{context}",
@@ -199,12 +220,12 @@ def _decompose_query(query: str) -> List[str]:
         ]
     else:
         # Pattern: "X or Y" or "X and Y" - split on the conjunction
-        or_match = re.search(r'^(.+?)\s+or\s+(.+?)(?:\s+for\s+.+)?$', q_lower)
-        and_match = re.search(r'^(.+?)\s+and\s+(.+?)(?:\s+for\s+.+)?$', q_lower)
+        or_match = re.search(r"^(.+?)\s+or\s+(.+?)(?:\s+for\s+.+)?$", q_lower)
+        and_match = re.search(r"^(.+?)\s+and\s+(.+?)(?:\s+for\s+.+)?$", q_lower)
         match = or_match or and_match
         if match:
             a, b = match.group(1).strip(), match.group(2).strip()
-            context_match = re.search(r'\s+for\s+(.+)$', q_lower)
+            context_match = re.search(r"\s+for\s+(.+)$", q_lower)
             context = f" for {context_match.group(1)}" if context_match else ""
             sub_queries = [
                 f"{a}{context}",
@@ -229,7 +250,7 @@ def _merge_search_results(results: List[str]) -> str:
             if not result:
                 continue
             # Extract URL for deduplication
-            url_match = re.search(r'URL:\s*(.+)', result)
+            url_match = re.search(r"URL:\s*(.+)", result)
             url = url_match.group(1).strip() if url_match else result[:100]
             if url not in seen_urls:
                 seen_urls.add(url)
@@ -260,15 +281,22 @@ def web_search(query: str) -> str:
     # Check if query needs decomposition
     sub_queries = _decompose_query(query)
     if len(sub_queries) > 1:
-        logger.info("Decomposing query into %d sub-queries: %s", len(sub_queries), sub_queries)
+        logger.info(
+            "Decomposing query into %d sub-queries: %s", len(sub_queries), sub_queries
+        )
         # Execute sub-queries in parallel using thread pool
         from concurrent.futures import ThreadPoolExecutor
+
         with ThreadPoolExecutor(max_workers=len(sub_queries)) as executor:
             futures = [executor.submit(_single_search, q) for q in sub_queries]
             results = [f.result() for f in futures if f.result()]
         if results:
             merged = _merge_search_results(results)
-            return f"[Multi-query search: {len(sub_queries)} sub-queries]\n\n{merged}" if merged else "No results found."
+            return (
+                f"[Multi-query search: {len(sub_queries)} sub-queries]\n\n{merged}"
+                if merged
+                else "No results found."
+            )
         return "No results found for any sub-query."
     return _single_search(query)
 
@@ -277,9 +305,9 @@ def _single_search(query: str) -> str:
     """Execute a single search query across all providers."""
     cleaned = _clean_search_query(query)
 
-    searxng_url = os.getenv("SEARXNG_URL", "")
-    tavily_key = os.getenv("TAVILY_API_KEY")
-    exa_key = os.getenv("EXA_API_KEY")
+    searxng_url = config.searxng_url
+    tavily_key = config.tavily_api_key
+    exa_key = config.exa_api_key
 
     # Tier 1: SearXNG (self-hosted, no API key needed)
     if searxng_url:
@@ -292,7 +320,9 @@ def _single_search(query: str) -> str:
                 params["time_range"] = "day"
             if any(kw in q_lower for kw in _NEWS_KEYWORDS):
                 params["categories"] = "news"
-            response = httpx.get(f"{base}/search", params=params, timeout=SEARXNG_TIMEOUT)
+            response = httpx.get(
+                f"{base}/search", params=params, timeout=SEARXNG_TIMEOUT
+            )
             if response.status_code == 200:
                 results = []
                 for item in response.json().get("results", [])[:SEARCH_RESULT_LIMIT]:
@@ -308,7 +338,9 @@ def _single_search(query: str) -> str:
                     return "\n\n".join(results)
             logger.error(
                 "SearXNG failed with status %s for query %r: %s",
-                response.status_code, cleaned, response.text,
+                response.status_code,
+                cleaned,
+                response.text,
             )
         except Exception:
             logger.exception("SearXNG search error for query: %s", cleaned)
@@ -320,7 +352,11 @@ def _single_search(query: str) -> str:
             response = httpx.post(
                 "https://api.exa.ai/search",
                 headers={"x-api-key": exa_key, "content-type": "application/json"},
-                json={"query": cleaned, "numResults": SEARCH_RESULT_LIMIT, "text": True},
+                json={
+                    "query": cleaned,
+                    "numResults": SEARCH_RESULT_LIMIT,
+                    "text": True,
+                },
                 timeout=EXA_TIMEOUT,
             )
             if response.status_code == 200:
@@ -334,7 +370,9 @@ def _single_search(query: str) -> str:
                 return "\n\n".join(results) or "No results found."
             logger.error(
                 "Exa search failed with status %s for query %r: %s",
-                response.status_code, cleaned, response.text,
+                response.status_code,
+                cleaned,
+                response.text,
             )
         except Exception:
             logger.exception("Exa search error for query: %s", cleaned)
@@ -364,14 +402,18 @@ def _single_search(query: str) -> str:
                 return "\n\n".join(results) or "No results found."
             logger.error(
                 "Tavily search failed with status %s for query %r: %s",
-                response.status_code, cleaned, response.text,
+                response.status_code,
+                cleaned,
+                response.text,
             )
         except Exception:
             logger.exception("Tavily search error for query: %s", cleaned)
 
     # Tier 4: DuckDuckGo fallback
     try:
-        logger.info("DuckDuckGo fallback search: original=%r cleaned=%r", query, cleaned)
+        logger.info(
+            "DuckDuckGo fallback search: original=%r cleaned=%r", query, cleaned
+        )
         from bs4 import BeautifulSoup
 
         for endpoint in ("lite", "html"):
@@ -385,15 +427,21 @@ def _single_search(query: str) -> str:
                 if response.status_code in DDG_ACCEPTED_STATUSES:
                     soup = BeautifulSoup(response.text, "html.parser")
                     if endpoint == "lite":
-                        snippets = soup.find_all("td", class_="result-snippet")[:SEARCH_RESULT_LIMIT]
+                        snippets = soup.find_all("td", class_="result-snippet")[
+                            :SEARCH_RESULT_LIMIT
+                        ]
                     else:
-                        snippets = soup.find_all("a", class_="result__snippet")[:SEARCH_RESULT_LIMIT]
+                        snippets = soup.find_all("a", class_="result__snippet")[
+                            :SEARCH_RESULT_LIMIT
+                        ]
                     results = [s.get_text(strip=True) for s in snippets]
                     if results:
                         return "\n".join(results)
             except Exception:
                 logger.warning(
-                    "DuckDuckGo %s endpoint failed for query %r", endpoint, cleaned,
+                    "DuckDuckGo %s endpoint failed for query %r",
+                    endpoint,
+                    cleaned,
                     exc_info=True,
                 )
                 continue
@@ -419,7 +467,15 @@ def _single_search(query: str) -> str:
     is_interactive=True,
 )
 def shell_execute(command: str) -> str:
-    _BLOCKED_KEYWORDS = ("rm -rf", "mkfs", "dd if=", "format ", "shutdown", "reboot", "poweroff")
+    _BLOCKED_KEYWORDS = (
+        "rm -rf",
+        "mkfs",
+        "dd if=",
+        "format ",
+        "shutdown",
+        "reboot",
+        "poweroff",
+    )
     lowered = command.lower().strip()
     for keyword in _BLOCKED_KEYWORDS:
         if keyword in lowered:
@@ -461,14 +517,23 @@ def shell_execute(command: str) -> str:
 
     try:
         process = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=SHELL_TIMEOUT,
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=SHELL_TIMEOUT,
         )
         parts = []
         if process.stdout and process.stdout.strip():
             parts.append(f"STDOUT:\n{process.stdout.strip()}")
         if process.stderr and process.stderr.strip():
             parts.append(f"STDERR:\n{process.stderr.strip()}")
-        return "\n".join(parts) or "Command executed successfully (no output)."
+        if parts:
+            return "\n".join(parts)
+        # Many commands (start, taskkill, etc.) return empty on success
+        if process.returncode == 0:
+            return "Command succeeded (exit code 0). No output."
+        return f"Command finished with exit code {process.returncode}. No output."
     except subprocess.TimeoutExpired:
         return f"Error: Command timed out after {SHELL_TIMEOUT}s."
     except Exception as e:
@@ -534,34 +599,67 @@ _MEMORY_MAX_CHARS = {
     "user": 1375,
     "opinions": 800,
 }
+_MEMORY_SEP = "\u00a7"  # section sign - unambiguous entry delimiter
+
+
+def _parse_memory_entries(text: str) -> list:
+    """Parse memory file into individual entries using section sign delimiter."""
+    if not text.strip():
+        return []
+    if _MEMORY_SEP not in text:
+        # Legacy file without separators - treat as single entry
+        return [text.strip()] if text.strip() else []
+    return [e.strip() for e in text.split(_MEMORY_SEP) if e.strip()]
+
+
+def _format_capacity(target: str, entries: list, max_chars: int) -> str:
+    """Format capacity header showing usage and entries."""
+    current = sum(len(e) for e in entries)
+    if entries:
+        current += len(entries) - 1  # separators
+    pct = int(current / max_chars * 100) if max_chars > 0 else 0
+    lines = [f"[{target.upper()}] {current}/{max_chars} chars ({pct}%) - {len(entries)} entries"]
+    for i, entry in enumerate(entries, 1):
+        lines.append(f"  {i}. {entry}")
+    return "\n".join(lines)
+
+
+def _memory_capacity_error(target: str, entries: list, max_chars: int, new_len: int) -> str:
+    """Return capacity error with full entry listing."""
+    return (
+        f"Memory full: {target} at capacity. Cannot add {new_len} chars.\n"
+        "Consolidate first: use 'replace' to merge overlapping entries, "
+        "or 'remove' to drop stale ones.\n\n"
+        + _format_capacity(target, entries, max_chars)
+    )
 
 
 @registry.register_tool(
     name="memory",
-    description="Manage persistent memory files (MEMORY.md for system context, USER.md for user preferences, OPINIONS.md for personal opinions). Actions: add appends text, replace swaps old_text with content, remove deletes a substring match.",
+    description="Manage persistent memory files. Actions: add appends an entry, replace swaps an entry containing old_text, remove drops an entry, consolidate returns all entries with capacity for review. Entries are delimited by section sign.",
     schema={
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "replace", "remove"],
-                "description": "The action to perform: add appends, replace swaps a substring, remove deletes a substring."
+                "enum": ["add", "replace", "remove", "consolidate"],
+                "description": "add = append entry, replace = swap entry containing old_text, remove = drop entry, consolidate = list all entries with capacity info.",
             },
             "target": {
                 "type": "string",
                 "enum": ["memory", "user", "opinions"],
-                "description": "Which file to modify: memory = MEMORY.md (system context, max 2200 chars), user = USER.md (user preferences, max 1375 chars), opinions = OPINIONS.md (personal opinions, max 800 chars)."
+                "description": "Which file: memory = MEMORY.md (system context, max 2200 chars), user = USER.md (user preferences, max 1375 chars), opinions = OPINIONS.md (personal opinions, max 800 chars).",
             },
             "content": {
                 "type": "string",
-                "description": "Text content to add or use as replacement (required for add/replace, ignored for remove)."
+                "description": "Text content to add or use as replacement (required for add/replace, ignored for remove/consolidate).",
             },
             "old_text": {
                 "type": "string",
-                "description": "Substring to find and replace or remove (required for replace/remove, ignored for add)."
-            }
+                "description": "Substring to find in an entry (required for replace/remove, ignored for add/consolidate).",
+            },
         },
-        "required": ["action", "target"]
+        "required": ["action", "target"],
     },
 )
 def memory(action: str, target: str, content: str = "", old_text: str = "") -> str:
@@ -569,7 +667,13 @@ def memory(action: str, target: str, content: str = "", old_text: str = "") -> s
         return f"Error: target must be 'memory', 'user', or 'opinions', got '{target}'."
 
     max_chars = _MEMORY_MAX_CHARS[target]
-    path = config.memory_file if target == "memory" else config.opinions_file if target == "opinions" else config.user_file
+    path = (
+        config.memory_file
+        if target == "memory"
+        else config.opinions_file
+        if target == "opinions"
+        else config.user_file
+    )
 
     try:
         existing = ""
@@ -577,48 +681,109 @@ def memory(action: str, target: str, content: str = "", old_text: str = "") -> s
             with open(path, "r", encoding="utf-8") as handle:
                 existing = handle.read()
 
+        entries = _parse_memory_entries(existing)
+
+        # consolidate: return current entries for review
+        if action == "consolidate":
+            return _format_capacity(target, entries, max_chars)
+
         if action == "add":
-            updated = existing + content if existing else content
+            if not content:
+                return "Error: content is required for add actions."
+            new_entry = content.strip()
+            new_len = len(new_entry) + (1 if entries else 0)
+            current_len = sum(len(e) for e in entries)
+            if entries:
+                current_len += len(entries) - 1
+            if current_len + new_len > max_chars:
+                return _memory_capacity_error(target, entries, max_chars, len(new_entry))
+            entries.append(new_entry)
         elif action == "replace":
             if not old_text:
                 return "Error: old_text is required for replace actions."
-            if old_text not in existing:
-                return f"Error: old_text not found in {path}."
-            matches = existing.count(old_text)
-            if matches > 1:
+            if not content:
+                return "Error: content is required for replace actions."
+            matches = [i for i, e in enumerate(entries) if old_text in e]
+            if not matches:
                 return (
-                    f"Error: old_text matched {matches} times in {path}; "
-                    "provide a more specific string."
+                    f"Error: no entry contains '{old_text}'.\n"
+                    + _format_capacity(target, entries, max_chars)
                 )
-            updated = existing.replace(old_text, content, 1)
+            if len(matches) > 1:
+                return f"Error: '{old_text}' matched {len(matches)} entries. Provide a more specific string."
+            entries[matches[0]] = content.strip()
         elif action == "remove":
             if not old_text:
                 return "Error: old_text is required for remove actions."
-            if old_text not in existing:
-                return f"Error: old_text not found in {path}."
-            matches = existing.count(old_text)
-            if matches > 1:
+            matches = [i for i, e in enumerate(entries) if old_text in e]
+            if not matches:
                 return (
-                    f"Error: old_text matched {matches} times in {path}; "
-                    "provide a more specific string."
+                    f"Error: no entry contains '{old_text}'.\n"
+                    + _format_capacity(target, entries, max_chars)
                 )
-            updated = existing.replace(old_text, "", 1)
+            if len(matches) > 1:
+                return f"Error: '{old_text}' matched {len(matches)} entries. Provide a more specific string."
+            entries.pop(matches[0])
         else:
             return f"Error: Unsupported action '{action}'."
 
-        if len(updated) > max_chars:
-            return (
-                f"Error: {path} would be {len(updated)} chars (max {max_chars}). "
-                "Consolidate entries before adding more."
-            )
-
+        updated = _MEMORY_SEP.join(entries) if entries else ""
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(updated)
 
-        return f"Updated {path}: {len(updated)}/{max_chars} chars."
+        current_len = sum(len(e) for e in entries)
+        if entries:
+            current_len += len(entries) - 1
+        return f"Updated {target}: {current_len}/{max_chars} chars ({len(entries)} entries)."
     except Exception as e:
         logger.exception("Memory tool error: action=%s target=%s", action, target)
         return f"Error updating memory: {e}"
+
+
+@registry.register_tool(
+    name="vector_memory",
+    description="Semantic memory: remember facts or recall them across sessions. 'remember' stores a fact for future retrieval. 'recall' searches past conversations semantically.",
+    schema={
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["remember", "recall"],
+                "description": "remember = store a fact, recall = search past memories.",
+            },
+            "content": {
+                "type": "string",
+                "description": "For 'remember': the fact to store. For 'recall': the query to search for.",
+            },
+        },
+        "required": ["action", "content"],
+    },
+)
+def vector_memory(action: str, content: str) -> str:
+    if _memory_store is None or not _memory_store.is_available:
+        return "Vector memory is not available. Embedding service may be offline."
+
+    if action == "remember":
+        count = _memory_store.add_memory(
+            text=content,
+            source="user",
+            session_id="explicit",
+            auto_extract=False,
+        )
+        if count > 0:
+            return f"Remembered: {content[:100]}"
+        return "Failed to store memory."
+
+    elif action == "recall":
+        results = _memory_store.search(content, n_results=3)
+        if not results:
+            return "No relevant memories found."
+        lines = []
+        for r in results:
+            lines.append(f"- {r['text']}")
+        return "\n".join(lines)
+
+    return f"Unknown action: {action}"
 
 
 @registry.register_tool(
@@ -629,10 +794,10 @@ def memory(action: str, target: str, content: str = "", old_text: str = "") -> s
         "properties": {
             "query": {
                 "type": "string",
-                "description": "Search query to find in past conversations."
+                "description": "Search query to find in past conversations.",
             }
         },
-        "required": ["query"]
+        "required": ["query"],
     },
 )
 def session_search(query: str) -> str:
@@ -654,8 +819,6 @@ def session_search(query: str) -> str:
         return "No matching history found."
 
     lines = []
-    for item in results:
-        role = item.get("role", "unknown")
-        message = item.get("message", "")
+    for role, message in results:
         lines.append(f"- [{role}]: {message}")
     return "\n".join(lines)

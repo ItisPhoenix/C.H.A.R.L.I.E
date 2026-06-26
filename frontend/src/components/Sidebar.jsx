@@ -1,5 +1,15 @@
-import { Plus, RefreshCw } from 'lucide-react';
+import { Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+function parseDate(ts) {
+  if (!ts) return new Date(NaN);
+  if (typeof ts === 'string' && !ts.includes('T')) {
+    // SQLite UTC space format "YYYY-MM-DD HH:MM:SS.SSS" -> ISO "YYYY-MM-DDTHH:MM:SS.SSSZ"
+    const normalized = ts.replace(' ', 'T') + 'Z';
+    return new Date(normalized);
+  }
+  return new Date(ts);
+}
+
 
 function groupSessionsByDate(sessions) {
   const now = new Date();
@@ -12,7 +22,7 @@ function groupSessionsByDate(sessions) {
   const groups = { Today: [], Yesterday: [], 'Last 7 Days': [], Older: [] };
 
   sessions.forEach((session) => {
-    const d = new Date(session.updated_at || session.created_at);
+    const d = parseDate(session.updated_at || session.created_at);
     if (d >= today) groups.Today.push(session);
     else if (d >= yesterday) groups.Yesterday.push(session);
     else if (d >= lastWeek) groups['Last 7 Days'].push(session);
@@ -25,7 +35,7 @@ function groupSessionsByDate(sessions) {
 function formatRelativeTime(ts) {
   if (!ts) return '';
   const now = Date.now();
-  const then = new Date(ts).getTime();
+  const then = parseDate(ts).getTime();
   if (isNaN(then)) return '';
   const diffSec = Math.floor((now - then) / 1000);
   if (diffSec < 60) return 'just now';
@@ -35,7 +45,7 @@ function formatRelativeTime(ts) {
   if (diffHr < 24) return `${diffHr}h ago`;
   const diffDay = Math.floor(diffHr / 24);
   if (diffDay < 7) return `${diffDay}d ago`;
-  return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return parseDate(ts).toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
 export function Sidebar({
@@ -48,6 +58,7 @@ export function Sidebar({
   filterMode = 'launch',
   onFilterModeChange,
   collapsed = false,
+  onDeleteSession,
 }) {
   const grouped = groupSessionsByDate(sessions);
 
@@ -75,17 +86,24 @@ export function Sidebar({
   }
 
   return (
-    <div className="flex flex-col h-full w-72 shrink-0 glass-strong border-r border-white/[0.06] select-none z-30">
+    <motion.div
+      initial={{ x: -20, opacity: 0 }}
+      animate={{ x: 0, opacity: 1 }}
+      transition={{ duration: 0.4, ease: [0.25, 0.1, 0.25, 1] }}
+      className="flex flex-col h-full w-72 shrink-0 glass-strong border-r border-white/[0.06] select-none z-30"
+    >
       {/* New Chat Button */}
       <div className="p-4 border-b border-white/[0.06]">
-        <button
+        <motion.button
           type="button"
           onClick={onNewChat}
-          className="w-full flex items-center justify-center gap-2 rounded-2xl py-3 px-4 border border-white/[0.06] text-[var(--text-primary)] hover:border-[var(--accent)]/40 hover:shadow-[0_0_20px_rgba(167,139,250,0.1)] transition-all duration-300 active:scale-[0.98]"
+          whileHover={{ scale: 1.02, boxShadow: '0 0 20px rgba(167,139,250,0.1)' }}
+          whileTap={{ scale: 0.97 }}
+          className="w-full flex items-center justify-center gap-2 rounded-2xl py-3 px-4 border border-white/[0.06] text-[var(--text-primary)] hover:border-[var(--accent)]/40 transition-all duration-300"
         >
           <Plus size={16} className="text-[var(--accent)]" />
           <span className="text-sm font-medium">New Chat</span>
-        </button>
+        </motion.button>
       </div>
 
       {/* Header */}
@@ -133,12 +151,17 @@ export function Sidebar({
         )}
 
         {!loading && sessions.length === 0 && (
-          <div className="flex flex-col items-center justify-center py-12 px-4 text-center opacity-60">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 0.6, scale: 1 }}
+            transition={{ duration: 0.5 }}
+            className="flex flex-col items-center justify-center py-12 px-4 text-center"
+          >
             <div className="w-10 h-10 rounded-2xl bg-white/[0.06] border border-white/[0.08] flex items-center justify-center mb-3">
               <span className="text-lg">💬</span>
             </div>
             <p className="text-sm text-[var(--text-muted)]">No conversations yet</p>
-          </div>
+          </motion.div>
         )}
 
         <AnimatePresence mode="popLayout">
@@ -155,39 +178,50 @@ export function Sidebar({
                 const isActive = session.id === currentSessionId;
                 const isCurrentLaunch = session.launch_id != null && session.launch_id !== '';
                 return (
-                  <motion.button
+                  <motion.div
                     key={session.id}
                     layout
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -8 }}
                     transition={{ duration: 0.2 }}
-                    type="button"
                     onClick={() => onSelectSession(session.id)}
-                    className={`w-full text-left rounded-xl px-3 py-2.5 mb-1 transition-all duration-200 group ${
+                    className={`w-full flex items-center gap-1 rounded-xl px-3 py-2.5 mb-1 transition-colors duration-200 group cursor-pointer ${
                       isActive
                         ? 'bg-white/[0.06] ring-1 ring-[var(--accent)]/50'
-                        : 'hover:bg-white/[0.04] hover:translate-y-[-1px] hover:shadow-[0_4px_12px_rgba(0,0,0,0.2)]'
+                        : 'hover:bg-white/[0.04]'
                     }`}
                   >
-                    <div className="flex items-center gap-2">
-                      {isCurrentLaunch && (
-                        <div className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] shrink-0" />
-                      )}
-                      <span className={`text-sm font-medium truncate ${isActive ? 'text-[var(--text-primary)]' : 'text-[var(--text-primary)] opacity-80 group-hover:opacity-100'}`}>
-                        {session.title || 'New Chat'}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        {isCurrentLaunch && (
+                          <div className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] shrink-0" />
+                        )}
+                        <span className={`text-sm font-medium truncate ${isActive ? 'text-[var(--text-primary)]' : 'text-[var(--text-primary)] opacity-80 group-hover:opacity-100'}`}>
+                          {session.title || 'New Chat'}
+                        </span>
+                      </div>
+                      <span className="text-xs text-[var(--text-muted)] ml-3.5 block mt-0.5">
+                        {formatRelativeTime(session.updated_at || session.created_at)}
                       </span>
                     </div>
-                    <span className="text-xs text-[var(--text-muted)] ml-3.5 block mt-0.5">
-                      {formatRelativeTime(session.updated_at || session.created_at)}
-                    </span>
-                  </motion.button>
+                    {onDeleteSession && (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); onDeleteSession(session.id); }}
+                        className="shrink-0 p-1.5 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-red-500/15 text-[var(--text-muted)] hover:text-red-400 transition-all duration-200"
+                        title="Delete chat"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    )}
+                  </motion.div>
                 );
               })}
             </div>
           ))}
         </AnimatePresence>
       </div>
-    </div>
+    </motion.div>
   );
 }

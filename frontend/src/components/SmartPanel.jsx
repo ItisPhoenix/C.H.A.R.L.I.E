@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Sparkles, Brain, Wrench, ChevronDown, ChevronRight, Loader } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -49,29 +49,37 @@ function ActivityCard({ entry }) {
   );
 }
 
-function CollapsedEntries({ count }) {
-  const [expanded, setExpanded] = useState(false);
-
+function CollapsedEntries({ count, entries, onToggle, expanded }) {
   return (
-    <button
-      type="button"
-      onClick={() => setExpanded(!expanded)}
-      className="flex items-center gap-1.5 px-3 py-1 text-[10px] text-[var(--text-secondary)] hover:text-[var(--text-muted)] transition-colors"
-    >
-      {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-      <span>{expanded ? 'Hide' : `Show ${count} previous steps`}</span>
-    </button>
+    <div>
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex items-center gap-1.5 px-3 py-1 text-[10px] text-[var(--text-secondary)] hover:text-[var(--text-muted)] transition-colors"
+      >
+        {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+        <span>{expanded ? 'Hide' : `Show ${count} previous steps`}</span>
+      </button>
+      {expanded && (
+        <div className="space-y-2 mt-1 opacity-60">
+          {entries.map((entry) => (
+            <ActivityCard key={entry.id} entry={entry} />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
 export function SmartPanel({ visible = true, onClose, onMessage, currentSessionId }) {
   const [entries, setEntries] = useState([]);
-  const [stepCounter, setStepCounter] = useState(0);
+  const stepRef = useRef(0);
+  const [collapsedExpanded, setCollapsedExpanded] = useState(false);
 
   // Clear on session change
   useEffect(() => {
     setEntries([]);
-    setStepCounter(0);
+    stepRef.current = 0;
   }, [currentSessionId]);
 
   // Subscribe to WS events
@@ -80,10 +88,10 @@ export function SmartPanel({ visible = true, onClose, onMessage, currentSessionI
 
     const unsubscribe = onMessage((event) => {
       if (event.type === 'thinking_update') {
-        setStepCounter((prev) => prev + 1);
-        setEntries((prev) => [
-          { type: 'thinking_update', text: event.payload?.text || 'Thinking...', step: stepCounter + 1, id: Date.now() },
-          ...prev,
+        stepRef.current += 1;
+        setEntries((old) => [
+          { type: 'thinking_update', text: event.payload?.text || 'Thinking...', step: stepRef.current, id: Date.now() },
+          ...old,
         ]);
       } else if (event.type === 'tool_call') {
         const name = event.payload?.name || 'tool';
@@ -110,7 +118,7 @@ export function SmartPanel({ visible = true, onClose, onMessage, currentSessionI
       }
     });
     return unsubscribe;
-  }, [onMessage, stepCounter, currentSessionId]);
+  }, [onMessage, currentSessionId]);
 
   if (!visible) return null;
 
@@ -152,7 +160,7 @@ export function SmartPanel({ visible = true, onClose, onMessage, currentSessionI
         <div className="flex-1 overflow-y-auto px-3 py-3 space-y-2">
           {/* Collapsed old entries */}
           {collapsed.length > 0 && (
-            <CollapsedEntries count={collapsed.length} />
+            <CollapsedEntries count={collapsed.length} entries={collapsed} expanded={collapsedExpanded} onToggle={() => setCollapsedExpanded((p) => !p)} />
           )}
 
           {/* Recent entries */}
@@ -167,7 +175,7 @@ export function SmartPanel({ visible = true, onClose, onMessage, currentSessionI
       {/* Footer */}
       <div className="px-5 py-3 border-t border-white/[0.06] text-center">
         <span className="text-[10px] text-[var(--text-secondary)] uppercase tracking-widest">
-          {entries.length > 0 ? `${entries.length} steps` : 'Phase 2'}
+          Activity log
         </span>
       </div>
     </motion.div>

@@ -8,6 +8,7 @@ import logging
 import asyncio
 import threading
 import os
+
 os.environ["ORT_LOG_LEVEL"] = "3"
 
 import time
@@ -21,8 +22,8 @@ from typing import Callable, Optional
 from kokoro_onnx import Kokoro
 from collections import deque
 from charlie.asr_worker import asr_worker_process
-
 from charlie.core import strip_internal_reasoning
+from charlie.wake_word import WakeWordDetector
 
 logger = logging.getLogger("charlie.voice")
 
@@ -30,35 +31,38 @@ logger = logging.getLogger("charlie.voice")
 _MIN_TEXT_LEN = 3
 _ECHO_WINDOW_SEC = 2.0
 _ECHO_MAX_WORDS = 4
+_LONG_SENTENCE_CHARS = 250
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?,;])\s+")
+
 
 # Ellipsis patterns
-_RE_ELLIPSIS = re.compile(r'\.{4,}')
-_RE_DOTS = re.compile(r'(?<!\.)\.(?!\.)(\s*\.)+')  # loose dots -> single period
+_RE_ELLIPSIS = re.compile(r"\.{4,}")
+_RE_DOTS = re.compile(r"(?<!\.)\.(?!\.)(\s*\.)+")  # loose dots -> single period
 
 # Repeated punctuation (keep max 1)
-_RE_REPEATED_EXCL = re.compile(r'!{2,}')
-_RE_REPEATED_QUES = re.compile(r'\?{2,}')
+_RE_REPEATED_EXCL = re.compile(r"!{2,}")
+_RE_REPEATED_QUES = re.compile(r"\?{2,}")
 
 # Dashes as clause breaks (em dash, en dash, double hyphen)
-_RE_EM_DASH = re.compile(r'\s*\u2014\s*')
-_RE_EN_DASH = re.compile(r'\s*\u2013\s*')
-_RE_DOUBLE_HYPHEN = re.compile(r'\s*--\s*')
+_RE_EM_DASH = re.compile(r"\s*\u2014\s*")
+_RE_EN_DASH = re.compile(r"\s*\u2013\s*")
+_RE_DOUBLE_HYPHEN = re.compile(r"\s*--\s*")
 
 # LLM formatting artifacts
-_RE_LIST_BULLET = re.compile(r'^[\s]*[-*+]\s+', re.MULTILINE)  # "- item" or "* item"
-_RE_NUMBERED_LIST = re.compile(r'^[\s]*\d+[.)]\s+', re.MULTILINE)  # "1. item"
-_RE_HASH_HEADER = re.compile(r'^#{1,6}\s+', re.MULTILINE)  # "## Header"
-_RE_BOLD_ITALIC = re.compile(r'[*_]{1,3}(\S.*?\S)[*_]{1,3}')  # *bold* or _italic_
-_RE_INLINE_CODE = re.compile(r'`([^`]+)`')
-_RE_BACKTICK_WRAP = re.compile(r'^`|`$')
-_RE_TRAILING_PUNCT_NO_SPACE = re.compile(r'([.!?])([A-Z])')
+_RE_LIST_BULLET = re.compile(r"^[\s]*[-*+]\s+", re.MULTILINE)  # "- item" or "* item"
+_RE_NUMBERED_LIST = re.compile(r"^[\s]*\d+[.)]\s+", re.MULTILINE)  # "1. item"
+_RE_HASH_HEADER = re.compile(r"^#{1,6}\s+", re.MULTILINE)  # "## Header"
+_RE_BOLD_ITALIC = re.compile(r"[*_]{1,3}(\S.*?\S)[*_]{1,3}")  # *bold* or _italic_
+_RE_INLINE_CODE = re.compile(r"`([^`]+)`")
+_RE_BACKTICK_WRAP = re.compile(r"^`|`$")
+_RE_TRAILING_PUNCT_NO_SPACE = re.compile(r"([.!?])([A-Z])")
 
 # Wrapper quotes from LLM output: "Hello world" -> Hello world
 _RE_WRAPPER_QUOTES = re.compile(r'^\s*["\u201c\u201d]\s*(.+?)\s*["\u201c\u201d]\s*$')
 
 # Parenthetical: strip short ones entirely, keep content for long ones
-_RE_PAREN_SHORT = re.compile(r'\([^)]{1,40}\)')  # short aside -> remove
-_RE_PAREN_LONG = re.compile(r'\(([^)]{41,})\)')  # long aside -> keep content
+_RE_PAREN_SHORT = re.compile(r"\([^)]{1,40}\)")  # short aside -> remove
+_RE_PAREN_LONG = re.compile(r"\(([^)]{41,})\)")  # long aside -> keep content
 
 # Contraction fixes for TTS naturalness
 _CONTRACTIONS = {
@@ -93,9 +97,13 @@ _CONTRACTIONS = {
 
 
 class VoiceEngine:
-    def __init__(self, config, on_speech: Callable[[str], None],
-                 on_tts_start: Optional[Callable[[], None]] = None,
-                 on_tts_stop: Optional[Callable[[], None]] = None):
+    def __init__(
+        self,
+        config,
+        on_speech: Callable[[str], None],
+        on_tts_start: Optional[Callable[[], None]] = None,
+        on_tts_stop: Optional[Callable[[], None]] = None,
+    ):
         self.config = config
         self.on_speech = on_speech
         self._on_tts_start = on_tts_start
@@ -127,16 +135,26 @@ class VoiceEngine:
         )
         self.barge_in_enabled: bool = True
 
+        # Wake word state
+        self._wake_word_detector: Optional[WakeWordDetector] = None
+        self._wake_word_active: bool = False  # True = in active session after wake word
+        self._last_activity_time: float = 0.0
+        self._on_wake_word: Optional[Callable[[], None]] = None
+
     def set_widget_callback(self, cb: Callable[[str], None]) -> None:
         """Register callback for mode changes (listening/speaking/idle)."""
         self._widget_callback = cb
+
+    def set_wake_word_callback(self, cb: Callable[[], None]) -> None:
+        """Register callback for wake-word detection events."""
+        self._on_wake_word = cb
 
     def _ensure_models(self):
         os.makedirs(self.config.kokoro_model_dir, exist_ok=True)
         base_url = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
         files = {
             "kokoro-v1.0.onnx": f"{base_url}/kokoro-v1.0.onnx",
-            "voices-v1.0.bin": f"{base_url}/voices-v1.0.bin"
+            "voices-v1.0.bin": f"{base_url}/voices-v1.0.bin",
         }
         for name, url in files.items():
             path = os.path.join(self.config.kokoro_model_dir, name)
@@ -146,14 +164,43 @@ class VoiceEngine:
 
     def start(self):
         logger.info("Starting voice engine loops")
-        self.input_thread = threading.Thread(target=self._run, daemon=True, name="VoiceInputLoop")
+        self.input_thread = threading.Thread(
+            target=self._run, daemon=True, name="VoiceInputLoop"
+        )
         self.input_thread.start()
-        self.tts_worker = threading.Thread(target=self._tts_worker_loop, daemon=True, name="TTSWorker")
+        self.tts_worker = threading.Thread(
+            target=self._tts_worker_loop, daemon=True, name="TTSWorker"
+        )
         self.tts_worker.start()
-        self.playback_worker = threading.Thread(target=self._playback_worker, daemon=True, name="TTSPlayback")
+        self.playback_worker = threading.Thread(
+            target=self._playback_worker, daemon=True, name="TTSPlayback"
+        )
         self.playback_worker.start()
-        self.asr_poller_thread = threading.Thread(target=self._asr_poller_loop, daemon=True)
+        self.asr_poller_thread = threading.Thread(
+            target=self._asr_poller_loop, daemon=True
+        )
         self.asr_poller_thread.start()
+
+        # Initialize wake word detector if enabled
+        if self.config.wake_word_enabled:
+            try:
+                self._wake_word_detector = WakeWordDetector(
+                    classifier_path=self.config.wake_word_model_path,
+                    threshold=self.config.wake_word_threshold,
+                )
+                if self._wake_word_detector.is_available:
+                    self._wake_word_active = False  # start in waiting state
+                    self._last_activity_time = time.time()
+                    logger.info("Wake word detection enabled.")
+                else:
+                    self._wake_word_detector = None
+                    logger.warning("Wake word detector unavailable; disabling.")
+            except Exception as e:
+                self._wake_word_detector = None
+                logger.warning(f"Wake word init failed: {e}; disabling.")
+        else:
+            logger.info("Wake word detection disabled.")
+
         logger.info("Continuous listening mode active.")
 
     def stop(self):
@@ -161,7 +208,12 @@ class VoiceEngine:
         logger.info("Voice engine stopping...")
         self.stop_event.set()
         self.stop_tts()
-        for thread in (self.input_thread, self.tts_worker, self.playback_worker, self.asr_poller_thread):
+        for thread in (
+            self.input_thread,
+            self.tts_worker,
+            self.playback_worker,
+            self.asr_poller_thread,
+        ):
             if thread and thread.is_alive():
                 thread.join(timeout=1.0)
         if self.asr_process:
@@ -207,26 +259,26 @@ class VoiceEngine:
             return ""
 
         # 1. Ellipsis handling: "..." -> ".", "wait..." -> "wait."
-        text = _RE_ELLIPSIS.sub('.', text)
-        text = _RE_DOTS.sub('.', text)
+        text = _RE_ELLIPSIS.sub(".", text)
+        text = _RE_DOTS.sub(".", text)
 
         # 2. Repeated punctuation: "!!" -> "!", "??" -> "?"
-        text = _RE_REPEATED_EXCL.sub('!', text)
-        text = _RE_REPEATED_QUES.sub('?', text)
+        text = _RE_REPEATED_EXCL.sub("!", text)
+        text = _RE_REPEATED_QUES.sub("?", text)
 
         # 3. Dashes -> commas (clause breaks sound natural; dashes sound robotic)
-        text = _RE_EM_DASH.sub(', ', text)
-        text = _RE_EN_DASH.sub(', ', text)
-        text = _RE_DOUBLE_HYPHEN.sub(', ', text)
+        text = _RE_EM_DASH.sub(", ", text)
+        text = _RE_EN_DASH.sub(", ", text)
+        text = _RE_DOUBLE_HYPHEN.sub(", ", text)
 
         # 4. Strip LLM formatting artifacts
-        text = _RE_LIST_BULLET.sub('', text)
-        text = _RE_NUMBERED_LIST.sub('', text)
-        text = _RE_HASH_HEADER.sub('', text)
-        text = _RE_BOLD_ITALIC.sub(r'\1', text)  # *bold* -> bold
-        text = _RE_INLINE_CODE.sub(r'\1', text)  # `code` -> code
+        text = _RE_LIST_BULLET.sub("", text)
+        text = _RE_NUMBERED_LIST.sub("", text)
+        text = _RE_HASH_HEADER.sub("", text)
+        text = _RE_BOLD_ITALIC.sub(r"\1", text)  # *bold* -> bold
+        text = _RE_INLINE_CODE.sub(r"\1", text)  # `code` -> code
         # Strip all remaining bold/italic asterisks/underscores to prevent TTS reading them
-        text = text.replace('**', '').replace('*', '').replace('_', '')
+        text = text.replace("**", "").replace("*", "").replace("_", "")
 
         # 5. Wrapper quotes: "Hello world" -> Hello world
         m = _RE_WRAPPER_QUOTES.match(text)
@@ -234,24 +286,41 @@ class VoiceEngine:
             text = m.group(1)
 
         # 6. Parenthetical aside handling
-        text = _RE_PAREN_SHORT.sub('', text)  # remove short asides entirely
-        text = _RE_PAREN_LONG.sub(r'\1', text)  # keep content of long asides
+        text = _RE_PAREN_SHORT.sub("", text)  # remove short asides entirely
+        text = _RE_PAREN_LONG.sub(r"\1", text)  # keep content of long asides
 
         # 7. Ensure sentence ends with punctuation (Kokoro needs this for prosody)
         text = text.rstrip()
-        if text and text[-1] not in '.!?':
+        if text and text[-1] not in ".!?":
             # Check if it looks like a question
             lower = text.lower()
-            if any(lower.endswith(q) for q in ('what', 'why', 'how', 'when', 'where', 'who', 'which', 'is it', 'do you', 'can you', 'could you', 'would you', 'shall we')):
-                text += '?'
+            if any(
+                lower.endswith(q)
+                for q in (
+                    "what",
+                    "why",
+                    "how",
+                    "when",
+                    "where",
+                    "who",
+                    "which",
+                    "is it",
+                    "do you",
+                    "can you",
+                    "could you",
+                    "would you",
+                    "shall we",
+                )
+            ):
+                text += "?"
             else:
-                text += '.'
+                text += "."
 
         # 8. Fix missing space after sentence-ending punctuation
-        text = _RE_TRAILING_PUNCT_NO_SPACE.sub(r'\1 \2', text)
+        text = _RE_TRAILING_PUNCT_NO_SPACE.sub(r"\1 \2", text)
 
         # 9. Collapse multiple spaces/newlines
-        text = re.sub(r'\s+', ' ', text).strip()
+        text = re.sub(r"\s+", " ", text).strip()
 
         return text
 
@@ -265,15 +334,18 @@ class VoiceEngine:
         if now - getattr(self, "_last_speech_time", 0.0) < self.speech_echo_window:
             new_words = set(text.lower().split())
             old_words = set(getattr(self, "_last_speech_text", "").lower().split())
-            if (len(new_words) <= self.speech_echo_max_words and
-                    new_words and new_words.issubset(old_words)):
+            if (
+                len(new_words) <= self.speech_echo_max_words
+                and new_words
+                and new_words.issubset(old_words)
+            ):
                 return ""
         self._last_speech_time = now
         self._last_speech_text = text
 
         # Strip URLs
-        text = re.sub(r'\(https?://.*?\)', '', text)
-        text = re.sub(r'https?://\S+', '', text)
+        text = re.sub(r"\(https?://.*?\)", "", text)
+        text = re.sub(r"https?://\S+", "", text)
 
         # Humanize for natural TTS prosody
         text = self._humanize_text(text)
@@ -281,12 +353,20 @@ class VoiceEngine:
         # Number and symbol conversion
         text = self._numbers_to_words(text)
         text = self._symbols_to_words(text)
-
         # Final ASCII cleanup
         text = text.encode("ascii", "ignore").decode("ascii")
-        text = re.sub(r'\s+', ' ', text).strip()
+        text = re.sub(r"\s+", " ", text).strip()
 
         if not text or len(text) < _MIN_TEXT_LEN:
+            return
+
+        if len(text) > _LONG_SENTENCE_CHARS:
+            self.stop_tts_event.clear()
+            chunks = _SENTENCE_SPLIT_RE.split(text)
+            for chunk in chunks:
+                chunk = chunk.strip()
+                if chunk and len(chunk) >= _MIN_TEXT_LEN:
+                    self.tts_queue.put((chunk, emotional_state))
             return
 
         self.stop_tts_event.clear()
@@ -308,10 +388,15 @@ class VoiceEngine:
                 try:
                     tts_start = time.time()
                     samples, sample_rate = self.kokoro.create(
-                        text, voice=self.config.kokoro_voice, speed=speed, lang=self.config.kokoro_lang
+                        text,
+                        voice=self.config.kokoro_voice,
+                        speed=speed,
+                        lang=self.config.kokoro_lang,
                     )
                     tts_ms = (time.time() - tts_start) * 1000
-                    logger.debug(f"pipeline_stage | stage=tts | latency_ms={tts_ms:.1f}")
+                    logger.debug(
+                        f"pipeline_stage | stage=tts | latency_ms={tts_ms:.1f}"
+                    )
                     mouth_values = []
                     return (samples, sample_rate, mouth_values)
                 except Exception as e:
@@ -336,7 +421,10 @@ class VoiceEngine:
                     yield (samples, sr)
                 return
             stream = self.kokoro.create_stream(
-                text, voice=self.config.kokoro_voice, speed=speed, lang=self.config.kokoro_lang
+                text,
+                voice=self.config.kokoro_voice,
+                speed=speed,
+                lang=self.config.kokoro_lang,
             )
             async for samples, sr in stream:
                 yield (samples, sr)
@@ -399,7 +487,9 @@ class VoiceEngine:
                     continue
 
                 try:
-                    samples, sample_rate, mouth_values = self.playback_queue.get(timeout=0.1)
+                    samples, sample_rate, mouth_values = self.playback_queue.get(
+                        timeout=0.1
+                    )
                 except queue.Empty:
                     continue
 
@@ -454,10 +544,40 @@ class VoiceEngine:
         """Convert integer to English words (0 to 999 billion)."""
         if n == 0:
             return "zero"
-        ones = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-                "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
-                "seventeen", "eighteen", "nineteen"]
-        tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+        ones = [
+            "",
+            "one",
+            "two",
+            "three",
+            "four",
+            "five",
+            "six",
+            "seven",
+            "eight",
+            "nine",
+            "ten",
+            "eleven",
+            "twelve",
+            "thirteen",
+            "fourteen",
+            "fifteen",
+            "sixteen",
+            "seventeen",
+            "eighteen",
+            "nineteen",
+        ]
+        tens = [
+            "",
+            "",
+            "twenty",
+            "thirty",
+            "forty",
+            "fifty",
+            "sixty",
+            "seventy",
+            "eighty",
+            "ninety",
+        ]
 
         def _h(n: int) -> str:
             if n == 0:
@@ -490,6 +610,7 @@ class VoiceEngine:
 
     def _numbers_to_words(self, text: str) -> str:
         """Convert numeric patterns to English words."""
+
         def _get_suffix_word(s):
             s = s.lower()
             if s == "k":
@@ -501,6 +622,17 @@ class VoiceEngine:
             if s == "t":
                 return " trillion"
             return ""
+        # Pre-pass: normalize full-word suffixes to single-letter ($2 billion -> $2B)
+        text = re.sub(
+            r"\$(\d[\d,]*\.?\d*)\s+(thousand|million|billion|trillion)",
+            lambda m: f"${m.group(1)}{m.group(2)[0].upper()}",
+            text, flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"(?<!\w)(\d[\d,]*\.?\d*)\s+(thousand|million|billion|trillion)",
+            lambda m: f"{m.group(1)}{m.group(2)[0].upper()}",
+            text, flags=re.IGNORECASE,
+        )
 
         def _replace_currency(m):
             raw = m.group(1).replace(",", "")
@@ -509,13 +641,23 @@ class VoiceEngine:
             try:
                 if "." in raw:
                     integer, fraction = raw.split(".", 1)
-                    int_words = self._number_to_words(int(integer)) if integer and integer != "0" else "zero"
-                    frac_digits = " ".join(self._number_to_words(int(d)) for d in fraction)
+                    int_words = (
+                        self._number_to_words(int(integer))
+                        if integer and integer != "0"
+                        else "zero"
+                    )
+                    frac_digits = " ".join(
+                        self._number_to_words(int(d)) for d in fraction
+                    )
                     words = f"{int_words} point {frac_digits}"
                 else:
                     n = int(float(raw))
                     words = self._number_to_words(n)
-                return f"{words}{suffix_word} dollars" if words != "one" or suffix_word else f"{words} dollar"
+                return (
+                    f"{words}{suffix_word} dollars"
+                    if words != "one" or suffix_word
+                    else f"{words} dollar"
+                )
             except (ValueError, IndexError):
                 return m.group(0)
 
@@ -526,8 +668,14 @@ class VoiceEngine:
             try:
                 if "." in raw:
                     integer, fraction = raw.split(".", 1)
-                    int_words = self._number_to_words(int(integer)) if integer and integer != "0" else "zero"
-                    frac_digits = " ".join(self._number_to_words(int(d)) for d in fraction)
+                    int_words = (
+                        self._number_to_words(int(integer))
+                        if integer and integer != "0"
+                        else "zero"
+                    )
+                    frac_digits = " ".join(
+                        self._number_to_words(int(d)) for d in fraction
+                    )
                     words = f"{int_words} point {frac_digits}"
                 else:
                     n = int(float(raw))
@@ -536,44 +684,86 @@ class VoiceEngine:
             except (ValueError, IndexError):
                 return m.group(0)
 
-        text = re.sub(r'\$(\d[\d,]*\.?\d*)\s*([BbMmTtKk])?(?!\w)', _replace_currency, text)
-        text = re.sub(r'(?<!\w)(\d[\d,]*\.?\d*)\s*([BbMmTtKk])(?!\w)', _replace_number, text)
-        text = re.sub(r'(?<!\w)(\d{1,3}(?:,\d{3})+)(?!\w)', _replace_number, text)
+        text = re.sub(
+            r"\$(\d[\d,]*\.?\d*)\s*([BbMmTtKk])?(?!\w)", _replace_currency, text
+        )
+        text = re.sub(
+            r"(?<!\w)(\d[\d,]*\.?\d*)\s*([BbMmTtKk])(?!\w)", _replace_number, text
+        )
+        text = re.sub(r"(?<!\w)(\d{1,3}(?:,\d{3})+)(?!\w)", _replace_number, text)
 
         def _replace_decimal_simple(m):
             integer, fraction = m.group(1).replace(",", ""), m.group(2)
             try:
-                int_words = self._number_to_words(int(integer)) if integer and integer != "0" else "zero"
+                int_words = (
+                    self._number_to_words(int(integer))
+                    if integer and integer != "0"
+                    else "zero"
+                )
                 frac_digits = " ".join(self._number_to_words(int(d)) for d in fraction)
                 return f"{int_words} point {frac_digits}"
             except ValueError:
                 return m.group(0)
 
-        text = re.sub(r'(?<!\d\.)(?<!\w)(\d{1,3}(?:,\d{3})*)\.(\d+)(?!\.\d)', _replace_decimal_simple, text)
-        text = re.sub(r'(?<!\w)(\d{5,})(?!\.\d)(?!\w)', _replace_number, text)
+        text = re.sub(
+            r"(?<!\d\.)(?<!\w)(\d{1,3}(?:,\d{3})*)\.(\d+)(?!\.\d)",
+            _replace_decimal_simple,
+            text,
+        )
+        text = re.sub(r"(?<!\w)(\d{5,})(?!\.\d)(?!\w)", _replace_number, text)
         return text
 
     # Symbol-to-word mappings for {str}.translate() -- maps ordinal -> word
-    _SYMBOL_MAP = str.maketrans({
-        "%": " percent",
-        "&": " and",
-        "@": " at",
-        "+": " plus",
-        "=": " equals",
-        "/": " slash ",
-        "\\": " backslash ",
-        ">": " greater than ",
-        "<": " less than ",
-    })
+    _SYMBOL_MAP = str.maketrans(
+        {
+            "%": " percent",
+            "&": " and",
+            "@": " at",
+            "+": " plus",
+            "=": " equals",
+            "/": " slash ",
+            "\\": " backslash ",
+            ">": " greater than ",
+            "<": " less than ",
+        }
+    )
 
     def _symbols_to_words(self, text: str) -> str:
         text = text.translate(self._SYMBOL_MAP)
-        text = re.sub(r'(\d)\s+degrees\s+', r'\1 degrees ', text)
+        text = re.sub(r"(\d)\s+degrees\s+", r"\1 degrees ", text)
         return text
 
     # -----------------------------------------------------------------------
     # Audio input / ASR
     # -----------------------------------------------------------------------
+
+    def _play_wake_chime(self) -> None:
+        """Play a short chime on wake-word detection. Non-blocking."""
+        chime_path = self.config.wake_word_audio_chime_path
+        try:
+            if os.path.exists(chime_path):
+                import soundfile as sf
+
+                samples, sr = sf.read(chime_path, dtype="float32")
+                # Play in a thread so we don't block the audio loop
+                threading.Thread(
+                    target=sd.play, args=(samples, sr), daemon=True
+                ).start()
+            else:
+                # Synthesize a short sine-wave chime (440Hz, 200ms)
+                sr = 16000
+                duration = 0.2
+                t = np.linspace(0, duration, int(sr * duration), dtype=np.float32)
+                chime = 0.3 * np.sin(2 * np.pi * 440 * t)
+                # Quick fade-in/out to avoid clicks
+                fade = min(int(sr * 0.02), len(chime))
+                chime[:fade] *= np.linspace(0, 1, fade)
+                chime[-fade:] *= np.linspace(1, 0, fade)
+                threading.Thread(
+                    target=sd.play, args=(chime, sr), daemon=True
+                ).start()
+        except Exception as e:
+            logger.debug(f"Wake chime error: {e}")
 
     def _run(self):
         samplerate = 16000
@@ -603,7 +793,7 @@ class VoiceEngine:
             self.audio_stream = sd.InputStream(
                 samplerate=samplerate,
                 channels=1,
-                dtype='float32',
+                dtype="float32",
                 blocksize=block_size,
                 device=input_device,
                 callback=_callback,
@@ -615,10 +805,16 @@ class VoiceEngine:
 
         try:
             dev_info = sd.query_devices(input_device)
-            dev_name = dev_info.get('name', str(input_device)) if isinstance(dev_info, dict) else str(input_device)
+            dev_name = (
+                dev_info.get("name", str(input_device))
+                if isinstance(dev_info, dict)
+                else str(input_device)
+            )
         except Exception:
             dev_name = str(input_device)
-        logger.info(f"Audio stream opened: device={dev_name} rate={samplerate} block={block_size}")
+        logger.info(
+            f"Audio stream opened: device={dev_name} rate={samplerate} block={block_size}"
+        )
 
         # Start ASR worker process
         self.asr_process = mp.Process(
@@ -650,18 +846,64 @@ class VoiceEngine:
         _frame_count = 0
         _rms_log_interval = int(3.0 * samplerate / block_size)  # log every ~3s
 
+        # Wake word sliding buffer (~2s at 16kHz for inference)
+        _ww_buffer_samples = samplerate * 2  # 32000 samples = 2s
+        _ww_buffer: deque = deque(maxlen=_ww_buffer_samples // block_size + 1)
+        _ww_check_interval = 4  # check every N frames (~2048ms at 512 block)
+        _ww_check_counter = 0
+
         while not self.stop_event.is_set():
             try:
                 data = self._audio_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
-            rms = float(np.sqrt(np.mean(data ** 2) + 1e-10))
+            # -- Wake word gating --
+            # When wake word is enabled and we're NOT in an active session,
+            # feed audio to the wake word detector instead of running VAD.
+            if self._wake_word_detector is not None and not self._wake_word_active:
+                _ww_buffer.append(data.copy())
+                _ww_check_counter += 1
+                if _ww_check_counter >= _ww_check_interval:
+                    _ww_check_counter = 0
+                    if len(_ww_buffer) >= _ww_buffer_samples // block_size:
+                        ww_audio = np.concatenate(list(_ww_buffer)).flatten()
+                        if self._wake_word_detector.is_triggered(ww_audio):
+                            logger.info("wake_word_detected")
+                            self._wake_word_active = True
+                            self._last_activity_time = time.time()
+                            # Play chime (non-blocking)
+                            self._play_wake_chime()
+                            # Notify frontend
+                            if self._on_wake_word:
+                                try:
+                                    self._on_wake_word()
+                                except Exception as e:
+                                    logger.debug(f"wake_word_callback error: {e}")
+                continue  # skip VAD when not in active session
+
+            # -- Activity timeout check --
+            if (
+                self._wake_word_detector is not None
+                and self._wake_word_active
+                and not is_speech  # only check when not mid-speech
+            ):
+                elapsed = time.time() - self._last_activity_time
+                if elapsed > self.config.wake_word_activity_timeout_seconds:
+                    logger.info("wake_word_inactive | timeout reached")
+                    self._wake_word_active = False
+                    _ww_buffer.clear()
+                    _ww_check_counter = 0
+
+
+            rms = float(np.sqrt(np.mean(data**2) + 1e-10))
             _frame_count += 1
 
             # Periodic RMS logging for mic level diagnostics
             if _frame_count % _rms_log_interval == 0:
-                logger.debug(f"vad_rms | rms={rms:.4f} threshold={_vad_threshold} speech={is_speech}")
+                logger.debug(
+                    f"vad_rms | rms={rms:.4f} threshold={_vad_threshold} speech={is_speech}"
+                )
 
             # Pre-roll: always keep a sliding window of recent audio
             _pre_roll_buffer.append(data.copy())
@@ -671,7 +913,9 @@ class VoiceEngine:
                     is_speech = True
                     speech_start_time = time.time()
                     last_speech_time = time.time()
-                    logger.info(f"vad_speech_onset | rms={rms:.4f} threshold={_vad_threshold}")
+                    logger.info(
+                        f"vad_speech_onset | rms={rms:.4f} threshold={_vad_threshold}"
+                    )
                     # Prepend pre-roll buffer to prevent clipping first words
                     speech_buffer = list(_pre_roll_buffer)
                     speech_buffer.append(data.copy())
@@ -688,7 +932,10 @@ class VoiceEngine:
             silence_duration = now - last_speech_time
 
             should_end = False
-            if silence_duration >= _silence_timeout and duration >= _phrase_min_duration:
+            if (
+                silence_duration >= _silence_timeout
+                and duration >= _phrase_min_duration
+            ):
                 should_end = True
             if duration >= _phrase_max_duration:
                 should_end = True
@@ -698,7 +945,9 @@ class VoiceEngine:
                 audio = np.concatenate(speech_buffer)
                 speech_buffer = []
                 duration_ms = duration * 1000
-                logger.info(f"vad_speech_offset | duration_ms={duration_ms:.0f} samples={len(audio)}")
+                logger.info(
+                    f"vad_speech_offset | duration_ms={duration_ms:.0f} samples={len(audio)}"
+                )
 
                 # Don't process if TTS is playing (unless barge-in enabled)
                 if self.is_speaking.is_set() and not self.barge_in_enabled:
@@ -715,8 +964,15 @@ class VoiceEngine:
                 result = self.asr_output_queue.get(timeout=0.1)
                 if result and self.on_speech:
                     # Worker sends (text, confidence, flags_dict) tuples
-                    text = result[0].strip() if isinstance(result, tuple) else str(result).strip()
+                    text = (
+                        result[0].strip()
+                        if isinstance(result, tuple)
+                        else str(result).strip()
+                    )
                     if text:
+                        # Reset wake word activity timer on user speech
+                        if self._wake_word_detector is not None:
+                            self._last_activity_time = time.time()
                         self.on_speech(text)
             except queue.Empty:
                 continue

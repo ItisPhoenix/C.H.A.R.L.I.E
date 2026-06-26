@@ -9,7 +9,10 @@ import asyncio
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     import warnings as _warnings
-    _warnings.filterwarnings("ignore", message=".*add_reader.*", category=RuntimeWarning)
+
+    _warnings.filterwarnings(
+        "ignore", message=".*add_reader.*", category=RuntimeWarning
+    )
 
 from pathlib import Path
 
@@ -17,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from charlie.web_server import start_server, app
+
 
 # Suppress pyzmq CancelledError traceback on Windows shutdown.
 # When uvicorn cancels the event loop on SIGINT, pyzmq's _chain callback

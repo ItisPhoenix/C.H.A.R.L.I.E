@@ -188,3 +188,18 @@ Every main.py invocation gets a `_LAUNCH_ID` (uuid4). This is passed to the web 
 via env var. Sessions created during that launch are tagged with `launch_id`. The frontend fetches
 launch_id from `/api/status` on mount and can filter sidebar to "This Launch" or "All". Backend
 filtering happens in `SessionStore.get_sessions(launch_id=...)`.
+
+### Forced Tool Calling via Fast-Paths (Local Models)
+Local models (Ollama) frequently ignore system prompt tool instructions, hallucinating success or taking too long (prefill latency). The only 100% reliable pattern is **deterministic pre-detection fast-paths** before the LLM call. We support:
+1.  **Opening Apps & Websites:** Upgraded `_detect_open_app()` matches starting verbs, scans for whitelisted local apps (Chrome, Notepad, VS Code), popular websites (YouTube, GitHub, Wikipedia), and generic domain names (using `_URL_RE` and `_is_probable_domain()`). It launches all matched targets via `start <cmd>` in a loop and returns a grammatical confirmation, bypassing the LLM.
+2.  **Closing Apps:** Upgraded `_detect_close_app()` scans for process targets and terminates them via `taskkill /IM <process> /F` in a loop, handling running vs. not-running states.
+Both support single-app, multi-app (e.g., "open chrome and notepad"), and website/domain queries, eliminating LLM prefill latency.
+
+### Active Session Synchronization (Voice + Web)
+In hybrid voice-first assistants, the background voice thread (which listens to the mic) and the web server run asynchronously. To prevent speech input from routing to a stale default session while the user is viewing another session in the browser:
+1.  **Frontend Broadcaster:** The React UI must send `{ type: 'session_active', session_id: currentSessionId }` over the WebSocket on load or whenever the active session changes.
+2.  **Backend Sync:** `main.py:consume_web_commands` must intercept this event and update `current_web_session_id`, ensuring subsequent microphone speech is recorded and processed directly in the active session.
+
+### Cross-Browser SQLite DateTime Parsing
+SQLite's `strftime('%Y-%m-%d %H:%M:%f', 'now')` returns UTC space-separated datetime strings. WebKit-based browsers (like Safari) fail to parse space-separated strings, resulting in `Invalid Date` and breaking UI date groupings and relative timers (like "2m ago").
+*   **Solution:** Always normalize SQLite timestamps to ISO-8601 format by replacing the space with a `T` and appending a `Z` (e.g. `ts.replace(' ', 'T') + 'Z'`) before calling `new Date(ts)` in the frontend.

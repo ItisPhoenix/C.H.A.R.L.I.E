@@ -3,6 +3,7 @@
 Provides zero-latency keyword-based emotion classification and explicit
 voice command parsing. No LLM calls -- pure regex/keyword matching.
 """
+
 import re
 from typing import Optional
 
@@ -20,7 +21,10 @@ _SAD_CALM_RE = re.compile(
 # -- Voice command patterns ------------------------------------------------
 
 _VOICE_COMMANDS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\b(?:be energetic|speak faster|cheer up)\b", re.IGNORECASE), "energetic"),
+    (
+        re.compile(r"\b(?:be energetic|speak faster|cheer up)\b", re.IGNORECASE),
+        "energetic",
+    ),
     (re.compile(r"\b(?:calm down|speak slower|easy)\b", re.IGNORECASE), "calm"),
 ]
 

@@ -48,7 +48,10 @@ def run_web_only():
 
     try:
         config = uvicorn.Config(
-            app, host="0.0.0.0", port=8000, log_level="info",
+            app,
+            host="0.0.0.0",
+            port=8000,
+            log_level="info",
             loop="asyncio",
         )
         server = uvicorn.Server(config)
@@ -58,7 +61,9 @@ def run_web_only():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Charlie: voice assistant + web dashboard")
+    parser = argparse.ArgumentParser(
+        description="Charlie: voice assistant + web dashboard"
+    )
     parser.add_argument(
         "--web-only",
         action="store_true",

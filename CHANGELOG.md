@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Web UI Glassmorphism Redesign & Active Session Sync (Phase 1 & 2)
+- **Glassmorphism Theme System:** Established an Apple Intelligence-inspired visual system using frosted glass panels, ambient glows, and smooth transitions (Vite + Tailwind CSS + Framer Motion).
+- **Three-Column Dashboard Layout:** Integrated a responsive tablet+ layout containing an collapsible sidebar (collapses to an icon rail on tablet), main Chat Panel, and a collapsible Smart Panel.
+- **Smart Activity Panel:** Created a live activity feed displaying real-time intermediate thinking updates (`thinking_update`), active tool call cards with status spinners, and collapsed historical steps.
+- **Animate-on-State Voice Dock:** Built a persistent bottom dock with an SVG/CSS waveform that animates dynamically based on Charlie's state (listening, thinking, speaking, or idle).
+- **Active Session Synchronization:** Added a `"session_active"` WebSocket broadcaster that syncs the selected frontend chat session with `main.py`, guaranteeing that microphone voice inputs route directly to the active browser chat.
+- **Cross-Browser SQLite Datetime Support:** Integrated a `parseDate` helper that normalizes UTC space-separated strings from SQLite into standard ISO-8601 format, eliminating WebKit/Safari `Invalid Date` rendering errors.
+- **Upgraded Multi-App & Website Fast-Paths:** Enhanced the open/close helpers in `core.py` to support scanning multiple targets (e.g., *"open chrome, youtube, and reddit.com"*) and launching/terminating them in a loop without LLM prefill latency. Automatically resolves TLD domain names and whitelisted popular websites.
+
 ### Current State
 Charlie is a headless, voice-first local AI assistant running on Windows 11.
 Pipeline: **VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> playback**.

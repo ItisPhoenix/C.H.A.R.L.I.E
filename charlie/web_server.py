@@ -10,9 +10,12 @@ import os
 
 # Windows: pyzmq needs Selector event loop, not Proactor (must be before any zmq import)
 import warnings as _warnings
+
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    _warnings.filterwarnings("ignore", message=".*add_reader.*", category=RuntimeWarning)
+    _warnings.filterwarnings(
+        "ignore", message=".*add_reader.*", category=RuntimeWarning
+    )
 
 import json
 import logging
@@ -68,6 +71,8 @@ async def _event_bridge():
             pipeline_state = "speaking"
         elif etype in ("speaking_stop", "response_done"):
             pipeline_state = "idle"
+        elif etype == "wake_word":
+            pipeline_state = "listening"
         await broadcast(event)
 
     try:
@@ -126,6 +131,7 @@ async def websocket_endpoint(ws: WebSocket):
 @app.get("/api/history")
 async def history(limit: int = 50):
     from charlie.session_store import SessionStore
+
     store = SessionStore(config.session_db_path)
     try:
         messages = store.get_recent(limit=limit)
@@ -137,10 +143,13 @@ async def history(limit: int = 50):
 @app.get("/api/status")
 async def status():
     return {"state": pipeline_state, "launch_id": LAUNCH_ID}
+
+
 @app.get("/api/sessions")
 async def list_sessions(request: Request):
     """List sessions, optionally filtered by launch_id or source."""
     from charlie.session_store import SessionStore
+
     store = SessionStore(config.session_db_path)
     try:
         launch_id = request.query_params.get("launch_id")
@@ -167,6 +176,7 @@ async def create_session(data: dict):
     """Create a new session."""
     from charlie.session_store import SessionStore
     import uuid as _uuid
+
     session_id = data.get("session_id", str(_uuid.uuid4()))
     title = data.get("title", "New Chat")
     source = data.get("source", "web")
@@ -174,14 +184,21 @@ async def create_session(data: dict):
     store = SessionStore(config.session_db_path)
     try:
         store.create_session(session_id, title, source=source, launch_id=launch_id)
-        return {"session_id": session_id, "title": title, "source": source, "launch_id": launch_id}
+        return {
+            "session_id": session_id,
+            "title": title,
+            "source": source,
+            "launch_id": launch_id,
+        }
     finally:
         store.close()
+
 
 @app.get("/api/sessions/{session_id}/messages")
 async def session_messages(session_id: str, limit: int = 50):
     """Get messages for a specific session."""
     from charlie.session_store import SessionStore
+
     store = SessionStore(config.session_db_path)
     try:
         messages = store.get_session_messages(session_id, limit=limit)
@@ -194,13 +211,38 @@ async def session_messages(session_id: str, limit: int = 50):
 async def update_session(session_id: str, data: dict):
     """Update session title."""
     from charlie.session_store import SessionStore
+
     title = data.get("title", "New Chat")
     store = SessionStore(config.session_db_path)
     try:
         store.update_session_title(session_id, title)
         # Broadcast title update to all connected WebSocket clients
-        await broadcast({"type": "session_update", "payload": {"session_id": session_id, "title": title}})
+        await broadcast(
+            {
+                "type": "session_update",
+                "payload": {"session_id": session_id, "title": title},
+            }
+        )
         return {"session_id": session_id, "title": title}
+    finally:
+        store.close()
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a session and all its messages."""
+    from charlie.session_store import SessionStore
+
+    store = SessionStore(config.session_db_path)
+    try:
+        store.delete_session(session_id)
+        await broadcast(
+            {
+                "type": "session_update",
+                "payload": {"session_id": session_id, "deleted": True},
+            }
+        )
+        return {"session_id": session_id, "deleted": True}
     finally:
         store.close()
 
@@ -219,6 +261,7 @@ if DIST_DIR.exists():
             return FileResponse(str(file_path))
         return FileResponse(str(DIST_DIR / "index.html"))
 else:
+
     @app.get("/")
     async def root():
         return {
@@ -228,13 +271,18 @@ else:
         }
 
 
-def start_server(pub_port: int = DEFAULT_EVENT_PORT,
-                 pull_port: int = DEFAULT_COMMAND_PORT):
+def start_server(
+    pub_port: int = DEFAULT_EVENT_PORT, pull_port: int = DEFAULT_COMMAND_PORT
+):
     """Entry point for the web server subprocess."""
     import uvicorn
+
     logger.info("Starting web server on 0.0.0.0:8000")
     server_config = uvicorn.Config(
-        app, host="0.0.0.0", port=8000, log_level="info",
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info",
         loop="asyncio",
     )
     server = uvicorn.Server(server_config)

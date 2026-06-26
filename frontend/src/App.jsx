@@ -27,6 +27,7 @@ function App() {
   const [launchId, setLaunchId] = useState(null);
   const [filterMode, setFilterMode] = useState('launch');
   const [smartPanelVisible, setSmartPanelVisible] = useState(true);
+  const [wakeWordPulse, setWakeWordPulse] = useState(false);
 
   const isDesktop = useMediaQuery('(min-width: 1024px)');
   const isTablet = useMediaQuery('(min-width: 768px) and (max-width: 1023px)');
@@ -64,16 +65,19 @@ function App() {
       const data = await res.json();
       const sessionList = data.sessions || [];
       setSessions(sessionList);
-
-      if (sessionList.length > 0 && !currentSessionId) {
-        setCurrentSessionId(sessionList[0].id);
-      }
+      // Auto-select first session only when none is selected (use functional update to avoid stale closure)
+      setCurrentSessionId((prev) => {
+        if (prev === null && sessionList.length > 0) {
+          return sessionList[0].id;
+        }
+        return prev;
+      });
     } catch (err) {
       console.error('Failed to fetch sessions:', err);
     } finally {
       setLoadingSessions(false);
     }
-  }, [currentSessionId, filterMode, launchId]);
+  }, [filterMode, launchId]);
 
   const fetchMessages = useCallback(async () => {
     if (!currentSessionId) {
@@ -106,6 +110,13 @@ function App() {
     fetchMessages();
   }, [currentSessionId, fetchMessages]);
 
+  // Notify backend of the active session so voice/speech gets routed correctly
+  useEffect(() => {
+    if (readyState === WebSocket.OPEN && currentSessionId) {
+      send({ type: 'session_active', session_id: currentSessionId });
+    }
+  }, [currentSessionId, readyState, send]);
+
   const wrappedOnMessage = useCallback(
     (handler) => {
       return onMessage((event) => {
@@ -123,7 +134,16 @@ function App() {
           case 'response_done':
             setStatus('idle');
             break;
+          case 'wake_word':
+            // Trigger 1.5s pulse animation on mic indicator
+            setWakeWordPulse(true);
+            setTimeout(() => setWakeWordPulse(false), 1500);
+            break;
           case 'session_update':
+            if (event.payload && event.payload.deleted) {
+              const deletedId = event.payload.session_id;
+              setCurrentSessionId((prev) => (prev === deletedId ? null : prev));
+            }
             fetchSessions();
             break;
           default:
@@ -166,6 +186,17 @@ function App() {
     setCurrentSessionId(sessionId);
   }, []);
 
+  const handleDeleteSession = useCallback(async (sessionId) => {
+    try {
+      await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+      // Set to null first so fetchSessions auto-selects the first remaining session
+      setCurrentSessionId((prev) => (prev === sessionId ? null : prev));
+      await fetchSessions();
+    } catch (err) {
+      console.error('Failed to delete session:', err);
+    }
+  }, [fetchSessions]);
+
   const toggleSmartPanel = useCallback(() => {
     setSmartPanelVisible((prev) => !prev);
   }, []);
@@ -197,6 +228,7 @@ function App() {
           filterMode={filterMode}
           onFilterModeChange={setFilterMode}
           collapsed={sidebarCollapsed}
+          onDeleteSession={handleDeleteSession}
         />
 
         {/* Center: Chat + Voice Dock */}
@@ -212,7 +244,7 @@ function App() {
               onToggleSmartPanel={toggleSmartPanel}
             />
           </div>
-          <VoiceDock status={status} />
+          <VoiceDock status={status} wakeWordPulse={wakeWordPulse} />
         </div>
 
         {/* Right: Smart Panel */}

@@ -3,14 +3,38 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from charlie.tools import registry, ToolRegistry, web_search, shell_execute, file_read, file_write, memory, _needs_decomposition, _decompose_query, _merge_search_results
+from charlie.tools import (
+    registry,
+    ToolRegistry,
+    web_search,
+    shell_execute,
+    file_read,
+    file_write,
+    memory,
+    _needs_decomposition,
+    _decompose_query,
+    _merge_search_results,
+    session_search,
+)
+import os
+from charlie.session_store import SessionStore
 
 
 def test_registry_registration_and_schema():
     definitions = registry.get_tool_definitions()
     names = {d["function"]["name"] for d in definitions}
-    assert names == {"web_search", "shell_execute", "file_read", "file_write", "memory", "session_search"}
-    assert any(d["function"]["parameters"]["required"] == ["query"] for d in definitions)
+    assert names == {
+        "web_search",
+        "shell_execute",
+        "file_read",
+        "file_write",
+        "memory",
+        "vector_memory",
+        "session_search",
+    }
+    assert any(
+        d["function"]["parameters"]["required"] == ["query"] for d in definitions
+    )
 
 
 def test_file_write_and_file_read(tmp_path):
@@ -33,7 +57,10 @@ def test_shell_execute_lists_env(monkeypatch):
 
 def test_tool_registry_unknown_tool_returns_error():
     local_registry = ToolRegistry()
-    assert local_registry.execute_tool("not-registered", {}) == "Error: Tool 'not-registered' is not registered."
+    assert (
+        local_registry.execute_tool("not-registered", {})
+        == "Error: Tool 'not-registered' is not registered."
+    )
 
 
 def test_web_search_returns_fallback_without_api_keys(monkeypatch):
@@ -43,8 +70,6 @@ def test_web_search_returns_fallback_without_api_keys(monkeypatch):
     result = web_search("unit-test-only-query")
     assert isinstance(result, str)
     assert len(result) > 0
-
-
 
 
 def test_memory_add_opinions(tmp_path, monkeypatch):
@@ -59,26 +84,28 @@ def test_memory_add_opinions(tmp_path, monkeypatch):
 
 
 def test_memory_replace_opinions(tmp_path, monkeypatch):
-    """Test replacing text in opinions."""
+    """Test replacing an entry in opinions."""
     opinions_file = tmp_path / "OPINIONS.md"
-    opinions_file.write_text("I like coffee.", encoding="utf-8")
+    opinions_file.write_text("I like coffee.§I prefer tea.", encoding="utf-8")
     monkeypatch.setattr("charlie.tools.config.opinions_file", str(opinions_file))
     result = memory("replace", "opinions", "I love espresso.", old_text="coffee")
     assert "Updated" in result
     content = opinions_file.read_text(encoding="utf-8")
     assert "espresso" in content
     assert "coffee" not in content
+    assert "I prefer tea." in content
 
 
 def test_memory_remove_opinions(tmp_path, monkeypatch):
-    """Test removing text from opinions."""
+    """Test removing an entry from opinions."""
     opinions_file = tmp_path / "OPINIONS.md"
-    opinions_file.write_text("I like tea and coffee.", encoding="utf-8")
+    opinions_file.write_text("I like tea.§I like coffee.", encoding="utf-8")
     monkeypatch.setattr("charlie.tools.config.opinions_file", str(opinions_file))
-    result = memory("remove", "opinions", old_text=" and coffee")
+    result = memory("remove", "opinions", old_text="coffee")
     assert "Updated" in result
     content = opinions_file.read_text(encoding="utf-8")
-    assert content.strip() == "I like tea."
+    assert "I like tea." in content
+    assert "coffee" not in content
 
 
 def test_memory_opinions_max_chars(tmp_path, monkeypatch):
@@ -87,8 +114,7 @@ def test_memory_opinions_max_chars(tmp_path, monkeypatch):
     opinions_file.write_text("x" * 800, encoding="utf-8")
     monkeypatch.setattr("charlie.tools.config.opinions_file", str(opinions_file))
     result = memory("add", "opinions", "y")
-    assert "Error" in result
-    assert "max" in result
+    assert "full" in result.lower() or "capacity" in result.lower()
 
 
 def test_memory_invalid_target():
@@ -96,7 +122,6 @@ def test_memory_invalid_target():
     result = memory("add", "invalid_target", "content")
     assert "Error" in result
     assert "must be" in result
-
 
 
 def test_needs_decomposition_compare():
@@ -147,3 +172,22 @@ def test_merge_search_results_dedup():
     merged = _merge_search_results(results)
     assert merged.count("https://example.com") == 1
     assert "https://other.com" in merged
+
+
+def test_session_search_formatting(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "tool_session_test.db")
+    monkeypatch.setattr("charlie.tools.config.session_db_path", db_path)
+    store = SessionStore(db_path)
+    try:
+        store.append("user", "remember this secret")
+        store.append("assistant", "remembered the secret")
+        formatted = session_search("secret")
+        assert "[user]" in formatted
+        assert "[assistant]" in formatted
+        assert "remember this secret" in formatted
+        assert "remembered the secret" in formatted
+    finally:
+        store.close()
+        for f in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
+            if os.path.exists(f):
+                os.remove(f)

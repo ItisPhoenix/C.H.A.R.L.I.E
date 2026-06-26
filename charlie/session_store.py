@@ -2,13 +2,15 @@ import os
 import sqlite3
 import logging
 import time
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger("charlie.session_store")
 
+
 class SessionStore:
     """Persistent SQLite-backed session history store with FTS5 search."""
-    
+
     def __init__(self, db_path: str = "sessions.db"):
         self.db_path = db_path
         self.conn = None
@@ -23,8 +25,10 @@ class SessionStore:
                 db_dir = os.path.dirname(os.path.abspath(self.db_path))
                 if db_dir and not os.path.exists(db_dir):
                     os.makedirs(db_dir, exist_ok=True)
-                
-                conn = sqlite3.connect(self.db_path, timeout=5.0, check_same_thread=False)
+
+                conn = sqlite3.connect(
+                    self.db_path, timeout=5.0, check_same_thread=False
+                )
                 # Enable foreign keys and set WAL mode for better concurrency
                 conn.execute("PRAGMA foreign_keys = ON;")
                 conn.execute("PRAGMA journal_mode = WAL;")
@@ -34,7 +38,9 @@ class SessionStore:
                     logger.warning("Database locked, retrying connection...")
                     time.sleep(0.05)
                 else:
-                    logger.error(f"Failed to connect to session DB at {self.db_path}: {e}")
+                    logger.error(
+                        f"Failed to connect to session DB at {self.db_path}: {e}"
+                    )
                     raise
             except sqlite3.Error as e:
                 logger.error(f"Failed to connect to session DB at {self.db_path}: {e}")
@@ -82,16 +88,20 @@ class SessionStore:
                         )
                     except sqlite3.OperationalError:
                         pass  # Column already exists
-                
+
                 # Check for FTS5 support before creating virtual table
                 fts5_supported = True
                 try:
-                    self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS temp_fts USING fts5(content);")
+                    self.conn.execute(
+                        "CREATE VIRTUAL TABLE IF NOT EXISTS temp_fts USING fts5(content);"
+                    )
                     self.conn.execute("DROP TABLE temp_fts;")
                 except sqlite3.OperationalError:
                     fts5_supported = False
-                    logger.warning("FTS5 is not supported by sqlite3. Falling back to normal LIKE searches.")
-                
+                    logger.warning(
+                        "FTS5 is not supported by sqlite3. Falling back to normal LIKE searches."
+                    )
+
                 if fts5_supported:
                     # In SQLite FTS5, external content tables can keep mapping to messages
                     self.conn.execute("""
@@ -120,7 +130,7 @@ class SessionStore:
                     """)
                 else:
                     self.fts5_supported = False
-                
+
                 self.fts5_supported = fts5_supported
         except sqlite3.Error as e:
             logger.error(f"Database initialization failed: {e}")
@@ -134,7 +144,7 @@ class SessionStore:
                 with self.conn:
                     self.conn.execute(
                         "INSERT INTO messages (role, content, session_id) VALUES (?, ?, ?);",
-                        (role, content, session_id)
+                        (role, content, session_id),
                     )
                 return
             except sqlite3.OperationalError as e:
@@ -164,7 +174,7 @@ class SessionStore:
                         )
                         ORDER BY id DESC LIMIT ?;
                         """,
-                        (query, limit)
+                        (query, limit),
                     )
                 else:
                     # Fallback to standard SQL LIKE query
@@ -174,7 +184,7 @@ class SessionStore:
                         WHERE content LIKE ? 
                         ORDER BY id DESC LIMIT ?;
                         """,
-                        (f"%{query}%", limit)
+                        (f"%{query}%", limit),
                     )
                 return cursor.fetchall()
             except sqlite3.OperationalError as e:
@@ -188,7 +198,9 @@ class SessionStore:
                 logger.error(f"Search failed: {e}")
                 return []
 
-    def get_recent(self, limit: int = 20, session_id: str = "default") -> List[Tuple[str, str]]:
+    def get_recent(
+        self, limit: int = 20, session_id: str = "default"
+    ) -> List[Tuple[str, str]]:
         """Returns the most recent messages for a session, oldest first."""
         retries = 2
         for attempt in range(retries):
@@ -210,6 +222,7 @@ class SessionStore:
             except sqlite3.Error as e:
                 logger.error(f"get_recent failed: {e}")
                 return []
+
     def create_session(
         self,
         session_id: str,
@@ -243,7 +256,7 @@ class SessionStore:
         launch_id: Optional[str] = None,
     ) -> List[Tuple[str, str, str, str, str]]:
         """Returns matching sessions as (session_id, title, created_at, updated_at, launch_id), newest first.
-        
+
         Pass source and/or launch_id to filter. Pass neither to list all.
         """
         try:
@@ -271,8 +284,8 @@ class SessionStore:
         try:
             with self.conn:
                 self.conn.execute(
-                    "UPDATE sessions SET title = ?, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE session_id = ?",
-                    (title, session_id),
+                    "UPDATE sessions SET title = ?, updated_at = ? WHERE session_id = ?",
+                    (title, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f"), session_id),
                 )
         except sqlite3.Error as e:
             logger.error(f"update_session_title failed: {e}")
@@ -282,13 +295,28 @@ class SessionStore:
         try:
             with self.conn:
                 self.conn.execute(
-                    "UPDATE sessions SET updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE session_id = ?",
-                    (session_id,),
+                    "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                    (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f"), session_id),
                 )
         except sqlite3.Error as e:
             logger.error(f"touch_session failed: {e}")
 
-    def get_session_messages(self, session_id: str, limit: int = 50) -> List[Tuple[str, str]]:
+    def delete_session(self, session_id: str) -> None:
+        """Deletes a session and all its messages."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            cursor.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+            conn.commit()
+            logger.info(f"delete_session | session_id={session_id}")
+        except Exception as e:
+            logger.error(f"delete_session failed: {e}")
+            raise
+
+    def get_session_messages(
+        self, session_id: str, limit: int = 50
+    ) -> List[Tuple[str, str]]:
         """Returns messages for a specific session, oldest first."""
         return self.get_recent(limit=limit, session_id=session_id)
 

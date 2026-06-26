@@ -17,6 +17,12 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 - **Streaming TTS**: Speaks as the LLM generates -- no waiting for full replies.
 - **Barge-in**: Interrupt Charlie mid-sentence. Say "stop", "wait", or just start talking.
 - **Tool calling**: Web search, shell commands, file I/O, persistent memory, session history search.
+- **Premium Glassmorphism Web Dashboard**: Frost-glass UI with liquid depth, ambient glows, and responsive three-column layouts (Sidebar, Chat, Smart Panel).
+- **Smart Activity Panel**: Live feed showing the assistant's intermediate thinking steps, active tool calls, and results.
+- **Persistent Voice Dock**: Animate-on-state SVG waveform reflecting VAD listening, thinking, and speaking phases.
+- **Deterministic Multi-App & Website Control**: High-speed fast-paths that bypass the LLM for opening/closing single or multiple local apps, popular websites, or arbitrary domain names.
+- **Active Session Synchronization**: Real-time WebSocket syncing ensures background voice interactions are recorded directly in the active browser chat.
+- **Cross-Browser SQLite Datetime Parsing**: Normalizes UTC timestamps to ISO-8601, ensuring relative time tickers render flawlessly on all browsers (including Safari/WebKit).
 - **Emotional tone**: Adapts speech speed and energy based on your mood.
 - **Persistent memory**: Remembers facts across sessions via `MEMORY.md` and `USER.md`.
 - **Local-first**: All speech processing runs locally. Only the LLM call goes to the network.

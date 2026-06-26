@@ -179,7 +179,10 @@ export function ChatPanel({
       )}
 
       {/* Input dock */}
-      <form
+      <motion.form
+        initial={{ y: 20, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        transition={{ duration: 0.4, delay: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
         onSubmit={handleSubmit}
         className="px-4 pb-4 pt-2"
       >
@@ -200,26 +203,32 @@ export function ChatPanel({
           />
           <div className="flex items-center gap-1 shrink-0">
             {isBusy ? (
-              <button
+              <motion.button
                 type="button"
                 onClick={onStop}
-                className="p-2.5 rounded-xl border-2 border-red-500/40 text-red-400 hover:bg-red-500/10 transition-all duration-200 animate-pulse active:scale-95"
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.9 }}
+                animate={{ boxShadow: ['0 0 0 0 rgba(239,68,68,0)', '0 0 0 8px rgba(239,68,68,0.1)', '0 0 0 0 rgba(239,68,68,0)'] }}
+                transition={{ boxShadow: { duration: 1.5, repeat: Infinity }, default: { duration: 0.15 } }}
+                className="p-2.5 rounded-xl border-2 border-red-500/40 text-red-400"
                 title="Stop generation"
               >
                 <Square size={13} fill="currentColor" />
-              </button>
+              </motion.button>
             ) : (
-              <button
+              <motion.button
                 type="submit"
                 disabled={!input.trim() || !currentSessionId}
-                className="p-2.5 rounded-xl bg-[var(--accent)] text-white hover:shadow-[0_0_20px_rgba(167,139,250,0.3)] disabled:opacity-30 disabled:hover:shadow-none transition-all duration-200 active:scale-95"
+                whileHover={{ scale: 1.05, boxShadow: '0 0 20px rgba(167,139,250,0.3)' }}
+                whileTap={{ scale: 0.92 }}
+                className="p-2.5 rounded-xl bg-[var(--accent)] text-white disabled:opacity-30 disabled:hover:shadow-none transition-all duration-200"
               >
                 <Send size={14} />
-              </button>
+              </motion.button>
             )}
           </div>
         </div>
-      </form>
+      </motion.form>
     </div>
   );
 }

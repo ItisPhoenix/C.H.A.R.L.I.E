@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
+
 @dataclass
 class Config:
     llm_url: str = os.getenv("LLM_URL", "")
@@ -14,11 +15,11 @@ class Config:
     fallback_llm_url: str = os.getenv("FALLBACK_LLM_URL", "")
     fallback_llm_key: str = os.getenv("FALLBACK_LLM_API_KEY", "no-key")
     fallback_llm_model: str = os.getenv("FALLBACK_LLM_MODEL", "")
-    
+
     # -1 = system default input/output device; >=0 = specific device index
     mic_index: int = int(os.getenv("MIC_INDEX", "-1"))
     output_index: int = int(os.getenv("OUTPUT_INDEX", "-1"))
-    
+
     whisper_model: str = os.getenv("WHISPER_MODEL", "distil-large-v3")
     silence_timeout: float = float(os.getenv("SILENCE_TIMEOUT", "1.0"))
     phrase_min_duration: float = float(os.getenv("PHRASE_MIN_DURATION", "0.8"))
@@ -30,18 +31,22 @@ class Config:
     default_language: str = os.getenv("DEFAULT_LANGUAGE", "en")
     log_file: str = "logs/charlie.log"
     log_level: str = "INFO"
-    
+
     # VAD Configuration
     vad_threshold: float = float(os.getenv("VAD_THRESHOLD", "0.75"))
     vad_silence_timeout: float = float(os.getenv("VAD_SILENCE_TIMEOUT", "1.2"))
-    
+
     # Barge-in Configuration
     enable_barge_in: bool = os.getenv("ENABLE_BARGE_IN", "true").lower() == "true"
-    
-    llm_disable_reasoning: bool = os.getenv("LLM_DISABLE_REASONING", "true").lower() == "true"
+
+    llm_disable_reasoning: bool = (
+        os.getenv("LLM_DISABLE_REASONING", "true").lower() == "true"
+    )
     # Enable native JSON tool calling for compatible remote APIs (OpenAI, Anthropic).
     # When False, falls back to text-based TOOL: parsing for local models.
-    native_tool_calling: bool = os.getenv("NATIVE_TOOL_CALLING", "true").lower() == "true"
+    native_tool_calling: bool = (
+        os.getenv("NATIVE_TOOL_CALLING", "true").lower() == "true"
+    )
 
     # Iteration Budget & Context Compression
     iteration_budget_max: int = int(os.getenv("ITERATION_BUDGET_MAX", "12"))
@@ -54,7 +59,28 @@ class Config:
     session_db_path: str = os.getenv("SESSION_DB_PATH", "sessions.db")
     # Search provider (SearXNG self-hosted)
     searxng_url: str = os.getenv("SEARXNG_URL", "")
+    exa_api_key: str = os.getenv("EXA_API_KEY", "")
+    tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
+
+    # Wake Word Configuration
+    wake_word_enabled: bool = os.getenv("WAKE_WORD_ENABLED", "false").lower() == "true"
+    wake_word_model_path: str = os.getenv("WAKE_WORD_MODEL_PATH", "charlie/charlie.onnx")
+    wake_word_threshold: float = float(os.getenv("WAKE_WORD_THRESHOLD", "0.6"))
+    wake_word_activity_timeout_seconds: int = int(os.getenv("WAKE_WORD_ACTIVITY_TIMEOUT", "600"))
+    wake_word_audio_chime_path: str = os.getenv("WAKE_WORD_CHIME_PATH", "assets/wake_word_chime.wav")
+    # --- Vector Memory Configuration ---
+    memory_db_path: str = os.getenv("MEMORY_DB_PATH", "charlie_memory_db")
+    memory_relevance_threshold: float = float(os.getenv("MEMORY_RELEVANCE_THRESHOLD", "0.3"))
+    memory_embedding_model: str = os.getenv("MEMORY_EMBEDDING_MODEL", "nomic-embed-text:v1.5")
+    memory_embedding_url: str = os.getenv("MEMORY_EMBEDDING_URL", "http://localhost:11434")
+    memory_auto_extract: bool = os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true"
+    # Memory capacity management
+    memory_nudge_interval: int = int(os.getenv("MEMORY_NUDGE_INTERVAL", "5"))
+    memory_capacity_threshold: float = float(os.getenv("MEMORY_CAPACITY_THRESHOLD", "0.8"))
+
     soul: str = ""
+
+
 config = Config()
 
 # Load SOUL.md into config.soul at startup

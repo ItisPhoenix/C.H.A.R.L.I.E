@@ -6,10 +6,12 @@ import logging
 import re
 import time
 import asyncio
+
 # Windows: pyzmq needs Selector event loop, not Proactor.
 # Suppress the pyzmq RuntimeWarning about add_reader - tornado 6.x
 # already provides the fallback, but the warning fires on first use.
 import warnings
+
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     warnings.filterwarnings("ignore", message=".*add_reader.*", category=RuntimeWarning)
@@ -21,25 +23,49 @@ import uuid
 # When user says "Open Chrome calculator notepad", insert "and" between items
 # so the model treats them as separate commands
 _APP_LIST_PATTERN = re.compile(
-    r'(?:open|start|launch|run)\s+'
-    r'([a-zA-Z][a-zA-Z0-9]*'
-    r'(?:\s+(?:and\s+)?[a-zA-Z][a-zA-Z0-9]*)*)',
-    re.IGNORECASE
+    r"(?:open|start|launch|run)\s+"
+    r"([a-zA-Z][a-zA-Z0-9]*"
+    r"(?:\s+(?:and\s+)?[a-zA-Z][a-zA-Z0-9]*)*)",
+    re.IGNORECASE,
 )
 
 _KNOWN_APPS = {
-    'chrome', 'firefox', 'edge', 'opera', 'brave', 'vivaldi',
-    'notepad', 'calculator', 'calc', 'paint', 'explorer', 'file',
-    'word', 'excel', 'powerpoint', 'outlook', 'teams', 'slack',
-    'discord', 'spotify', 'vlc', 'steam', 'code', 'vscode',
-    'terminal', 'powershell', 'cmd', 'prompt',
+    "chrome",
+    "firefox",
+    "edge",
+    "opera",
+    "brave",
+    "vivaldi",
+    "notepad",
+    "calculator",
+    "calc",
+    "paint",
+    "explorer",
+    "file",
+    "word",
+    "excel",
+    "powerpoint",
+    "outlook",
+    "teams",
+    "slack",
+    "discord",
+    "spotify",
+    "vlc",
+    "steam",
+    "code",
+    "vscode",
+    "terminal",
+    "powershell",
+    "cmd",
+    "prompt",
 }
 
 
 def _normalize_app_list(text: str) -> str:
     """Insert 'and' between app names in commands like 'Open Chrome calculator notepad'."""
+
     def _replace_match(m: re.Match) -> str:
-        prefix = m.group(0)[:m.start(1) - m.start(0)]
+        prefix = m.group(0)[: m.start(1) - m.start(0)]
         items_str = m.group(1)
         items = items_str.split()
         if len(items) <= 1:
@@ -55,12 +81,16 @@ def _normalize_app_list(text: str) -> str:
         if len(apps) < 2:
             return m.group(0)
         # Rebuild with "and" between apps
-        normalized_apps = ' and '.join(apps)
+        normalized_apps = " and ".join(apps)
         if others:
             return f"{prefix}{normalized_apps} {' '.join(others)}"
         return f"{prefix}{normalized_apps}"
+
     return _APP_LIST_PATTERN.sub(_replace_match, text)
+
+
 from pathlib import Path
+
 
 # 1. SETUP ENVIRONMENT FIRST
 class SafeStreamWrapper:
@@ -88,9 +118,18 @@ class SafeStreamWrapper:
     def __getattr__(self, name):
         return getattr(self.stream, name)
 
-if sys.platform == 'win32':
-    sys.stdout = SafeStreamWrapper(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True, write_through=True))
-    sys.stderr = SafeStreamWrapper(io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True, write_through=True))
+
+if sys.platform == "win32":
+    sys.stdout = SafeStreamWrapper(
+        io.TextIOWrapper(
+            sys.stdout.buffer, encoding="utf-8", line_buffering=True, write_through=True
+        )
+    )
+    sys.stderr = SafeStreamWrapper(
+        io.TextIOWrapper(
+            sys.stderr.buffer, encoding="utf-8", line_buffering=True, write_through=True
+        )
+    )
 else:
     sys.stdout = SafeStreamWrapper(sys.stdout)
     sys.stderr = SafeStreamWrapper(sys.stderr)
@@ -102,11 +141,15 @@ LOG_FILE = "logs/charlie.log"
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)
 
-file_formatter = logging.Formatter('%(asctime)s [%(name)s] [%(levelname)s] %(funcName)s:%(lineno)d - %(message)s')
-file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8', mode='a')
+file_formatter = logging.Formatter(
+    "%(asctime)s [%(name)s] [%(levelname)s] %(funcName)s:%(lineno)d - %(message)s"
+)
+file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8", mode="a")
 file_handler.setFormatter(file_formatter)
 
-console_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_formatter = logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(console_formatter)
@@ -118,6 +161,7 @@ root_logger.addHandler(console_handler)
 # 3. NOW IMPORT CHARLIE MODULES
 from charlie.config import config
 from charlie.session_store import SessionStore
+from charlie.memory_store import MemoryStore
 from charlie.core import Brain
 from charlie.personality import get_emotion_for_context, parse_voice_command
 from charlie.voice import VoiceEngine
@@ -125,22 +169,27 @@ from charlie.ipc import EventBus
 
 logger = logging.getLogger("charlie.main")
 # Unique launch identity -- every main() invocation gets one so the sidebar can
-# filter "this launch" vs "all history" (Hermes-style single-DB isolation).
+# filter "this launch" vs "all history".
 _LAUNCH_ID: str = str(uuid.uuid4())
 
 
 # Streaming TTS flush thresholds (chars, not words)
 # First sentence: speak after first sentence boundary. Force-flush at 200 chars if no boundary.
-_SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+')
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+_CLAUSE_BOUNDARY = re.compile(r"(?<=[,;])\s+")
 _MAX_FLUSH_CHARS = 200  # Force-flush at word boundary if no sentence boundary seen
+
+
 async def main():
     # Suppress pyzmq CancelledError traceback on Windows shutdown.
     # See web_server_entry.py for full explanation.
     loop = asyncio.get_running_loop()
     _orig_handler = loop.call_exception_handler
+
     def _guarded_handler(ctx):
         if not isinstance(ctx.get("exception"), asyncio.CancelledError):
             _orig_handler(ctx)
+
     loop.call_exception_handler = _guarded_handler
 
     logger.info("Charlie is waking up...")
@@ -155,6 +204,13 @@ async def main():
     except Exception as e:
         logger.error(f"Failed to initialize SessionStore: {e}")
         return
+    # Initialize vector memory store (graceful degradation if no embedding backend)
+    memory_store = None
+    try:
+        memory_store = MemoryStore(config)
+    except Exception as e:
+        logger.warning(f"Vector memory disabled: {e}")
+
 
     def speaking_callback(text):
         if voice:
@@ -189,6 +245,7 @@ async def main():
             config,
             on_thought_callback=speaking_callback,
             session_store=store,
+            memory_store=memory_store,
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_thinking_update=on_thinking_update,
@@ -199,6 +256,11 @@ async def main():
             store.close()
         return
 
+    # Wire vector memory store into tool registry
+    from charlie.tools import registry as tool_registry
+    if memory_store is not None:
+        tool_registry.set_memory_store(memory_store)
+
     # Placeholder for event_bus (set later in async context)
     event_bus = None
     # Use the session id provided by the web UI when available; otherwise default
@@ -208,7 +270,9 @@ async def main():
         if not session_id:
             return
         try:
-            store.create_session(session_id, title="New Chat", source="voice", launch_id=_LAUNCH_ID)
+            store.create_session(
+                session_id, title="New Chat", source="voice", launch_id=_LAUNCH_ID
+            )
         except Exception as exc:
             logger.debug(f"ensure_session_ready skipped: {exc}")
 
@@ -230,7 +294,10 @@ async def main():
             store.update_session_title(session_id, candidate)
             if event_bus:
                 asyncio.run_coroutine_threadsafe(
-                    event_bus.emit("session_update", {"session_id": session_id, "title": candidate}), loop
+                    event_bus.emit(
+                        "session_update", {"session_id": session_id, "title": candidate}
+                    ),
+                    loop,
                 )
         except Exception as exc:
             logger.debug(f"update_session_title_from_text skipped: {exc}")
@@ -243,7 +310,9 @@ async def main():
         if current_web_session_id not in (None, "default", ""):
             session_id = current_web_session_id
         ensure_session_ready(session_id)
-        asyncio.run_coroutine_threadsafe(_process(text, brain, voice, session_id=session_id), loop)
+        asyncio.run_coroutine_threadsafe(
+            _process(text, brain, voice, session_id=session_id), loop
+        )
 
     async def _process(text, brain, voice, session_id="default", platform="voice"):
         nonlocal speech_echo_cooldown, last_emotion
@@ -253,12 +322,25 @@ async def main():
 
         # Emit transcript event
         if event_bus:
-            asyncio.create_task(event_bus.emit("transcript", {"text": text, "source": platform, "session_id": session_id}))
+            asyncio.create_task(
+                event_bus.emit(
+                    "transcript",
+                    {"text": text, "source": platform, "session_id": session_id},
+                )
+            )
 
         print(f"\rHeard: {text}", flush=True)
         if voice.is_speaking.is_set():
             # Barge-in detection: command words always interrupt immediately
-            _BARGE_COMMANDS = {"stop", "wait", "no", "cancel", "quiet", "shut", "enough"}
+            _BARGE_COMMANDS = {
+                "stop",
+                "wait",
+                "no",
+                "cancel",
+                "quiet",
+                "shut",
+                "enough",
+            }
             words = set(text.lower().strip().split())
             if words & _BARGE_COMMANDS:
                 logger.info("Barge-in: Command word detected. Stopping TTS.")
@@ -286,7 +368,7 @@ async def main():
 
         # Route !search command
         if text.strip().startswith("!search "):
-            query = text.strip()[len("!search "):].strip()
+            query = text.strip()[len("!search ") :].strip()
             print("Searching history...", end="\r", flush=True)
             results = store.search(query)
             if not results:
@@ -303,13 +385,18 @@ async def main():
         # Store user message
         try:
             store.append("user", text, session_id=session_id)
+            store.touch_session(session_id)
+            update_session_title_from_text(session_id, text)
         except Exception as e:
-            logger.warning(f"Failed to archive user message: {e}")
+            logger.warning(f"Failed to archive user message or touch session: {e}")
         # Voice command detection (before LLM call)
         cmd_emotion = parse_voice_command(text)
         if cmd_emotion is not None:
             last_emotion = cmd_emotion
-            ack_map = {"energetic": "Got it. Switching to energetic.", "calm": "Got it, calming down."}
+            ack_map = {
+                "energetic": "Got it. Switching to energetic.",
+                "calm": "Got it, calming down.",
+            }
             ack = ack_map.get(cmd_emotion, "Got it.")
             voice.speak(ack, cmd_emotion)
             return
@@ -320,7 +407,11 @@ async def main():
         # Sparkle announcements on emotion change
         sparkle = ""
         if detected_emotion != last_emotion:
-            sparkle_map = {"energetic": "Oh, exciting! ", "calm": "Got it, calming down. ", "sad": "I hear you. "}
+            sparkle_map = {
+                "energetic": "Oh, exciting! ",
+                "calm": "Got it, calming down. ",
+                "sad": "I hear you. ",
+            }
             sparkle = sparkle_map.get(detected_emotion, "")
         last_emotion = detected_emotion
 
@@ -339,7 +430,7 @@ async def main():
         is_first_flush = True
         async for chunk in brain.chat_stream(text, platform=platform):
             if is_first_chunk:
-                print("\r" + " " * 30 + "\r", end="", flush=True) # Clear thinking
+                print("\r" + " " * 30 + "\r", end="", flush=True)  # Clear thinking
                 is_first_chunk = False
             print(chunk, end="", flush=True)
             sentence_buffer += chunk
@@ -351,11 +442,15 @@ async def main():
                 parts = _SENTENCE_BOUNDARY.split(web_buffer)
                 for part in parts[:-1]:
                     if part.strip():
-                        asyncio.create_task(event_bus.emit("token", {"text": part.strip() + ". ", "session_id": session_id}))
+                        asyncio.create_task(
+                            event_bus.emit(
+                                "token",
+                                {"text": part.strip() + ". ", "session_id": session_id},
+                            )
+                        )
                 web_buffer = parts[-1]
 
-            # Progressive flush: sentence boundary > force-flush safety net.
-            # Clause boundaries removed - they cause awkward mid-sentence pauses.
+            # Progressive flush: sentence boundary > clause boundary > force-flush.
             flushed = False
 
             # Early first-flush: wait for first sentence boundary, or force at 150 chars
@@ -363,14 +458,14 @@ async def main():
                 if _SENTENCE_BOUNDARY.search(sentence_buffer):
                     parts = _SENTENCE_BOUNDARY.split(sentence_buffer)
                     if len(parts) > 1:
-                        first_sentence = parts[0].strip()
-                        if first_sentence:
-                            voice.speak(first_sentence, detected_emotion)
-                            sentence_buffer = parts[-1]  # keep remainder (next sentence start)
-                            flushed = True
-                            is_first_flush = False
+                        for part in parts[:-1]:
+                            if part.strip():
+                                voice.speak(part.strip(), detected_emotion)
+                        sentence_buffer = parts[-1]
+                        flushed = True
+                        is_first_flush = False
                 elif len(sentence_buffer) >= 150:
-                    idx = sentence_buffer.rfind(' ', 0, 150)
+                    idx = sentence_buffer.rfind(" ", 0, 150)
                     if idx > 0:
                         voice.speak(sentence_buffer[:idx].strip(), detected_emotion)
                         sentence_buffer = sentence_buffer[idx:].lstrip()
@@ -389,18 +484,31 @@ async def main():
                         flushed = True
 
             if not flushed and len(sentence_buffer) >= _MAX_FLUSH_CHARS:
-                # Force-flush at word boundary to avoid mid-word splits
-                idx = sentence_buffer.rfind(' ', 0, _MAX_FLUSH_CHARS)
-                if idx > 0:
-                    voice.speak(sentence_buffer[:idx].strip(), detected_emotion)
-                    sentence_buffer = sentence_buffer[idx:].lstrip()
-                elif sentence_buffer.strip():
-                    voice.speak(sentence_buffer[:_MAX_FLUSH_CHARS].strip(), detected_emotion)
-                    sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
+                # Force-flush: prefer clause (comma/semicolon) boundary,
+                # fall back to word boundary to avoid mid-word splits.
+                clause_idx = _CLAUSE_BOUNDARY.search(sentence_buffer[:_MAX_FLUSH_CHARS])
+                if clause_idx:
+                    flush_end = clause_idx.end()
+                    voice.speak(sentence_buffer[:flush_end].strip(), detected_emotion)
+                    sentence_buffer = sentence_buffer[flush_end:].lstrip()
+                else:
+                    word_idx = sentence_buffer.rfind(" ", 0, _MAX_FLUSH_CHARS)
+                    if word_idx > 0:
+                        voice.speak(sentence_buffer[:word_idx].strip(), detected_emotion)
+                        sentence_buffer = sentence_buffer[word_idx:].lstrip()
+                    elif sentence_buffer.strip():
+                        voice.speak(
+                            sentence_buffer[:_MAX_FLUSH_CHARS].strip(), detected_emotion
+                        )
+                        sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
 
         # Final web UI flush - emit any remaining text stuck in web_buffer
         if event_bus and web_buffer.strip():
-            asyncio.create_task(event_bus.emit("token", {"text": web_buffer.strip(), "session_id": session_id}))
+            asyncio.create_task(
+                event_bus.emit(
+                    "token", {"text": web_buffer.strip(), "session_id": session_id}
+                )
+            )
 
         # Final TTS -- chunks already printed everything
         if sentence_buffer.strip():
@@ -408,17 +516,23 @@ async def main():
 
         # Emit response_done event
         if event_bus:
-            asyncio.create_task(event_bus.emit("response_done", {"session_id": session_id}))
+            asyncio.create_task(
+                event_bus.emit("response_done", {"session_id": session_id})
+            )
 
         # Archive assistant reply
         if full_reply_buffer.strip():
             try:
                 store.append("assistant", full_reply_buffer, session_id=session_id)
+                store.touch_session(session_id)
             except Exception as e:
-                logger.warning(f"Failed to archive assistant message: {e}")
+                logger.warning(
+                    f"Failed to archive assistant message or touch session: {e}"
+                )
 
         # Learning loop: deferred to background -- doesn't block next turn
         if full_reply_buffer.strip() and text.strip():
+
             async def _background_learn(user_text: str, reply_text: str):
                 try:
                     learning_prompt = (
@@ -428,12 +542,18 @@ async def main():
                         "Output ONLY the preference line, or output nothing if nothing new."
                     )
                     learning = ""
-                    async for chunk in brain.chat_stream(learning_prompt, skip_pre_search=True):
+                    async for chunk in brain.chat_stream(
+                        learning_prompt, skip_pre_search=True
+                    ):
                         learning += chunk
                     learning = learning.strip() if learning.strip() else ""
                     if learning:
                         u_path = Path(config.user_file)
-                        existing = u_path.read_text(encoding="utf-8") if u_path.exists() else ""
+                        existing = (
+                            u_path.read_text(encoding="utf-8")
+                            if u_path.exists()
+                            else ""
+                        )
                         if learning not in existing:
                             with open(u_path, "a", encoding="utf-8") as f:
                                 f.write(f"\n{learning}")
@@ -446,12 +566,23 @@ async def main():
 
     async def consume_web_commands(event_bus, brain, voice):
         """Read commands from the web UI and dispatch them."""
+        nonlocal current_web_session_id
         while True:
             try:
                 cmd = await event_bus.next_command()
                 logger.debug(f"ZMQ received command: {cmd}")
                 if cmd.get("type") == "chat":
-                    await _process(cmd["text"], brain, voice, session_id=cmd.get("session_id", "default"), platform="web")
+                    current_web_session_id = cmd.get("session_id", "default")
+                    await _process(
+                        cmd["text"],
+                        brain,
+                        voice,
+                        session_id=current_web_session_id,
+                        platform="web",
+                    )
+                elif cmd.get("type") == "session_active":
+                    current_web_session_id = cmd.get("session_id", "default")
+                    logger.info(f"Active session updated to: {current_web_session_id}")
                 elif cmd.get("type") == "stop":
                     voice.stop_tts()
                     brain.cancel_chat()
@@ -462,7 +593,9 @@ async def main():
 
     # Start web server subprocess
     try:
-        web_entry = os.path.join(os.path.dirname(__file__), "charlie", "web_server_entry.py")
+        web_entry = os.path.join(
+            os.path.dirname(__file__), "charlie", "web_server_entry.py"
+        )
         _web_env = os.environ.copy()
         _web_env["CHARLIE_LAUNCH_ID"] = _LAUNCH_ID
         web_proc = subprocess.Popen(
@@ -479,11 +612,16 @@ async def main():
         # TTS lifecycle callbacks for IPC events
         def on_tts_start():
             if event_bus:
-                asyncio.run_coroutine_threadsafe(event_bus.emit("speaking_start", {}), loop)
+                asyncio.run_coroutine_threadsafe(
+                    event_bus.emit("speaking_start", {}), loop
+                )
 
         def on_tts_stop():
             if event_bus:
-                asyncio.run_coroutine_threadsafe(event_bus.emit("speaking_stop", {}), loop)
+                asyncio.run_coroutine_threadsafe(
+                    event_bus.emit("speaking_stop", {}), loop
+                )
+
         voice = VoiceEngine(
             config,
             on_speech=on_speech,
@@ -492,19 +630,31 @@ async def main():
         )
         voice.start()
 
+        def on_wake_word():
+            if event_bus:
+                asyncio.run_coroutine_threadsafe(
+                    event_bus.emit("wake_word", {}), loop
+                )
+
+        voice.set_wake_word_callback(on_wake_word)
+
         # Connection test & Dynamic Welcome
         logger.debug("Requesting dynamic welcome message from LLM...")
         welcome_msg = ""
         # Wrap the generator in a timeout to avoid hangs if LLM IP is unreachable
         try:
             async with asyncio.timeout(25.0):
-                async for chunk in brain.chat_stream("Give me a one-sentence warm, friendly welcome message as you start up. Speak only in English."):
+                async for chunk in brain.chat_stream(
+                    "Give me a one-sentence warm, friendly welcome message as you start up. Speak only in English."
+                ):
                     welcome_msg += chunk
         except asyncio.TimeoutError:
             logger.warning("Dynamic welcome timed out after 25s. Using fallback.")
             welcome_msg = "Welcome, Sir; I'm online and ready to help."
         except Exception as e:
-            logger.warning(f"Dynamic welcome failed: {type(e).__name__}: {e}. Using fallback.")
+            logger.warning(
+                f"Dynamic welcome failed: {type(e).__name__}: {e}. Using fallback."
+            )
             welcome_msg = "Welcome, Sir; I'm online and ready to help."
 
         print("=" * 40, flush=True)
@@ -527,11 +677,11 @@ async def main():
     except Exception as e:
         logger.exception(f"Fatal error: {e}")
     finally:
-        if 'voice' in locals() and voice is not None:
+        if "voice" in locals() and voice is not None:
             voice.stop()
-        if 'brain' in locals():
+        if "brain" in locals():
             await brain.close()
-        if 'store' in locals() and store is not None:
+        if "store" in locals() and store is not None:
             store.close()
         if web_proc is not None:
             web_proc.terminate()
@@ -552,6 +702,7 @@ async def _voice_loop_idle(voice):
             await asyncio.sleep(1)
     except asyncio.CancelledError:
         pass
+
 
 if __name__ == "__main__":
     try:

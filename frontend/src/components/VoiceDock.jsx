@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Mic, Brain, Volume2, Wifi } from 'lucide-react';
+import { Mic, Brain, Volume2, Wifi, MicOff } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 const STATE_CONFIG = {
@@ -16,9 +16,9 @@ function useWaveform(status) {
   const frameRef = useRef(null);
 
   const tick = useCallback(() => {
+    if (status === 'idle') return;
     const t = Date.now() * 0.005;
     const next = Array.from({ length: BAR_COUNT }, (_, i) => {
-      if (status === 'idle') return 3;
       if (status === 'listening') return 4 + Math.sin(i * 0.8 + t) * 8 + Math.random() * 4;
       if (status === 'thinking') return 4 + Math.sin(i * 0.5 + t * 0.6) * 5;
       if (status === 'speaking') return 4 + Math.sin(i * 0.6 + t * 0.8) * 10 + Math.cos(i * 1.2) * 3;
@@ -29,11 +29,16 @@ function useWaveform(status) {
   }, [status]);
 
   useEffect(() => {
+    if (status === 'idle') {
+      if (frameRef.current) cancelAnimationFrame(frameRef.current);
+      setHeights(Array(BAR_COUNT).fill(3));
+      return;
+    }
     frameRef.current = requestAnimationFrame(tick);
     return () => {
       if (frameRef.current) cancelAnimationFrame(frameRef.current);
     };
-  }, [tick]);
+  }, [tick, status]);
 
   return heights;
 }
@@ -55,9 +60,10 @@ function WaveformBars({ status }) {
   );
 }
 
-export function VoiceDock({ status = 'idle' }) {
+export function VoiceDock({ status = 'idle', wakeWordPulse = false }) {
   const config = STATE_CONFIG[status] || STATE_CONFIG.idle;
   const Icon = config.icon;
+  const isListening = status === 'listening';
 
   return (
     <motion.div
@@ -72,22 +78,77 @@ export function VoiceDock({ status = 'idle' }) {
       </div>
 
       {/* Status pill */}
-      <div className={`flex items-center gap-2 px-4 py-1.5 rounded-full border ${config.pillBorder} ${config.pillGlow || ''} backdrop-blur-lg transition-all duration-300`}>
-        <Icon size={12} className={`${config.color} shrink-0`} />
+      <motion.div
+        key={status}
+        initial={{ scale: 0.9, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        transition={{ duration: 0.3 }}
+        className={`flex items-center gap-2 px-4 py-1.5 rounded-full border ${config.pillBorder} ${config.pillGlow || ''} backdrop-blur-lg`}
+      >
+        <motion.div
+          animate={
+            isListening
+              ? { scale: [1, 1.3, 1], opacity: [0.6, 1, 0.6] }
+              : status === 'thinking'
+                ? { rotate: [0, 360] }
+                : status === 'speaking'
+                  ? { scale: [1, 1.15, 1] }
+                  : { scale: 1, opacity: 0.5 }
+          }
+          transition={
+            isListening || status === 'speaking'
+              ? { duration: 1.2, repeat: Infinity, ease: 'easeInOut' }
+              : status === 'thinking'
+                ? { duration: 2, repeat: Infinity, ease: 'linear' }
+                : { duration: 0.3 }
+          }
+        >
+          <Icon size={12} className={`${config.color} shrink-0`} />
+        </motion.div>
         <span className={`text-xs font-medium ${config.color} transition-colors duration-300`}>
           {config.label}
         </span>
-      </div>
+      </motion.div>
 
-      {/* Right: mic button stub */}
-      <div className="w-40 flex justify-end">
-        <button
-          type="button"
-          className="p-2 rounded-xl border border-white/[0.06] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] transition-all"
-          title="Microphone (stub)"
+      {/* Right: mic status indicator */}
+      <div className="w-40 flex justify-end relative">
+        {wakeWordPulse && (
+          <motion.div
+            initial={{ scale: 0.8, opacity: 0.8 }}
+            animate={{ scale: 2.2, opacity: 0 }}
+            transition={{ duration: 1.5, ease: 'easeOut' }}
+            className="absolute inset-0 rounded-xl border-2 border-[#a78bfa] pointer-events-none z-10"
+          />
+        )}
+        <motion.div
+          animate={
+            wakeWordPulse
+              ? { boxShadow: ['0 0 0 0 rgba(167,139,250,0)', '0 0 0 8px rgba(167,139,250,0.25)', '0 0 0 0 rgba(167,139,250,0)'] }
+              : isListening
+                ? { boxShadow: ['0 0 0 0 rgba(52,211,153,0)', '0 0 0 6px rgba(52,211,153,0.15)', '0 0 0 0 rgba(52,211,153,0)'] }
+                : { boxShadow: '0 0 0 0 rgba(0,0,0,0)' }
+          }
+          transition={
+            wakeWordPulse
+              ? { duration: 1.5, ease: 'easeOut' }
+              : isListening
+                ? { duration: 1.5, repeat: Infinity, ease: 'easeInOut' }
+                : { duration: 0.3 }
+          }
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border transition-all duration-300 ${
+            wakeWordPulse
+              ? 'border-[#a78bfa]/40 text-[#a78bfa]'
+              : isListening
+                ? 'border-emerald-500/30 text-emerald-400'
+                : 'border-white/[0.06] text-[var(--text-muted)]'
+          }`}
+          title={wakeWordPulse ? 'Wake word detected — listening...' : isListening ? 'Hardware mic is active — voice is being captured' : 'Mic is idle'}
         >
-          <Mic size={14} />
-        </button>
+          {isListening || wakeWordPulse ? <Mic size={13} /> : <MicOff size={13} />}
+          <span className="text-[10px] font-medium uppercase tracking-wider">
+            {wakeWordPulse ? 'Listening...' : isListening ? 'Live' : 'Mic'}
+          </span>
+        </motion.div>
       </div>
     </motion.div>
   );

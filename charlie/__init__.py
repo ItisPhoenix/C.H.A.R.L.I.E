@@ -6,12 +6,15 @@ def __getattr__(name: str):
     """Lazy imports for heavy modules (torch) to avoid unnecessary imports."""
     if name == "Brain":
         from .core import Brain
+
         return Brain
     if name == "VoiceEngine":
         from .voice import VoiceEngine
+
         return VoiceEngine
     if name == "SessionStore":
         from .session_store import SessionStore
+
         return SessionStore
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

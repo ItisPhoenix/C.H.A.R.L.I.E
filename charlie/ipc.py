@@ -6,6 +6,7 @@ EventBus provides two roles:
 
 Default ports: 5555 (events), 5556 (commands).
 """
+
 import json
 import asyncio
 import logging
@@ -14,9 +15,12 @@ from typing import Callable, Optional
 
 # Windows: pyzmq needs Selector event loop, not Proactor
 import warnings as _warnings
+
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    _warnings.filterwarnings("ignore", message=".*add_reader.*", category=RuntimeWarning)
+    _warnings.filterwarnings(
+        "ignore", message=".*add_reader.*", category=RuntimeWarning
+    )
 
 import zmq
 import zmq.asyncio
@@ -30,8 +34,12 @@ DEFAULT_COMMAND_PORT = 5556
 class EventBus:
     """ZeroMQ PUB/SUB + PUSH/PULL bridge between voice and web processes."""
 
-    def __init__(self, pub_port: int = DEFAULT_EVENT_PORT,
-                 pull_port: int = DEFAULT_COMMAND_PORT, is_producer: bool = True):
+    def __init__(
+        self,
+        pub_port: int = DEFAULT_EVENT_PORT,
+        pull_port: int = DEFAULT_COMMAND_PORT,
+        is_producer: bool = True,
+    ):
         self.ctx = zmq.asyncio.Context()
         self.is_producer = is_producer
         self.pub_port = pub_port
@@ -58,8 +66,12 @@ class EventBus:
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        for sock in (self._pub_socket, self._sub_socket,
-                     self._push_socket, self._pull_socket):
+        for sock in (
+            self._pub_socket,
+            self._sub_socket,
+            self._push_socket,
+            self._pull_socket,
+        ):
             if sock is not None:
                 try:
                     sock.close()
