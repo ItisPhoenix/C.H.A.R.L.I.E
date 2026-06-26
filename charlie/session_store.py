@@ -304,11 +304,10 @@ class SessionStore:
     def delete_session(self, session_id: str) -> None:
         """Deletes a session and all its messages."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-            cursor.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
-            conn.commit()
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+                cursor.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
             logger.info(f"delete_session | session_id={session_id}")
         except Exception as e:
             logger.error(f"delete_session failed: {e}")

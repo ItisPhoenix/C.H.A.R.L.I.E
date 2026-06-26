@@ -1677,7 +1677,8 @@ def _format_text_tool_summary(
     for call, result in zip(tool_calls, exec_results):
         content = result[:_TOOL_RESULT_MAX_CHARS]
         if call["name"] == "shell_execute":
-            cmd = call.get("arguments", "")
+            args = call.get("arguments", {})
+            cmd = args.get("command", args) if isinstance(args, dict) else args
             if "Command executed successfully" in content:
                 lines.append(
                     f"shell_execute{cmd} executed successfully. The command is now running."
@@ -1685,7 +1686,9 @@ def _format_text_tool_summary(
             else:
                 lines.append(f"shell_execute{cmd} returned: {content}")
         else:
-            lines.append(f"{call['name']}({call['arguments']}) returned: {content}")
+            args = call.get("arguments", {})
+            arg_str = args.get("command", args) if isinstance(args, dict) else args
+            lines.append(f"{call['name']}({arg_str}) returned: {content}")
     lines.append(
         "\nIMPORTANT: The tools above have been executed. "
         "Confirm to the user what was done. Do NOT call any more tools."

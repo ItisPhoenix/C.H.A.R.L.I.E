@@ -277,10 +277,10 @@ def start_server(
     """Entry point for the web server subprocess."""
     import uvicorn
 
-    logger.info("Starting web server on 0.0.0.0:8000")
+    logger.info("Starting web server on 127.0.0.1:8000")
     server_config = uvicorn.Config(
         app,
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=8000,
         log_level="info",
         loop="asyncio",

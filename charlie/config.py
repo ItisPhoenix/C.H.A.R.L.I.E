@@ -33,6 +33,9 @@ class Config:
     log_file: str = "logs/charlie.log"
     log_level: str = "INFO"
 
+    # Runtime-tunable env overrides (set by voice.py before importing onnxruntime)
+    ort_log_level: str = os.getenv("ORT_LOG_LEVEL", "3")
+
     # VAD / ASR tuning
     vad_threshold: float = float(os.getenv("VAD_THRESHOLD", "0.25"))
     vad_silence_timeout: float = float(os.getenv("VAD_SILENCE_TIMEOUT", "0.6"))

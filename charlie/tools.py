@@ -451,6 +451,22 @@ def _single_search(query: str) -> str:
     return "Error: Web search failed and no search API keys were configured."
 
 
+# --- Shell safety ---
+_BLOCKED_KEYWORDS = (
+    "rm -rf",
+    "mkfs",
+    "dd if=",
+    "format ",
+    "shutdown",
+    "reboot",
+    "poweroff",
+    "pkill",
+    "killall",
+)
+_SHELL_NAMES = ("cmd", "cmd.exe", "powershell", "powershell.exe")
+_CONVERSATIONAL = ("stop", "start", "cancel", "wait", "halt")
+
+
 @registry.register_tool(
     name="shell_execute",
     description="Run a shell command and get output. Risky commands are blocked.",
@@ -467,29 +483,16 @@ def _single_search(query: str) -> str:
     is_interactive=True,
 )
 def shell_execute(command: str) -> str:
-    _BLOCKED_KEYWORDS = (
-        "rm -rf",
-        "mkfs",
-        "dd if=",
-        "format ",
-        "shutdown",
-        "reboot",
-        "poweroff",
-    )
     lowered = command.lower().strip()
     for keyword in _BLOCKED_KEYWORDS:
         if keyword in lowered:
             return f"Error: Command blocked -- risky keyword '{keyword}'"
 
     # Block bare interactive shells and conversational nonsense
-    _SHELL_NAMES = ("cmd", "cmd.exe", "powershell", "powershell.exe")
     if lowered in _SHELL_NAMES:
         return "Error: Cannot open an interactive shell. Specify a command."
-    _CONVERSATIONAL = ("stop", "start", "cancel", "wait", "halt")
     if lowered in _CONVERSATIONAL:
         return f"Error: '{lowered}' is not a shell command."
-    if "pkill" in lowered or "killall" in lowered:
-        return "Error: Process kill commands are not allowed."
 
     # Cross-platform volume command translation (wrong OS -> Windows)
     m = _AMIXER_SET_RE.search(command)
@@ -584,9 +587,23 @@ def file_read(path: str) -> str:
 )
 def file_write(path: str, content: str) -> str:
     try:
-        dest_dir = os.path.dirname(os.path.abspath(path))
+        abs_path = os.path.abspath(path)
+        # Block traversal and sensitive paths
+        _BLOCKED_WRITE_PATHS = (
+            ".env",
+            "sessions.db",
+            os.path.sep + "etc" + os.path.sep,
+            os.path.sep + "proc" + os.path.sep,
+            os.path.sep + "sys" + os.path.sep,
+            os.path.sep + "registry" + os.path.sep,
+        )
+        path_lower = abs_path.lower()
+        for blocked in _BLOCKED_WRITE_PATHS:
+            if blocked in path_lower:
+                return f"Error: Writing to '{blocked}' paths is blocked for safety."
+        dest_dir = os.path.dirname(abs_path)
         os.makedirs(dest_dir, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
+        with open(abs_path, "w", encoding="utf-8") as handle:
             handle.write(content)
         return f"Successfully wrote to {path}"
     except Exception as e:

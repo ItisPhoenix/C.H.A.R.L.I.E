@@ -32,3 +32,8 @@ Thumbs.db
 MEMORY.md
 USER.md
 SOUL.md
+
+# ChromaDB runtime state
+charlie_memory_db/*.sqlite3
+charlie_memory_db/*/data_level0.bin
+charlie_memory_db/*/length.bin

@@ -9,7 +9,7 @@ import asyncio
 import threading
 import os
 
-os.environ["ORT_LOG_LEVEL"] = "3"
+os.environ.setdefault("ORT_LOG_LEVEL", os.getenv("ORT_LOG_LEVEL", "3"))
 
 import time
 import urllib.request
@@ -123,8 +123,8 @@ class VoiceEngine:
         self._widget_callback = None
 
         # ASR state
-        self.asr_input_queue: mp.Queue = mp.Queue()
-        self.asr_output_queue: mp.Queue = mp.Queue()
+        self.asr_input_queue: mp.Queue = mp.Queue(maxsize=8)
+        self.asr_output_queue: mp.Queue = mp.Queue(maxsize=8)
         self.asr_process = None
 
         # Load Kokoro TTS
@@ -544,6 +544,10 @@ class VoiceEngine:
         """Convert integer to English words (0 to 999 billion)."""
         if n == 0:
             return "zero"
+        prefix = ""
+        if n < 0:
+            prefix = "minus "
+            n = -n
         ones = [
             "",
             "one",
@@ -593,6 +597,8 @@ class VoiceEngine:
             return h + (" " + _h(r) if r else "")
 
         parts = []
+        if prefix:
+            parts.append(prefix.rstrip())
         if n >= 1_000_000_000:
             b = n // 1_000_000_000
             parts.append(_h(b) + " billion")
@@ -820,7 +826,7 @@ class VoiceEngine:
             "beam_size": self.config.asr_beam_size,
             "best_of": self.config.asr_best_of,
             "repetition_penalty": self.config.asr_repetition_penalty,
-            "vad_threshold": 0.45,
+            "vad_threshold": self.config.vad_threshold,
             "min_speech_duration_ms": self.config.vad_min_speech_duration_ms,
             "max_speech_duration_s": self.config.vad_max_speech_duration_s,
             "min_silence_duration_ms": self.config.vad_min_silence_duration_ms,
@@ -847,7 +853,7 @@ class VoiceEngine:
         _phrase_min_duration = self.config.phrase_min_duration
         _phrase_max_duration = self.config.phrase_max_duration
         _pre_roll_samples = int(samplerate * 0.8)  # 800ms pre-roll buffer
-        _pre_roll_buffer: deque = deque(maxlen=_pre_roll_samples // block_size + 1)
+        _pre_roll_buffer: deque = deque(maxlen=_pre_roll_samples // block_size)
 
         is_speech = False
         speech_start_time = 0.0
@@ -859,7 +865,7 @@ class VoiceEngine:
         # Wake word sliding buffer (~2s at 16kHz for inference)
         _ww_buffer_samples = samplerate * 2  # 32000 samples = 2s
         _ww_buffer: deque = deque(maxlen=_ww_buffer_samples // block_size + 1)
-        _ww_check_interval = 4  # check every N frames (~2048ms at 512 block)
+        _ww_check_interval = max(1, block_size // 512)  # scale with block_size
         _ww_check_counter = 0
 
         while not self.stop_event.is_set():
@@ -935,7 +941,7 @@ class VoiceEngine:
             speech_buffer.append(data.copy())
             now = time.time()
 
-            if rms > _vad_threshold * 0.5:
+            if rms > _vad_threshold:
                 last_speech_time = now
 
             duration = now - speech_start_time
@@ -959,13 +965,8 @@ class VoiceEngine:
                     f"vad_speech_offset | duration_ms={duration_ms:.0f} samples={len(audio)}"
                 )
 
-                # Don't process if TTS is playing (unless barge-in enabled)
-                if self.is_speaking.is_set() and not self.barge_in_enabled:
-                    continue
-
                 # Send to ASR (must be tuple: bytes, sample_rate)
                 self.asr_input_queue.put((audio.tobytes(), samplerate))
-                time.sleep(0.05)
 
     def _asr_poller_loop(self):
         """Poll ASR results and forward to on_speech callback."""
