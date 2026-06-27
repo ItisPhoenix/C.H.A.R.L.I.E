@@ -557,8 +557,21 @@ def shell_execute(command: str) -> str:
         "required": ["path"],
     },
 )
+def _resolve_user_placeholders(path: str) -> str:
+    import getpass
+    placeholders = {"yourusername", "username", "user"}
+    current_user = getpass.getuser()
+    parts = []
+    for part in os.path.normpath(path).split(os.path.sep):
+        if part.lower() in placeholders:
+            parts.append(current_user)
+        else:
+            parts.append(part)
+    return os.path.sep.join(parts)
+
 def file_read(path: str) -> str:
     try:
+        path = _resolve_user_placeholders(path)
         with open(path, "r", encoding="utf-8") as handle:
             return handle.read()
     except Exception as e:
@@ -586,6 +599,7 @@ def file_read(path: str) -> str:
 )
 def file_write(path: str, content: str) -> str:
     try:
+        path = _resolve_user_placeholders(path)
         abs_path = os.path.abspath(path)
         # Block traversal and sensitive paths
         _BLOCKED_WRITE_PATHS = (

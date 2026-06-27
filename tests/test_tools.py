@@ -47,6 +47,20 @@ def test_file_write_and_file_read(tmp_path):
     assert content.strip() == "hello tools"
 
 
+def test_resolve_user_placeholders():
+    import getpass
+
+    from charlie.tools import _resolve_user_placeholders
+    curr_user = getpass.getuser()
+
+    p1 = "C:\\Users\\YourUsername\\Documents\\charlie.txt"
+    p2 = "C:\\Users\\username\\Documents\\charlie.txt"
+    p3 = "C:\\Users\\user\\Documents\\charlie.txt"
+
+    assert _resolve_user_placeholders(p1) == f"C:\\Users\\{curr_user}\\Documents\\charlie.txt"
+    assert _resolve_user_placeholders(p2) == f"C:\\Users\\{curr_user}\\Documents\\charlie.txt"
+    assert _resolve_user_placeholders(p3) == f"C:\\Users\\{curr_user}\\Documents\\charlie.txt"
+
 def test_shell_execute_lists_env(monkeypatch):
     import os
 

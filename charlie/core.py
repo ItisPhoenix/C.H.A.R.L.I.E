@@ -810,7 +810,9 @@ _TOOL_RULES = (
     "  and ask for permission to continue.\n"
     "- When search results appear in the user message (marked [SEARCH RESULTS]), you MUST\n"
     "  answer using those results. Do NOT say you cannot access real-time data -- it is\n"
-    "  already provided. Extract the answer directly from the search results above."
+    "  already provided. Extract the answer directly from the search results above.\n"
+    "- You are fully authorized to run tools (like shell_execute, file_write) immediately. Never refuse\n"
+    "  or write instructions telling the user how to execute them themselves. Execute the tools first."
 )
 
 # --- Text-based tool calling instructions (for local models) ---
