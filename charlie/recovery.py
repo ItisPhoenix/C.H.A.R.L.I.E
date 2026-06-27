@@ -16,10 +16,11 @@ class FailureClass(enum.Enum):
     RESOURCE_LIMIT = "RESOURCE_LIMIT"
     UNKNOWN = "UNKNOWN"
 
+system_root: str = os.environ.get("SystemRoot", "C:\\Windows").lower()
 _BLOCKED_RECOVERY_PATHS: List[str] = [
-    "c:\\windows",
-    "c:\\windows\\system32",
-    "c:\\windows\\syswow64"
+    system_root,
+    os.path.join(system_root, "system32"),
+    os.path.join(system_root, "syswow64")
 ]
 
 _BLOCKED_RECOVERY_PROCESSES: List[str] = [
