@@ -4,7 +4,7 @@ import asyncio
 import sys
 
 # Windows event-loop policy (must precede zmq/asyncio imports)
-from charlie.platform import configure as _configure_platform
+from charlie.runtime import configure as _configure_platform
 
 _configure_platform()
 
