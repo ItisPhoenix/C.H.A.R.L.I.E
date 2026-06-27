@@ -284,3 +284,28 @@ async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
         results.append(chunk)
     assert results == ["I've opened Calculator for you."]
     assert not called_stream
+
+@pytest.mark.asyncio
+async def test_chat_stream_skip_tools(monkeypatch, brain_config):
+    from charlie.core import Brain
+
+    called_tool = False
+    def mock_execute(*args, **kwargs):
+        nonlocal called_tool
+        called_tool = True
+        return "mocked"
+
+    monkeypatch.setattr("charlie.tools.registry.execute_tool", mock_execute)
+
+    async def mock_stream_completion(*args, **kwargs):
+        return ('TOOL: file_write("C:\\\\test.txt", "hello")', [], False)
+
+    brain = Brain(brain_config)
+    monkeypatch.setattr(brain, "_stream_completion", mock_stream_completion)
+
+    results = []
+    async for chunk in brain.chat_stream("test", skip_tools=True):
+        results.append(chunk)
+
+    assert "TOOL: file_write" in "".join(results)
+    assert not called_tool

@@ -471,7 +471,7 @@ async def main():
                     )
                     learning = ""
                     async for chunk in brain.chat_stream(
-                        learning_prompt, skip_pre_search=True
+                        learning_prompt, skip_pre_search=True, skip_tools=True
                     ):
                         learning += chunk
                     learning = learning.strip() if learning.strip() else ""
@@ -575,7 +575,8 @@ async def main():
                 async for chunk in brain.chat_stream(
                     "Give me a very brief, one-sentence startup welcome. Be warm, natural, "
                     "and speak like a human colleague (not an AI assistant). "
-                    "Do NOT say 'How can I help you' or 'How can I assist'. Speak only in English."
+                    "Do NOT say 'How can I help you' or 'How can I assist'. Speak only in English.",
+                    skip_tools=True
                 ):
                     welcome_msg += chunk
         except asyncio.TimeoutError:

@@ -1122,6 +1122,7 @@ class Brain:
     def _build_payload(
         self,
         messages: List[Dict[str, Any]],
+        skip_tools: bool = False,
     ) -> Dict[str, Any]:
         """Build the API payload for chat completions."""
         payload: Dict[str, Any] = {
@@ -1130,7 +1131,7 @@ class Brain:
             "temperature": _LLM_TEMPERATURE,
             "stream": True,
         }
-        if self._use_native_tools:
+        if self._use_native_tools and not skip_tools:
             payload["tools"] = tool_registry.get_tool_definitions()
             payload["tool_choice"] = "auto"
         if getattr(self.config, "llm_disable_reasoning", False):
@@ -1143,6 +1144,7 @@ class Brain:
         platform: str = "voice",
         skip_pre_search: bool = False,
         session_id: str = "default",
+        skip_tools: bool = False,
     ) -> AsyncGenerator[str, None]:
         from datetime import datetime
 
@@ -1243,14 +1245,17 @@ class Brain:
         # Save user message to history
         self.history.append({"role": "user", "content": user_input})
 
-        payload = self._build_payload(messages)
+        payload = self._build_payload(messages, skip_tools=skip_tools)
         accumulated, tool_calls, used_fallback = await self._stream_completion(
             payload, generation
         )
 
         # Hybrid fallback: try text-based extraction if native returned nothing
-        if not tool_calls and accumulated:
+        if not tool_calls and accumulated and not skip_tools:
             tool_calls = self._extract_tool_calls(accumulated)
+
+        if skip_tools:
+            tool_calls = []
 
         if not tool_calls:
             if accumulated:
