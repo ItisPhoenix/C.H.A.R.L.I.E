@@ -915,7 +915,7 @@ class Brain:
             memory_content, user_content, opinions_content
         )
 
-    def _check_memory_capacity(self) -> None:
+    async def _check_memory_capacity(self) -> None:
         """Review memory files and consolidate when near capacity."""
         self._turns_since_nudge += 1
         nudge_interval = getattr(self.config, "memory_nudge_interval", 5)
@@ -943,13 +943,13 @@ class Brain:
 
         logger.info("Memory near capacity, consolidating...")
         try:
-            self._consolidate_memory()
+            await self._consolidate_memory()
             self.reload_context()
             logger.info("Memory consolidated and context reloaded")
         except Exception as exc:
             logger.warning("Memory consolidation failed: %s", exc)
 
-    def _consolidate_memory(self) -> None:
+    async def _consolidate_memory(self) -> None:
         """Send memory files to LLM for consolidation when near capacity."""
         from charlie.tools import _MEMORY_SEP, _parse_memory_entries
 
@@ -993,15 +993,13 @@ class Brain:
                     "temperature": 0.1,
                     "max_tokens": max_chars,
                 }
-                import asyncio as _asyncio
-
                 async def _do_consolidate():
                     async with client:
                         resp = await client.post("chat/completions", json=payload)
                         resp.raise_for_status()
                         return resp.json()["choices"][0]["message"]["content"]
 
-                result = _asyncio.get_event_loop().run_until_complete(_do_consolidate())
+                result = await _do_consolidate()
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(result)
                 logger.info("Consolidated %s: %d -> %d chars", target, current_len, len(result))
@@ -1213,7 +1211,7 @@ class Brain:
                 yield accumulated
                 # Save to vector memory (fire-and-forget)
                 self._save_to_memory(accumulated, "assistant")
-            self._check_memory_capacity()
+            await self._check_memory_capacity()
             return
 
         # --- Tool execution loop ---
@@ -1456,7 +1454,7 @@ class Brain:
                 self.history.append({"role": "assistant", "content": accumulated})
                 # Save to vector memory (fire-and-forget)
                 self._save_to_memory(accumulated, "assistant")
-            self._check_memory_capacity()
+            await self._check_memory_capacity()
             # Trim history to max turns (keep pairs: user + assistant)
             max_messages = self._history_max_turns * 2
             if len(self.history) > max_messages:
