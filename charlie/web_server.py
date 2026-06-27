@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 
 from charlie.config import config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
+from charlie.session_store import SessionStore
 
 logger = logging.getLogger("charlie.web_server")
 
@@ -35,6 +36,14 @@ logger = logging.getLogger("charlie.web_server")
 active_connections: Set[WebSocket] = set()
 event_bus: EventBus | None = None
 LAUNCH_ID: str = os.environ.get("CHARLIE_LAUNCH_ID", "")
+_store: SessionStore | None = None
+
+
+def _get_store() -> SessionStore:
+    global _store
+    if _store is None:
+        _store = SessionStore(config.session_db_path)
+    return _store
 pipeline_state: str = "idle"
 
 app = FastAPI(title="Charlie Dashboard")
@@ -131,14 +140,9 @@ async def websocket_endpoint(ws: WebSocket):
 
 @app.get("/api/history")
 async def history(limit: int = 50):
-    from charlie.session_store import SessionStore
-
-    store = SessionStore(config.session_db_path)
-    try:
-        messages = store.get_recent(limit=limit)
-        return {"messages": [{"role": r, "content": c} for r, c in messages]}
-    finally:
-        store.close()
+    store = _get_store()
+    messages = store.get_recent(limit=limit)
+    return {"messages": [{"role": r, "content": c} for r, c in messages]}
 
 
 @app.get("/api/status")
@@ -149,27 +153,22 @@ async def status():
 @app.get("/api/sessions")
 async def list_sessions(request: Request):
     """List sessions, optionally filtered by launch_id or source."""
-    from charlie.session_store import SessionStore
-
-    store = SessionStore(config.session_db_path)
-    try:
-        launch_id = request.query_params.get("launch_id")
-        source = request.query_params.get("source")
-        sessions = store.get_sessions(source=source, launch_id=launch_id)
-        return {
-            "sessions": [
-                {
-                    "id": s[0],
-                    "title": s[1],
-                    "created_at": s[2],
-                    "updated_at": s[3],
-                    "launch_id": s[4],
-                }
-                for s in sessions
-            ]
-        }
-    finally:
-        store.close()
+    store = _get_store()
+    launch_id = request.query_params.get("launch_id")
+    source = request.query_params.get("source")
+    sessions = store.get_sessions(source=source, launch_id=launch_id)
+    return {
+        "sessions": [
+            {
+                "id": s[0],
+                "title": s[1],
+                "created_at": s[2],
+                "updated_at": s[3],
+                "launch_id": s[4],
+            }
+            for s in sessions
+        ]
+    }
 
 
 @app.post("/api/sessions")
@@ -177,76 +176,56 @@ async def create_session(data: dict):
     """Create a new session."""
     import uuid as _uuid
 
-    from charlie.session_store import SessionStore
-
     session_id = data.get("session_id", str(_uuid.uuid4()))
     title = data.get("title", "New Chat")
     source = data.get("source", "web")
     launch_id = data.get("launch_id")
-    store = SessionStore(config.session_db_path)
-    try:
-        store.create_session(session_id, title, source=source, launch_id=launch_id)
-        return {
-            "session_id": session_id,
-            "title": title,
-            "source": source,
-            "launch_id": launch_id,
-        }
-    finally:
-        store.close()
+    store = _get_store()
+    store.create_session(session_id, title, source=source, launch_id=launch_id)
+    return {
+        "session_id": session_id,
+        "title": title,
+        "source": source,
+        "launch_id": launch_id,
+    }
 
 
 @app.get("/api/sessions/{session_id}/messages")
 async def session_messages(session_id: str, limit: int = 50):
     """Get messages for a specific session."""
-    from charlie.session_store import SessionStore
-
-    store = SessionStore(config.session_db_path)
-    try:
-        messages = store.get_session_messages(session_id, limit=limit)
-        return {"messages": [{"role": r, "content": c} for r, c in messages]}
-    finally:
-        store.close()
+    store = _get_store()
+    messages = store.get_session_messages(session_id, limit=limit)
+    return {"messages": [{"role": r, "content": c} for r, c in messages]}
 
 
 @app.put("/api/sessions/{session_id}")
 async def update_session(session_id: str, data: dict):
     """Update session title."""
-    from charlie.session_store import SessionStore
-
     title = data.get("title", "New Chat")
-    store = SessionStore(config.session_db_path)
-    try:
-        store.update_session_title(session_id, title)
+    store = _get_store()
+    store.update_session_title(session_id, title)
         # Broadcast title update to all connected WebSocket clients
-        await broadcast(
-            {
-                "type": "session_update",
-                "payload": {"session_id": session_id, "title": title},
-            }
-        )
-        return {"session_id": session_id, "title": title}
-    finally:
-        store.close()
+    await broadcast(
+        {
+            "type": "session_update",
+            "payload": {"session_id": session_id, "title": title},
+        }
+    )
+    return {"session_id": session_id, "title": title}
 
 
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str):
     """Delete a session and all its messages."""
-    from charlie.session_store import SessionStore
-
-    store = SessionStore(config.session_db_path)
-    try:
-        store.delete_session(session_id)
-        await broadcast(
-            {
-                "type": "session_update",
-                "payload": {"session_id": session_id, "deleted": True},
-            }
-        )
-        return {"session_id": session_id, "deleted": True}
-    finally:
-        store.close()
+    store = _get_store()
+    store.delete_session(session_id)
+    await broadcast(
+        {
+            "type": "session_update",
+            "payload": {"session_id": session_id, "deleted": True},
+        }
+    )
+    return {"session_id": session_id, "deleted": True}
 
 
 # Static file serving for the React frontend
