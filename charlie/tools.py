@@ -4,15 +4,14 @@ All tool definitions, execution logic, and provider integrations live here.
 No business logic -- just tool I/O.
 """
 
+import logging
 import os
 import re
 import subprocess
 import sys
-import logging
+from typing import Any, Callable, Dict, List
 
 import httpx
-
-from typing import Any, Callable, Dict, List
 
 from charlie.config import config
 from charlie.session_store import SessionStore
@@ -653,27 +652,32 @@ def _memory_capacity_error(target: str, entries: list, max_chars: int, new_len: 
 
 @registry.register_tool(
     name="memory",
-    description="Manage persistent memory files. Actions: add appends an entry, replace swaps an entry containing old_text, remove drops an entry, consolidate returns all entries with capacity for review. Entries are delimited by section sign.",
+    description=(
+        "Manage persistent memory files. Actions: add appends an entry, "
+        "replace swaps an entry containing old_text, remove drops an entry, "
+        "consolidate returns all entries with capacity for review. "
+        "Entries are delimited by section sign."
+    ),
     schema={
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
                 "enum": ["add", "replace", "remove", "consolidate"],
-                "description": "add = append entry, replace = swap entry containing old_text, remove = drop entry, consolidate = list all entries with capacity info.",
+                "description": "add = append, replace = swap entry, remove = drop, consolidate = list all.",
             },
             "target": {
                 "type": "string",
                 "enum": ["memory", "user", "opinions"],
-                "description": "Which file: memory = MEMORY.md (system context, max 2200 chars), user = USER.md (user preferences, max 1375 chars), opinions = OPINIONS.md (personal opinions, max 800 chars).",
+                "description": "memory (max 2200), user (max 1375), opinions (max 800 chars).",
             },
             "content": {
                 "type": "string",
-                "description": "Text content to add or use as replacement (required for add/replace, ignored for remove/consolidate).",
+                "description": "Text to add or use as replacement (required for add/replace).",
             },
             "old_text": {
                 "type": "string",
-                "description": "Substring to find in an entry (required for replace/remove, ignored for add/consolidate).",
+                "description": "Substring to find in an entry (required for replace/remove).",
             },
         },
         "required": ["action", "target"],
@@ -759,7 +763,10 @@ def memory(action: str, target: str, content: str = "", old_text: str = "") -> s
 
 @registry.register_tool(
     name="vector_memory",
-    description="Semantic memory: remember facts or recall them across sessions. 'remember' stores a fact for future retrieval. 'recall' searches past conversations semantically.",
+    description=(
+        "Semantic memory: remember facts or recall them across sessions. "
+        "'remember' stores a fact. 'recall' searches past conversations."
+    ),
     schema={
         "type": "object",
         "properties": {
@@ -805,7 +812,7 @@ def vector_memory(action: str, content: str) -> str:
 
 @registry.register_tool(
     name="session_search",
-    description="Search past conversation history stored in the session database. Returns matching messages from previous sessions.",
+    description="Search past conversation history. Returns matching messages.",
     schema={
         "type": "object",
         "properties": {

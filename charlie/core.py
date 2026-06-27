@@ -5,15 +5,16 @@ Tiered prompt assembly for API prompt caching: Stable > Context > Volatile.
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
-import json
-from typing import TYPE_CHECKING, AsyncGenerator, Optional, Dict, Any, List
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
-from charlie.tools import registry as tool_registry
+
 from charlie.budget import IterationBudget
+from charlie.tools import registry as tool_registry
 
 logger = logging.getLogger("charlie.core")
 if TYPE_CHECKING:
@@ -551,7 +552,11 @@ def _token_count(messages: List[Dict[str, Any]]) -> int:
 
 
 def _sanitize_roles(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Ensure messages alternate correctly. Collapses consecutive assistants and inserts stub assistants before tools."""
+    """Ensure messages alternate correctly.
+
+    Collapses consecutive assistants and inserts stub assistants
+    before tools.
+    """
     cleaned = []
     for msg in messages:
         role = msg.get("role")
@@ -767,7 +772,9 @@ _TEXT_TOOL_INSTRUCTIONS = (
     'TOOL: memory("add", "user", "User prefers coffee in the morning")\n'
     'TOOL: memory("replace", "opinions", "I love espresso", "coffee")\n'
     'TOOL: memory("remove", "opinions", "old opinion text")\n'
-    "For memory tool: first arg is action (add/replace/remove/consolidate), second is target (memory/user/opinions), third is content, fourth (optional) is old_text for replace/remove."
+    "For memory tool: first arg is action (add/replace/remove/consolidate), "
+    "second is target (memory/user/opinions), third is content, "
+    "fourth (optional) is old_text for replace/remove."
 )
 
 
@@ -944,7 +951,7 @@ class Brain:
 
     def _consolidate_memory(self) -> None:
         """Send memory files to LLM for consolidation when near capacity."""
-        from charlie.tools import _parse_memory_entries, _MEMORY_SEP
+        from charlie.tools import _MEMORY_SEP, _parse_memory_entries
 
         files = {
             "memory": (self.config.memory_file, 2200),

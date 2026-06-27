@@ -3,21 +3,22 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import os
+
+from charlie.session_store import SessionStore
 from charlie.tools import (
-    registry,
     ToolRegistry,
-    web_search,
-    shell_execute,
+    _decompose_query,
+    _merge_search_results,
+    _needs_decomposition,
     file_read,
     file_write,
     memory,
-    _needs_decomposition,
-    _decompose_query,
-    _merge_search_results,
+    registry,
     session_search,
+    shell_execute,
+    web_search,
 )
-import os
-from charlie.session_store import SessionStore
 
 
 def test_registry_registration_and_schema():

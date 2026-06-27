@@ -1,9 +1,10 @@
 import logging
+import multiprocessing as mp
 import queue
+import time
+
 import numpy as np
 from faster_whisper import WhisperModel
-import multiprocessing as mp
-import time
 
 # Set up logging for the worker process
 logging.basicConfig(level=logging.INFO)

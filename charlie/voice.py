@@ -4,23 +4,25 @@ All text arriving at speak() passes through _humanize_text() before
 phonemization. This is the single control point for prosody and pacing.
 """
 
-import logging
 import asyncio
-import threading
+import logging
 import os
+import threading
 
 os.environ.setdefault("ORT_LOG_LEVEL", os.getenv("ORT_LOG_LEVEL", "3"))
 
+import multiprocessing as mp
+import queue
+import re
 import time
 import urllib.request
+from collections import deque
+from typing import Callable, Optional
+
 import numpy as np
 import sounddevice as sd
-import re
-import queue
-import multiprocessing as mp
-from typing import Callable, Optional
 from kokoro_onnx import Kokoro
-from collections import deque
+
 from charlie.asr_worker import asr_worker_process
 from charlie.core import strip_internal_reasoning
 from charlie.wake_word import WakeWordDetector

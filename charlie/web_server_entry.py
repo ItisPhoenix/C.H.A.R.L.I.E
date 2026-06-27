@@ -1,7 +1,7 @@
 """Entry point for Charlie web server subprocess."""
 
-import sys
 import asyncio
+import sys
 
 # Windows: Force Selector event loop BEFORE any other imports.
 # uvicorn and pyzmq both override/create event loops — this is the
@@ -19,7 +19,7 @@ from pathlib import Path
 # Ensure charlie package is importable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from charlie.web_server import start_server, app
+from charlie.web_server import app, start_server
 
 
 # Suppress pyzmq CancelledError traceback on Windows shutdown.

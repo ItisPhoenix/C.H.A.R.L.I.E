@@ -1,6 +1,6 @@
+import logging
 import os
 import sqlite3
-import logging
 import time
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
@@ -118,14 +118,19 @@ class SessionStore:
                         END;
                     """)
                     self.conn.execute("""
-                        CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-                            INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
+                        CREATE TRIGGER IF NOT EXISTS messages_ad
+                        AFTER DELETE ON messages BEGIN
+                            INSERT INTO messages_fts(messages_fts, rowid, content)
+                            VALUES('delete', old.id, old.content);
                         END;
                     """)
                     self.conn.execute("""
-                        CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-                            INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
-                            INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+                        CREATE TRIGGER IF NOT EXISTS messages_au
+                        AFTER UPDATE ON messages BEGIN
+                            INSERT INTO messages_fts(messages_fts, rowid, content)
+                            VALUES('delete', old.id, old.content);
+                            INSERT INTO messages_fts(rowid, content)
+                            VALUES (new.id, new.content);
                         END;
                     """)
                 else:
@@ -167,9 +172,9 @@ class SessionStore:
                 if self.fts5_supported:
                     cursor.execute(
                         """
-                        SELECT role, content FROM messages 
+                        SELECT role, content FROM messages
                         WHERE id IN (
-                            SELECT rowid FROM messages_fts 
+                            SELECT rowid FROM messages_fts
                             WHERE messages_fts MATCH ?
                         )
                         ORDER BY id DESC LIMIT ?;
@@ -180,8 +185,8 @@ class SessionStore:
                     # Fallback to standard SQL LIKE query
                     cursor.execute(
                         """
-                        SELECT role, content FROM messages 
-                        WHERE content LIKE ? 
+                        SELECT role, content FROM messages
+                        WHERE content LIKE ?
                         ORDER BY id DESC LIMIT ?;
                         """,
                         (f"%{query}%", limit),
@@ -270,10 +275,11 @@ class SessionStore:
                 clauses.append("launch_id = ?")
                 params.append(launch_id)
             where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-            cursor.execute(
-                f"SELECT session_id, title, created_at, updated_at, launch_id FROM sessions{where} ORDER BY created_at DESC",
-                params,
+            sql = (
+                f"SELECT session_id, title, created_at, updated_at, launch_id"
+                f" FROM sessions{where} ORDER BY created_at DESC"
             )
+            cursor.execute(sql, params)
             return cursor.fetchall()
         except sqlite3.Error as e:
             logger.error(f"get_sessions failed: {e}")

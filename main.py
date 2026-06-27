@@ -1,11 +1,11 @@
 # ruff: noqa: E402
-import sys
-import io
-import os
-import logging
-import re
-import time
 import asyncio
+import io
+import logging
+import os
+import re
+import sys
+import time
 
 # Windows: pyzmq needs Selector event loop, not Proactor.
 # Suppress the pyzmq RuntimeWarning about add_reader - tornado 6.x
@@ -17,7 +17,6 @@ if sys.platform == "win32":
     warnings.filterwarnings("ignore", message=".*add_reader.*", category=RuntimeWarning)
 import subprocess
 import uuid
-
 
 # --- Text normalization for multi-app commands ---
 # When user says "Open Chrome calculator notepad", insert "and" between items
@@ -160,12 +159,12 @@ root_logger.addHandler(console_handler)
 
 # 3. NOW IMPORT CHARLIE MODULES
 from charlie.config import config
-from charlie.session_store import SessionStore
-from charlie.memory_store import MemoryStore
 from charlie.core import Brain
-from charlie.personality import get_emotion_for_context, parse_voice_command
-from charlie.voice import VoiceEngine
 from charlie.ipc import EventBus
+from charlie.memory_store import MemoryStore
+from charlie.personality import get_emotion_for_context, parse_voice_command
+from charlie.session_store import SessionStore
+from charlie.voice import VoiceEngine
 
 logger = logging.getLogger("charlie.main")
 # Unique launch identity -- every main() invocation gets one so the sidebar can

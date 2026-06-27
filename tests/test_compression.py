@@ -1,5 +1,5 @@
-from charlie.core import _compress_messages, _token_count
 from charlie.config import Config
+from charlie.core import _compress_messages, _token_count
 
 
 def test_compression_trigger():

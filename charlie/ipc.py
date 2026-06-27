@@ -7,14 +7,14 @@ EventBus provides two roles:
 Default ports: 5555 (events), 5556 (commands).
 """
 
-import json
 import asyncio
+import json
 import logging
 import sys
-from typing import Callable, Optional
 
 # Windows: pyzmq needs Selector event loop, not Proactor
 import warnings as _warnings
+from typing import Callable, Optional
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

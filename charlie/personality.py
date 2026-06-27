@@ -15,7 +15,8 @@ _ENERGETIC_RE = re.compile(
 )
 
 _SAD_CALM_RE = re.compile(
-    r"\b(?:sad|sorry|terrible|depressed|lonely|miss|unfortunately|bad day|frustrat\w*|annoyed|hate|stupid|why won't|useless)\b",
+    r"\b(?:sad|sorry|terrible|depressed|lonely|miss|unfortunately"
+    r"|bad day|frustrat\w*|annoyed|hate|stupid|why won't|useless)\b",
     re.IGNORECASE,
 )
 # -- Voice command patterns ------------------------------------------------

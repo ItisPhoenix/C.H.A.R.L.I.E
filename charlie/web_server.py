@@ -5,8 +5,8 @@ Communicates with the voice process via ZeroMQ (EventBus).
 """
 
 import asyncio
-import sys
 import os
+import sys
 
 # Windows: pyzmq needs Selector event loop, not Proactor (must be before any zmq import)
 import warnings as _warnings
@@ -21,12 +21,13 @@ import json
 import logging
 from pathlib import Path
 from typing import Set
+
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from charlie.ipc import EventBus, DEFAULT_EVENT_PORT, DEFAULT_COMMAND_PORT
 from charlie.config import config
+from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
 
 logger = logging.getLogger("charlie.web_server")
 
@@ -174,8 +175,9 @@ async def list_sessions(request: Request):
 @app.post("/api/sessions")
 async def create_session(data: dict):
     """Create a new session."""
-    from charlie.session_store import SessionStore
     import uuid as _uuid
+
+    from charlie.session_store import SessionStore
 
     session_id = data.get("session_id", str(_uuid.uuid4()))
     title = data.get("title", "New Chat")

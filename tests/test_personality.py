@@ -2,7 +2,6 @@
 
 from charlie.personality import get_emotion_for_context, parse_voice_command
 
-
 # ── get_emotion_for_context ────────────────────────────────────────────────
 
 

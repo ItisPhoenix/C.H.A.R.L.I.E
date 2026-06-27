@@ -1,4 +1,5 @@
 import os
+
 from charlie.session_store import SessionStore
 
 
@@ -69,7 +70,7 @@ def test_session_metadata_ops():
         first_touch = "2026-06-26 00:00:00.000000"
         with store.conn:
             store.conn.execute("UPDATE sessions SET updated_at = ? WHERE session_id = ?", (first_touch, "sess_1"))
-        
+
         # 4. Update session title and verify
         store.update_session_title("sess_1", "Updated Title")
         sessions = store.get_sessions()

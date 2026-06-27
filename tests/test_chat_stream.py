@@ -1,6 +1,7 @@
 import pytest
-from charlie.core import Brain
+
 from charlie.config import Config
+from charlie.core import Brain
 
 
 @pytest.fixture
@@ -29,7 +30,7 @@ async def test_budget_exhaustion(monkeypatch, brain_config):
 
             async def aiter_lines(self):
                 if followup_count <= 4:
-                    yield 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"123","function":{"name":"web_search","arguments":"{\\"query\\":\\"test\\"}"}}]}}]}'
+                    yield 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"123","function":{"name":"web_search","arguments":"{\\"query\\":\\"test\\"}"}}]}}]}'  # noqa: E501
                 else:
                     yield 'data: {"choices":[{"delta":{"content":"done"}}]}'
                 yield "data: [DONE]"
@@ -100,8 +101,9 @@ def test_extract_mixed_tool_formats():
 
 
 def test_detect_close_app(monkeypatch):
-    from charlie.core import _detect_close_app
     import subprocess
+
+    from charlie.core import _detect_close_app
 
     called_cmds = []
 
@@ -160,8 +162,9 @@ def test_detect_close_app(monkeypatch):
 
 
 def test_detect_open_app(monkeypatch):
-    from charlie.core import _detect_open_app
     import subprocess
+
+    from charlie.core import _detect_open_app
 
     called_cmds = []
 
@@ -218,8 +221,9 @@ def test_detect_open_app(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
-    from charlie.core import Brain
     import subprocess
+
+    from charlie.core import Brain
 
     def mock_run(cmd, *args, **kwargs):
         class MockResult:
