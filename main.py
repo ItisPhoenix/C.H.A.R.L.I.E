@@ -573,17 +573,19 @@ async def main():
         try:
             async with asyncio.timeout(25.0):
                 async for chunk in brain.chat_stream(
-                    "Give me a one-sentence warm, friendly welcome message as you start up. Speak only in English."
+                    "Give me a very brief, one-sentence startup welcome. Be warm, natural, "
+                    "and speak like a human colleague (not an AI assistant). "
+                    "Do NOT say 'How can I help you' or 'How can I assist'. Speak only in English."
                 ):
                     welcome_msg += chunk
         except asyncio.TimeoutError:
             logger.warning("Dynamic welcome timed out after 25s. Using fallback.")
-            welcome_msg = "Welcome, Sir; I'm online and ready to help."
+            welcome_msg = "Hey there. I'm online and listening."
         except Exception as e:
             logger.warning(
                 f"Dynamic welcome failed: {type(e).__name__}: {e}. Using fallback."
             )
-            welcome_msg = "Welcome, Sir; I'm online and ready to help."
+            welcome_msg = "Hey there. I'm online and listening."
 
         print("=" * 40, flush=True)
         print("   Charlie is online and listening", flush=True)
