@@ -1027,6 +1027,8 @@ class Brain:
 
         Returns (accumulated_text, tool_calls_list, fallback_used).
         """
+        from charlie.streaming import parse_sse_stream
+
         client = self.client
         model = self.config.llm_model
 
@@ -1035,55 +1037,13 @@ class Brain:
                 "POST", "chat/completions", json=payload
             ) as response:
                 response.raise_for_status()
-                accumulated = ""
-                tc_by_index: Dict[int, Dict[str, str]] = {}
-                async for line in response.aiter_lines():
-                    if self._chat_generation != generation:
-                        logger.info("Chat generation cancelled (barge-in)")
-                        return ("", [], False)
-                    if not line.startswith("data: "):
-                        continue
-                    if line.strip() == "data: [DONE]":
-                        break
-                    try:
-                        chunk = json.loads(line[6:])
-                        delta = chunk.get("choices", [{}])[0].get("delta", {})
-                        content = delta.get("content", "")
-                        if content:
-                            accumulated += content
-                        for tc in delta.get("tool_calls", []):
-                            idx = tc.get("index", 0)
-                            if idx not in tc_by_index:
-                                tc_by_index[idx] = {
-                                    "id": "",
-                                    "name": "",
-                                    "arguments": "",
-                                }
-                            entry = tc_by_index[idx]
-                            if tc.get("id"):
-                                entry["id"] = tc["id"]
-                            func = tc.get("function", {})
-                            if func.get("name"):
-                                entry["name"] = func["name"]
-                            if func.get("arguments"):
-                                entry["arguments"] += func["arguments"]
-                    except Exception:
-                        continue
-
-                tool_calls = []
-                for idx in sorted(tc_by_index.keys()):
-                    tc = tc_by_index[idx]
-                    try:
-                        args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                    except json.JSONDecodeError:
-                        args = {}
-                    tool_calls.append(
-                        {
-                            "id": tc["id"],
-                            "name": tc["name"],
-                            "arguments": args,
-                        }
-                    )
+                accumulated, tc_by_index, cancelled = await parse_sse_stream(
+                    response, generation, self._chat_generation
+                )
+                if cancelled:
+                    logger.info("Chat generation cancelled (barge-in)")
+                    return ("", [], False)
+                tool_calls = _collect_tool_calls(tc_by_index)
                 return (accumulated, tool_calls, False)
 
         except Exception as exc:
@@ -1100,77 +1060,20 @@ class Brain:
         payload["model"] = model
         async with client.stream("POST", "chat/completions", json=payload) as response:
             response.raise_for_status()
-            accumulated = ""
-            tc_by_index: Dict[int, Dict[str, str]] = {}
-            async for line in response.aiter_lines():
-                if self._chat_generation != generation:
-                    logger.info("Chat generation cancelled (barge-in)")
-                    return ("", [], True)
-                if not line.startswith("data: "):
-                    continue
-                if line.strip() == "data: [DONE]":
-                    break
-                try:
-                    chunk = json.loads(line[6:])
-                    delta = chunk.get("choices", [{}])[0].get("delta", {})
-                    content = delta.get("content", "")
-                    if content:
-                        accumulated += content
-                    for tc in delta.get("tool_calls", []):
-                        idx = tc.get("index", 0)
-                        if idx not in tc_by_index:
-                            tc_by_index[idx] = {"id": "", "name": "", "arguments": ""}
-                        entry = tc_by_index[idx]
-                        if tc.get("id"):
-                            entry["id"] = tc["id"]
-                        func = tc.get("function", {})
-                        if func.get("name"):
-                            entry["name"] = func["name"]
-                        if func.get("arguments"):
-                            entry["arguments"] += func["arguments"]
-                except Exception:
-                    continue
-
-            tool_calls = []
-            for idx in sorted(tc_by_index.keys()):
-                tc = tc_by_index[idx]
-                try:
-                    args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                except json.JSONDecodeError:
-                    args = {}
-                tool_calls.append(
-                    {
-                        "id": tc["id"],
-                        "name": tc["name"],
-                        "arguments": args,
-                    }
-                )
+            accumulated, tc_by_index, cancelled = await parse_sse_stream(
+                response, generation, self._chat_generation
+            )
+            if cancelled:
+                logger.info("Chat generation cancelled (barge-in)")
+                return ("", [], True)
+            tool_calls = _collect_tool_calls(tc_by_index)
             return (accumulated, tool_calls, True)
 
-    def _build_initial_payload(
-        self,
-        messages: List[Dict[str, Any]],
-        budget_remaining: int,
-    ) -> Dict[str, Any]:
-        """Build the API payload, including native tools or omitting them for text fallback."""
-        payload: Dict[str, Any] = {
-            "model": self.config.llm_model,
-            "messages": messages,
-            "temperature": _LLM_TEMPERATURE,
-            "stream": True,
-        }
-        if self._use_native_tools:
-            payload["tools"] = tool_registry.get_tool_definitions()
-            payload["tool_choice"] = "auto"
-        if getattr(self.config, "llm_disable_reasoning", False):
-            payload["reasoning"] = {"effort": "none"}
-        return payload
-
-    def _build_followup_payload(
+    def _build_payload(
         self,
         messages: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Build follow-up payload after tool execution."""
+        """Build the API payload for chat completions."""
         payload: Dict[str, Any] = {
             "model": self.config.llm_model,
             "messages": messages,
@@ -1290,7 +1193,7 @@ class Brain:
         # Save user message to history
         self.history.append({"role": "user", "content": user_input})
 
-        payload = self._build_initial_payload(messages, budget.remaining)
+        payload = self._build_payload(messages)
         accumulated, tool_calls, used_fallback = await self._stream_completion(
             payload, generation
         )
@@ -1425,7 +1328,7 @@ class Brain:
 
             messages = _compress_messages(_sanitize_roles(messages), self.config)
 
-            followup_payload = self._build_followup_payload(messages)
+            followup_payload = self._build_payload(messages)
             followup_tc_by_index: Dict[int, Dict[str, str]] = {}
             if used_fallback and self._fallback_client:
                 followup_client = self._fallback_client
@@ -1484,7 +1387,7 @@ class Brain:
                                     break
                                 try:
                                     chunk = json.loads(line[6:])
-                                    delta = chunk.get("choices", [{}])[0].get(
+                                    delta = chunk.get("choices", [{}]).get(
                                         "delta", {}
                                     )
                                     content = delta.get("content", "")
