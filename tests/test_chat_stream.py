@@ -100,6 +100,26 @@ def test_extract_mixed_tool_formats():
     assert names == {"web_search", "shell_execute"}
 
 
+def test_extract_multi_arg_tool_calls():
+    """Verify tool calls with multiple arguments map to correct names."""
+    from charlie.config import Config
+    brain = Brain(
+        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy")
+    )
+    # Test TOOL: format
+    text = 'TOOL: file_write("C:\\\\test.txt", "hello world")'
+    calls = brain._extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "file_write"
+    assert calls[0]["arguments"] == {"path": "C:\\\\test.txt", "content": "hello world"}
+
+    # Test bare format
+    text = 'file_write("C:\\\\test.txt", "hello world")'
+    calls = brain._extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "file_write"
+    assert calls[0]["arguments"] == {"path": "C:\\\\test.txt", "content": "hello world"}
+
 def test_detect_close_app(monkeypatch):
     import subprocess
 

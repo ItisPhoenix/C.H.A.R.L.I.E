@@ -53,6 +53,14 @@ _TOOL_PARAM_NAMES: Dict[str, str] = {
     "memory": "action",
     "session_search": "query",
 }
+_TOOL_PARAM_LISTS: Dict[str, List[str]] = {
+    "web_search": ["query"],
+    "shell_execute": ["command"],
+    "file_read": ["path"],
+    "file_write": ["path", "content"],
+    "memory": ["action", "target", "content", "old_text"],
+    "session_search": ["query"],
+}
 # --- Fast-path: time/date queries answered from system clock (zero LLM) ---
 _TIME_DATE_RE = re.compile(
     r"(?:what(?:'s|\s+is|\s+s)?\s+(?:the\s+)?(?:current\s+)?(?:time|date|day|today))"
@@ -1568,7 +1576,7 @@ class Brain:
                 if len(quoted) == 1:
                     arguments = {expected_params: quoted[0]}
                 elif len(quoted) > 1:
-                    params_list = ["action", "target", "content", "old_text"]
+                    params_list = _TOOL_PARAM_LISTS.get(tool_name, ["query"])
                     arguments = {}
                     for i, val in enumerate(quoted):
                         if i < len(params_list):
@@ -1598,7 +1606,7 @@ class Brain:
                 if len(quoted) == 1:
                     args = {expected: quoted[0]}
                 elif len(quoted) > 1:
-                    params_list = ["action", "target", "content", "old_text"]
+                    params_list = _TOOL_PARAM_LISTS.get(tname, ["query"])
                     args = {}
                     for i, val in enumerate(quoted):
                         if i < len(params_list):
