@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
@@ -128,7 +129,7 @@ def _answer_time_date(query: str) -> Optional[str]:
     """Answer time/date queries directly from system clock. Returns None if not a time/date query."""
     if not _TIME_DATE_RE.search(query):
         return None
-    now = __import__("datetime").datetime.now()
+    now = datetime.now()
     q = query.lower().strip()
     if "time" in q:
         return f"It's {now.strftime('%I:%M %p')}."
