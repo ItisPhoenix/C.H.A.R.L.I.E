@@ -168,37 +168,33 @@ def test_detect_open_app(monkeypatch):
 
     called_cmds = []
 
-    def mock_run(cmd, *args, **kwargs):
+    def mock_popen(cmd, *args, **kwargs):
         called_cmds.append(cmd)
 
-        class MockResult:
-            returncode = 0
-            stdout = ""
-            stderr = ""
+        class MockProcess:
+            pid = 12345
 
-        return MockResult()
+        return MockProcess()
 
-    monkeypatch.setattr(subprocess, "run", mock_run)
+    monkeypatch.setattr(subprocess, "Popen", mock_popen)
     monkeypatch.setattr("sys.platform", "win32")
 
     # 1. Test opening single app
     res = _detect_open_app("open calculator")
     assert res == "I've opened Calculator for you."
-    assert "start calc" in called_cmds
-
-    # 2. Test opening multiple whitelisted apps
+    assert 'start "" calc' in called_cmds
     called_cmds.clear()
     res = _detect_open_app("open chrome and calculator")
     assert "Calculator and Chrome" in res
-    assert "start chrome" in called_cmds
-    assert "start calc" in called_cmds
+    assert 'start "" chrome' in called_cmds
+    assert 'start "" calc' in called_cmds
 
     # 3. Test opening whitelisted websites by name
     called_cmds.clear()
     res = _detect_open_app("open youtube and github")
     assert "Youtube and Github" in res or "Github and Youtube" in res
-    assert "start https://youtube.com" in called_cmds
-    assert "start https://github.com" in called_cmds
+    assert 'start "" https://youtube.com' in called_cmds
+    assert 'start "" https://github.com' in called_cmds
 
     # 4. Test opening generic domains/URLs
     called_cmds.clear()
@@ -206,9 +202,9 @@ def test_detect_open_app(monkeypatch):
     assert "reddit.com" in res
     assert "wikipedia.org" in res
     assert "https://neon.tech" in res
-    assert "start https://reddit.com" in called_cmds
-    assert "start https://wikipedia.org" in called_cmds
-    assert "start https://neon.tech" in called_cmds
+    assert 'start "" https://reddit.com' in called_cmds
+    assert 'start "" https://wikipedia.org' in called_cmds
+    assert 'start "" https://neon.tech' in called_cmds
 
     # 5. Test float/version number exclusion (must not match as domain)
     res = _detect_open_app("open version 3.5")
@@ -233,7 +229,13 @@ async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
 
         return MockResult()
 
+    def mock_popen(cmd, *args, **kwargs):
+        class MockProcess:
+            pid = 12345
+        return MockProcess()
+
     monkeypatch.setattr(subprocess, "run", mock_run)
+    monkeypatch.setattr(subprocess, "Popen", mock_popen)
     monkeypatch.setattr("sys.platform", "win32")
 
     called_stream = False

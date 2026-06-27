@@ -482,22 +482,37 @@ def _detect_open_app(query: str) -> Optional[str]:
     failed_apps = []
 
     for app, cmd in zip(matched_apps, launched_commands):
+        launched = False
+        last_error = None
+        # Strategy 1: `start "" <cmd>` (handles apps + URLs)
         try:
-            # start handles both local apps and website URLs perfectly on Windows!
-            full_cmd = f"start {cmd}"
-            res = subprocess.run(
-                full_cmd, shell=True, capture_output=True, text=True, timeout=5
+            full_cmd = f'start "" {cmd}'
+            subprocess.Popen(
+                full_cmd, shell=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            if res.returncode == 0:
-                success_apps.append(app)
-            else:
-                failed_apps.append(app)
+            launched = True
         except Exception as e:
-            logger.error("Failed to launch %s (%s): %s", app, cmd, e, exc_info=True)
-            failed_apps.append(app)
+            last_error = e
+            logger.debug("start command failed for %s: %s", app, e)
+        # Strategy 2 (fallback): os.startfile for local paths/executables
+        if not launched and not cmd.startswith(("http://", "https://")):
+            try:
+                os.startfile(cmd)
+                launched = True
+            except Exception as e:
+                last_error = e
+                logger.debug("os.startfile failed for %s: %s", app, e)
+        if launched:
+            success_apps.append(app)
+        else:
+            error_detail = type(last_error).__name__ if last_error else "unknown error"
+            logger.error("Failed to launch %s (%s): %s", app, cmd, last_error)
+            failed_apps.append((app, error_detail))
 
     if not success_apps:
-        return f"I tried to open {', '.join(failed_apps)}, but encountered an error."
+        failed_names = [f"{name} ({err})" for name, err in failed_apps]
+        return f"I could not open {', '.join(failed_names)}."
 
     # Build response message
     def format_list(items):
