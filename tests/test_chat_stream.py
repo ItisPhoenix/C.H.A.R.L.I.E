@@ -234,6 +234,10 @@ def test_detect_open_app(monkeypatch):
     res = _detect_open_app("open unknownapp")
     assert res is None
 
+    # 7. Test compound command bypass
+    res = _detect_open_app("open notepad and write hello")
+    assert res is None
+
 
 @pytest.mark.asyncio
 async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):

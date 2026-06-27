@@ -365,6 +365,19 @@ def _detect_close_app(query: str) -> Optional[str]:
     if not matched_apps:
         return None
 
+    # Check if remaining_text contains non-trivial words (conjunctions are allowed)
+    cleaned_remaining = re.sub(
+        r"\b(and|or|then|please|also|to|write|save|type)\b|\.exe\b|[.,;&!?]",
+        " ",
+        remaining_text,
+        flags=re.IGNORECASE
+    ).strip()
+    if cleaned_remaining:
+        logger.info(
+            "Extra instructions detected in close app query: '%s', bypassing fast-path",
+            cleaned_remaining
+        )
+        return None
     import subprocess
     import sys
 
@@ -474,6 +487,19 @@ def _detect_open_app(query: str) -> Optional[str]:
     if not matched_apps:
         return None
 
+    # Check if remaining_text contains non-trivial words (conjunctions are allowed)
+    cleaned_remaining = re.sub(
+        r"\b(and|or|then|please|also|to|write|save|type)\b|\.exe\b|[.,;&!?]",
+        " ",
+        remaining_text,
+        flags=re.IGNORECASE
+    ).strip()
+    if cleaned_remaining:
+        logger.info(
+            "Extra instructions detected in open app query: '%s', bypassing fast-path",
+            cleaned_remaining
+        )
+        return None
     import subprocess
     import sys
 
