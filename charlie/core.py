@@ -1259,10 +1259,38 @@ class Brain:
                         r = await asyncio.wait_for(_run(), timeout=timeout)
                 else:
                     r = await asyncio.wait_for(_run(), timeout=timeout)
-            except asyncio.TimeoutError:
-                r = f"Error: Tool '{tool_name}' timed out after {timeout}s"
-                logger.warning("Tool %s timed out", tool_name)
 
+                # Check for standard returned shell failures to attempt recovery
+                if tool_name == "shell_execute" and r.startswith("Error"):
+                    logger.info("Shell execution returned an error. Running recovery pipeline...")
+                    from charlie.recovery import recover_command
+                    recovered_res = await recover_command(self, call["arguments"]["command"], RuntimeError(r))
+                    if recovered_res is not None:
+                        r = recovered_res
+            except asyncio.TimeoutError as te:
+                if tool_name == "shell_execute":
+                    logger.info("Shell execution timed out. Running recovery pipeline...")
+                    from charlie.recovery import recover_command
+                    recovered_res = await recover_command(self, call["arguments"]["command"], te)
+                    if recovered_res is not None:
+                        r = recovered_res
+                    else:
+                        r = f"Error: Tool '{tool_name}' timed out after {timeout}s"
+                else:
+                    r = f"Error: Tool '{tool_name}' timed out after {timeout}s"
+                logger.warning("Tool %s timed out", tool_name)
+            except Exception as e:
+                if tool_name == "shell_execute":
+                    logger.info("Shell execution raised exception. Running recovery pipeline...")
+                    from charlie.recovery import recover_command
+                    recovered_res = await recover_command(self, call["arguments"]["command"], e)
+                    if recovered_res is not None:
+                        r = recovered_res
+                    else:
+                        r = f"Error executing tool '{tool_name}': {e}"
+                else:
+                    r = f"Error executing tool '{tool_name}': {e}"
+                logger.warning("Tool %s raised an exception: %s", tool_name, e)
             if self.on_tool_result:
                 self.on_tool_result(call["name"], r)
 
