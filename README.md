@@ -212,14 +212,14 @@ uv run ruff check . && uv run pytest -v
 Charlie does not wait for the full LLM response before speaking. As tokens arrive:
 - **Sentence boundaries** (`.`, `!`, `?`) trigger immediate TTS flush
 - **Clause boundaries** (`,`, `;`, `:`) also trigger flush for faster response
-- **Force flush** at 100 characters prevents long pauses
+- **Force flush** at 200 characters prevents long pauses
 
 ### Tool Loop
 When the LLM wants to use a tool (e.g., web search):
 1. Tool executes with a 15-second timeout
 2. Result is injected into the conversation as `{"role": "tool", "content": ...}`
 3. LLM generates a final answer from the result
-4. Max 4 tool rounds per question
+- Max 12 tool rounds per question
 5. Text normalization: multi-app commands (e.g., "Open Chrome calculator notepad") get "and" inserted between app names before LLM call
 6. Multi-argument tools (memory, session_search) parsed from text-based TOOL: format
 

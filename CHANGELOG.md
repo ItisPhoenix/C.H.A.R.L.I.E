@@ -4,6 +4,19 @@ All notable changes to Charlie (the voice-first AI assistant) are documented her
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+### Stabilization Pass (2026-06-27)
+- **CI/CD:** Added GitHub Actions workflow with ruff lint + pytest.
+- **Fast-path extraction:** Extracted `_normalize_app_list` and related constants to `charlie/text_utils.py` for testability.
+- **Fast-path tests:** Added `tests/test_fastpaths.py` covering app list normalization, URL detection, and known-app matching.
+- **SSE refactor:** Extracted shared SSE stream parser into `charlie/streaming.py`, deduplicated 5 inline parsing loops and 2 payload builders.
+- **Async consolidation:** Fixed `_consolidate_memory` to use proper `await` instead of `run_until_complete` (avoids RuntimeError in running event loop).
+- **SessionStore singleton:** Replaced 6 per-request `SessionStore()` instantiations in `web_server.py` with a module-level singleton.
+- **Import cleanup:** Replaced `__import__('datetime')` with proper `from datetime import datetime`.
+- **Runtime artifacts:** Untracked `charlie_memory_db/` files that were committed before `.gitignore` rules.
+- **Loopback binding:** Changed web server bind from `0.0.0.0` to `127.0.0.1` (local-only).
+- **File write guard:** Added `Path.resolve()` prefix check in `file_write` tool to prevent path traversal.
+- **README corrections:** Fixed force-flush (100->200 chars) and max tool rounds (4->12) to match code.
+
 
 ### Web UI Glassmorphism Redesign & Active Session Sync (Phase 1 & 2)
 - **Glassmorphism Theme System:** Established an Apple Intelligence-inspired visual system using frosted glass panels, ambient glows, and smooth transitions (Vite + Tailwind CSS + Framer Motion).
@@ -89,7 +102,7 @@ Primary LLM via async httpx (OpenAI-compatible API) with automatic fallback to s
 - Speculative ASR streams consume internal network streams to completion.
 - Command word echo bypass for barge-in responsiveness.
 - Text humanization: ellipsis handling, repeated punctuation normalization, dash-to-comma conversion, wrapper quote removal, list marker cleanup.
-- Streaming TTS flush: sentence/clause/max-char boundaries (100 chars).
+- Streaming TTS flush: sentence/clause/max-char boundaries (200 chars).
 
 ### Memory & History
 - `MEMORY.md`: System context, user preferences, session facts.
@@ -98,7 +111,7 @@ Primary LLM via async httpx (OpenAI-compatible API) with automatic fallback to s
 - Session store: SQLite with FTS5 search (falls back to SQL LIKE).
 
 ### Testing
-- 34/34 pytest passing.
+- 63/63 pytest passing.
 - ruff lint clean.
 - AST parse clean across all Python files.
 
