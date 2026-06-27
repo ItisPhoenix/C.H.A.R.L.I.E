@@ -7,14 +7,10 @@ import re
 import sys
 import time
 
-# Windows: pyzmq needs Selector event loop, not Proactor.
-# Suppress the pyzmq RuntimeWarning about add_reader - tornado 6.x
-# already provides the fallback, but the warning fires on first use.
-import warnings
+# Windows event-loop policy (must precede zmq/asyncio imports)
+from charlie.platform import configure as _configure_platform
 
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    warnings.filterwarnings("ignore", message=".*add_reader.*", category=RuntimeWarning)
+_configure_platform()
 import subprocess
 import uuid
 

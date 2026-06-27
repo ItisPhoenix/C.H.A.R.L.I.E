@@ -8,16 +8,16 @@ In full mode, main.py spawns the web server as a subprocess.
 In web-only mode, only the FastAPI server starts (useful for testing the UI).
 """
 
-import sys
-import os
-import asyncio
 import argparse
+import asyncio
+import os
+import sys
 from pathlib import Path
 
-# Windows: pyzmq needs Selector event loop, not Proactor
-# Must be set BEFORE uvicorn or asyncio.run() creates the loop
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+# Windows event-loop policy (must precede zmq/asyncio imports)
+from charlie.platform import configure as _configure_platform
+
+_configure_platform()
 
 # Ensure project root is on path
 ROOT = Path(__file__).parent
@@ -39,6 +39,7 @@ def run_full():
 def run_web_only():
     """Run just the web server -- no voice hardware needed."""
     import uvicorn
+
     from charlie.web_server import app
 
     print("=" * 50)
@@ -49,7 +50,7 @@ def run_web_only():
     try:
         config = uvicorn.Config(
             app,
-            host="0.0.0.0",
+            host="127.0.0.1",
             port=8000,
             log_level="info",
             loop="asyncio",

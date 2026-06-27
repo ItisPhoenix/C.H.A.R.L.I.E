@@ -3,16 +3,10 @@
 import asyncio
 import sys
 
-# Windows: Force Selector event loop BEFORE any other imports.
-# uvicorn and pyzmq both override/create event loops — this is the
-# single authoritative policy set for the web server subprocess.
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    import warnings as _warnings
+# Windows event-loop policy (must precede zmq/asyncio imports)
+from charlie.platform import configure as _configure_platform
 
-    _warnings.filterwarnings(
-        "ignore", message=".*add_reader.*", category=RuntimeWarning
-    )
+_configure_platform()
 
 from pathlib import Path
 

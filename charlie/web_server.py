@@ -6,16 +6,11 @@ Communicates with the voice process via ZeroMQ (EventBus).
 
 import asyncio
 import os
-import sys
 
-# Windows: pyzmq needs Selector event loop, not Proactor (must be before any zmq import)
-import warnings as _warnings
+# Windows event-loop policy (must precede zmq/asyncio imports)
+from charlie.platform import configure as _configure_platform
 
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    _warnings.filterwarnings(
-        "ignore", message=".*add_reader.*", category=RuntimeWarning
-    )
+_configure_platform()
 
 import json
 import logging
