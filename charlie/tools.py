@@ -602,9 +602,11 @@ def file_write(path: str, content: str) -> str:
         path = _resolve_user_placeholders(path)
         abs_path = os.path.abspath(path)
         # Block traversal and sensitive paths
+        system_root = os.environ.get("SystemRoot", "C:\\Windows").lower()
         _BLOCKED_WRITE_PATHS = (
             ".env",
             "sessions.db",
+            system_root,
             os.path.sep + "etc" + os.path.sep,
             os.path.sep + "proc" + os.path.sep,
             os.path.sep + "sys" + os.path.sep,

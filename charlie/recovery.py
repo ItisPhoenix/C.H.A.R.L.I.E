@@ -178,94 +178,134 @@ async def query_fallback_llm(brain: Any, command: str, failure: Dict[str, Any]) 
         logger.exception("Fallback LLM query failed: %s", exc)
     return None
 
-async def recover_command(brain: Any, command: str, e: Exception) -> Optional[str]:
+async def recover_tool(
+    brain: Any,
+    tool_name: str,
+    arguments: Dict[str, Any],
+    e: Exception
+) -> Optional[str]:
     """Universal recovery coordinator. Tries cache, strategies, then fallback LLM.
-    Returns the STDOUT/STDERR result of the successful recovery, or None if failed.
+    Returns the result of the successful recovery, or None if failed.
     """
     failure = normalize_exception(e)
     failure_class = failure["failure_class"]
     error_msg = failure["message"]
 
-    logger.info("Initiating recovery pipeline for failure class %s: %s", failure_class.value, error_msg)
+    logger.info(
+        "Initiating recovery pipeline for tool %s (class %s): %s",
+        tool_name,
+        failure_class.value,
+        error_msg
+    )
 
-    # 1. Check local cache
-    from charlie.recovery_cache import get_cached_resolution, set_cached_resolution
-    cached_cmd = get_cached_resolution(command, failure_class.value, error_msg)
-    if cached_cmd:
-        if not is_safe_to_recover(cached_cmd):
-            return "Error: Cached recovery command blocked by safety guardrails."
+    # 1. Handle file_write PermissionError/AccessDenied
+    if tool_name == "file_write" and failure_class == FailureClass.PERMISSION:
         try:
-            logger.info("Executing cached recovery command: %s", cached_cmd)
-            if failure_class == FailureClass.TIMEOUT:
-                subprocess.Popen(
-                    f'start "" {cached_cmd}', shell=True,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.DETACHED_PROCESS if sys.platform == "win32" else 0,
-                    close_fds=True
-                )
-                return "Command succeeded (exit code 0). launched in background via cached recovery."
+            old_path = arguments.get("path", "")
+            if old_path:
+                home_dir = os.path.expanduser("~")
+                docs_dir = os.path.join(home_dir, "Documents")
 
-            res = run_command_safe(cached_cmd)
-            if res.returncode == 0:
-                parts = []
-                if res.stdout:
-                    parts.append(res.stdout.strip())
-                if res.stderr:
-                    parts.append(res.stderr.strip())
-                return "\n".join(parts) if parts else "Command succeeded (exit code 0)."
-        except Exception as cache_exc:
-            logger.warning("Cached recovery command failed: %s", cache_exc)
+                # Extract file name and build new safe path in Documents
+                file_name = os.path.basename(old_path)
+                new_path = os.path.join(docs_dir, file_name)
 
-    # 2. Try strategies
-    for strategy in RECOVERY_REGISTRY:
-        if strategy.can_handle(failure):
-            logger.info("Attempting strategy: %s", type(strategy).__name__)
+                logger.info("Redirecting file_write from %s to safe path %s", old_path, new_path)
+
+                # Execute the write tool with new safe path
+                from charlie.tools import file_write
+                res = file_write(new_path, arguments.get("content", ""))
+                if not res.startswith("Error"):
+                    return (
+                        f"Redirected save: I couldn't write to the system folder due to "
+                        f"permissions, so I saved the file to '{new_path}' instead."
+                    )
+        except Exception as redirect_exc:
+            logger.warning("Failed to redirect file_write: %s", redirect_exc)
+
+    # 2. Handle shell_execute (command recovery logic)
+    if tool_name == "shell_execute":
+        command = arguments.get("command", "")
+        if not command:
+            return None
+
+        # Check local cache
+        from charlie.recovery_cache import get_cached_resolution, set_cached_resolution
+        cached_cmd = get_cached_resolution(command, failure_class.value, error_msg)
+        if cached_cmd:
+            if not is_safe_to_recover(cached_cmd):
+                return "Error: Cached recovery command blocked by safety guardrails."
             try:
-                res = await strategy.recover(command, failure)
-                if res.success and res.command:
-                    if not is_safe_to_recover(res.command):
-                        logger.warning("Strategy proposed unsafe command: %s", res.command)
-                        continue
+                logger.info("Executing cached recovery command: %s", cached_cmd)
+                if failure_class == FailureClass.TIMEOUT:
+                    subprocess.Popen(
+                        f'start "" {cached_cmd}', shell=True,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.DETACHED_PROCESS if sys.platform == "win32" else 0,
+                        close_fds=True
+                    )
+                    return "Command succeeded (exit code 0). launched in background via cached recovery."
 
-                    if type(strategy).__name__ == "DeclassProcessStrategy":
-                        set_cached_resolution(command, failure_class.value, error_msg, res.command)
-                        return res.message or "Command launched in background via recovery strategy."
+                res = run_command_safe(cached_cmd)
+                if res.returncode == 0:
+                    parts = []
+                    if res.stdout:
+                        parts.append(res.stdout.strip())
+                    if res.stderr:
+                        parts.append(res.stderr.strip())
+                    return "\n".join(parts) if parts else "Command succeeded (exit code 0)."
+            except Exception as cache_exc:
+                logger.warning("Cached recovery command failed: %s", cache_exc)
 
-                    exec_res = run_command_safe(res.command)
-                    if exec_res.returncode == 0:
-                        logger.info("Strategy %s succeeded!", type(strategy).__name__)
-                        set_cached_resolution(command, failure_class.value, error_msg, res.command)
-                        parts = []
-                        if exec_res.stdout:
-                            parts.append(exec_res.stdout.strip())
-                        if exec_res.stderr:
-                            parts.append(exec_res.stderr.strip())
-                        return "\n".join(parts) if parts else "Command succeeded."
-            except Exception as strat_exc:
-                logger.warning("Strategy execution failed: %s", strat_exc)
+        # Try strategies
+        for strategy in RECOVERY_REGISTRY:
+            if strategy.can_handle(failure):
+                logger.info("Attempting strategy: %s", type(strategy).__name__)
+                try:
+                    res = await strategy.recover(command, failure)
+                    if res.success and res.command:
+                        if not is_safe_to_recover(res.command):
+                            logger.warning("Strategy proposed unsafe command: %s", res.command)
+                            continue
 
-    # 3. Fallback LLM query
-    logger.info("All strategies exhausted. Querying fallback LLM for recovery command.")
-    fixed_cmd = await query_fallback_llm(brain, command, failure)
-    if fixed_cmd:
-        if not is_safe_to_recover(fixed_cmd):
-            return "Error: Fallback LLM suggested an unsafe command blocked by guardrails."
-        try:
-            logger.info("Executing fallback LLM command: %s", fixed_cmd)
-            exec_res = run_command_safe(fixed_cmd)
-            if exec_res.returncode == 0:
-                logger.info("Fallback LLM command execution succeeded!")
-                set_cached_resolution(command, failure_class.value, error_msg, fixed_cmd)
-                parts = []
-                if exec_res.stdout:
-                    parts.append(exec_res.stdout.strip())
-                if exec_res.stderr:
-                    parts.append(exec_res.stderr.strip())
-                return "\n".join(parts) if parts else "Command succeeded via fallback LLM correction."
-        except Exception as llm_exc:
-            logger.warning("Fallback LLM command execution failed: %s", llm_exc)
+                        if type(strategy).__name__ == "DeclassProcessStrategy":
+                            set_cached_resolution(command, failure_class.value, error_msg, res.command)
+                            return res.message or "Command launched in background via recovery strategy."
 
-    return None
+                        exec_res = run_command_safe(res.command)
+                        if exec_res.returncode == 0:
+                            logger.info("Strategy %s succeeded!", type(strategy).__name__)
+                            set_cached_resolution(command, failure_class.value, error_msg, res.command)
+                            parts = []
+                            if exec_res.stdout:
+                                parts.append(exec_res.stdout.strip())
+                            if exec_res.stderr:
+                                parts.append(exec_res.stderr.strip())
+                            return "\n".join(parts) if parts else "Command succeeded."
+                except Exception as strat_exc:
+                    logger.warning("Strategy execution failed: %s", strat_exc)
+
+        # Fallback LLM query
+        logger.info("All strategies exhausted. Querying fallback LLM for recovery command.")
+        fixed_cmd = await query_fallback_llm(brain, command, failure)
+        if fixed_cmd:
+            if not is_safe_to_recover(fixed_cmd):
+                return "Error: Fallback LLM suggested an unsafe command blocked by guardrails."
+            try:
+                logger.info("Executing fallback LLM command: %s", fixed_cmd)
+                exec_res = run_command_safe(fixed_cmd)
+                if exec_res.returncode == 0:
+                    logger.info("Fallback LLM command execution succeeded!")
+                    set_cached_resolution(command, failure_class.value, error_msg, fixed_cmd)
+                    parts = []
+                    if exec_res.stdout:
+                        parts.append(exec_res.stdout.strip())
+                    if exec_res.stderr:
+                        parts.append(exec_res.stderr.strip())
+                    return "\n".join(parts) if parts else "Command succeeded via fallback LLM correction."
+            except Exception as llm_exc:
+                logger.warning("Fallback LLM command execution failed: %s", llm_exc)
+
 
 class BaseRecoveryStrategy:
     def can_handle(self, failure: Dict[str, Any]) -> bool:

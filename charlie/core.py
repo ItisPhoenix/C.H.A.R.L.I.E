@@ -1301,18 +1301,24 @@ class Brain:
                 else:
                     r = await asyncio.wait_for(_run(), timeout=timeout)
 
-                # Check for standard returned shell failures to attempt recovery
+                # Check for standard returned shell/file failures to attempt recovery
                 if tool_name == "shell_execute" and r.startswith("Error"):
                     logger.info("Shell execution returned an error. Running recovery pipeline...")
-                    from charlie.recovery import recover_command
-                    recovered_res = await recover_command(self, call["arguments"]["command"], RuntimeError(r))
+                    from charlie.recovery import recover_tool
+                    recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
+                    if recovered_res is not None:
+                        r = recovered_res
+                elif tool_name == "file_write" and r.startswith("Error"):
+                    logger.info("File write returned an error. Running recovery pipeline...")
+                    from charlie.recovery import recover_tool
+                    recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
                     if recovered_res is not None:
                         r = recovered_res
             except asyncio.TimeoutError as te:
-                if tool_name == "shell_execute":
-                    logger.info("Shell execution timed out. Running recovery pipeline...")
-                    from charlie.recovery import recover_command
-                    recovered_res = await recover_command(self, call["arguments"]["command"], te)
+                if tool_name in ("shell_execute", "file_write"):
+                    logger.info("Tool %s timed out. Running recovery pipeline...", tool_name)
+                    from charlie.recovery import recover_tool
+                    recovered_res = await recover_tool(self, tool_name, call["arguments"], te)
                     if recovered_res is not None:
                         r = recovered_res
                     else:
@@ -1321,10 +1327,10 @@ class Brain:
                     r = f"Error: Tool '{tool_name}' timed out after {timeout}s"
                 logger.warning("Tool %s timed out", tool_name)
             except Exception as e:
-                if tool_name == "shell_execute":
-                    logger.info("Shell execution raised exception. Running recovery pipeline...")
-                    from charlie.recovery import recover_command
-                    recovered_res = await recover_command(self, call["arguments"]["command"], e)
+                if tool_name in ("shell_execute", "file_write"):
+                    logger.info("Tool %s raised exception. Running recovery pipeline...", tool_name)
+                    from charlie.recovery import recover_tool
+                    recovered_res = await recover_tool(self, tool_name, call["arguments"], e)
                     if recovered_res is not None:
                         r = recovered_res
                     else:

@@ -1,6 +1,8 @@
 import os
 import subprocess
 
+import pytest
+
 from charlie.recovery import (
     DeclassProcessStrategy,
     FailureClass,
@@ -83,3 +85,30 @@ def test_recovery_cache():
     # Clean up
     if os.path.exists(CACHE_FILE):
         os.remove(CACHE_FILE)
+
+@pytest.mark.asyncio
+async def test_recover_tool_file_write_redirect(monkeypatch):
+    from charlie.recovery import recover_tool
+
+    e = PermissionError("[WinError 5] Access is denied")
+
+    class DummyBrain:
+        _fallback_client = None
+
+    brain = DummyBrain()
+    args = {"path": "C:\\Windows\\test.txt", "content": "I am Charlie"}
+
+    redirected_path = None
+    def mock_file_write(path, content):
+        nonlocal redirected_path
+        redirected_path = path
+        return "Successfully wrote"
+
+    monkeypatch.setattr("charlie.tools.file_write", mock_file_write)
+
+    res = await recover_tool(brain, "file_write", args, e)
+
+    assert res is not None
+    assert "Redirected save" in res
+    assert redirected_path is not None
+    assert "Documents" in redirected_path
