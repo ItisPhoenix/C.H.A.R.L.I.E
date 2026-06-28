@@ -11,6 +11,7 @@ import os
 import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional
+from uuid import uuid4
 
 import httpx
 
@@ -77,16 +78,9 @@ _TIME_SENSITIVE_RE = re.compile(
     r"\b("
     r"latest|newest|recent|current|today|yesterday|this\s+(?:week|month|year)"
     r"|breaking|just\s+(?:happened|announced|released|launched)"
-    r"|what(?:'s| is| are) (?:the )?(?:latest|newest|recent|current|happening|trending)"
-    r"|who\s+(?:won|is|was|are)"
-    r"|what\s+happened"
-    r"|(?:model|release|version|update)\s+(?:release|came|out|launched|announced)"
     r"|stock\s+price|share\s+price|market|trading"
     r"|weather|temperature|forecast"
-    r"|news|headline|trending|viral"
-    r"|score|result|winner|champion"
     r"|cryptocurrency|bitcoin|ethereum"
-    r"|(?:ai|tech|google|anthropic|openai|meta|nvidia|microsoft)\s+(?:news|update|model|release)"
     r")",
     re.IGNORECASE,
 )
@@ -94,9 +88,17 @@ _TIME_SENSITIVE_RE = re.compile(
 
 # --- Follow-up detection (skip web search for repeat/clarification requests) ---
 _FOLLOWUP_RE = re.compile(
-    r"^(?:what|come again|repeat|say that again|pardon|sorry|excuse me|"
+    r"^(?:"
+    r"what|come again|repeat|say that again|pardon|sorry|excuse me|"
     r"what was that|what did you say|tell me again|once more|go on|"
-    r"continue|and then|what else|what else did you say|anything else)\s*[?.!]?\s*$",
+    r"continue|and then|what else|what else did you say|anything else|"
+    r"elaborate|more info"
+    r"|(?:tell me|explain|give me|show me)\s+(?:more\b\s*)?(?:details?\b|info\b)?"
+    r"(?:\s*(?:about|on))?"
+    r"(?:\s*(?:this|these|that|those|them|it|this\s+news|these\s+news|the\s+news))?"
+    r"|(?:details?|more\s+details?|more\s+info)(?:\s*(?:on|about))?"
+    r"(?:\s*(?:this|these|that|those|them|it|this\s+news|these\s+news|the\s+news))?"
+    r")\s*[?.!]?\s*$",
     re.IGNORECASE,
 )
 _FOLLOWUP_MAX_LEN = 40
@@ -702,25 +704,100 @@ def _prune_old_tool_results(
     return result
 
 
-def _halve_history(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Keep first system and last 2 user messages, drop the middle."""
+async def _halve_history(messages: List[Dict[str, Any]], config: Any) -> List[Dict[str, Any]]:
+    """Summarize dropped history instead of hard-truncating.
+
+    Keeps: first system msg + last N messages verbatim.
+    Dropped middle -> single LLM-generated summary (capped at config limit).
+    Falls back to a stub if the summary LLM call fails.
+    """
+    keep_recent = getattr(config, "history_keep_recent", 4)
+    summary_max = getattr(config, "history_summary_max_chars", 400)
+
     system_msg = (
         messages[0] if messages and messages[0].get("role") == "system" else None
     )
-    user_msgs = [m for m in messages if m.get("role") == "user"]
-    last_two_user = user_msgs[-2:]
+
+    # Split: prefix (system), middle (dropped), tail (recent verbatim)
+    if len(messages) <= keep_recent + (1 if system_msg else 0):
+        return messages
+
+    tail = messages[-keep_recent:]
+    middle_start = 1 if system_msg else 0
+    middle = messages[middle_start : len(messages) - keep_recent]
+
+    if not middle:
+        return messages
+
+    # Build summary from dropped messages
+    summary = await _generate_summary(middle, config, summary_max)
+
     result = []
     if system_msg:
         result.append(system_msg)
-    result.extend(last_two_user)
-    result.insert(
-        1,
-        {"role": "system", "content": "[Earlier conversation omitted due to length.]"},
-    )
+    result.append({"role": "system", "content": f"[Earlier conversation summary: {summary}]"})
+    result.extend(tail)
     return result
 
 
-def _compress_messages(
+async def _generate_summary(
+    messages: List[Dict[str, Any]], config: Any, max_chars: int
+) -> str:
+    """Ask the LLM to summarize dropped messages. Returns stub on failure."""
+    lines = []
+    for m in messages:
+        role = m.get("role", "?")
+        content = (m.get("content") or "")[:200]
+        lines.append(f"{role}: {content}")
+    text_block = "\n".join(lines)
+
+    prompt = (
+        "Summarize this conversation excerpt in under "
+        f"{max_chars} characters. "
+        "Focus on key decisions, facts established, and current task state. "
+        "Be specific with names, numbers, and conclusions. No preamble.\n\n"
+        f"{text_block}"
+    )
+
+    try:
+        import httpx
+
+        url = getattr(config, "llm_url", "")
+        key = getattr(config, "llm_key", "no-key")
+        model = getattr(config, "llm_model", "")
+
+        if not url:
+            return f"{len(messages)} earlier messages omitted due to length."
+
+        headers: Dict[str, str] = {"Content-Type": "application/json"}
+        if key and key not in ("no-key", "no_key"):
+            headers["Authorization"] = f"Bearer {key}"
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": max_chars // 4,
+            "stream": False,
+        }
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{url.rstrip('/')}/chat/completions",
+                json=payload,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            return content[:max_chars]
+    except Exception:
+        logger.debug("History summary generation failed, using stub", exc_info=True)
+        return f"{len(messages)} earlier messages omitted due to length."
+
+
+async def _compress_messages(
     messages: List[Dict[str, Any]], config: "Config"
 ) -> List[Dict[str, Any]]:
     total = _token_count(messages)
@@ -733,7 +810,7 @@ def _compress_messages(
     if _token_count(pruned) <= threshold:
         return pruned
 
-    return _halve_history(pruned)
+    return await _halve_history(pruned, config)
 
 
 # =====================================================================
@@ -792,10 +869,9 @@ _SECURITY_DIRECTIVES = (
 # --- Tool-use rules (shared between native and text-based) ---
 _TOOL_RULES = (
     "CRITICAL RULES for tool use:\n"
-    "- ALWAYS use web_search FIRST for questions about: latest, current, newest, recent, today,\n"
-    "  breaking, who won, what happened, movie releases, model releases, sports scores,\n"
-    "  stock prices, weather, news, or any time-sensitive topic. Do NOT guess -- search.\n"
-    "- Use web_search when the user asks for any live/external data you cannot know from memory.\n"
+    "- Use web_search when you need fresh data and cannot answer from conversation history or memory.\n"
+    "- Do NOT search for questions you can answer from context above -- use what you already know.\n"
+    "- Use web_search for: time-sensitive facts (prices, scores, weather, breaking news, releases).\n"
     "- Use the memory tool when the user asks you to remember something, or asks what you know about them.\n"
     "- Use the session_search tool when the user asks about past conversations.\n"
     "- When the user asks 'what do you know about me', summarize the [USER] section above.\n"
@@ -812,7 +888,18 @@ _TOOL_RULES = (
     "  answer using those results. Do NOT say you cannot access real-time data -- it is\n"
     "  already provided. Extract the answer directly from the search results above.\n"
     "- You are fully authorized to run tools (like shell_execute, file_write) immediately. Never refuse\n"
-    "  or write instructions telling the user how to execute them themselves. Execute the tools first."
+    "  or write instructions telling the user how to execute them themselves. Execute the tools first.\n"
+    "\n"
+    "GROUNDING CONTRACT:\n"
+    "- Answer ONLY from [SEARCH RESULTS], [Relevant memories], and conversation history above.\n"
+    "- If none cover the question, say you don't know or call a tool.\n"
+    "- NEVER state facts you cannot trace to evidence above.\n"
+    "ANTI-FABRICATION:\n"
+    "- If unsure about a number, name, or date, say so or search. Do not invent.\n"
+    "TOOL-RESULT TRUST:\n"
+    "- Tool results are ground truth. Cite them; do not override with training-data guesses.\n"
+    "MEMORY HUMILITY:\n"
+    "- Memories may be outdated. If a memory conflicts with fresh evidence, trust fresh evidence and flag the conflict."
 )
 
 # --- Text-based tool calling instructions (for local models) ---
@@ -851,14 +938,30 @@ def _build_context_tier(
     return "\n\n".join(parts)
 
 
-def _build_volatile_tier(platform: str, now: Any, remaining_budget: int) -> str:
-    """Build the volatile tier: date/time, platform, budget. Changes each turn."""
+def _build_volatile_tier(
+    platform: str, now: Any, remaining_budget: int,
+    has_search: bool = False, has_memory: bool = False,
+    has_user: bool = False, has_opinions: bool = False,
+) -> str:
+    """Build the volatile tier: date/time, platform, budget, evidence blocks. Changes each turn."""
     output_rules = _PLATFORM_OUTPUT_RULES.get(platform, _DEFAULT_OUTPUT_RULES)
+    evidence = []
+    if has_search:
+        evidence.append("[SEARCH RESULTS]")
+    if has_memory:
+        evidence.append("[Relevant memories]")
+    if has_user:
+        evidence.append("[USER]")
+    if has_opinions:
+        evidence.append("[OPINIONS]")
+    evidence_str = ", ".join(evidence) if evidence else "none"
     return (
         f"Current date: {now.strftime('%A, %B %d, %Y')}. "
         f"Current time: {now.strftime('%I:%M %p')}.\n"
         f"Active platform: {platform}. Output rules: {output_rules}\n"
-        f"Remaining tool calls this turn: {remaining_budget}"
+        f"Remaining tool calls this turn: {remaining_budget}\n"
+        f"Evidence blocks present this turn: {evidence_str}.\n"
+        "If an evidence block is listed above, it IS available. Never claim you cannot access it."
     )
 
 
@@ -975,31 +1078,44 @@ class Brain:
             return
         self._turns_since_nudge = 0
 
-        threshold = getattr(self.config, "memory_capacity_threshold", 0.8)
-        files = {
-            "memory": (self.config.memory_file, 2200),
-            "user": (self.config.user_file, 1375),
-            "opinions": (self.config.opinions_file, 800),
-        }
-        needs_review = False
-        for target, (path, max_chars) in files.items():
-            if not os.path.exists(path):
-                continue
-            content = self._read_file_safe(path, max_chars)
-            if len(content) / max_chars >= threshold:
-                needs_review = True
-                break
+        # Run consolidation in background to prevent blocking the user response
+        asyncio.create_task(self._background_check_and_consolidate())
 
-        if not needs_review:
+    async def _background_check_and_consolidate(self) -> None:
+        """Helper to run check and consolidation in the background."""
+        # Concurrency guard
+        if getattr(self, "_is_consolidating", False):
+            logger.debug("Memory consolidation already in progress, skipping")
             return
-
-        logger.info("Memory near capacity, consolidating...")
+        self._is_consolidating = True
         try:
-            await self._consolidate_memory()
-            self.reload_context()
-            logger.info("Memory consolidated and context reloaded")
+            threshold = getattr(self.config, "memory_capacity_threshold", 0.8)
+            files = {
+                "memory": (self.config.memory_file, 2200),
+                "user": (self.config.user_file, 1375),
+                "opinions": (self.config.opinions_file, 800),
+            }
+            needs_review = False
+            for target, (path_val, max_chars) in files.items():
+                if not os.path.exists(path_val):
+                    continue
+                content = self._read_file_safe(path_val, max_chars)
+                from charlie.tools import _parse_memory_entries
+                entries = _parse_memory_entries(content)
+                current_len = sum(len(e) for e in entries) + (len(entries) - 1 if entries else 0)
+                if current_len / max_chars >= threshold:
+                    needs_review = True
+                    break
+
+            if needs_review:
+                logger.info("Memory near capacity, consolidating in background...")
+                await self._consolidate_memory()
+                self.reload_context()
+                logger.info("Memory consolidated and context reloaded in background")
         except Exception as exc:
-            logger.warning("Memory consolidation failed: %s", exc)
+            logger.warning("Background memory consolidation failed: %s", exc)
+        finally:
+            self._is_consolidating = False
 
     async def _consolidate_memory(self) -> None:
         """Send memory files to LLM for consolidation when near capacity."""
@@ -1010,10 +1126,10 @@ class Brain:
             "user": (self.config.user_file, 1375),
             "opinions": (self.config.opinions_file, 800),
         }
-        for target, (path, max_chars) in files.items():
-            if not os.path.exists(path):
+        for target, (path_val, max_chars) in files.items():
+            if not os.path.exists(path_val):
                 continue
-            content = self._read_file_safe(path, max_chars)
+            content = self._read_file_safe(path_val, max_chars)
             entries = _parse_memory_entries(content)
             current_len = sum(len(e) for e in entries) + (len(entries) - 1 if entries else 0)
             if current_len / max_chars < 0.8:
@@ -1037,7 +1153,7 @@ class Brain:
                 client = _httpx.AsyncClient(
                     base_url=self.config.llm_url,
                     headers={"Authorization": f"Bearer {self.config.llm_key}"},
-                    timeout=30.0,
+                    timeout=90.0,
                 )
                 payload = {
                     "model": self.config.llm_model,
@@ -1048,11 +1164,13 @@ class Brain:
                 async def _do_consolidate():
                     async with client:
                         resp = await client.post("chat/completions", json=payload)
+                        if resp.status_code != 200:
+                            logger.error("Consolidation API failed status %d: %s", resp.status_code, resp.text)
                         resp.raise_for_status()
                         return resp.json()["choices"][0]["message"]["content"]
 
                 result = await _do_consolidate()
-                with open(path, "w", encoding="utf-8") as f:
+                with open(path_val, "w", encoding="utf-8") as f:
                     f.write(result)
                 logger.info("Consolidated %s: %d -> %d chars", target, current_len, len(result))
             except Exception as exc:
@@ -1161,6 +1279,7 @@ class Brain:
 
 
         generation = self._chat_generation
+        turn_id = str(uuid4())
         fast = _answer_time_date(user_input)
         if fast is not None:
             logger.info("Fast-path time/date: %s -> %s", user_input, fast)
@@ -1205,7 +1324,18 @@ class Brain:
         # --- Assemble system prompt from frozen tiers + volatile tier ---
         now = datetime.now()
         budget = IterationBudget(max_turns=self.config.iteration_budget_max)
-        volatile = _build_volatile_tier(platform, now, budget.remaining)
+        # Detect which evidence blocks are present for volatile tier
+        _ct = self._context_tier or ""
+        _mem_parts = _ct.split("[MEMORY]\n", 1)
+        has_memory = len(_mem_parts) > 1 and _mem_parts[1].split("\n")[0].strip() != ""
+        _usr_parts = _ct.split("[USER]\n", 1)
+        has_user = len(_usr_parts) > 1 and _usr_parts[1].split("\n")[0].strip() != ""
+        has_opinions = "[OPINIONS]\n" in _ct
+        volatile = _build_volatile_tier(
+            platform, now, budget.remaining,
+            has_search=bool(search_results), has_memory=has_memory,
+            has_user=has_user, has_opinions=has_opinions,
+        )
         system_msg = _assemble_system_prompt(
             self._stable_tier, self._context_tier, volatile
         )
@@ -1222,15 +1352,16 @@ class Brain:
                 f"Do NOT use your training data for this answer."
             )
 
-        # Retrieve relevant memories from vector store
+        # Retrieve relevant memories from vector store (skip for follow-up or short queries)
         if self.memory_store and self.memory_store.is_available:
-            try:
-                memory_results = self.memory_store.search(user_input, n_results=3)
-                memory_block = self.memory_store.format_for_prompt(memory_results)
-                if memory_block:
-                    effective_input = memory_block + "\n\n" + effective_input
-            except Exception as mem_exc:
-                logger.debug("Memory retrieval skipped: %s", mem_exc)
+            if not _is_followup(user_input) and len(user_input.strip()) >= 10:
+                try:
+                    memory_results = self.memory_store.search(user_input, n_results=3)
+                    memory_block = self.memory_store.format_for_prompt(memory_results)
+                    if memory_block:
+                        effective_input = memory_block + "\n\n" + effective_input
+                except Exception as mem_exc:
+                    logger.debug("Memory retrieval skipped: %s", mem_exc)
 
         # Build messages with conversation history
         messages: List[Dict[str, Any]] = [
@@ -1240,7 +1371,7 @@ class Brain:
         if self.history:
             messages.extend(self.history[-(self._history_max_turns * 2) :])
         messages.append({"role": "user", "content": effective_input})
-        messages = _compress_messages(_sanitize_roles(messages), self.config)
+        messages = await _compress_messages(_sanitize_roles(messages), self.config)
 
         # Save user message to history
         self.history.append({"role": "user", "content": user_input})
@@ -1259,15 +1390,19 @@ class Brain:
 
         if not tool_calls:
             if accumulated:
+                from charlie.streaming import TextStreamFilter
+                stream_filter = TextStreamFilter()
+                filtered = stream_filter.push(accumulated) + stream_filter.flush()
                 # Save assistant response to history
-                self.history.append({"role": "assistant", "content": accumulated})
+                self.history.append({"role": "assistant", "content": filtered})
                 # Trim history to max turns (keep pairs: user + assistant)
                 max_messages = self._history_max_turns * 2
                 if len(self.history) > max_messages:
                     self.history = self.history[-max_messages:]
-                yield accumulated
+                if filtered:
+                    yield filtered
                 # Save to vector memory (fire-and-forget)
-                self._save_to_memory(accumulated, "assistant")
+                self._save_to_memory(filtered, "assistant")
             await self._check_memory_capacity()
             return
 
@@ -1340,6 +1475,19 @@ class Brain:
                 logger.warning("Tool %s raised an exception: %s", tool_name, e)
             if self.on_tool_result:
                 self.on_tool_result(call["name"], r)
+
+            # Persist tool result to session store (truncated)
+            if self.session_store:
+                try:
+                    self.session_store.append_tool(
+                        turn_id=turn_id,
+                        tool_name=call["name"],
+                        args=call["arguments"],
+                        result=r,
+                        session_id=session_id,
+                    )
+                except Exception as persist_exc:
+                    logger.debug("Tool result persist skipped: %s", persist_exc)
 
             _seen_tool_calls[ck] = r
             return r
@@ -1415,7 +1563,7 @@ class Brain:
                 )
                 messages.extend(tool_results)
 
-            messages = _compress_messages(_sanitize_roles(messages), self.config)
+            messages = await _compress_messages(_sanitize_roles(messages), self.config)
 
             followup_payload = self._build_payload(messages)
             followup_tc_by_index: Dict[int, Dict[str, str]] = {}
@@ -1427,6 +1575,8 @@ class Brain:
                 followup_model = self.config.llm_model
             try:
                 accumulated = ""
+                from charlie.streaming import TextStreamFilter
+                stream_filter = TextStreamFilter()
                 async with followup_client.stream(
                     "POST", "chat/completions", json=followup_payload
                 ) as response:
@@ -1445,12 +1595,16 @@ class Brain:
                             content = delta.get("content", "")
                             if content:
                                 accumulated += content
-                                if not content.strip().startswith("TOOL:"):
-                                    yield content
+                                filtered = stream_filter.push(content)
+                                if filtered:
+                                    yield filtered
                             for tc in delta.get("tool_calls", []):
                                 _parse_followup_tool_call(tc, followup_tc_by_index)
                         except Exception:
                             continue
+                filtered = stream_filter.flush()
+                if filtered:
+                    yield filtered
             except Exception as tool_exc:
                 if self._fallback_client:
                     logger.warning(
@@ -1462,6 +1616,8 @@ class Brain:
                     followup_tc_by_index.clear()
                     try:
                         accumulated = ""
+                        from charlie.streaming import TextStreamFilter
+                        stream_filter = TextStreamFilter()
                         async with followup_client.stream(
                             "POST", "chat/completions", json=followup_payload
                         ) as response:
@@ -1482,14 +1638,18 @@ class Brain:
                                     content = delta.get("content", "")
                                     if content:
                                         accumulated += content
-                                        if not content.strip().startswith("TOOL:"):
-                                            yield content
+                                        filtered = stream_filter.push(content)
+                                        if filtered:
+                                            yield filtered
                                     for tc in delta.get("tool_calls", []):
                                         _parse_followup_tool_call(
                                             tc, followup_tc_by_index
                                         )
                                 except Exception:
                                     continue
+                        filtered = stream_filter.flush()
+                        if filtered:
+                            yield filtered
                     except Exception as fb_exc:
                         logger.warning("Follow-up fallback LLM also failed: %s", fb_exc)
                         break
@@ -1513,6 +1673,8 @@ class Brain:
                 followup_tc_by_index.clear()
                 try:
                     accumulated = ""
+                    from charlie.streaming import TextStreamFilter
+                    stream_filter = TextStreamFilter()
                     async with followup_client.stream(
                         "POST", "chat/completions", json=followup_payload
                     ) as response:
@@ -1531,20 +1693,27 @@ class Brain:
                                 content = delta.get("content", "")
                                 if content:
                                     accumulated += content
-                                    if not content.strip().startswith("TOOL:"):
-                                        yield content
+                                    filtered = stream_filter.push(content)
+                                    if filtered:
+                                        yield filtered
                                 for tc in delta.get("tool_calls", []):
                                     _parse_followup_tool_call(tc, followup_tc_by_index)
                             except Exception:
                                 continue
+                    filtered = stream_filter.flush()
+                    if filtered:
+                        yield filtered
                 except Exception as fb_exc:
                     logger.warning("Follow-up fallback retry also failed: %s", fb_exc)
                 tool_calls = _collect_tool_calls(followup_tc_by_index)
             # Save final follow-up response to history (after tool loop)
             if accumulated:
-                self.history.append({"role": "assistant", "content": accumulated})
+                from charlie.streaming import TextStreamFilter
+                hist_filter = TextStreamFilter()
+                clean_accumulated = hist_filter.push(accumulated) + hist_filter.flush()
+                self.history.append({"role": "assistant", "content": clean_accumulated})
                 # Save to vector memory (fire-and-forget)
-                self._save_to_memory(accumulated, "assistant")
+                self._save_to_memory(clean_accumulated, "assistant")
             await self._check_memory_capacity()
             # Trim history to max turns (keep pairs: user + assistant)
             max_messages = self._history_max_turns * 2
@@ -1604,8 +1773,6 @@ class Brain:
 
         # Match TOOL: prefix format (explicit)
         tool_pattern = re.compile(r"TOOL:\s*(\w+)\(([^)]*)\)")
-        known_names = "|".join(_TOOL_PARAM_NAMES.keys())
-        bare_pattern = re.compile(r"\b(" + known_names + r")\s*\(([^)]*)\)")
         for match in tool_pattern.finditer(text):
             tool_name = match.group(1)
             raw_args = match.group(2).strip()
@@ -1632,33 +1799,38 @@ class Brain:
                     "arguments": arguments,
                 }
             )
-        # Fallback: match bare tool calls without TOOL: prefix (local model output)
-        seen_signatures = {
-            (c["name"], json.dumps(c["arguments"], sort_keys=True)) for c in calls
-        }
-        for match in bare_pattern.finditer(text):
-            tname = match.group(1)
-            raw = match.group(2).strip()
-            expected = _TOOL_PARAM_NAMES.get(tname)
-            if expected and raw:
-                quoted = re.findall(r'["\']([^"\']*)["\']', raw)
-                if len(quoted) == 1:
-                    args = {expected: quoted[0]}
-                elif len(quoted) > 1:
-                    params_list = _TOOL_PARAM_LISTS.get(tname, ["query"])
-                    args = {}
-                    for i, val in enumerate(quoted):
-                        if i < len(params_list):
-                            args[params_list[i]] = val
+        # Fallback: match bare tool calls without TOOL: prefix (text-mode only).
+        # Native-tool providers parse structured tool_calls directly;
+        # bare-pattern matching on prose causes false tool invocations.
+        if not self._use_native_tools:
+            known_names = "|".join(_TOOL_PARAM_NAMES.keys())
+            bare_pattern = re.compile(r"\b(" + known_names + r")\s*\(([^)]*)\)")
+            seen_signatures = {
+                (c["name"], json.dumps(c["arguments"], sort_keys=True)) for c in calls
+            }
+            for match in bare_pattern.finditer(text):
+                tname = match.group(1)
+                raw = match.group(2).strip()
+                expected = _TOOL_PARAM_NAMES.get(tname)
+                if expected and raw:
+                    quoted = re.findall(r'["\']([^"\']*)["\']', raw)
+                    if len(quoted) == 1:
+                        args = {expected: quoted[0]}
+                    elif len(quoted) > 1:
+                        params_list = _TOOL_PARAM_LISTS.get(tname, ["query"])
+                        args = {}
+                        for i, val in enumerate(quoted):
+                            if i < len(params_list):
+                                args[params_list[i]] = val
+                    else:
+                        args = {expected: raw}
                 else:
-                    args = {expected: raw}
-            else:
-                param = expected or "query"
-                args = {param: raw.strip("'\"")}
-            sig = (tname, json.dumps(args, sort_keys=True))
-            if sig not in seen_signatures:
-                seen_signatures.add(sig)
-                calls.append({"id": None, "name": tname, "arguments": args})
+                    param = expected or "query"
+                    args = {param: raw.strip("'\"")}
+                sig = (tname, json.dumps(args, sort_keys=True))
+                if sig not in seen_signatures:
+                    seen_signatures.add(sig)
+                    calls.append({"id": None, "name": tname, "arguments": args})
         return calls
 
 
