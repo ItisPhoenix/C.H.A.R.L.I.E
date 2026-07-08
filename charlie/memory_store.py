@@ -14,11 +14,11 @@ logger = logging.getLogger("charlie.memory_store")
 # --- Constants ---
 _COLLECTION_NAME = "charlie_memories"
 _DEFAULT_DB_PATH = "charlie_memory_db"
-_DEFAULT_EMBEDDING_MODEL = "nomic-embed-text:v1.5"
-_DEFAULT_EMBEDDING_URL = "http://localhost:11434"
+_DEFAULT_EMBEDDING_MODEL = ""
+_DEFAULT_EMBEDDING_URL = ""
 _DEFAULT_RELEVANCE_THRESHOLD = 0.3
 _FACT_EXTRACT_MAX_CHARS = 2000
-_FACT_EXTRACT_MODEL = "llama3.2:3b"
+_FACT_EXTRACT_MODEL = ""
 
 
 class _RemoteEmbeddingFunction:
@@ -195,7 +195,7 @@ class MemoryStore:
         for i, fact in enumerate(facts):
             if not fact or len(fact) < 5:
                 continue
-            doc_id = f"{session_id}_{int(now.replace('-', '').replace(':', '').replace('T', '').replace('Z', ''))}_{i}"
+            doc_id = f"{session_id}_{time.time_ns()}_{i}"
             documents.append(fact)
             metadatas.append(
                 {
@@ -288,10 +288,10 @@ class MemoryStore:
         try:
             import httpx
 
-            # Use the fast LLM endpoint (configurable)
-            fast_url = getattr(self.config, "llm_url", "")
-            fast_model = getattr(self.config, "llm_model", _FACT_EXTRACT_MODEL)
-            fast_key = getattr(self.config, "llm_key", "no-key")
+            # Use the small LLM endpoint (configurable)
+            fast_url = getattr(self.config, "small_llm_url", "")
+            fast_model = getattr(self.config, "small_llm_model", _FACT_EXTRACT_MODEL)
+            fast_key = getattr(self.config, "small_llm_key", "no-key")
 
             if not fast_url:
                 logger.debug("No LLM configured for fact extraction")

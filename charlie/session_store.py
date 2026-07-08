@@ -1,11 +1,15 @@
 import logging
 import os
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger("charlie.session_store")
+
+# --- Constants ---
+_TOOL_PERSIST_MAX_CHARS = 500  # cap stored tool result length to prevent DB bloat
 
 
 class SessionStore:
@@ -13,8 +17,18 @@ class SessionStore:
 
     def __init__(self, db_path: str = "sessions.db"):
         self.db_path = db_path
-        self.conn = None
+        self._local = threading.local()
         self.init_db()
+
+    @property
+    def conn(self):
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            self._local.conn = self._get_connection()
+        return self._local.conn
+
+    @conn.setter
+    def conn(self, value):
+        self._local.conn = value
 
     def _get_connection(self):
         """Helper to get or reconnect to SQLite database with retries."""
@@ -27,7 +41,7 @@ class SessionStore:
                     os.makedirs(db_dir, exist_ok=True)
 
                 conn = sqlite3.connect(
-                    self.db_path, timeout=5.0, check_same_thread=False
+                    self.db_path, timeout=5.0
                 )
                 # Enable foreign keys and set WAL mode for better concurrency
                 conn.execute("PRAGMA foreign_keys = ON;")
@@ -54,7 +68,7 @@ class SessionStore:
                 self.conn.execute("""
                     CREATE TABLE IF NOT EXISTS messages (
                         id INTEGER PRIMARY KEY,
-                        timestamp TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+                        timestamp TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                         role TEXT NOT NULL,
                         content TEXT NOT NULL,
                         session_id TEXT DEFAULT 'default',
@@ -66,7 +80,7 @@ class SessionStore:
                     CREATE TABLE IF NOT EXISTS sessions (
                         session_id TEXT PRIMARY KEY,
                         title TEXT NOT NULL DEFAULT 'New Chat',
-                        created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
+                        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                     );
                 """)
                 # Migration: add updated_at column if missing (existing DBs)
@@ -137,19 +151,32 @@ class SessionStore:
                     self.fts5_supported = False
 
                 self.fts5_supported = fts5_supported
+
+                # Index for fast session-ordered message retrieval
+                self.conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_session_id "
+                    "ON messages(session_id, id);"
+                )
         except sqlite3.Error as e:
             logger.error(f"Database initialization failed: {e}")
             raise
 
-    def append(self, role: str, content: str, session_id: str = "default") -> None:
+    def append(
+        self,
+        role: str,
+        content: str,
+        session_id: str = "default",
+        turn_id: Optional[str] = None,
+    ) -> None:
         """Appends a single message to history."""
         retries = 2
         for attempt in range(retries):
             try:
                 with self.conn:
                     self.conn.execute(
-                        "INSERT INTO messages (role, content, session_id) VALUES (?, ?, ?);",
-                        (role, content, session_id),
+                        "INSERT INTO messages (role, content, session_id, turn_id) "
+                        "VALUES (?, ?, ?, ?);",
+                        (role, content, session_id, turn_id),
                     )
                 return
             except sqlite3.OperationalError as e:
@@ -162,6 +189,30 @@ class SessionStore:
             except sqlite3.Error as e:
                 logger.error(f"Failed to append message to history: {e}")
                 raise
+
+    def append_tool(
+        self,
+        turn_id: str,
+        tool_name: str,
+        args: dict,
+        result: str,
+        session_id: str = "default",
+    ) -> None:
+        """Append a tool execution result as a role='tool' row.
+
+        Truncated save to prevent DB bloat: tool name + args + first
+        _TOOL_PERSIST_MAX_CHARS chars of result.
+        """
+        import json as _json
+
+        max_chars = _TOOL_PERSIST_MAX_CHARS
+        try:
+            args_str = _json.dumps(args, ensure_ascii=False)
+        except (TypeError, ValueError):
+            args_str = str(args)
+        truncated_result = (result or "")[:max_chars]
+        content = f"[{tool_name} args={args_str}] result: {truncated_result}"
+        self.append("tool", content, session_id=session_id, turn_id=turn_id)
 
     def search(self, query: str, limit: int = 5) -> List[Tuple[str, str]]:
         """Searches past conversation content."""
@@ -291,7 +342,7 @@ class SessionStore:
             with self.conn:
                 self.conn.execute(
                     "UPDATE sessions SET title = ?, updated_at = ? WHERE session_id = ?",
-                    (title, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f"), session_id),
+                    (title, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), session_id),
                 )
         except sqlite3.Error as e:
             logger.error(f"update_session_title failed: {e}")
@@ -302,7 +353,7 @@ class SessionStore:
             with self.conn:
                 self.conn.execute(
                     "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-                    (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f"), session_id),
+                    (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), session_id),
                 )
         except sqlite3.Error as e:
             logger.error(f"touch_session failed: {e}")
