@@ -92,21 +92,29 @@ _FOLLOWUP_RE = re.compile(
     r"what|come again|repeat|say that again|pardon|sorry|excuse me|"
     r"what was that|what did you say|tell me again|once more|go on|"
     r"continue|and then|what else|what else did you say|anything else|"
-    r"elaborate|more info"
+    r"elaborate|more info|no[,.]?\s|that's\s+wrong|that's\s+not\s+right|actually|I\s+meant"
     r"|(?:tell me|explain|give me|show me)\s+(?:more\b\s*)?(?:details?\b|info\b)?"
     r"(?:\s*(?:about|on))?"
     r"(?:\s*(?:this|these|that|those|them|it|this\s+news|these\s+news|the\s+news))?"
     r"|(?:details?|more\s+details?|more\s+info)(?:\s*(?:on|about))?"
     r"(?:\s*(?:this|these|that|those|them|it|this\s+news|these\s+news|the\s+news))?"
-    r")\s*[?.!]?\s*$",
+    r")\s*[?.!]?\s*",
     re.IGNORECASE,
 )
 _FOLLOWUP_MAX_LEN = 40
 
 
+# Strip vocatives like ", Charlie" from end before follow-up test
+_VOCATIVE_RE = re.compile(r"[,?\s]+(?:hey\s+)?charlie\s*[?.!\s]*$", re.IGNORECASE)
+
+
+def _strip_vocatives(query: str) -> str:
+    """Remove trailing vocatives like ', Charlie' from the query."""
+    return _VOCATIVE_RE.sub("", query).strip()
+
 def _is_followup(query: str) -> bool:
     """Check if a query is a short follow-up/clarification that should not trigger web search."""
-    q = query.strip()
+    q = _strip_vocatives(query)
     if len(q) > _FOLLOWUP_MAX_LEN:
         return False
     return bool(_FOLLOWUP_RE.match(q))
@@ -170,6 +178,17 @@ _OPINION_EXTRACT_RE = re.compile(
     r"(?:you\s+(?:should|must|need\s+to)\s+)(like|prefer|love|enjoy|favor)\s+(.+)",
     re.IGNORECASE,
 )
+# --- Correction detection (auto-learn from user corrections) ---
+_CORRECTION_RE = re.compile(
+    r"(?:"
+    r"no[,.]?\s+(?:I\s+mean|I\s+meant|that's|it's|I\s+think)|"
+    r"that's\s+(?:wrong|incorrect|not\s+right|not\s+what\s+I)|"
+    r"^\s*actually[,.]|"
+    r"not\s+(?:quite|exactly|really|that)|"
+    r"I\s+(?:said|asked|meant)"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _detect_opinion_teaching(query: str) -> Optional[str]:
@@ -209,6 +228,41 @@ def _detect_opinion_teaching(query: str) -> Optional[str]:
         opinion = opinion[0].upper() + opinion[1:]
 
     return opinion
+
+
+def _detect_correction(query: str) -> bool:
+    """Detect if the user is correcting a previous response."""
+    return bool(_CORRECTION_RE.search(query.strip()))
+
+
+def _apply_correction_to_memory(
+    query: str, assistant_response: str, opinions_path: str = "OPINIONS.md"
+) -> Optional[str]:
+    """Write a correction entry to OPINIONS.md. Returns the entry or None."""
+    if not _detect_correction(query):
+        return None
+    short_resp = assistant_response[:120].strip()
+    if len(assistant_response) > 120:
+        short_resp += "..."
+    entry = f"Correction by user: {query.strip()}. Previous answer: '{short_resp}'."
+    try:
+        from pathlib import Path as _P
+        p = _P(opinions_path)
+        existing = p.read_text(encoding="utf-8") if p.exists() else ""
+        if entry in existing:
+            logger.debug("Correction already in opinions, skipping")
+            return None
+        with open(opinions_path, "a", encoding="utf-8") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write(f"{entry}\n")
+        logger.info("Correction stored: %s", entry[:80])
+        return entry
+    except Exception as exc:
+        logger.warning("Failed to store correction: %s", exc)
+        return None
+
+
 
 
 # --- Fast-path: close/open app (deterministic, no LLM needed) ---
@@ -762,9 +816,9 @@ async def _generate_summary(
     try:
         import httpx
 
-        url = getattr(config, "llm_url", "")
-        key = getattr(config, "llm_key", "no-key")
-        model = getattr(config, "llm_model", "")
+        url = getattr(config, "small_llm_url", "")
+        key = getattr(config, "small_llm_key", "no-key")
+        model = getattr(config, "small_llm_model", "")
 
         if not url:
             return f"{len(messages)} earlier messages omitted due to length."
@@ -937,11 +991,66 @@ def _build_context_tier(
         parts.append(f"[OPINIONS]\n{opinions_content}")
     return "\n\n".join(parts)
 
+# --- Verbosity preference detection ---
+_VERBOSITY_SHORT_RE = re.compile(
+    r"\b(?:too\s+long|shorter|be\s+brief|keep\s+it\s+short|just\s+the\s+answer|"
+    r"too\s+verbose|more\s+concise|quick\s+answer|tldr|tl;dr)\b",
+    re.IGNORECASE,
+)
+_VERBOSITY_LONG_RE = re.compile(
+    r"\b(?:more\s+detail|elaborate|tell\s+me\s+more|go\s+deeper|in\s+depth|"
+    r"full\s+explanation|explain\s+in\s+detail|longer\s+answer)\b",
+    re.IGNORECASE,
+)
+
+_GOAL_RE = re.compile(
+    r"^(?:hey\s+charlie,?|ok\s+charlie,?|charlie,?)?\s*"
+    r"set\s+goal:\s*(.+)",
+    re.IGNORECASE,
+)
+
+
+def _detect_verbosity_feedback(query: str) -> Optional[str]:
+    """Detect explicit verbosity feedback. Returns 'short', 'long', or None."""
+    if _VERBOSITY_SHORT_RE.search(query):
+        return "short"
+    if _VERBOSITY_LONG_RE.search(query):
+        return "long"
+    return None
+
+
+def _detect_set_goal(query: str) -> Optional[str]:
+    """Detect 'set goal: X' command. Returns goal text or None."""
+    m = _GOAL_RE.match(query.strip())
+    return m.group(1).strip().rstrip(".") if m else None
+
+
+_UNINFORMATIVE_PATTERNS = re.compile(
+    r"^(?:Error|No results found|<html|404|500|empty|None|N/A)",
+    re.IGNORECASE,
+)
+_TOOL_RESULT_MIN_CHARS = 50
+
+
+def _assess_tool_result_relevance(
+    tool_name: str, tool_result: str, user_query: str = ""
+) -> bool:
+    """Heuristic: is this tool result useful? Returns True if relevant."""
+    if not tool_result or len(tool_result.strip()) < _TOOL_RESULT_MIN_CHARS:
+        return False
+    if _UNINFORMATIVE_PATTERNS.match(tool_result.strip()):
+        return False
+    return True
+
+
+
 
 def _build_volatile_tier(
     platform: str, now: Any, remaining_budget: int,
     has_search: bool = False, has_memory: bool = False,
     has_user: bool = False, has_opinions: bool = False,
+    verbosity_hint: Optional[str] = None,
+    active_goal: Optional[str] = None,
 ) -> str:
     """Build the volatile tier: date/time, platform, budget, evidence blocks. Changes each turn."""
     output_rules = _PLATFORM_OUTPUT_RULES.get(platform, _DEFAULT_OUTPUT_RULES)
@@ -955,14 +1064,19 @@ def _build_volatile_tier(
     if has_opinions:
         evidence.append("[OPINIONS]")
     evidence_str = ", ".join(evidence) if evidence else "none"
-    return (
+    parts = [
         f"Current date: {now.strftime('%A, %B %d, %Y')}. "
         f"Current time: {now.strftime('%I:%M %p')}.\n"
         f"Active platform: {platform}. Output rules: {output_rules}\n"
         f"Remaining tool calls this turn: {remaining_budget}\n"
         f"Evidence blocks present this turn: {evidence_str}.\n"
-        "If an evidence block is listed above, it IS available. Never claim you cannot access it."
-    )
+        "If an evidence block is listed above, it IS available. Never claim you cannot access it.",
+    ]
+    if verbosity_hint:
+        parts.append(f"Answer style: {verbosity_hint}.")
+    if active_goal:
+        parts.append(f"Current goal: {active_goal}. Stay focused on this.")
+    return "\n".join(parts)
 
 
 def _assemble_system_prompt(stable: str, context: str, volatile: str) -> str:
@@ -987,6 +1101,7 @@ class Brain:
         on_tool_call: Optional[callable] = None,
         on_tool_result: Optional[callable] = None,
         on_thinking_update: Optional[callable] = None,
+        blackboard=None,
     ):
         self.config = config
         self.on_thought_callback = on_thought_callback
@@ -995,9 +1110,13 @@ class Brain:
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
         self.on_thinking_update = on_thinking_update
+        self._blackboard = blackboard
+        small_headers: Dict[str, str] = {}
+        if config.small_llm_key and config.small_llm_key not in ("no-key", "no_key", ""):
+            small_headers["Authorization"] = f"Bearer {config.small_llm_key}"
         self.client = httpx.AsyncClient(
-            base_url=config.llm_url,
-            headers={"Authorization": f"Bearer {config.llm_key}"},
+            base_url=config.small_llm_url,
+            headers=small_headers,
             timeout=60.0,
         )
         self._chat_generation = 0
@@ -1005,13 +1124,15 @@ class Brain:
         self.history: List[Dict[str, Any]] = []
         self._history_max_turns = 5
         self._turns_since_nudge: int = 0
+        self._active_goal: Optional[str] = None
+        self._goal_turns_remaining: int = 0
+        self._reflect_turn_counter: int = 0
+        self._reflect_interval: int = 5  # reflect every N turns
 
         # --- Hybrid tool calling: detect native support ---
-        # Auto-detect local models (Ollama, LM Studio) - they ignore native tools payload
-        _url = config.llm_url.lower()
-        _is_local = any(
-            h in _url for h in ("127.0.0.1", "localhost", ":11434", ":1234")
-        )
+        # Auto-detect local models (Ollama, LM Studio, etc.) - they ignore native tools payload
+        _url = config.small_llm_url.lower()
+        _is_local = any(h in _url for h in ("127.0.0.1", "localhost"))
         if _is_local:
             self._use_native_tools = False
             logger.info("Local model detected - using text-based tool calling")
@@ -1032,19 +1153,23 @@ class Brain:
         )
 
         # --- Fallback LLM client for provider failover ---
-        self._fallback_client = None
+        self._big_client = None
         if (
-            config.fallback_llm_url
-            and config.fallback_llm_key
-            and config.fallback_llm_key not in ("no-key", "no_key")
+            config.big_llm_url
+            and config.big_llm_key
+            and config.big_llm_key not in ("no-key", "no_key")
         ):
-            self._fallback_client = httpx.AsyncClient(
-                base_url=config.fallback_llm_url,
-                headers={"Authorization": f"Bearer {config.fallback_llm_key}"},
+            self._big_client = httpx.AsyncClient(
+                base_url=config.big_llm_url,
+                headers={"Authorization": f"Bearer {config.big_llm_key}"},
                 timeout=60.0,
             )
-            self._fallback_model = config.fallback_llm_model
-            logger.info("Fallback LLM configured: %s", config.fallback_llm_url)
+            self._big_model = config.big_llm_model
+            logger.info("Big LLM configured: %s", config.big_llm_url)
+
+        # --- Knowledge graph memory ---
+        from charlie.memory_graph import MemoryGraph
+        self.memory_graph = MemoryGraph(db_path=config.memory_graph_db)
 
     @staticmethod
     def _read_file_safe(path: str, max_chars: int) -> str:
@@ -1150,26 +1275,28 @@ class Brain:
             )
             try:
                 import httpx as _httpx
-                client = _httpx.AsyncClient(
-                    base_url=self.config.llm_url,
-                    headers={"Authorization": f"Bearer {self.config.llm_key}"},
-                    timeout=90.0,
-                )
+                small_headers: Dict[str, str] = {}
+                if (
+                    self.config.small_llm_key
+                    and self.config.small_llm_key not in ("no-key", "no_key", "")
+                ):
+                    small_headers["Authorization"] = f"Bearer {self.config.small_llm_key}"
                 payload = {
-                    "model": self.config.llm_model,
+                    "model": self.config.small_llm_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.1,
                     "max_tokens": max_chars,
                 }
-                async def _do_consolidate():
-                    async with client:
-                        resp = await client.post("chat/completions", json=payload)
-                        if resp.status_code != 200:
-                            logger.error("Consolidation API failed status %d: %s", resp.status_code, resp.text)
-                        resp.raise_for_status()
-                        return resp.json()["choices"][0]["message"]["content"]
-
-                result = await _do_consolidate()
+                async with _httpx.AsyncClient(
+                    base_url=self.config.small_llm_url,
+                    headers=small_headers,
+                    timeout=90.0,
+                ) as client:
+                    resp = await client.post("chat/completions", json=payload)
+                    if resp.status_code != 200:
+                        logger.error("Consolidation API failed status %d: %s", resp.status_code, resp.text)
+                    resp.raise_for_status()
+                    result = resp.json()["choices"][0]["message"]["content"]
                 with open(path_val, "w", encoding="utf-8") as f:
                     f.write(result)
                 logger.info("Consolidated %s: %d -> %d chars", target, current_len, len(result))
@@ -1183,8 +1310,8 @@ class Brain:
     async def close(self) -> None:
         """Close the HTTP client."""
         await self.client.aclose()
-        if self._fallback_client:
-            await self._fallback_client.aclose()
+        if self._big_client:
+            await self._big_client.aclose()
 
     async def _stream_completion(
         self,
@@ -1198,7 +1325,7 @@ class Brain:
         from charlie.streaming import parse_sse_stream
 
         client = self.client
-        model = self.config.llm_model
+        model = self.config.small_llm_model
 
         try:
             async with client.stream(
@@ -1206,7 +1333,7 @@ class Brain:
             ) as response:
                 response.raise_for_status()
                 accumulated, tc_by_index, cancelled = await parse_sse_stream(
-                    response, generation, self._chat_generation
+                    response, generation, lambda: self._chat_generation
                 )
                 if cancelled:
                     logger.info("Chat generation cancelled (barge-in)")
@@ -1216,12 +1343,12 @@ class Brain:
 
         except Exception as exc:
             logger.warning("Primary LLM stream error: %s", exc)
-            if not self._fallback_client:
+            if not self._big_client:
                 raise
-            client = self._fallback_client
-            model = self._fallback_model
+            client = self._big_client
+            model = self._big_model
             logger.info(
-                "Falling back to secondary LLM: %s", self.config.fallback_llm_url
+                "Falling back to big LLM: %s", self.config.big_llm_url
             )
 
         # Fallback attempt
@@ -1229,7 +1356,7 @@ class Brain:
         async with client.stream("POST", "chat/completions", json=payload) as response:
             response.raise_for_status()
             accumulated, tc_by_index, cancelled = await parse_sse_stream(
-                response, generation, self._chat_generation
+                response, generation, lambda: self._chat_generation
             )
             if cancelled:
                 logger.info("Chat generation cancelled (barge-in)")
@@ -1244,7 +1371,7 @@ class Brain:
     ) -> Dict[str, Any]:
         """Build the API payload for chat completions."""
         payload: Dict[str, Any] = {
-            "model": self.config.llm_model,
+            "model": self.config.small_llm_model,
             "messages": messages,
             "temperature": _LLM_TEMPERATURE,
             "stream": True,
@@ -1276,6 +1403,22 @@ class Brain:
                 logger.debug("Loaded %d history messages for session: %s", len(self.history), session_id)
             except Exception as e:
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
+        # --- Auto-learn: detect corrections and store in opinions memory ---
+        if _detect_correction(user_input) and self.history:
+            last_assistant = ""
+            for msg in reversed(self.history):
+                if msg.get("role") == "assistant":
+                    last_assistant = msg.get("content", "")
+                    break
+            if last_assistant:
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    _apply_correction_to_memory,
+                    user_input,
+                    last_assistant,
+                    self.config.opinions_file,
+                )
+
 
 
         generation = self._chat_generation
@@ -1304,6 +1447,39 @@ class Brain:
                 logger.error("Failed to store opinion: %s", e, exc_info=True)
                 yield "I tried to remember that, but something went wrong."
             return
+        # --- Fast-path: set goal (deterministic, no LLM needed) ---
+        goal_text = _detect_set_goal(user_input)
+        if goal_text is not None:
+            self._active_goal = goal_text
+            self._goal_turns_remaining = 5
+            logger.info("Goal set: %s", goal_text)
+            yield f"Got it, I'll focus on: {goal_text}."
+            return
+
+        # --- Verbosity preference update ---
+        verbosity = _detect_verbosity_feedback(user_input)
+        if verbosity is not None:
+            try:
+                from pathlib import Path as _VP
+                up = _VP(self.config.user_file)
+                existing = up.read_text(encoding="utf-8") if up.exists() else ""
+                # Replace or append verbosity line
+                new_lines = []
+                found = False
+                for line in existing.splitlines():
+                    if line.strip().startswith("verbosity:"):
+                        new_lines.append(f"verbosity: {verbosity}")
+                        found = True
+                    else:
+                        new_lines.append(line)
+                if not found:
+                    new_lines.append(f"verbosity: {verbosity}")
+                up.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+                self.reload_context()
+                logger.info("Verbosity preference set to: %s", verbosity)
+            except Exception as ve:
+                logger.warning("Failed to update verbosity: %s", ve)
+
 
         # --- Fast-path: close app (deterministic, no LLM needed) ---
         close_res = await asyncio.to_thread(_detect_close_app, user_input)
@@ -1331,10 +1507,25 @@ class Brain:
         _usr_parts = _ct.split("[USER]\n", 1)
         has_user = len(_usr_parts) > 1 and _usr_parts[1].split("\n")[0].strip() != ""
         has_opinions = "[OPINIONS]\n" in _ct
+        # Read verbosity hint from USER.md context tier
+        verbosity_hint = None
+        for line in _ct.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("verbosity:"):
+                verbosity_hint = stripped.split(":", 1)[1].strip()
+                break
+        # Goal expiry: decrement turns remaining each turn
+        if self._active_goal and self._goal_turns_remaining > 0:
+            self._goal_turns_remaining -= 1
+            if self._goal_turns_remaining <= 0:
+                logger.debug("Goal expired: %s", self._active_goal)
+                self._active_goal = None
         volatile = _build_volatile_tier(
             platform, now, budget.remaining,
             has_search=bool(search_results), has_memory=has_memory,
             has_user=has_user, has_opinions=has_opinions,
+            verbosity_hint=verbosity_hint,
+            active_goal=self._active_goal,
         )
         system_msg = _assemble_system_prompt(
             self._stable_tier, self._context_tier, volatile
@@ -1527,6 +1718,12 @@ class Brain:
                     results_map[idx] = await _exec_one(c)
 
             exec_results = [results_map[i] for i in range(len(tool_calls))]
+            # Step 3: Post-tool confidence gate - replace low-quality results
+            exec_results = [
+                r if _assess_tool_result_relevance(c["name"], r, user_input)
+                else "Error: Search returned no useful results. Proceed with general knowledge."
+                for c, r in zip(tool_calls, exec_results)
+            ]
 
             tool_results = [
                 {
@@ -1567,12 +1764,12 @@ class Brain:
 
             followup_payload = self._build_payload(messages)
             followup_tc_by_index: Dict[int, Dict[str, str]] = {}
-            if used_fallback and self._fallback_client:
-                followup_client = self._fallback_client
-                followup_model = self._fallback_model
+            if used_fallback and self._big_client:
+                followup_client = self._big_client
+                followup_model = self._big_model
             else:
                 followup_client = self.client
-                followup_model = self.config.llm_model
+                followup_model = self.config.small_llm_model
             try:
                 accumulated = ""
                 from charlie.streaming import TextStreamFilter
@@ -1606,12 +1803,12 @@ class Brain:
                 if filtered:
                     yield filtered
             except Exception as tool_exc:
-                if self._fallback_client:
+                if self._big_client:
                     logger.warning(
                         "Follow-up primary LLM error: %s, falling back", tool_exc
                     )
-                    followup_client = self._fallback_client
-                    followup_model = self._fallback_model
+                    followup_client = self._big_client
+                    followup_model = self._big_model
                     followup_payload["model"] = followup_model
                     followup_tc_by_index.clear()
                     try:
@@ -1663,12 +1860,12 @@ class Brain:
                 not accumulated
                 and not tool_calls
                 and not used_fallback
-                and self._fallback_client
+                and self._big_client
             ):
                 logger.warning("Follow-up returned empty, retrying with fallback LLM")
                 used_fallback = True
-                followup_client = self._fallback_client
-                followup_model = self._fallback_model
+                followup_client = self._big_client
+                followup_model = self._big_model
                 followup_payload["model"] = followup_model
                 followup_tc_by_index.clear()
                 try:
@@ -1715,6 +1912,10 @@ class Brain:
                 # Save to vector memory (fire-and-forget)
                 self._save_to_memory(clean_accumulated, "assistant")
             await self._check_memory_capacity()
+            # --- Periodic reflection and knowledge graph update ---
+            self._reflect_turn_counter += 1
+            if self._reflect_turn_counter % self._reflect_interval == 0:
+                asyncio.ensure_future(self._reflect_and_consolidate())
             # Trim history to max turns (keep pairs: user + assistant)
             max_messages = self._history_max_turns * 2
             if len(self.history) > max_messages:
@@ -1738,6 +1939,72 @@ class Brain:
         except Exception as e:
             logger.debug("Memory save skipped: %s", e)
 
+
+    async def _reflect_and_consolidate(self) -> None:
+        """Periodically reflect on recent conversation and consolidate the knowledge graph."""
+        try:
+            # Get recent conversation context
+            recent = self.history[-6:] if len(self.history) >= 6 else self.history
+            if len(recent) < 2:
+                return
+
+            conversation_text = "\n".join(
+                f"{m['role']}: {m['content'][:200]}" for m in recent
+            )
+
+            # Use big LLM for reflection if available, else small
+            client = self._big_client or self.client
+            model = getattr(self, "_big_model", None) or self.config.small_llm_model
+
+            prompt = (
+                "Review this recent conversation and extract key facts. "
+                "For each fact, output a line in the format:\n"
+                "SUBJECT | PREDICATE | OBJECT\n\n"
+                "Focus on: user preferences, environment facts, corrections, goals.\n"
+                "Skip trivial/chit-chat. Max 10 facts.\n\n"
+                f"Conversation:\n{conversation_text}\n\n"
+                "Facts (one per line, format: S | P | O):"
+            )
+
+            response = await client.post(
+                "/chat/completions",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 500,
+                    "temperature": 0.3,
+                },
+            )
+            if response.status_code != 200:
+                logger.debug("Reflection LLM call failed: %s", response.status_code)
+                return
+
+            content = response.json()["choices"][0]["message"]["content"]
+
+            # Parse facts and add to graph
+            added = 0
+            for line in content.strip().splitlines():
+                line = line.strip()
+                if "|" in line and not line.startswith("#"):
+                    parts = [p.strip() for p in line.split("|")]
+                    if len(parts) == 3 and all(parts):
+                        try:
+                            self.memory_graph.add_fact(parts[0], parts[1], parts[2])
+                            added += 1
+                        except Exception:
+                            logger.debug("Failed to add fact: %s", line)
+
+            if added > 0:
+                logger.info("Reflection: added %d facts to knowledge graph", added)
+
+            # Periodically consolidate
+            if self._reflect_turn_counter % (self._reflect_interval * 3) == 0:
+                removed = self.memory_graph.consolidate()
+                if removed:
+                    logger.info("Reflection: consolidated graph, removed %d stale facts", removed)
+
+        except Exception as e:
+            logger.debug("Reflection failed: %s", e, exc_info=True)
     def _extract_tool_calls(self, text: str) -> List[Dict[str, Any]]:
         """Extract tool calls from both JSON and text-based TOOL: format."""
         calls = []

@@ -2,6 +2,7 @@ import enum
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,9 @@ class FailureClass(enum.Enum):
     RESOURCE_LIMIT = "RESOURCE_LIMIT"
     UNKNOWN = "UNKNOWN"
 
-system_root: str = os.environ.get("SystemRoot", "C:\\Windows").lower()
+from charlie.config import config
+
+system_root: str = config.system_root
 _BLOCKED_RECOVERY_PATHS: List[str] = [
     system_root,
     os.path.join(system_root, "system32"),
@@ -43,7 +46,7 @@ def is_safe_to_recover(command: str) -> bool:
             logger.warning("Safety Guardrail: Command mentions blocked process: %s", proc)
             return False
     for port in _BLOCKED_RECOVERY_PORTS:
-        if f":{port}" in cmd_lower or f" {port} " in cmd_lower:
+        if re.search(rf":{re.escape(str(port))}(?=\D|$)", cmd_lower):
             logger.warning("Safety Guardrail: Command mentions blocked port: %d", port)
             return False
     return True
@@ -121,15 +124,15 @@ def run_command_safe(command: str) -> subprocess.CompletedProcess:
         timeout=15.0
     )
 
-async def query_fallback_llm(brain: Any, command: str, failure: Dict[str, Any]) -> Optional[str]:
+async def query_big_llm(brain: Any, command: str, failure: Dict[str, Any]) -> Optional[str]:
     """Queries the fallback LLM to dynamically suggest a command modification."""
     has_fallback = (
-        brain._fallback_client
-        and brain.config.fallback_llm_key
-        and brain.config.fallback_llm_key not in ("no-key", "no_key")
+        brain._big_client
+        and brain.config.big_llm_key
+        and brain.config.big_llm_key not in ("no-key", "no_key")
     )
     if not has_fallback:
-        logger.info("Fallback LLM not configured, skipping LLM recovery")
+        logger.info("Big LLM not configured, skipping LLM recovery")
         return None
 
     prompt = (
@@ -151,16 +154,16 @@ async def query_fallback_llm(brain: Any, command: str, failure: Dict[str, Any]) 
 
     try:
         payload = {
-            "model": brain._fallback_model,
+            "model": brain.config.big_llm_model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,
             "response_format": {"type": "json_object"}
         }
 
-        response = await brain._fallback_client.post(
+        response = await brain._big_client.post(
             "chat/completions",
             json=payload,
-            headers={"Authorization": f"Bearer {brain.config.fallback_llm_key}"}
+            headers={"Authorization": f"Bearer {brain.config.big_llm_key}"}
         )
         if response.status_code == 200:
             res_data = response.json()
@@ -287,8 +290,8 @@ async def recover_tool(
                     logger.warning("Strategy execution failed: %s", strat_exc)
 
         # Fallback LLM query
-        logger.info("All strategies exhausted. Querying fallback LLM for recovery command.")
-        fixed_cmd = await query_fallback_llm(brain, command, failure)
+        logger.info("All strategies exhausted. Querying big LLM for recovery command.")
+        fixed_cmd = await query_big_llm(brain, command, failure)
         if fixed_cmd:
             if not is_safe_to_recover(fixed_cmd):
                 return "Error: Fallback LLM suggested an unsafe command blocked by guardrails."
@@ -348,11 +351,11 @@ class SystemPathSearchStrategy(BaseRecoveryStrategy):
             key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{app_name}.exe"
             try:
                 with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
-                    val, _ = winreg.QueryValue(key, "")
+                    val, _ = winreg.QueryValueEx(key, "")
                     return val
-            except WindowsError:
+            except OSError:
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
-                    val, _ = winreg.QueryValue(key, "")
+                    val, _ = winreg.QueryValueEx(key, "")
                     return val
         except Exception as e:
             logger.debug("Registry lookup failed for %s: %s", app_name, e)
@@ -383,9 +386,9 @@ class SystemPathSearchStrategy(BaseRecoveryStrategy):
         # 3. Search common system folders
         common_dirs = []
         if sys.platform == "win32":
-            pf = os.environ.get("ProgramFiles", "C:\\Program Files")
-            pf86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
-            windir = os.environ.get("SystemRoot", "C:\\Windows")
+            pf = config.program_files
+            pf86 = config.program_files_x86
+            windir = config.system_root
             common_dirs.extend([
                 windir,
                 os.path.join(windir, "System32"),
