@@ -94,6 +94,8 @@ from charlie.memory_store import MemoryStore
 from charlie.personality import get_emotion_for_context, parse_voice_command
 from charlie.session_store import SessionStore
 from charlie.voice import VoiceEngine
+from charlie.blackboard import Blackboard
+from charlie.swarm import SwarmOrchestrator
 
 logger = logging.getLogger("charlie.main")
 # Unique launch identity -- every main() invocation gets one so the sidebar can
@@ -138,6 +140,8 @@ async def main():
         memory_store = MemoryStore(config)
     except Exception as e:
         logger.warning(f"Vector memory disabled: {e}")
+    # Initialize Blackboard for agent swarm coordination
+    blackboard = Blackboard()
 
 
     def speaking_callback(text):
@@ -177,6 +181,7 @@ async def main():
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_thinking_update=on_thinking_update,
+            blackboard=blackboard,
         )
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")
@@ -188,6 +193,28 @@ async def main():
     from charlie.tools import registry as tool_registry
     if memory_store is not None:
         tool_registry.set_memory_store(memory_store)
+    # Wire knowledge graph into tool registry
+    if brain is not None and hasattr(brain, "memory_graph"):
+        tool_registry.set_memory_graph(brain.memory_graph)
+
+    # Build the swarm with a real LLM client so agents do genuine work.
+    # The agents expect an object with `.post(path, json=...)` and `.model`;
+    # Brain.client is an httpx.AsyncClient (has .post) so we just expose .model.
+    if brain is not None:
+        class _AgentLLMClient:
+            def __init__(self, client, model: str) -> None:
+                self._client = client
+                self.model = model
+
+            def post(self, path: str, *, json=None, **kwargs):
+                return self._client.post(path, json=json, **kwargs)
+
+        swarm = SwarmOrchestrator(
+            blackboard,
+            llm_client=_AgentLLMClient(brain.client, config.small_llm_model),
+        )
+    else:
+        swarm = SwarmOrchestrator(blackboard)
 
     # Placeholder for event_bus (set later in async context)
     event_bus = None
@@ -258,7 +285,7 @@ async def main():
             )
 
         print(f"\rHeard: {text}", flush=True)
-        if voice.is_speaking.is_set():
+        if config.enable_barge_in and voice.is_speaking.is_set():
             # Barge-in detection: command words always interrupt immediately
             _BARGE_COMMANDS = {
                 "stop",
@@ -309,6 +336,30 @@ async def main():
             print(f"\n{response_str}", flush=True)
             voice.speak(response_str, last_emotion)
             return
+        # Route /memory-review command
+        if text.strip().lower() in ("/memory-review", "!memory-review"):
+            if brain is None:
+                response_str = "Brain not initialized."
+            else:
+                graph = brain.memory_graph
+                facts = graph.get_all_facts()
+                if not facts:
+                    response_str = "Knowledge graph is empty."
+                else:
+                    # Build summary
+                    subjects = {}
+                    for s, p, o in facts:
+                        subjects.setdefault(s, []).append(f"{p} -> {o}")
+                    response_str = f"Knowledge graph: {len(facts)} facts.\n"
+                    for subj, preds in sorted(subjects.items()):
+                        response_str += f"  {subj}:\n"
+                        for pred in preds[:3]:
+                            response_str += f"    {pred}\n"
+                        if len(preds) > 3:
+                            response_str += f"    ... +{len(preds)-3} more\n"
+            print(f"\n{response_str}", flush=True)
+            voice.speak(response_str, last_emotion)
+            return
 
         # Store user message
         try:
@@ -330,7 +381,7 @@ async def main():
             return
 
         # Detect emotion for this turn
-        detected_emotion = get_emotion_for_context(text, [])
+        detected_emotion = get_emotion_for_context(text)
 
         # Sparkle announcements on emotion change
         sparkle = ""
@@ -474,18 +525,31 @@ async def main():
                         learning_prompt, skip_pre_search=True, skip_tools=True
                     ):
                         learning += chunk
-                    learning = learning.strip() if learning.strip() else ""
-                    if learning:
-                        u_path = Path(config.user_file)
-                        existing = (
-                            u_path.read_text(encoding="utf-8")
-                            if u_path.exists()
-                            else ""
+                    learning = learning.strip()
+                    clean_learning = learning.lower().rstrip(".")
+                    if not learning or any(clean_learning.startswith(p) for p in (
+                        "nothing", "none", "no new", "no preference", "no change", "no update"
+                    )):
+                        return
+
+                    from charlie.tools import registry as tool_registry
+                    existing = ""
+                    u_path = Path(config.user_file)
+                    if u_path.exists():
+                        existing = u_path.read_text(encoding="utf-8")
+
+                    if learning not in existing:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None,
+                            tool_registry.execute_tool,
+                            "memory",
+                            {
+                                "action": "add",
+                                "target": "user",
+                                "content": learning,
+                            },
                         )
-                        if learning not in existing:
-                            with open(u_path, "a", encoding="utf-8") as f:
-                                f.write(f"\n{learning}")
-                            logger.info(f"Learning: {learning}")
+                        logger.info(f"Learning: {learning}")
                 except Exception as e:
                     logger.debug(f"Learning loop skipped: {e}")
 
@@ -499,21 +563,44 @@ async def main():
             try:
                 cmd = await event_bus.next_command()
                 logger.debug(f"ZMQ received command: {cmd}")
-                if cmd.get("type") == "chat":
-                    current_web_session_id = cmd.get("session_id", "default")
+                cmd_type = cmd.get("type")
+                if cmd_type == "chat":
+                    payload_sid = cmd.get("payload", {}).get("session_id")
+                    current_web_session_id = cmd.get("session_id") or payload_sid or "default"
+                    chat_text = cmd.get("text") or cmd.get("payload", {}).get("text", "")
                     await _process(
-                        cmd["text"],
+                        chat_text,
                         brain,
                         voice,
                         session_id=current_web_session_id,
                         platform="web",
                     )
-                elif cmd.get("type") == "session_active":
-                    current_web_session_id = cmd.get("session_id", "default")
+                elif cmd_type == "session_active":
+                    payload_sid = cmd.get("payload", {}).get("session_id")
+                    current_web_session_id = cmd.get("session_id") or payload_sid or "default"
                     logger.info(f"Active session updated to: {current_web_session_id}")
-                elif cmd.get("type") == "stop":
+                elif cmd_type == "stop":
                     voice.stop_tts()
                     brain.cancel_chat()
+                elif cmd_type == "task_create":
+                    payload = cmd.get("payload", {})
+                    task_name = payload.get("name", "Web Task")
+                    assigned = payload.get("assigned_to", "")
+                    blackboard.add_task(task_name, assigned_to=assigned)
+                    # Broadcast update
+                    await event_bus.emit("blackboard_update", blackboard.snapshot())
+                elif cmd_type == "agent_kill":
+                    agent_name = cmd.get("payload", {}).get("name")
+                    if agent_name:
+                        swarm.terminate_agent(agent_name)
+                        await event_bus.emit("blackboard_update", blackboard.snapshot())
+                elif cmd_type == "hitl_approve":
+                    task_id = cmd.get("payload", {}).get("task_id")
+                    approved = cmd.get("payload", {}).get("approved", True)
+                    if task_id:
+                        # Feed the feedback/approval into the swarm orchestrator or task result
+                        blackboard.update_task(task_id, status="done" if approved else "failed")
+                        await event_bus.emit("blackboard_update", blackboard.snapshot())
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -594,13 +681,59 @@ async def main():
         print(f"\rCharlie: {welcome_msg}", flush=True)
         voice.speak(welcome_msg, "neutral")
 
+        async def _emit_system_status_and_blackboard(bus):
+            import psutil
+            try:
+                while True:
+                    # Emit system status metrics
+                    cpu_percent = psutil.cpu_percent()
+                    ram_percent = psutil.virtual_memory().percent
+                    await bus.emit("system_status", {
+                        "cpu": cpu_percent,
+                        "ram": ram_percent,
+                        "gpu": 0.0,
+                        "active_agents": list(swarm.active_agents) if hasattr(swarm, "active_agents") else []
+                    })
+                    # Emit blackboard update
+                    await bus.emit("blackboard_update", blackboard.snapshot())
+                    await asyncio.sleep(3.0)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"Metric emitter error: {e}")
+
         # Run voice loop + web command consumer concurrently via ZeroMQ
         async with EventBus(pub_port=5555, pull_port=5556, is_producer=True) as bus:
             event_bus = bus
-            await asyncio.gather(
-                _voice_loop_idle(voice),
-                consume_web_commands(bus, brain, voice),
+
+            class ZmqLogHandler(logging.Handler):
+                def emit(self, record):
+                    try:
+                        log_entry = self.format(record)
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.create_task(bus.emit("log", {"line": log_entry}))
+                        except RuntimeError:
+                            pass
+                    except Exception:
+                        pass
+
+            zmq_handler = ZmqLogHandler()
+            zmq_handler.setFormatter(
+                logging.Formatter("%(asctime)s [%(name)s] [%(levelname)s] - %(message)s")
             )
+            zmq_handler.setLevel(logging.INFO)
+            logging.getLogger().addHandler(zmq_handler)
+
+            try:
+                await asyncio.gather(
+                    _voice_loop_idle(voice),
+                    consume_web_commands(bus, brain, voice),
+                    swarm.run(),
+                    _emit_system_status_and_blackboard(bus),
+                )
+            finally:
+                logging.getLogger().removeHandler(zmq_handler)
     except KeyboardInterrupt:
         logger.info("Interrupt received, shutting down...")
     except asyncio.CancelledError:
