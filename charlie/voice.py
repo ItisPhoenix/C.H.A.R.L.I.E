@@ -33,6 +33,10 @@ logger = logging.getLogger("charlie.voice")
 _MIN_TEXT_LEN = 3
 _ECHO_WINDOW_SEC = 2.0
 _ECHO_MAX_WORDS = 4
+# Sentinel pushed to playback_queue after every chunk of a single TTS run has
+# been enqueued. Lets the playback worker distinguish "utterance fully spoken"
+# from momentary inter-chunk queue gaps.
+_TTS_RUN_END = object()
 _LONG_SENTENCE_CHARS = 250
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?,;])\s+")
 
@@ -218,6 +222,11 @@ class VoiceEngine:
         ):
             if thread and thread.is_alive():
                 thread.join(timeout=1.0)
+        if self.audio_stream is not None:
+            try:
+                self.audio_stream.close()
+            except Exception as e:
+                logger.debug(f"audio_stream close error: {e}")
         if self.asr_process:
             self.asr_input_queue.put(None)
             self.asr_process.join(timeout=1.0)
@@ -279,8 +288,10 @@ class VoiceEngine:
         text = _RE_HASH_HEADER.sub("", text)
         text = _RE_BOLD_ITALIC.sub(r"\1", text)  # *bold* -> bold
         text = _RE_INLINE_CODE.sub(r"\1", text)  # `code` -> code
-        # Strip all remaining bold/italic asterisks/underscores to prevent TTS reading them
-        text = text.replace("**", "").replace("*", "").replace("_", "")
+        # Strip remaining bold asterisks to prevent TTS reading them.
+        # Paired emphasis (_italic_ / *bold*) is handled by _RE_BOLD_ITALIC above.
+        # Lone underscores (snake_case, IDs, handles) are intentionally preserved.
+        text = text.replace("**", "").replace("*", "")
 
         # 5. Wrapper quotes: "Hello world" -> Hello world
         m = _RE_WRAPPER_QUOTES.match(text)
@@ -343,7 +354,6 @@ class VoiceEngine:
             ):
                 return ""
         self._last_speech_time = now
-        self._last_speech_text = text
 
         # Strip URLs
         text = re.sub(r"\(https?://.*?\)", "", text)
@@ -351,6 +361,11 @@ class VoiceEngine:
 
         # Humanize for natural TTS prosody
         text = self._humanize_text(text)
+
+        # Store the humanized string actually spoken (used by echo detection
+        # in both speak() and main.py barge-in). Do this before ASCII cleanup
+        # so comparisons match what Kokoro phonemizes.
+        self._last_speech_text = text
 
         # Number and symbol conversion
         text = self._numbers_to_words(text)
@@ -360,7 +375,7 @@ class VoiceEngine:
         text = re.sub(r"\s+", " ", text).strip()
 
         if not text or len(text) < _MIN_TEXT_LEN:
-            return
+            return ""
 
         if len(text) > _LONG_SENTENCE_CHARS:
             self.stop_tts_event.clear()
@@ -458,11 +473,19 @@ class VoiceEngine:
                 logger.error(f"tts_worker_error | {e}")
 
     async def _tts_stream_and_queue(self, text: str, speed: float):
-        """Consume _synth_stream and push each chunk to playback_queue."""
+        """Consume _synth_stream and push each chunk to playback_queue.
+
+        A _TTS_RUN_END sentinel is pushed after all chunks of a single TTS
+        run so the playback worker knows when the entire utterance (which may
+        span multiple chunks) is fully drained, rather than clearing
+        is_speaking on the momentary gaps between chunks.
+        """
         async for samples, sr in self._synth_stream(text, speed):
             if self.stop_tts_event.is_set():
                 break
             self.playback_queue.put((samples, sr, []))
+        if not self.stop_tts_event.is_set():
+            self.playback_queue.put(_TTS_RUN_END)
 
     def _playback_worker(self):
         """Dedicated playback thread."""
@@ -489,11 +512,24 @@ class VoiceEngine:
                     continue
 
                 try:
-                    samples, sample_rate, mouth_values = self.playback_queue.get(
-                        timeout=0.1
-                    )
+                    item = self.playback_queue.get(timeout=0.1)
                 except queue.Empty:
                     continue
+
+                # Sentinel marking the true end of a TTS run.
+                if item is _TTS_RUN_END:
+                    if tts_started_fired and self.stop_tts_event.is_set() is False:
+                        if self._on_tts_stop:
+                            try:
+                                self._on_tts_stop()
+                            except Exception:
+                                pass
+                        self.is_speaking.clear()
+                        self.tts_active.clear()
+                        tts_started_fired = False
+                    continue
+
+                samples, sample_rate, mouth_values = item
 
                 # First chunk of a new TTS run
                 if not tts_started_fired:
@@ -515,16 +551,10 @@ class VoiceEngine:
                 sd.wait()
                 self._last_speech_end = time.time()
 
-                # Check if more chunks are queued — if not, TTS run is done
-                if self.playback_queue.empty() and not self.stop_tts_event.is_set():
-                    if tts_started_fired and self._on_tts_stop:
-                        try:
-                            self._on_tts_stop()
-                        except Exception:
-                            pass
-                    self.is_speaking.clear()
-                    self.tts_active.clear()
-                    tts_started_fired = False
+                # Do NOT clear is_speaking here. A long utterance spans
+                # multiple chunks with momentary queue-empty gaps; clearing
+                # on a gap defeats barge-in. The _TTS_RUN_END sentinel (pushed
+                # after all chunks) signals the real end of the utterance.
 
             except Exception as e:
                 logger.error(f"playback_error | {e}")

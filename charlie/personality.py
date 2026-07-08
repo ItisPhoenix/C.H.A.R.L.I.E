@@ -30,7 +30,7 @@ _VOICE_COMMANDS: list[tuple[re.Pattern, str]] = [
 ]
 
 
-def get_emotion_for_context(user_text: str, history: list) -> str:
+def get_emotion_for_context(user_text: str) -> str:
     """Classify user intent into an emotion tag via keyword heuristic.
 
     Returns one of: "neutral", "energetic", or "calm".
