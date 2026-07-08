@@ -73,11 +73,11 @@ The code only knows "fast LLM" and "main LLM". No provider names (OpenRouter, Ol
 
 ---
 
-## 5. Fast LLM Key Check (Critical)
+## 5. Small LLM Key Check (Critical)
 
 The exact guard pattern everywhere:
 ```python
-if self.config.fast_llm_key and self.config.fast_llm_key not in ("no-key", "no_key"):
+if self.config.small_llm_key and self.config.small_llm_key not in ("no-key", "no_key"):
 ```
 Use the exact tuple `("no-key", "no_key")`. Never `== "no-key"` alone -- this has caused a production bug.
 
@@ -94,6 +94,15 @@ Use the exact tuple `("no-key", "no_key")`. Never `== "no-key"` alone -- this ha
 | `charlie/personality.py` | Emotion classification + voice command parsing. Pure keyword matching. | LLM calls or I/O. |
 | `charlie/asr_worker.py` | Subprocess entry for Whisper. Only file that imports `faster_whisper`. | Other Charlie modules. |
 | `charlie/session_store.py` | SQLite + FTS5 session history. Session isolation via `launch_id` column. | Anything outside session scope. |
+| `charlie/blackboard.py` | `Blackboard` class. Shared state for agent coordination via publish/subscribe. | Direct LLM calls; must remain sync-friendly. |
+| `charlie/swarm.py` | `SwarmOrchestrator`. Routes tasks to MARVEL-named agents, manages lifecycle. | Business logic; delegates to agent classes. |
+| `charlie/agents/base.py` | `BaseAgent` ABC. Defines agent interface for the swarm. | Direct LLM or voice calls; must go through Brain. |
+| `charlie/agents/*.py` | MARVEL-named agents (Jarvis, Vision, Friday, etc.). Each handles a domain. | Cross-import between agent modules; must be self-contained. |
+| `charlie/memory_v2.py` | Evolving memory system. Episodic, semantic, procedural, meta layers. | Direct file I/O; uses SessionStore or MemoryGraph. |
+| `charlie/memory_graph.py` | `MemoryGraph` class. SQLite-backed knowledge graph with triple storage. | Business logic; pure data access. |
+| `charlie/reflection.py` | Periodic reflection engine. Consolidates memory, updates knowledge graph. | Direct LLM calls; uses Brain for generation. |
+| `charlie/mcp_client.py` | MCP (Model Context Protocol) client. Connects to external tool servers. | Business logic; protocol handling only. |
+| `charlie/plugins.py` | Hybrid plugin system. Loads and manages external integrations. | Core Charlie logic; plugins must be sandboxed. |
 | `main.py` | Entry point. Logging setup, voice loop, TTS flush logic, barge-in, text normalization for multi-app commands. | Feature code -- delegate to modules. |
 
 ---
@@ -122,6 +131,21 @@ Additional checks for significant changes:
 - `ast.parse` all modified Python files.
 - Verify no non-ASCII characters in `.py` files.
 
+---
+
+## 8.5. Frontend Patterns (Next.js + React + Zustand)
+
+| Pattern | Rule |
+|---|---|
+| **WebSocket events** | Backend emits `"blackboard_update"`, `"system_status"`, `"chat_stream"`. Frontend handlers MUST match these exact strings. |
+| **ErrorBoundary** | Wrap main layout in `<ErrorBoundary>` (from `components/ErrorBoundary.tsx`). Catches render errors and shows fallback UI. |
+| **Unused imports** | No `React` import with React 19 (automatic JSX transform). No unused `lucide-react` icons. |
+| **Props interface** | All props passed to a component MUST be declared in its `Props` interface. TypeScript `--noUnusedLocals` must pass. |
+| **Zustand selectors** | Use `useCharlieStore(selector)` with shallow equality. Never re-render on unrelated state. |
+| **WebSocket lifecycle** | Connect in `useEffect` with cleanup. Exponential backoff on close. Send `session_active` on session change. |
+| **Glass morphism** | Use `glass` class (defined in `globals.css`). No inline `backdrop-filter`. |
+| **TypeScript** | `npx tsc --noEmit` must pass. All public function signatures must have type hints. |
+| **Testing** | `npm test` (vitest) must pass. Store tests in `store/*.test.ts`. Run `npx tsc --noEmit` before `npm test`. |
 ---
 
 ## 9. Safety Rules

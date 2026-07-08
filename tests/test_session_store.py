@@ -94,3 +94,100 @@ def test_session_metadata_ops():
                     os.remove(f)
                 except OSError:
                     pass
+
+def test_append_tool_and_reload():
+    """Tool results persisted via append_tool must survive round-trip through get_session_messages."""
+    db_path = "test_sessions_tool.db"
+    for f in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+    store = SessionStore(db_path)
+    try:
+        store.create_session("sess_tool", title="Tool Test", source="test")
+        turn_id = "turn_abc"
+
+        # Persist a user message, a tool result, and an assistant reply
+        store.append("user", "What is the weather?", session_id="sess_tool")
+        store.append_tool(
+            turn_id=turn_id,
+            tool_name="web_search",
+            args={"query": "weather today"},
+            result="Sunny, 25C",
+            session_id="sess_tool",
+        )
+        store.append("assistant", "It is sunny today.", session_id="sess_tool")
+
+        # Reload and verify tool row is present
+        messages = store.get_session_messages("sess_tool")
+        roles = [m[0] for m in messages]
+        assert "tool" in roles, f"Expected tool role in messages, got: {roles}"
+
+        # Find the tool row and verify content
+        tool_rows = [m for m in messages if m[0] == "tool"]
+        assert len(tool_rows) == 1
+        tool_content = tool_rows[0][1]
+        assert "web_search" in tool_content
+        assert "Sunny" in tool_content
+
+        # Verify truncation: long result capped at 500 chars
+        long_result = "x" * 2000
+        store.append_tool(
+            turn_id=turn_id,
+            tool_name="shell_execute",
+            args={"command": "dir"},
+            result=long_result,
+            session_id="sess_tool",
+        )
+        messages2 = store.get_session_messages("sess_tool")
+        shell_rows = [m for m in messages2 if m[0] == "tool" and "shell_execute" in m[1]]
+        assert len(shell_rows) == 1
+        assert len(shell_rows[0][1]) < 2000, "Tool result should be truncated"
+    finally:
+        store.close()
+        for f in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+def test_tool_content_in_session_messages():
+    """Tool rows must flow back as role=content tuples for _sanitize_roles."""
+    db_path = "test_sessions_tool2.db"
+    for f in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+    store = SessionStore(db_path)
+    try:
+        store.append("user", "search for cats", session_id="s1")
+        store.append_tool(
+            turn_id="t1",
+            tool_name="web_search",
+            args={"query": "cats"},
+            result="Cats are fluffy",
+            session_id="s1",
+        )
+        store.append("assistant", "Cats are indeed fluffy!", session_id="s1")
+
+        messages = store.get_session_messages("s1")
+        # Verify ordering: user, tool, assistant
+        assert messages[0] == ("user", "search for cats")
+        assert messages[1][0] == "tool"
+        assert "web_search" in messages[1][1]
+        assert messages[2] == ("assistant", "Cats are indeed fluffy!")
+    finally:
+        store.close()
+        for f in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass

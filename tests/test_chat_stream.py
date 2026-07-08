@@ -7,9 +7,9 @@ from charlie.core import Brain
 @pytest.fixture
 def brain_config():
     return Config(
-        llm_url="http://localhost:11434",
-        llm_key="no-key",
-        llm_model="dummy",
+        small_llm_url="http://localhost:11434",
+        small_llm_key="no-key",
+        small_llm_model="dummy",
         iteration_budget_max=3,
     )
 
@@ -62,7 +62,7 @@ def test_extract_bare_tool_calls():
     from charlie.config import Config
 
     brain = Brain(
-        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy")
+        Config(small_llm_url="http://localhost:11434", small_llm_key="no-key", small_llm_model="dummy")
     )
     text = 'shell_execute(command="start https://youtube.com")\nshell_execute(command="start https://twitter.com")'
     calls = brain._extract_tool_calls(text)
@@ -78,7 +78,7 @@ def test_extract_bare_tool_dedup():
     from charlie.config import Config
 
     brain = Brain(
-        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy")
+        Config(small_llm_url="http://localhost:11434", small_llm_key="no-key", small_llm_model="dummy")
     )
     text = 'TOOL: web_search("test")\nweb_search("test")'
     calls = brain._extract_tool_calls(text)
@@ -91,7 +91,7 @@ def test_extract_mixed_tool_formats():
     from charlie.config import Config
 
     brain = Brain(
-        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy")
+        Config(small_llm_url="http://localhost:11434", small_llm_key="no-key", small_llm_model="dummy")
     )
     text = 'TOOL: web_search("news")\nshell_execute(command="dir")'
     calls = brain._extract_tool_calls(text)
@@ -104,7 +104,7 @@ def test_extract_multi_arg_tool_calls():
     """Verify tool calls with multiple arguments map to correct names."""
     from charlie.config import Config
     brain = Brain(
-        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy")
+        Config(small_llm_url="http://localhost:11434", small_llm_key="no-key", small_llm_model="dummy")
     )
     # Test TOOL: format
     text = 'TOOL: file_write("C:\\\\test.txt", "hello world")'
@@ -298,7 +298,7 @@ async def test_chat_stream_skip_tools(monkeypatch, brain_config):
     monkeypatch.setattr("charlie.tools.registry.execute_tool", mock_execute)
 
     async def mock_stream_completion(*args, **kwargs):
-        return ('TOOL: file_write("C:\\\\test.txt", "hello")', [], False)
+        return ('Hello world TOOL: file_write("C:\\\\test.txt", "hello")', [], False)
 
     brain = Brain(brain_config)
     monkeypatch.setattr(brain, "_stream_completion", mock_stream_completion)
@@ -307,5 +307,6 @@ async def test_chat_stream_skip_tools(monkeypatch, brain_config):
     async for chunk in brain.chat_stream("test", skip_tools=True):
         results.append(chunk)
 
-    assert "TOOL: file_write" in "".join(results)
+    assert "Hello world" in "".join(results)
+    assert "TOOL: file_write" not in "".join(results)
     assert not called_tool

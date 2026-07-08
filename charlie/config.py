@@ -9,13 +9,13 @@ load_dotenv(override=True)
 
 @dataclass
 class Config:
-    llm_url: str = os.getenv("LLM_URL", "")
-    llm_key: str = os.getenv("LLM_API_KEY", "no-key")
-    llm_model: str = os.getenv("LLM_MODEL", "")
-    # Fallback LLM provider (used when primary LLM fails)
-    fallback_llm_url: str = os.getenv("FALLBACK_LLM_URL", "")
-    fallback_llm_key: str = os.getenv("FALLBACK_LLM_API_KEY", "no-key")
-    fallback_llm_model: str = os.getenv("FALLBACK_LLM_MODEL", "")
+    small_llm_url: str = os.getenv("SMALL_LLM_URL", "")
+    small_llm_key: str = os.getenv("SMALL_LLM_API_KEY", "no-key")
+    small_llm_model: str = os.getenv("SMALL_LLM_MODEL", "")
+    # Big LLM provider (used when small LLM fails)
+    big_llm_url: str = os.getenv("BIG_LLM_URL", "")
+    big_llm_key: str = os.getenv("BIG_LLM_API_KEY", "no-key")
+    big_llm_model: str = os.getenv("BIG_LLM_MODEL", "")
 
     # -1 = system default input/output device; >=0 = specific device index
     mic_index: int = int(os.getenv("MIC_INDEX", "-1"))
@@ -23,7 +23,7 @@ class Config:
 
     # Speech / ASR / TTS
     whisper_model: str = os.getenv("WHISPER_MODEL", "large-v3")
-    silence_timeout: float = float(os.getenv("SILENCE_TIMEOUT", "0.6"))
+    silence_timeout: float = float(os.getenv("SILENCE_TIMEOUT", "1.5"))
     phrase_min_duration: float = float(os.getenv("PHRASE_MIN_DURATION", "0.35"))
     phrase_max_duration: float = float(os.getenv("PHRASE_MAX_DURATION", "45.0"))
     kokoro_voice: str = os.getenv("KOKORO_VOICE", "af_heart")
@@ -39,10 +39,10 @@ class Config:
 
     # VAD / ASR tuning
     vad_threshold: float = float(os.getenv("VAD_THRESHOLD", "0.25"))
-    vad_silence_timeout: float = float(os.getenv("VAD_SILENCE_TIMEOUT", "0.6"))
+    vad_silence_timeout: float = float(os.getenv("VAD_SILENCE_TIMEOUT", "1.5"))
     vad_min_speech_duration_ms: int = int(os.getenv("VAD_MIN_SPEECH_DURATION_MS", "120"))
     vad_max_speech_duration_s: int = int(os.getenv("VAD_MAX_SPEECH_DURATION_S", "60"))
-    vad_min_silence_duration_ms: int = int(os.getenv("VAD_MIN_SILENCE_DURATION_MS", "480"))
+    vad_min_silence_duration_ms: int = int(os.getenv("VAD_MIN_SILENCE_DURATION_MS", "1000"))
     vad_speech_pad_ms: int = int(os.getenv("VAD_SPEECH_PAD_MS", "320"))
     asr_beam_size: int = int(os.getenv("ASR_BEAM_SIZE", "6"))
     asr_best_of: int = int(os.getenv("ASR_BEST_OF", "6"))
@@ -52,7 +52,7 @@ class Config:
     enable_barge_in: bool = os.getenv("ENABLE_BARGE_IN", "true").lower() == "true"
 
     llm_disable_reasoning: bool = (
-        os.getenv("LLM_DISABLE_REASONING", "true").lower() == "true"
+        os.getenv("SMALL_LLM_DISABLE_REASONING", "true").lower() == "true"
     )
     # Enable native JSON tool calling for compatible remote APIs (OpenAI, Anthropic).
     # When False, falls back to text-based TOOL: parsing for local models.
@@ -64,6 +64,8 @@ class Config:
     iteration_budget_max: int = int(os.getenv("ITERATION_BUDGET_MAX", "12"))
     context_window: int = int(os.getenv("CONTEXT_WINDOW", "8192"))
     compression_threshold: float = float(os.getenv("COMPRESSION_THRESHOLD", "0.8"))
+    history_keep_recent: int = int(os.getenv("HISTORY_KEEP_RECENT", "6"))
+    history_summary_max_chars: int = int(os.getenv("HISTORY_SUMMARY_MAX_CHARS", "400"))
     memory_file: str = os.getenv("MEMORY_FILE", "MEMORY.md")
     user_file: str = os.getenv("USER_FILE", "USER.md")
     opinions_file: str = os.getenv("OPINIONS_FILE", "OPINIONS.md")
@@ -84,11 +86,27 @@ class Config:
     memory_db_path: str = os.getenv("MEMORY_DB_PATH", "charlie_memory_db")
     memory_relevance_threshold: float = float(os.getenv("MEMORY_RELEVANCE_THRESHOLD", "0.3"))
     memory_embedding_model: str = os.getenv("MEMORY_EMBEDDING_MODEL", "text-embedding-nomic-embed-text-v1.5")
-    memory_embedding_url: str = os.getenv("MEMORY_EMBEDDING_URL", "http://127.0.0.1:1234/v1")
+    memory_embedding_url: str = os.getenv("MEMORY_EMBEDDING_URL", "")
     memory_auto_extract: bool = os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true"
     # Memory capacity management
     memory_nudge_interval: int = int(os.getenv("MEMORY_NUDGE_INTERVAL", "5"))
     memory_capacity_threshold: float = float(os.getenv("MEMORY_CAPACITY_THRESHOLD", "0.8"))
+    # Knowledge graph (SQLite)
+    memory_graph_db: str = os.getenv("MEMORY_GRAPH_DB", "charlie_memory_graph.db")
+    # --- Agentic OS Toggles ---
+    blackboard_enabled: bool = os.getenv("BLACKBOARD_ENABLED", "true").lower() == "true"
+    swarm_enabled: bool = os.getenv("SWARM_ENABLED", "true").lower() == "true"
+    reflection_enabled: bool = os.getenv("REFLECTION_ENABLED", "true").lower() == "true"
+    mcp_enabled: bool = os.getenv("MCP_ENABLED", "false").lower() == "true"
+    plugins_enabled: bool = os.getenv("PLUGINS_ENABLED", "false").lower() == "true"
+
+
+    charlie_host: str = os.getenv("CHARLIE_HOST", "127.0.0.1")
+    charlie_port: int = int(os.getenv("CHARLIE_PORT", "8000"))
+    charlie_launch_id: str = os.getenv("CHARLIE_LAUNCH_ID", "")
+    system_root: str = os.getenv("SystemRoot", r"C:\Windows").lower()
+    program_files: str = os.getenv("ProgramFiles", r"C:\Program Files")
+    program_files_x86: str = os.getenv("ProgramFiles(x86)", r"C:\Program Files (x86)")
 
     soul: str = ""
 

@@ -16,6 +16,22 @@ def __getattr__(name: str):
         from .session_store import SessionStore
 
         return SessionStore
+    if name == "Blackboard":
+        from .blackboard import Blackboard
+
+        return Blackboard
+    if name == "SwarmOrchestrator":
+        from .swarm import SwarmOrchestrator
+
+        return SwarmOrchestrator
+    if name == "MemoryGraph":
+        from .memory_graph import MemoryGraph
+
+        return MemoryGraph
+    if name == "ReflectionEngine":
+        from .reflection import ReflectionEngine
+
+        return ReflectionEngine
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -24,7 +40,11 @@ __all__ = [
     "Brain",
     "VoiceEngine",
     "SessionStore",
+    "Blackboard",
+    "SwarmOrchestrator",
+    "MemoryGraph",
+    "ReflectionEngine",
     "registry",
 ]
 
-__version__ = "1.1.0"
+__version__ = "2.0.0-alpha.1"

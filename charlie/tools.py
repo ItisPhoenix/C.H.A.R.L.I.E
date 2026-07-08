@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 import httpx
@@ -20,6 +21,8 @@ logger = logging.getLogger("charlie.tools")
 
 # --- Vector memory store (set via set_memory_store at init) ---
 _memory_store = None  # type: Optional[Any]
+# --- Knowledge graph store (set via set_memory_graph at init) ---
+_memory_graph = None  # type: Optional[Any]
 
 # --- Search tuning ---
 SEARCH_RESULT_LIMIT = 5
@@ -154,6 +157,10 @@ class ToolRegistry:
         """Inject vector memory store for vector_memory tool."""
         global _memory_store
         _memory_store = store
+    def set_memory_graph(self, graph: Any) -> None:
+        """Inject knowledge graph store for graph tools."""
+        global _memory_graph
+        _memory_graph = graph
 
 
 # Global tool registry
@@ -475,14 +482,40 @@ _CONVERSATIONAL = ("stop", "start", "cancel", "wait", "halt")
             "command": {
                 "type": "string",
                 "description": "The shell command to execute.",
-            }
+            },
+            "voice_mode": {
+                "type": "boolean",
+                "description": "Restrict to a safe command allowlist for voice input.",
+            },
         },
         "required": ["command"],
     },
     is_interactive=True,
 )
-def shell_execute(command: str) -> str:
+def shell_execute(command: str, *, voice_mode: bool = False) -> str:
     lowered = command.lower().strip()
+
+    if voice_mode:
+        if not lowered:
+            return "Error: No command provided."
+        allowed_prefixes = (
+            "start ",
+            "taskkill ",
+            "code ",
+            "explorer ",
+            "calc ",
+            "notepad ",
+            "dir ",
+            "cmd ",
+        )
+        if not any(lowered.startswith(prefix) for prefix in allowed_prefixes):
+            return (
+                "Error: Command not on the allowed list for voice mode. "
+                "Use the web UI for unrestricted shell access."
+            )
+        if any(ch in command for ch in ";|&`$()"):
+            return "Error: Shell metacharacters are not allowed in voice mode."
+
     for keyword in _BLOCKED_KEYWORDS:
         if keyword in lowered:
             return f"Error: Command blocked -- risky keyword '{keyword}'"
@@ -534,13 +567,62 @@ def shell_execute(command: str) -> str:
             return "\n".join(parts)
         # Many commands (start, taskkill, etc.) return empty on success
         if process.returncode == 0:
-            return "Command succeeded (exit code 0). No output."
-        return f"Command finished with exit code {process.returncode}. No output."
+            result = "Command succeeded (exit code 0). No output."
+        else:
+            result = f"Command finished with exit code {process.returncode}. No output."
+        if not voice_mode:
+            result = "WARNING: Shell commands are powerful. Be careful with destructive operations.\n\n" + result
+        return result
     except subprocess.TimeoutExpired:
         return f"Error: Command timed out after {SHELL_TIMEOUT}s."
     except Exception as e:
         logger.exception("Shell command error: %s", command)
         return f"Error executing shell command: {e}"
+
+
+_WORKSPACE_DIR = Path(__file__).parent.parent.resolve()
+
+
+def _resolve_safe_path(path_str: str) -> Path:
+    target = Path(path_str)
+    if target.is_absolute():
+        resolved = target.resolve(strict=False)
+    else:
+        resolved = (_WORKSPACE_DIR / path_str).resolve(strict=False)
+
+    from charlie.config import config
+    system_root = config.system_root.lower()
+    path_lower = str(resolved).lower()
+
+    _BLOCKED_PATHS = (
+        ".env",
+        "sessions.db",
+        system_root,
+        os.path.sep + "etc" + os.path.sep,
+        os.path.sep + "proc" + os.path.sep,
+        os.path.sep + "sys" + os.path.sep,
+        os.path.sep + "registry" + os.path.sep,
+        os.path.sep + ".ssh" + os.path.sep,
+        os.path.sep + ".aws" + os.path.sep,
+    )
+    for blocked in _BLOCKED_PATHS:
+        if blocked.lower() in path_lower:
+            raise ValueError(f"Access to '{blocked}' paths is blocked for safety.")
+    return resolved
+
+
+def _resolve_user_placeholders(path: str) -> str:
+    import getpass
+    placeholders = {"yourusername", "username", "user"}
+    current_user = getpass.getuser()
+    parts = []
+    for part in os.path.normpath(path).split(os.path.sep):
+        clean_part = part.strip("<>").lower()
+        if clean_part in placeholders:
+            parts.append(current_user)
+        else:
+            parts.append(part)
+    return os.path.sep.join(parts)
 
 
 @registry.register_tool(
@@ -557,22 +639,11 @@ def shell_execute(command: str) -> str:
         "required": ["path"],
     },
 )
-def _resolve_user_placeholders(path: str) -> str:
-    import getpass
-    placeholders = {"yourusername", "username", "user"}
-    current_user = getpass.getuser()
-    parts = []
-    for part in os.path.normpath(path).split(os.path.sep):
-        if part.lower() in placeholders:
-            parts.append(current_user)
-        else:
-            parts.append(part)
-    return os.path.sep.join(parts)
-
 def file_read(path: str) -> str:
     try:
         path = _resolve_user_placeholders(path)
-        with open(path, "r", encoding="utf-8") as handle:
+        safe_path = _resolve_safe_path(path)
+        with open(safe_path, "r", encoding="utf-8") as handle:
             return handle.read()
     except Exception as e:
         logger.exception("File read error: %s", path)
@@ -600,27 +671,18 @@ def file_read(path: str) -> str:
 def file_write(path: str, content: str) -> str:
     try:
         path = _resolve_user_placeholders(path)
-        abs_path = os.path.abspath(path)
-        # Block traversal and sensitive paths
-        system_root = os.environ.get("SystemRoot", "C:\\Windows").lower()
-        _BLOCKED_WRITE_PATHS = (
-            ".env",
-            "sessions.db",
-            system_root,
-            os.path.sep + "etc" + os.path.sep,
-            os.path.sep + "proc" + os.path.sep,
-            os.path.sep + "sys" + os.path.sep,
-            os.path.sep + "registry" + os.path.sep,
-        )
-        path_lower = abs_path.lower()
-        for blocked in _BLOCKED_WRITE_PATHS:
-            if blocked in path_lower:
-                return f"Error: Writing to '{blocked}' paths is blocked for safety."
-        dest_dir = os.path.dirname(abs_path)
+        path = os.path.abspath(path)
+        safe_path = _resolve_safe_path(path)
+        if safe_path.is_dir():
+            return f"Error: Cannot write to a directory ({path}). Please specify a file path."
+
+        dest_dir = os.path.dirname(safe_path)
         os.makedirs(dest_dir, exist_ok=True)
-        with open(abs_path, "w", encoding="utf-8") as handle:
+        with open(safe_path, "w", encoding="utf-8") as handle:
             handle.write(content)
         return f"Successfully wrote to {path}"
+    except ValueError as e:
+        return f"Error: {e}"
     except Exception as e:
         logger.exception("File write error: %s", path)
         return f"Error writing file: {e}"
@@ -862,3 +924,92 @@ def session_search(query: str) -> str:
     for role, message in results:
         lines.append(f"- [{role}]: {message}")
     return "\n".join(lines)
+
+
+
+# ---------------------------------------------------------------------------
+# Knowledge graph tools
+# ---------------------------------------------------------------------------
+
+
+def _graph_available() -> bool:
+    """Check if the memory graph is loaded."""
+    return _memory_graph is not None
+
+
+@registry.register_tool(
+    name="graph_add_fact",
+    description=(
+        "Add a fact to the knowledge graph. "
+        "A fact is a relationship: subject -> predicate -> object."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "subject": {"type": "string", "description": "The subject entity (e.g. 'user')"},
+            "predicate": {"type": "string", "description": "The relationship (e.g. 'prefers')"},
+            "object": {"type": "string", "description": "The object entity (e.g. 'dark mode')"},
+        },
+        "required": ["subject", "predicate", "object"],
+    },
+)
+def graph_add_fact(subject: str, predicate: str, object: str) -> str:
+    if not _graph_available():
+        return "Knowledge graph is not available."
+    try:
+        _memory_graph.add_fact(subject, predicate, object)
+        return f"Added: {subject} -> {predicate} -> {object}"
+    except Exception as e:
+        logger.exception("graph_add_fact error")
+        return f"Error adding fact: {e}"
+
+
+@registry.register_tool(
+    name="graph_query",
+    description="Query the knowledge graph. Find facts related to a subject, object, or pattern.",
+    schema={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search term to find in facts"},
+            "subject_filter": {"type": "string", "description": "Optional: filter by subject"},
+        },
+        "required": ["query"],
+    },
+)
+def graph_query(query: str, subject_filter: str = "") -> str:
+    if not _graph_available():
+        return "Knowledge graph is not available."
+    try:
+        results = _memory_graph.search_facts(query, subject_filter=subject_filter or None)
+        if not results:
+            return "No matching facts found."
+        lines = []
+        for s, p, o, score in results:
+            lines.append(f"- {s} -> {p} -> {o} (relevance: {score:.2f})")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.exception("graph_query error")
+        return f"Error querying graph: {e}"
+
+
+@registry.register_tool(
+    name="graph_consolidate",
+    description=(
+        "Consolidate the knowledge graph: merge duplicates, "
+        "remove stale facts, and update importance scores."
+    ),
+    schema={
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+)
+def graph_consolidate() -> str:
+    if not _graph_available():
+        return "Knowledge graph is not available."
+    try:
+        removed = _memory_graph.consolidate()
+        return f"Consolidated graph. Removed {removed} stale/duplicate facts."
+    except Exception as e:
+        logger.exception("graph_consolidate error")
+        return f"Error consolidating graph: {e}"

@@ -27,6 +27,9 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 - **Persistent memory**: Remembers facts across sessions via `MEMORY.md` and `USER.md`.
 - **Local-first**: All speech processing runs locally. Only the LLM call goes to the network.
 - **Self-hosted search**: SearXNG integration for private web search with no API key.
+- **Agentic OS Foundation:** Blackboard pattern agent coordination, MARVEL-named agent swarm, evolving 4-layer memory system (episodic, semantic, procedural, meta), and SQLite-backed knowledge graph.
+- **Next.js Web Dashboard:** Responsive glassmorphism web UI with electric blue accent, three-column layout, and WebSocket real-time sync. Built with React 19, Zustand, and Tailwind CSS v4.
+- **Reflection Engine:** Periodic self-reflection that consolidates memory, updates knowledge graph, and optimizes agent performance.
 
 ---
 
@@ -83,17 +86,17 @@ Edit `.env` with your settings:
 
 ```env
 # Required: Your LLM endpoint
-LLM_URL=https://your-api-endpoint/v1
-LLM_API_KEY=your-key-here
-LLM_MODEL=your-model-id
+SMALL_LLM_URL=https://your-api-endpoint/v1
+SMALL_LLM_API_KEY=your-key-here
+SMALL_LLM_MODEL=your-model-id
 
 # Optional: Self-hosted SearXNG for private web search
 SEARXNG_URL=http://localhost:8080
 
-# Optional: Fallback LLM (auto-failover when primary fails)
-# FALLBACK_LLM_URL=https://your-fallback-endpoint/v1
-# FALLBACK_LLM_API_KEY=your-key
-# FALLBACK_LLM_MODEL=your-model
+# Optional: Big LLM (auto-failover when small LLM fails)
+# BIG_LLM_URL=https://your-big-endpoint/v1
+# BIG_LLM_API_KEY=your-key
+# BIG_LLM_MODEL=your-model
 
 # Optional: Hardware overrides
 MIC_INDEX=-1          # -1 = system default, >=0 = specific device
@@ -104,10 +107,20 @@ GPU_DEVICE=cuda
 ### 3. Run
 
 ```bash
-python main.py
+python main.py          # full mode: voice engine + web dashboard + LLM Brain
 ```
 
 Charlie will initialize the voice engine, download models on first run, and start listening.
+The web dashboard is served at http://127.0.0.1:8000 (same process).
+
+> **Note on the dashboard and chat:** the web UI and the LLM Brain are one system.
+> In **full mode** the dashboard is fully live - chat and voice both route through the
+> Brain. The `--web-only` flag serves the UI without the Brain, so chat will not get
+> a reply (use it only for static UI inspection).
+
+```bash
+python run.py --web-only   # UI only, no voice/LLM backend
+```
 
 ---
 
@@ -117,19 +130,19 @@ All settings are via environment variables (`.env` file). See `.env.example` for
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLM_URL` | (required) | OpenAI-compatible API base URL |
-| `LLM_API_KEY` | (required) | API key for the LLM |
-| `LLM_MODEL` | (required) | Model ID to use |
+| `SMALL_LLM_URL` | (required) | OpenAI-compatible API base URL |
+| `SMALL_LLM_API_KEY` | (required) | API key for the small LLM |
+| `SMALL_LLM_MODEL` | (required) | Model ID to use |
 | `SEARXNG_URL` | (empty) | Self-hosted SearXNG URL for private search |
 | `WHISPER_MODEL` | `large-v3` | Whisper model for ASR |
 | `KOKORO_VOICE` | `af_heart` | Kokoro TTS voice |
 | `VAD_THRESHOLD` | `0.25` | Voice activity detection sensitivity (RMS) |
 | `SILENCE_TIMEOUT` | `0.6` | Seconds of silence before processing |
 | `ENABLE_BARGE_IN` | `true` | Allow interrupting Charlie mid-response |
-| `LLM_DISABLE_REASONING` | `true` | Disable chain-of-thought for lower latency |
-| `FALLBACK_LLM_URL` | (empty) | Secondary LLM endpoint for automatic failover |
-| `FALLBACK_LLM_API_KEY` | `no-key` | API key for the fallback LLM |
-| `FALLBACK_LLM_MODEL` | (empty) | Model ID for the fallback LLM |
+| `SMALL_LLM_DISABLE_REASONING` | `true` | Disable chain-of-thought for lower latency |
+| `BIG_LLM_URL` | (empty) | Secondary LLM endpoint for automatic failover |
+| `BIG_LLM_API_KEY` | `no-key` | API key for the big LLM |
+| `BIG_LLM_MODEL` | (empty) | Model ID for the big LLM |
 
 ---
 
@@ -178,13 +191,18 @@ Set `SEARXNG_URL` in `.env` for the best experience.
     personality.py      # Emotion detection
     asr_worker.py       # ASR subprocess
     session_store.py    # Session database
-    charlie.onnx        # Embedding model
+    web_server.py       # FastAPI web server + WebSocket
+  frontend/             # Next.js 16 + React 19 + Zustand dashboard
+    src/app/page.tsx    # Main page (WebSocket, layout)
+    src/components/     # VoiceDock, Sidebar, SmartPanel, ErrorBoundary
+    src/store/          # Zustand store (useCharlieStore)
   models/
     kokoro-v1.0.onnx    # Kokoro TTS model (~310MB)
     voices-v1.0.bin     # Voice embeddings (~27MB)
   tests/
     test_personality.py
     test_tools.py
+    test_fastpaths.py
   logs/
     charlie.log
 ```
@@ -194,14 +212,15 @@ Set `SEARXNG_URL` in `.env` for the best experience.
 ## Development
 
 ```bash
-# Run linter
+# Backend: lint + test
 uv run ruff check .
-
-# Run tests
 uv run pytest -v
 
-# Run both
-uv run ruff check . && uv run pytest -v
+# Frontend: type-check + test
+cd frontend && npx tsc --noEmit && npm test
+
+# Frontend: dev server (for dashboard)
+cd frontend && npm run dev
 ```
 
 ---

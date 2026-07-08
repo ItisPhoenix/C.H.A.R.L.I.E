@@ -128,6 +128,17 @@ class VoiceEngine:
         self.speech_echo_max_words = _ECHO_MAX_WORDS
         self._widget_callback = None
 
+        # Speaker output state (driven by the dashboard audio controls).
+        # `muted` silences TTS playback; `volume` is a 0.0-1.0 linear gain
+        # applied to the audio samples before they reach the output device.
+        self.muted: bool = False
+        self.volume: float = 1.0
+
+        # Microphone input state. `mic_muted` drops captured frames before
+        # they reach ASR so the assistant stops listening without killing the
+        # audio device. Distinct from `muted`, which only affects speakers.
+        self.mic_muted: bool = False
+
         # ASR state
         self.asr_input_queue: mp.Queue = mp.Queue(maxsize=8)
         self.asr_output_queue: mp.Queue = mp.Queue(maxsize=8)
@@ -154,6 +165,47 @@ class VoiceEngine:
     def set_wake_word_callback(self, cb: Callable[[], None]) -> None:
         """Register callback for wake-word detection events."""
         self._on_wake_word = cb
+
+    def set_event_bus(self, bus: object) -> None:
+        """Hand the voice engine a reference to the event bus so it can
+        publish real-time audio levels from the playback/mic threads. Also
+        captures the running event loop so audio threads can schedule emits."""
+        self._event_bus = bus
+        try:
+            self._event_loop = asyncio.get_event_loop()
+        except RuntimeError:
+            self._event_loop = None
+
+    def _emit_audio_level(self, level: float) -> None:
+        """Publish a normalized 0.0-1.0 audio amplitude on the event bus.
+
+        Throttled to ~50ms so a fast playback loop doesn't flood subscribers.
+        Runs from audio threads; the bus lives on the async loop, so we
+        schedule the emit there.
+        """
+        bus = getattr(self, "_event_bus", None)
+        loop = getattr(self, "_event_loop", None)
+        if bus is None or loop is None:
+            return
+        now = time.monotonic()
+        last = getattr(self, "_last_level_emit", 0.0)
+        if now - last < 0.05:
+            return
+        self._last_level_emit = now
+        try:
+            asyncio.run_coroutine_threadsafe(
+                bus.emit("audio_level", {"level": level}), loop
+            )
+        except Exception:
+            logger.debug("audio_level emit failed", exc_info=True)
+
+    @staticmethod
+    def _rms(samples: "np.ndarray") -> float:
+        """Root-mean-square amplitude of a float32 audio buffer, 0.0-1.0."""
+        arr = np.asarray(samples, dtype=np.float32)
+        if arr.size == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(np.square(arr))))
 
     def _ensure_models(self):
         os.makedirs(self.config.kokoro_model_dir, exist_ok=True)
@@ -248,6 +300,32 @@ class VoiceEngine:
             except queue.Empty:
                 break
         sd.stop()
+
+    def set_audio_state(self, muted: Optional[bool] = None, volume: Optional[float] = None) -> dict:
+        """Apply dashboard speaker controls. Returns the resulting state.
+
+        `muted` toggles silence; `volume` is a 0.0-1.0 linear gain. Either may
+        be omitted to leave the existing value unchanged.
+        """
+        if muted is not None:
+            self.muted = bool(muted)
+        if volume is not None:
+            self.volume = max(0.0, min(1.0, float(volume)))
+        return {"muted": self.muted, "volume": self.volume}
+
+    def get_audio_state(self) -> dict:
+        return {"muted": self.muted, "volume": self.volume}
+
+    def set_mic_state(self, mic_muted: bool) -> dict:
+        """Toggle the microphone input gate. When muted, captured audio is
+        dropped before ASR so the assistant stops hearing the user without
+        tearing down the audio device. Returns the resulting mic state.
+        """
+        self.mic_muted = bool(mic_muted)
+        return {"mic_muted": self.mic_muted}
+
+    def get_mic_state(self) -> dict:
+        return {"mic_muted": self.mic_muted}
 
     # -----------------------------------------------------------------------
     # Text humanization -- the single control point for TTS prosody
@@ -531,6 +609,15 @@ class VoiceEngine:
 
                 samples, sample_rate, mouth_values = item
 
+                # Apply dashboard volume gain; a muted device still drives the
+                # speaking callbacks (so the UI reflects state) but emits silence.
+                gain = 0.0 if self.muted else max(0.0, min(1.0, self.volume))
+                if gain != 1.0:
+                    samples = np.asarray(samples, dtype=np.float32) * gain
+
+                # Publish real TTS amplitude (drops to ~0.0 when muted).
+                self._emit_audio_level(self._rms(samples))
+
                 # First chunk of a new TTS run
                 if not tts_started_fired:
                     tts_started_fired = True
@@ -777,12 +864,17 @@ class VoiceEngine:
 
     def _play_wake_chime(self) -> None:
         """Play a short chime on wake-word detection. Non-blocking."""
+        # Respect the dashboard speaker controls.
+        gain = 0.0 if self.muted else max(0.0, min(1.0, self.volume))
+        if gain == 0.0:
+            return
         chime_path = self.config.wake_word_audio_chime_path
         try:
             if os.path.exists(chime_path):
                 import soundfile as sf
 
                 samples, sr = sf.read(chime_path, dtype="float32")
+                samples = np.asarray(samples, dtype=np.float32) * gain
                 # Play in a thread so we don't block the audio loop
                 threading.Thread(
                     target=sd.play, args=(samples, sr), daemon=True
@@ -792,7 +884,7 @@ class VoiceEngine:
                 sr = 16000
                 duration = 0.2
                 t = np.linspace(0, duration, int(sr * duration), dtype=np.float32)
-                chime = 0.3 * np.sin(2 * np.pi * 440 * t)
+                chime = 0.3 * np.sin(2 * np.pi * 440 * t) * gain
                 # Quick fade-in/out to avoid clicks
                 fade = min(int(sr * 0.02), len(chime))
                 chime[:fade] *= np.linspace(0, 1, fade)
@@ -808,6 +900,10 @@ class VoiceEngine:
         block_size = 1024
 
         def _callback(indata, frames, time_info, status):
+            # Mic muted: drop the frame before ASR and stop publishing its
+            # level so the VU meter reads flat instead of faking live audio.
+            if self.mic_muted:
+                return
             # Avoid logging on the audio thread; check status flag silently or log on debug
             try:
                 self._audio_queue.put_nowait(indata.copy())
@@ -820,6 +916,9 @@ class VoiceEngine:
                     self._audio_queue.put_nowait(indata.copy())
                 except queue.Full:
                     pass  # drop oldest frame on overflow
+            # Publish live mic amplitude from every captured frame (throttled
+            # in _emit_audio_level). Near-zero when quiet, rises with speech.
+            self._emit_audio_level(self._rms(indata))
 
         self._audio_queue: queue.Queue = queue.Queue(maxsize=32)
 

@@ -97,6 +97,16 @@ async def _event_bridge():
         elif etype == "system_status":
             global _system_status
             _system_status = event.get("payload", {})
+        elif etype == "audio_state":
+            global _audio_state
+            _audio_state = event.get("payload", {})
+        elif etype == "audio_level":
+            global _audio_level
+            payload = event.get("payload", {})
+            _audio_level = float(payload.get("level", 0.0))
+        elif etype == "mic_state":
+            global _mic_state
+            _mic_state = event.get("payload", {})
 
         await broadcast(event)
 
@@ -311,6 +321,15 @@ _system_status: dict = {
     "active_agents": [],
 }
 _active_frontend_session: str | None = None
+_audio_state: dict = {
+    "muted": False,
+    "volume": 1.0,
+}
+_mic_state: dict = {
+    "mic_muted": False,
+}
+_audio_level: float = 0.0
+
 
 
 @app.get("/api/blackboard")
@@ -323,6 +342,24 @@ async def get_blackboard():
 async def get_system_status():
     """Return current system resource usage."""
     return _system_status
+
+
+@app.get("/api/audio")
+async def get_audio_state():
+    """Return current speaker mute/volume state."""
+    return _audio_state
+
+
+@app.get("/api/mic")
+async def get_mic_state():
+    """Return current microphone mute state."""
+    return _mic_state
+
+
+@app.get("/api/audio-level")
+async def get_audio_level():
+    """Return the latest real-time audio amplitude (0.0-1.0)."""
+    return {"level": _audio_level}
 
 
 @app.get("/api/memory/facts")

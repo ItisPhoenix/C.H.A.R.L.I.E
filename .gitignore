@@ -1,37 +1,52 @@
-# Environment - contains API keys and secrets
+# === Charlie Secrets & Data ===
 .env
 .env.local
 .env.*.local
 
-# Python
+# === Python ===
 __pycache__/
 *.pyc
 *.pyo
+.venv/
+venv/
 
-# Logs
+# === Logs ===
 logs/
 *.log
 
-# Databases
+# === Databases (contain conversation history) ===
 *.db
 *.db-wal
 *.db-shm
 sessions.db
 
-# Models (large files)
+# === ML Models (large files) ===
 models/
+charlie_memory_db/
 
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-Thumbs.db
-# Personal data - contains user preferences and memory
+# === Personal Data (user preferences, memory, personality) ===
 MEMORY.md
 USER.md
 SOUL.md
 
-# ChromaDB runtime state (full directory)
-charlie_memory_db/
+# === IDE ===
+.vscode/
+.idea/
+.cursor/
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Frontend ===
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.env*
+
+# === Sensitive Artifacts ===
+*.key
+*.pem
+*.cert

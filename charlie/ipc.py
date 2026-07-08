@@ -74,17 +74,23 @@ class EventBus:
         ):
             if sock is not None:
                 try:
-                    sock.close()
+                    sock.close(linger=0)
                 except Exception:
                     pass
-        self.ctx.term()
+        try:
+            self.ctx.term()
+        except Exception:
+            pass
 
     async def emit(self, event_type: str, payload: dict):
         """Producer only. Publishes an event to all subscribers."""
         if not self.is_producer or not self._pub_socket:
-            raise RuntimeError("emit() called on consumer EventBus")
+            return
         data = json.dumps({"type": event_type, "payload": payload})
-        await self._pub_socket.send_string(data)
+        try:
+            await self._pub_socket.send_string(data)
+        except zmq.ZMQError:
+            logger.debug("emit_dropped_socket_closed | type=%s", event_type)
 
     async def next_command(self) -> dict:
         """Producer only. Blocks until a command arrives from the web process."""
@@ -105,6 +111,9 @@ class EventBus:
     async def send_command(self, command: dict):
         """Consumer only. Sends a command to the voice process."""
         if self.is_producer or not self._push_socket:
-            raise RuntimeError("send_command() called on producer EventBus")
+            return
         data = json.dumps(command)
-        await self._push_socket.send_string(data)
+        try:
+            await self._push_socket.send_string(data)
+        except zmq.ZMQError:
+            logger.debug("send_command_dropped_socket_closed")

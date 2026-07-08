@@ -14,7 +14,7 @@ logger = logging.getLogger("charlie.streaming")
 async def parse_sse_stream(
     response: Any,
     generation: int,
-    current_generation: int,
+    current_generation_getter: Callable[[], int],
     on_content: Optional[Callable[[str], None]] = None,
 ) -> Tuple[str, Dict[int, Dict[str, str]], bool]:
     """Parse an SSE stream from an OpenAI-compatible chat completions endpoint.
@@ -22,7 +22,7 @@ async def parse_sse_stream(
     Args:
         response: An httpx async response with aiter_lines().
         generation: The expected generation number (for cancel detection).
-        current_generation: Brain's current _chat_generation value.
+        current_generation_getter: A callable returning the current generation value.
         on_content: Optional callback invoked with each content token.
             If None, content is only accumulated (for _stream_completion).
             If provided, content is accumulated AND passed to the callback
@@ -38,7 +38,7 @@ async def parse_sse_stream(
     cancelled = False
 
     async for line in response.aiter_lines():
-        if current_generation != generation:
+        if current_generation_getter() != generation:
             cancelled = True
             break
         if not line.startswith("data: "):
@@ -73,3 +73,90 @@ async def parse_sse_stream(
             continue
 
     return accumulated, tc_by_index, cancelled
+
+
+class TextStreamFilter:
+    """Filter stream to block <think>...</think> blocks and lines starting with TOOL:."""
+    def __init__(self):
+        self.buffer = ""
+        self.in_thinking = False
+        self.in_tool_line = False
+
+    def push(self, chunk: str) -> str:
+        self.buffer += chunk
+        output = ""
+
+        while True:
+            if self.in_thinking:
+                end_idx = self.buffer.find("</think>")
+                if end_idx != -1:
+                    self.buffer = self.buffer[end_idx + 8:]
+                    self.in_thinking = False
+                    continue
+                else:
+                    keep_len = len("</think>") - 1
+                    if len(self.buffer) > keep_len:
+                        self.buffer = self.buffer[-keep_len:]
+                    break
+
+            if self.in_tool_line:
+                newline_idx = self.buffer.find("\n")
+                if newline_idx != -1:
+                    self.buffer = self.buffer[newline_idx + 1:]
+                    self.in_tool_line = False
+                    continue
+                else:
+                    self.buffer = ""
+                    break
+
+            # Find tags in buffer
+            think_idx = self.buffer.find("<think>")
+            tool_idx = self.buffer.find("TOOL:")
+
+            indices = []
+            if think_idx != -1:
+                indices.append((think_idx, "think"))
+            if tool_idx != -1:
+                indices.append((tool_idx, "tool"))
+
+            if not indices:
+                # No tags, check for partial match prefixes at end
+                max_partial = 0
+                for pattern in ("<think>", "TOOL:"):
+                    for i in range(1, len(pattern)):
+                        prefix = pattern[:i]
+                        if self.buffer.endswith(prefix):
+                            max_partial = max(max_partial, len(prefix))
+
+                if max_partial > 0:
+                    yield_len = len(self.buffer) - max_partial
+                    if yield_len > 0:
+                        output += self.buffer[:yield_len]
+                        self.buffer = self.buffer[yield_len:]
+                else:
+                    output += self.buffer
+                    self.buffer = ""
+                break
+            else:
+                indices.sort()
+                first_idx, tag_type = indices[0]
+                if first_idx > 0:
+                    output += self.buffer[:first_idx]
+                    self.buffer = self.buffer[first_idx:]
+
+                if tag_type == "think":
+                    self.in_thinking = True
+                    self.buffer = self.buffer[7:]
+                elif tag_type == "tool":
+                    self.in_tool_line = True
+                    self.buffer = self.buffer[5:]
+                continue
+
+        return output
+
+    def flush(self) -> str:
+        if not self.in_thinking and not self.in_tool_line:
+            ret = self.buffer
+            self.buffer = ""
+            return ret
+        return ""

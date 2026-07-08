@@ -4,6 +4,29 @@ All notable changes to Charlie (the voice-first AI assistant) are documented her
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+### Live Chat & Voice UI Sync (2026-07-09)
+- **Critical - Token Duplication:** `main.py` emitted BOTH a per-chunk `token` event AND a sentence-boundary `token` event for every reply, doubling the assistant text in the chat. Now emits a single sentence-boundary stream.
+- **Critical - Thinking Leak:** Raw model chunks (which can include `<thinking>` blocks) were sent to the chat UI. Added `_strip_think()` so reasoning never reaches the transcript.
+- **High - Static Chat:** `updateLastMessageContent` replaced the assistant bubble instead of appending, so tokens never accumulated live. Now appends streamed tokens into a single growing bubble.
+- **High - STT in Chat:** The backend streams recognized speech as `transcript` events, but the UI ignored them. Added a `transcript` handler that surfaces spoken input as a user bubble.
+- **High - Fresh Session per Launch:** The dashboard reused the first existing session on load. Now creates a new session on every start so conversations don't inherit prior history.
+- **Medium - Audio Dock Duplicate State:** `VoiceDock` rendered the global voice `state` twice (centered label + "Voice Link" block). The mic block now shows mic status (offline/muted/live) instead of duplicating the state word.
+- **Backend Binding:** Confirmed the dashboard and Brain/LLM are one system - chat requires full mode (`run.py`), since the WebSocket `chat` command is forwarded to `main.py` via the event bus. Web-only mode serves the UI but cannot answer.
+
+### Frontend Codebase Audit & Fix (2026-07-05)
+- **Critical - Blackboard Sync:** Fixed WebSocket handler checking `msg.type === "blackboard"` instead of `"blackboard_update"`, which caused the Swarm HUD to never update.
+- **Critical - Fallback Chat Endpoint:** Added missing `/api/sessions/{id}/chat` endpoint to `web_server.py`, so chat messages no longer 404 when WebSocket is down.
+- **Stale Cleanup:** Removed unused `HelpCircle` import from VoiceDock, deleted dead `sendActivity()` function, removed stale `useRef`/`useEffect` from WaveformBar, removed unused `handleSearch`/`setSearchQuery` from SmartPanel.
+- **Slop Cleanup:** Removed unused `MessageSquare`, `CheckCircle`, `XCircle` imports from Sidebar, removed redundant `handleSendMessage` variable and inline `apiCall` helper.
+- **Duplicate Removal:** Removed redundant `useEffect` for focus management in MainWorkspace.
+- **ErrorBoundary:** Added production-ready React ErrorBoundary with fallback UI and dev-mode error details.
+- **Test Coverage:** Added comprehensive Zustand store unit tests (23 tests covering all CRUD operations).
+- **Docs Update:** Replaced stale Tauri 2.0 references with Next.js 16 + React 19. Updated project structure. Added frontend dev commands.
+### Agentic OS Foundation (2026-07-05)
+- **Config Toggles:** Added `blackboard_enabled`, `swarm_enabled`, `reflection_enabled`, `mcp_enabled`, `plugins_enabled` to `Config` dataclass with env var backing.
+- **Module Boundaries:** Expanded AGENTS.md module table to include `blackboard.py`, `swarm.py`, `agents/`, `memory_v2.py`, `memory_graph.py`, `reflection.py`, `mcp_client.py`, `plugins.py`.
+- **Environment:** Added Agentic OS toggle section to `.env.example` with all 5 new env vars.
+- **Version bump:** `1.1.0` -> `2.0.0-alpha.1` for Agentic OS milestone.
 ### Stabilization Pass (2026-06-27)
 - **CI/CD:** Added GitHub Actions workflow with ruff lint + pytest.
 - **Fast-path extraction:** Extracted `_normalize_app_list` and related constants to `charlie/text_utils.py` for testability.

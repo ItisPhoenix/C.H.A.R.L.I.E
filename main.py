@@ -107,7 +107,13 @@ _LAUNCH_ID: str = str(uuid.uuid4())
 # First sentence: speak after first sentence boundary. Force-flush at 200 chars if no boundary.
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
 _CLAUSE_BOUNDARY = re.compile(r"(?<=[,;])\s+")
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _MAX_FLUSH_CHARS = 200  # Force-flush at word boundary if no sentence boundary seen
+
+
+def _strip_think(text: str) -> str:
+    """Remove reasoning/thought blocks so they never reach the chat UI."""
+    return _THINK_RE.sub("", text).strip()
 
 
 async def main():
@@ -416,7 +422,10 @@ async def main():
             full_reply_buffer += chunk
             web_buffer += chunk
 
-            # Emit web UI token: buffer until sentence boundary for coherent display
+            # Real-time UI token stream: emit whole sentences as they complete.
+            # This is the ONLY source of "token" events for the chat UI, so the
+            # text accumulates without duplication. Thought blocks are stripped
+            # here so reasoning never leaks into the chat.
             if event_bus and _SENTENCE_BOUNDARY.search(web_buffer):
                 parts = _SENTENCE_BOUNDARY.split(web_buffer)
                 for part in parts[:-1]:
@@ -424,7 +433,10 @@ async def main():
                         asyncio.create_task(
                             event_bus.emit(
                                 "token",
-                                {"text": part.strip() + ". ", "session_id": session_id},
+                                {
+                                    "text": _strip_think(part.strip()) + ". ",
+                                    "session_id": session_id,
+                                },
                             )
                         )
                 web_buffer = parts[-1]
@@ -485,29 +497,40 @@ async def main():
         if event_bus and web_buffer.strip():
             asyncio.create_task(
                 event_bus.emit(
-                    "token", {"text": web_buffer.strip(), "session_id": session_id}
+                    "token",
+                    {
+                        "text": _strip_think(web_buffer.strip()),
+                        "session_id": session_id,
+                    },
                 )
             )
 
-        # Final TTS -- chunks already printed everything
+        # Final TTS -- chunks already printed everything.
+        # Guard so a TTS failure cannot swallow archiving or response_done.
         if sentence_buffer.strip():
-            voice.speak(sparkle + sentence_buffer, detected_emotion)
-
-        # Emit response_done event
-        if event_bus:
-            asyncio.create_task(
-                event_bus.emit("response_done", {"session_id": session_id})
-            )
-
-        # Archive assistant reply
-        if full_reply_buffer.strip():
             try:
-                store.append("assistant", full_reply_buffer, session_id=session_id)
+                voice.speak(sparkle + sentence_buffer, detected_emotion)
+            except Exception:
+                logger.warning("Final TTS flush failed", exc_info=True)
+
+        # Persist whatever was generated. full_reply_buffer may be empty if the
+        # turn was cancelled (e.g. voice barge-in); fall back to the streamed
+        # web_buffer so a generated answer is never silently dropped.
+        final_reply = full_reply_buffer.strip() or web_buffer.strip()
+        if final_reply:
+            try:
+                store.append("assistant", final_reply, session_id=session_id)
                 store.touch_session(session_id)
             except Exception as e:
                 logger.warning(
                     f"Failed to archive assistant message or touch session: {e}"
                 )
+
+        # Emit response_done event so the UI can stop its typing indicator.
+        if event_bus:
+            asyncio.create_task(
+                event_bus.emit("response_done", {"session_id": session_id})
+            )
 
         # Learning loop: deferred to background -- doesn't block next turn
         if full_reply_buffer.strip() and text.strip():
@@ -601,6 +624,17 @@ async def main():
                         # Feed the feedback/approval into the swarm orchestrator or task result
                         blackboard.update_task(task_id, status="done" if approved else "failed")
                         await event_bus.emit("blackboard_update", blackboard.snapshot())
+                elif cmd_type == "audio_control":
+                    payload = cmd.get("payload", {})
+                    state = voice.set_audio_state(
+                        muted=payload.get("muted"),
+                        volume=payload.get("volume"),
+                    )
+                    await event_bus.emit("audio_state", state)
+                elif cmd_type == "mic_control":
+                    payload = cmd.get("payload", {})
+                    mic_state = voice.set_mic_state(bool(payload.get("mic_muted", True)))
+                    await event_bus.emit("mic_state", mic_state)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -681,6 +715,36 @@ async def main():
         print(f"\rCharlie: {welcome_msg}", flush=True)
         voice.speak(welcome_msg, "neutral")
 
+        # Real GPU utilization, re-read every tick so the dashboard reflects
+        # live load. Cached briefly (1s) to avoid hammering nvidia-smi on every
+        # status emit; falls back to 0.0 only when no NVIDIA GPU is present.
+        _gpu_reader: dict = {"value": 0.0, "ts": 0.0}
+
+        def _read_gpu_percent() -> float:
+            now = time.monotonic()
+            if now - _gpu_reader["ts"] < 1.0:
+                return _gpu_reader["value"]
+            _gpu_reader["ts"] = now
+            try:
+                out = subprocess.run(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=utilization.gpu",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=2.0,
+                    check=False,
+                )
+                if out.returncode == 0 and out.stdout.strip():
+                    _gpu_reader["value"] = float(out.stdout.strip().splitlines()[0].strip())
+                else:
+                    _gpu_reader["value"] = 0.0
+            except (FileNotFoundError, subprocess.SubprocessError, ValueError, OSError):
+                _gpu_reader["value"] = 0.0
+            return _gpu_reader["value"]
+
         async def _emit_system_status_and_blackboard(bus):
             import psutil
             try:
@@ -691,12 +755,12 @@ async def main():
                     await bus.emit("system_status", {
                         "cpu": cpu_percent,
                         "ram": ram_percent,
-                        "gpu": 0.0,
+                        "gpu": _read_gpu_percent(),
                         "active_agents": list(swarm.active_agents) if hasattr(swarm, "active_agents") else []
                     })
                     # Emit blackboard update
                     await bus.emit("blackboard_update", blackboard.snapshot())
-                    await asyncio.sleep(3.0)
+                    await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 pass
             except Exception as e:
@@ -705,6 +769,7 @@ async def main():
         # Run voice loop + web command consumer concurrently via ZeroMQ
         async with EventBus(pub_port=5555, pull_port=5556, is_producer=True) as bus:
             event_bus = bus
+            voice.set_event_bus(bus)
 
             class ZmqLogHandler(logging.Handler):
                 def emit(self, record):

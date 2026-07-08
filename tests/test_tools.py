@@ -32,6 +32,9 @@ def test_registry_registration_and_schema():
         "memory",
         "vector_memory",
         "session_search",
+        "graph_add_fact",
+        "graph_query",
+        "graph_consolidate",
     }
     assert any(
         d["function"]["parameters"]["required"] == ["query"] for d in definitions
