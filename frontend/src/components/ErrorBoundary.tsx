@@ -31,18 +31,18 @@ export class ErrorBoundary extends React.Component<
   render() {
     if (this.state.hasError) {
       return (
-        <div className="flex h-full w-full items-center justify-center bg-[var(--bg-primary)] p-8">
-          <div className="max-w-md rounded-xl border border-[var(--border-primary)] bg-[var(--bg-elevated)] p-8 text-center">
+        <div className="flex h-full w-full items-center justify-center bg-[var(--color-canvas)] p-8">
+          <div className="max-w-md rounded-xl border border-[var(--color-glass-border)] bg-[var(--color-glass-bg)] p-8 text-center">
             <div className="mb-4 text-4xl">!</div>
-            <h2 className="mb-2 text-lg font-semibold text-[var(--text-primary)]">
+            <h2 className="mb-2 text-lg font-semibold text-[var(--color-text-primary)]">
               Something went wrong
             </h2>
-            <p className="mb-4 text-sm text-[var(--text-secondary)]">
+            <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
               {this.state.error?.message || "An unexpected error occurred."}
             </p>
             <button
               onClick={() => this.setState({ hasError: false, error: null })}
-              className="rounded-lg bg-[var(--accent-primary)] px-4 py-2 text-sm font-medium text-white hover:opacity-90 transition-opacity"
+              className="rounded-lg bg-[var(--color-aurora)] px-4 py-2 text-sm font-medium text-white hover:opacity-90 transition-opacity"
             >
               Try Again
             </button>

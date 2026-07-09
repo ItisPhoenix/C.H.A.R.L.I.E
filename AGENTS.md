@@ -111,7 +111,7 @@ Use the exact tuple `("no-key", "no_key")`. Never `== "no-key"` alone -- this ha
 
 - **PipelineTimer reset** MUST happen in `voice.py` at VAD onset, not in `main.py`.
 - **Barge-in** must call `voice.stop_tts()`, `brain.cancel_chat()`, then set cooldown. Check `chat_generation >= generation` for cancel, not `cancel_chat_event.is_set()`.
-- **TTS flush**: Sentence boundaries first, then clause, then force-flush at 100 chars.
+- **TTS flush**: Sentence boundaries first, then clause, then force-flush at 250 chars.
 - **Text humanization** runs in `voice.py:speak()` before queuing to Kokoro. Strip markdown, normalize unicode, convert dashes to commas, remove wrapper quotes.
 - **Streaming-first**: All data flows as generators. Time-To-First-Audio must be prioritized.
 - **Text normalization**: `_normalize_app_list()` in `main.py` inserts "and" between app names in multi-app commands before LLM call.
@@ -137,7 +137,7 @@ Additional checks for significant changes:
 
 | Pattern | Rule |
 |---|---|
-| **WebSocket events** | Backend emits `"blackboard_update"`, `"system_status"`, `"chat_stream"`. Frontend handlers MUST match these exact strings. |
+| **WebSocket events** | Backend emits `"blackboard_update"`, `"system_status"`, `"token"`, `"transcript"`, `"thinking"`, `"speaking_start"`, `"speaking_stop"`, `"response_done"`. Frontend handlers MUST match these exact strings. (Note: the chat reply arrives as `"token"` events, NOT `"chat_stream"`.) |
 | **ErrorBoundary** | Wrap main layout in `<ErrorBoundary>` (from `components/ErrorBoundary.tsx`). Catches render errors and shows fallback UI. |
 | **Unused imports** | No `React` import with React 19 (automatic JSX transform). No unused `lucide-react` icons. |
 | **Props interface** | All props passed to a component MUST be declared in its `Props` interface. TypeScript `--noUnusedLocals` must pass. |

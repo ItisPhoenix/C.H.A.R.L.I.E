@@ -9,40 +9,37 @@ import { VoiceDock } from "../components/VoiceDock";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 
 export default function Page() {
-  const {
-    connected,
-    setConnected,
-    systemStatus,
-    setSystemStatus,
-    sessions,
-    setSessions,
-    currentSessionId,
-    setCurrentSessionId,
-    messages,
-    setMessages,
-    messagesLoading,
-    setMessagesLoading,
-    logs,
-    alerts,
-    addLog,
-    addAlert,
-    blackboard,
-    setBlackboard,
-    voiceState,
-    setVoiceState,
-    audio,
-    setAudio,
-    mic,
-    setMic,
-    setAudioLevel,
-    updateLastMessageContent,
-    addMessage,
-  } = useCharlieStore();
+  const connected = useCharlieStore((s) => s.connected);
+  const setConnected = useCharlieStore((s) => s.setConnected);
+  const systemStatus = useCharlieStore((s) => s.systemStatus);
+  const setSystemStatus = useCharlieStore((s) => s.setSystemStatus);
+  const sessions = useCharlieStore((s) => s.sessions);
+  const setSessions = useCharlieStore((s) => s.setSessions);
+  const currentSessionId = useCharlieStore((s) => s.currentSessionId);
+  const setCurrentSessionId = useCharlieStore((s) => s.setCurrentSessionId);
+  const messages = useCharlieStore((s) => s.messages);
+  const setMessages = useCharlieStore((s) => s.setMessages);
+  const messagesLoading = useCharlieStore((s) => s.messagesLoading);
+  const setMessagesLoading = useCharlieStore((s) => s.setMessagesLoading);
+  const addLog = useCharlieStore((s) => s.addLog);
+  const addAlert = useCharlieStore((s) => s.addAlert);
+  const blackboard = useCharlieStore((s) => s.blackboard);
+  const setBlackboard = useCharlieStore((s) => s.setBlackboard);
+  const voiceState = useCharlieStore((s) => s.voiceState);
+  const setVoiceState = useCharlieStore((s) => s.setVoiceState);
+  const audio = useCharlieStore((s) => s.audio);
+  const setAudio = useCharlieStore((s) => s.setAudio);
+  const mic = useCharlieStore((s) => s.mic);
+  const setMic = useCharlieStore((s) => s.setMic);
+  const setAudioLevel = useCharlieStore((s) => s.setAudioLevel);
+  const updateLastMessageContent = useCharlieStore((s) => s.updateLastMessageContent);
+  const addMessage = useCharlieStore((s) => s.addMessage);
 
   const [railCollapsed, setRailCollapsed] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptsRef = useRef<number>(0);
   const abortRef = useRef<AbortController | null>(null);
   const connectWSRef = useRef<(() => void) | null>(null);
   const currentSessionIdRef = useRef<string>("");
@@ -110,6 +107,7 @@ export default function Page() {
 
     socket.onopen = () => {
       setConnected(true);
+      reconnectAttemptsRef.current = 0;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;
@@ -125,7 +123,9 @@ export default function Page() {
     socket.onclose = () => {
       setConnected(false);
       wsRef.current = null;
-      reconnectTimeoutRef.current = setTimeout(() => connectWSRef.current?.(), 3000);
+      const attempt = reconnectAttemptsRef.current++;
+      const delay = Math.min(3000 * 2 ** attempt, 30000);
+      reconnectTimeoutRef.current = setTimeout(() => connectWSRef.current?.(), delay);
     };
 
     socket.onerror = (err) => {
@@ -158,23 +158,18 @@ export default function Page() {
         } else if (msg.type === "mic_state") {
           setMic({ mic_muted: Boolean(msg.payload?.mic_muted) });
         } else if (msg.type === "session_updated") {
-          // Renamed from another surface: merge the new title into the rail.
           const sid = msg.session_id || msg.payload?.session_id;
           const title = msg.title || msg.payload?.title;
-          if (sid && title) {
-            setSessions(
-              sessions.map((s) => (s.id === sid ? { ...s, title } : s))
-            );
-          }
-        } else if (msg.type === "session_update") {
-          const payload = msg.payload || {};
-          if (payload.deleted) {
-            const sid = msg.session_id || payload.session_id;
-            const remaining = sessions.filter((s) => s.id !== sid);
-            setSessions(remaining);
-            if (currentSessionId === sid) {
-              setCurrentSessionId(remaining[0]?.id ?? "");
+          const deleted = msg.payload?.deleted;
+          if (sid && deleted) {
+            const cur = useCharlieStore.getState().sessions;
+            setSessions(cur.filter((s) => s.id !== sid));
+            if (useCharlieStore.getState().currentSessionId === sid) {
+              setCurrentSessionId("");
             }
+          } else if (sid && title) {
+            const cur = useCharlieStore.getState().sessions;
+            setSessions(cur.map((s) => (s.id === sid ? { ...s, title } : s)));
           }
         } else if (msg.type === "audio_level") {
           const level = typeof msg.payload?.level === "number" ? msg.payload.level : 0;
@@ -193,21 +188,21 @@ export default function Page() {
         // "transcript" events. Surface the final utterance as a user bubble
         // in the active session so voice and chat stay in one thread.
         else if (msg.type === "transcript") {
+          const eventSession = msg.session_id || msg.payload?.session_id;
+          if (eventSession && eventSession !== currentSessionIdRef.current) return;
           const spoken = (msg.payload?.text || "").trim();
           if (spoken) {
             addMessage({ role: "user", content: spoken });
             addMessage({ role: "assistant", content: "" });
           }
         }
-        // Handle real-time token stream. Render into the active session
-        // regardless of the payload session_id so a reply is never dropped
-        // due to a transient session-id mismatch. Voice and chat both stream
-        // into the same active session, keeping them synced.
+        // Handle real-time token stream. Only render tokens for the active
+        // session; the server also filters by subscription, but we guard
+        // here too so a stray cross-session token can never bleed in.
         else if (msg.type === "token") {
+          const eventSession = msg.session_id || msg.payload?.session_id;
+          if (eventSession && eventSession !== currentSessionIdRef.current) return;
           updateLastMessageContent(msg.payload?.text || "");
-        } else if (msg.type === "response_done") {
-          // Force reload to get final transcript alignment
-          fetchMessages(currentSessionIdRef.current);
         }
       } catch (err) {
         console.error("Error parsing WS event packet:", err);

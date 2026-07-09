@@ -6,7 +6,7 @@ spawns worker agents, and handles escalation on failure.
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from charlie.agents import AGENT_REGISTRY
 from charlie.agents.base import BaseAgent
@@ -32,8 +32,14 @@ class SwarmOrchestrator:
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_AGENTS)
         self._active_tasks: Dict[str, asyncio.Task] = {}
         self._agent_instances: Dict[str, BaseAgent] = {}
+        self._active_agents: set[str] = set()
         self._running = False
         self._broadcast = broadcast_callback  # Optional: async fn(snapshot)
+
+    @property
+    def active_agents(self) -> List[str]:
+        """Names of agents currently executing a task."""
+        return sorted(self._active_agents)
 
     def _get_agent(self, name: str) -> Optional[BaseAgent]:
         """Get or create agent instance by name."""
@@ -60,6 +66,7 @@ class SwarmOrchestrator:
                 result=f"Agent '{task.assigned_to}' not found",
             )
             return
+        self._active_agents.add(agent.name)
         self.blackboard.update_agent(agent.name, status="working", current_task=task.name)
         self.blackboard.update_task(task.id, status="running", column="in_progress")
         await self._broadcast_state()
@@ -68,9 +75,15 @@ class SwarmOrchestrator:
                 result = await agent.execute(task.id)
                 status = result.get("status", "done")
                 result_text = result.get("result", "")
-                # A task still "running" is not resolved; leave it in_progress
-                # so the orchestrator/escalation can finish or retry it.
-                column = "in_progress" if status == "running" else "done"
+                # Only an explicit "failed" status is a failure. Any other
+                # status (including "running", which means the agent coroutine
+                # has already returned) is treated as completed so tasks are
+                # never stranded in the in_progress column.
+                if status == "failed":
+                    column = "done"
+                else:
+                    status = "done"
+                    column = "done"
                 self.blackboard.update_task(
                     task.id, status=status, column=column, result=result_text
                 )
@@ -81,9 +94,31 @@ class SwarmOrchestrator:
                 task.id, status="failed", column="done", result="Agent error"
             )
         finally:
+            self._active_agents.discard(agent.name)
             self.blackboard.update_agent(agent.name, status="idle", current_task="")
             await self._broadcast_state()
         self._handle_escalation()
+
+    def terminate_agent(self, name: str) -> bool:
+        """Cancel the in-flight task for the named agent, if any.
+
+        Returns True if a running task was cancelled, False otherwise.
+        """
+        target_task_id: Optional[str] = None
+        for task_id, task in self._active_tasks.items():
+            agent = self._agent_instances.get(name)
+            if agent is not None and not task.done():
+                target_task_id = task_id
+                break
+        if target_task_id is None:
+            logger.info("terminate_agent: no active task for %s", name)
+            return False
+        self._active_tasks[target_task_id].cancel()
+        self.blackboard.update_task(
+            target_task_id, status="failed", column="done", result="Terminated by user"
+        )
+        logger.info("terminate_agent: cancelled task %s for %s", target_task_id, name)
+        return True
 
     def _handle_escalation(self) -> None:
         """Check for failed tasks and escalate if retries exhausted."""

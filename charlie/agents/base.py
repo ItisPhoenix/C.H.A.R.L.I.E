@@ -68,3 +68,24 @@ class BaseAgent(ABC):
         self.blackboard.update_agent(
             self.name, status=status, current_task=task_id
         )
+
+    async def _complete(self, prompt: str, max_tokens: int = 1000) -> str:
+        """Call the LLM chat endpoint and return the assistant message text.
+
+        Injects the auth headers carried by the agent's LLM client (built from
+        the small-LLM key) so agent calls authenticate the same way the Brain's
+        own call sites do. Falls back to a placeholder string when no client is
+        wired (e.g. tests), keeping the agent callable without a live LLM.
+        """
+        if not self.llm_client:
+            return f"[{self.name} placeholder - LLM not connected] Would process: {prompt[:80]}..."
+        response = await self.llm_client.post(
+            "/chat/completions",
+            json={
+                "model": self.llm_client.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+            },
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]

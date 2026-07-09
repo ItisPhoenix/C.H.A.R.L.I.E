@@ -536,7 +536,12 @@ class CodeExecPlugin(Plugin):
         raise ValueError(f"Unknown tool: {tool_name}")
 
     def _exec_python(self, code: str) -> Dict[str, Any]:
-        """Execute Python code in a subprocess."""
+        """Execute Python code in a subprocess sandbox.
+
+        The sandbox is defense-in-depth only and is NOT a hard security
+        boundary. It is disabled by default (PLUGINS_ENABLED=false) and must
+        never be enabled for untrusted input.
+        """
         import ast
 
         _BANNED_BUILTINS = (
@@ -553,6 +558,13 @@ class CodeExecPlugin(Plugin):
             "locals",
             "vars",
             "memoryview",
+            "os",
+            "sys",
+            "subprocess",
+            "builtins",
+            "importlib",
+            "ctypes",
+            "io",
         )
         try:
             tree = ast.parse(code)
@@ -562,6 +574,10 @@ class CodeExecPlugin(Plugin):
                 if isinstance(node, ast.Attribute):
                     if node.attr.startswith("__"):
                         return {"error": "Rejected: private attribute access not allowed."}
+                if isinstance(node, ast.Subscript):
+                    slc = node.slice
+                    if isinstance(slc, ast.Constant) and isinstance(slc.value, str) and slc.value.startswith("__"):
+                        return {"error": "Rejected: dunder index access not allowed."}
                 if isinstance(node, ast.Call):
                     func = node.func
                     if isinstance(func, ast.Name):
@@ -574,11 +590,14 @@ class CodeExecPlugin(Plugin):
 
         try:
             wrapped = code + ("\n" if not code.endswith("\n") else "")
+            # Run with an empty environment so the parent's API keys and other
+            # secrets are never inherited by the sandboxed child process.
             result = subprocess.run(
                 [sys.executable, "-c", wrapped],
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
+                env={},
             )
             output = result.stdout
             if result.stderr:

@@ -207,17 +207,22 @@ async def main():
     # The agents expect an object with `.post(path, json=...)` and `.model`;
     # Brain.client is an httpx.AsyncClient (has .post) so we just expose .model.
     if brain is not None:
+        from charlie.utils import build_auth_headers
+
         class _AgentLLMClient:
-            def __init__(self, client, model: str) -> None:
+            def __init__(self, client, model: str, api_key: str) -> None:
                 self._client = client
                 self.model = model
+                self.headers = build_auth_headers(api_key)
 
             def post(self, path: str, *, json=None, **kwargs):
-                return self._client.post(path, json=json, **kwargs)
+                headers = dict(kwargs.pop("headers", {}))
+                headers.update(self.headers)
+                return self._client.post(path, json=json, headers=headers, **kwargs)
 
         swarm = SwarmOrchestrator(
             blackboard,
-            llm_client=_AgentLLMClient(brain.client, config.small_llm_model),
+            llm_client=_AgentLLMClient(brain.client, config.small_llm_model, config.small_llm_key),
         )
     else:
         swarm = SwarmOrchestrator(blackboard)
@@ -256,7 +261,7 @@ async def main():
             if event_bus:
                 asyncio.run_coroutine_threadsafe(
                     event_bus.emit(
-                        "session_update", {"session_id": session_id, "title": candidate}
+                        "session_updated", {"session_id": session_id, "title": candidate}
                     ),
                     loop,
                 )

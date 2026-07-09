@@ -6,14 +6,11 @@ phonemization. This is the single control point for prosody and pacing.
 
 import asyncio
 import logging
-import os
-import threading
-
-os.environ.setdefault("ORT_LOG_LEVEL", os.getenv("ORT_LOG_LEVEL", "3"))
-
 import multiprocessing as mp
+import os
 import queue
 import re
+import threading
 import time
 import urllib.request
 from collections import deque

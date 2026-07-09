@@ -12,9 +12,9 @@ interface Agent {
 }
 interface Task {
   id: string;
-  description: string;
+  name: string;
   status: string;
-  agent?: string;
+  assigned_to?: string;
 }
 interface BlackboardState {
   tasks: Task[];
@@ -342,11 +342,11 @@ export function InsightRail({
                   />
                   <div className="min-w-0">
                     <p className="text-sm text-[var(--color-text-primary)] truncate">
-                      {t.description}
+                      {t.name}
                     </p>
-                    {t.agent && (
+                    {t.assigned_to && (
                       <p className="text-xs text-[var(--color-text-muted)] truncate">
-                        {t.agent}
+                        {t.assigned_to}
                       </p>
                     )}
                   </div>

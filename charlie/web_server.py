@@ -14,6 +14,7 @@ _configure_platform()
 import json
 import logging
 import os
+import time
 from typing import Set
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, WebSocketException
@@ -25,8 +26,16 @@ from charlie.session_store import SessionStore
 
 logger = logging.getLogger("charlie.web_server")
 
+_START_TIME = time.time()
+
 # Module-level state
 active_connections: Set[WebSocket] = set()
+# Maps each WS connection to the session_id it is currently viewing. Lets us
+# scope per-session streams (token/transcript) instead of leaking them to all
+# connected browsers.
+ws_sessions: dict[WebSocket, str] = {}
+# Events that carry a session_id and must only reach clients subscribed to it.
+_SESSION_SCOPED_EVENTS = ("token", "transcript")
 event_bus: EventBus | None = None
 LAUNCH_ID: str = config.charlie_launch_id
 _store: SessionStore | None = None
@@ -41,6 +50,10 @@ pipeline_state: str = "idle"
 
 app = FastAPI(title="Charlie Dashboard")
 
+# SECURITY: This server has no authentication. It is intended for localhost
+# only. Never bind CHARLIE_HOST=0.0.0.0 (or any non-loopback address) without
+# placing an authenticating proxy in front of it -- any process that can reach
+# the port can read session history, run shell commands, and inject chat.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -56,16 +69,27 @@ app.add_middleware(
 
 
 async def broadcast(data: dict):
-    """Send a message to all connected WebSocket clients."""
+    """Send a message to connected WebSocket clients.
+
+    Session-scoped events (token/transcript) are delivered only to clients
+    subscribed to that session_id, preventing one browser from seeing another
+    session's live stream. All other events go to every client.
+    """
     message = json.dumps(data)
+    etype = data.get("type", "")
+    event_session = data.get("session_id") or (data.get("payload") or {}).get("session_id")
+    scoped = etype in _SESSION_SCOPED_EVENTS and event_session is not None
     disconnected: list[WebSocket] = []
     for ws in active_connections:
+        if scoped and ws_sessions.get(ws) != event_session:
+            continue
         try:
             await ws.send_text(message)
         except Exception:
             disconnected.append(ws)
     for ws in disconnected:
         active_connections.discard(ws)
+        ws_sessions.pop(ws, None)
 
 
 async def _event_bridge():
@@ -163,6 +187,7 @@ async def websocket_endpoint(ws: WebSocket):
 
     await ws.accept()
     active_connections.add(ws)
+    ws_sessions[ws] = _active_frontend_session
     logger.info("WebSocket connected: %d active", len(active_connections))
     try:
         while True:
@@ -176,6 +201,7 @@ async def websocket_endpoint(ws: WebSocket):
                 if msg_type == "session_active":
                     global _active_frontend_session
                     _active_frontend_session = msg.get("session_id") or msg.get("payload", {}).get("session_id")
+                    ws_sessions[ws] = _active_frontend_session
                     logger.info("Active session synced: %s", _active_frontend_session)
                     if event_bus:
                         await event_bus.send_command(msg)
@@ -203,9 +229,11 @@ async def websocket_endpoint(ws: WebSocket):
                 logger.warning("Invalid JSON from client: %s", data)
     except WebSocketDisconnect:
         active_connections.discard(ws)
+        ws_sessions.pop(ws, None)
         logger.info("WebSocket disconnected: %d active", len(active_connections))
     except Exception as e:
         active_connections.discard(ws)
+        ws_sessions.pop(ws, None)
         logger.error("WebSocket error: %s", e)
 
 
@@ -218,7 +246,12 @@ async def history(limit: int = 50):
 
 @app.get("/api/status")
 async def status():
-    return {"state": pipeline_state, "launch_id": LAUNCH_ID}
+    return {
+        "state": pipeline_state,
+        "launch_id": LAUNCH_ID,
+        "uptime_seconds": int(time.time() - _START_TIME),
+        "pid": os.getpid(),
+    }
 
 
 @app.get("/api/sessions")
@@ -291,7 +324,7 @@ async def delete_session(session_id: str):
     store.delete_session(session_id)
     await broadcast(
         {
-            "type": "session_update",
+            "type": "session_updated",
             "payload": {"session_id": session_id, "deleted": True},
         }
     )
@@ -299,12 +332,21 @@ async def delete_session(session_id: str):
 
 @app.post("/api/sessions/{session_id}/chat")
 async def session_chat(session_id: str, data: dict):
-    """HTTP fallback for chat when WebSocket is down."""
+    """HTTP fallback for chat when WebSocket is down.
+
+    Persists the user turn and forwards it to the voice process as a `chat`
+    command so the brain generates a reply and streams `token` events back
+    over the WebSocket, exactly like the live path.
+    """
     text = data.get("text", "").strip()
     if not text:
         return {"status": "error", "detail": "empty message"}
     store = _get_store()
     store.append("user", text, session_id=session_id)
+    if event_bus:
+        await event_bus.send_command(
+            {"type": "chat", "session_id": session_id, "text": text}
+        )
     return {"status": "ok"}
 # ---------------------------------------------------------------------------
 # Blackboard API (for Tauri dashboard)
@@ -332,18 +374,6 @@ _audio_level: float = 0.0
 
 
 
-@app.get("/api/blackboard")
-async def get_blackboard():
-    """Return current blackboard state for the dashboard."""
-    return _blackboard_state
-
-
-@app.get("/api/system-status")
-async def get_system_status():
-    """Return current system resource usage."""
-    return _system_status
-
-
 @app.get("/api/audio")
 async def get_audio_state():
     """Return current speaker mute/volume state."""
@@ -364,12 +394,25 @@ async def get_audio_level():
 
 @app.get("/api/memory/facts")
 async def get_memory_facts():
-    """Retrieve all facts from the SQLite knowledge graph."""
+    """Retrieve all known facts from the SQLite knowledge graph.
+
+    The graph stores nodes (node_type/label/properties) rather than
+    subject/predicate/object triples, so each node is mapped to a
+    fact-shaped record the frontend already renders.
+    """
     try:
         from charlie.tools import _memory_graph
         if _memory_graph:
-            facts = _memory_graph.get_all_facts()
-            return {"facts": [{"subject": f[0], "predicate": f[1], "object": f[2]} for f in facts]}
+            nodes = _memory_graph.get_all_nodes()
+            facts = [
+                {
+                    "subject": n.get("node_type", ""),
+                    "predicate": "is",
+                    "object": n.get("label", ""),
+                }
+                for n in nodes
+            ]
+            return {"facts": facts}
     except Exception as e:
         logger.error(f"Error fetching facts: {e}")
     return {"facts": []}
@@ -393,6 +436,15 @@ async def set_active_session(data: dict):
     global _active_frontend_session
     _active_frontend_session = data.get("session_id")
     logger.info("Active frontend session: %s", _active_frontend_session)
+    # Also update WS client subscriptions and route the switch to the voice
+    # process so microphone speech lands in the right session. The WS
+    # `session_active` path already does this; the POST path must too.
+    for ws in active_connections:
+        ws_sessions[ws] = _active_frontend_session
+    if event_bus:
+        await event_bus.send_command(
+            {"type": "session_active", "session_id": _active_frontend_session}
+        )
     return {"active_session": _active_frontend_session}
 
 

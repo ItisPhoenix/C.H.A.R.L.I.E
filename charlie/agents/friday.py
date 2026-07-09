@@ -20,15 +20,4 @@ Do not include markdown fences."""
         return f"Generated {len(code)} chars of code"
 
     async def _code(self, prompt: str) -> str:
-        if not self.llm_client:
-            return f"# FRIDAY placeholder\n# Would generate code for: {prompt[:60]}..."
-        response = await self.llm_client.post(
-            "/chat/completions",
-            json={
-                "model": self.llm_client.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 3000,
-            },
-        )
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        return await self._complete(prompt, max_tokens=3000)

@@ -28,10 +28,6 @@ def __getattr__(name: str):
         from .memory_graph import MemoryGraph
 
         return MemoryGraph
-    if name == "ReflectionEngine":
-        from .reflection import ReflectionEngine
-
-        return ReflectionEngine
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -43,7 +39,6 @@ __all__ = [
     "Blackboard",
     "SwarmOrchestrator",
     "MemoryGraph",
-    "ReflectionEngine",
     "registry",
 ]
 

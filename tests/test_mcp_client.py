@@ -49,15 +49,14 @@ class TestMCPClient:
         client = MCPClient()
         config = MCPServerConfig(name="s1", command="echo")
         client.add_server(config)
-        # Cannot directly access _servers, but add should not raise
-        assert True
+        assert config.name in client._servers
 
     def test_add_duplicate_server(self):
         client = MCPClient()
         config = MCPServerConfig(name="s1", command="echo")
         client.add_server(config)
         client.add_server(config)  # Should log warning, not raise
-        assert True
+        assert config.name in client._servers
 
     def test_list_tools_empty(self):
         client = MCPClient()

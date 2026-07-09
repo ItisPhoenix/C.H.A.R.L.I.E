@@ -8,10 +8,9 @@ people, places, and their relationships.
 import logging
 import sqlite3
 import threading
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from charlie.utils import json_dumps, json_loads, make_id
+from charlie.utils import json_dumps, json_loads, make_id, utc_now_iso
 
 logger = logging.getLogger("charlie.memory_graph")
 
@@ -104,7 +103,7 @@ class MemoryGraph:
             logger.warning("Unknown node_type '%s', storing as 'fact'", node_type)
             node_type = "fact"
 
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        now = utc_now_iso()
         meta_json = json_dumps(metadata) if metadata else None
 
         # Check for duplicate (same type + content)
@@ -157,7 +156,7 @@ class MemoryGraph:
 
 
         edge_id = edge_id or make_id()
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        now = utc_now_iso()
         self.conn.execute(
             "INSERT INTO edges (id, from_node_id, to_node_id, relation, created_at) "
             "VALUES (?, ?, ?, ?, ?)",

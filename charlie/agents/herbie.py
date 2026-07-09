@@ -20,15 +20,4 @@ Return a structured verification report."""
         return report
 
     async def _verify(self, prompt: str) -> str:
-        if not self.llm_client:
-            return f"[HERBIE placeholder - LLM not connected] Would verify: {prompt[:80]}..."
-        response = await self.llm_client.post(
-            "/chat/completions",
-            json={
-                "model": self.llm_client.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 1000,
-            },
-        )
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        return await self._complete(prompt, max_tokens=1000)

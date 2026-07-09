@@ -3,8 +3,9 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
 from typing import List, Optional, Tuple
+
+from charlie.utils import utc_now_iso
 
 logger = logging.getLogger("charlie.session_store")
 
@@ -342,7 +343,7 @@ class SessionStore:
             with self.conn:
                 self.conn.execute(
                     "UPDATE sessions SET title = ?, updated_at = ? WHERE session_id = ?",
-                    (title, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), session_id),
+                    (title, utc_now_iso(), session_id),
                 )
         except sqlite3.Error as e:
             logger.error(f"update_session_title failed: {e}")
@@ -353,7 +354,7 @@ class SessionStore:
             with self.conn:
                 self.conn.execute(
                     "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-                    (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), session_id),
+                    (utc_now_iso(), session_id),
                 )
         except sqlite3.Error as e:
             logger.error(f"touch_session failed: {e}")

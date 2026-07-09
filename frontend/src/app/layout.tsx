@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Space_Grotesk } from "next/font/google";
-import { ErrorBoundary } from "../components/ErrorBoundary";
 import "./globals.css";
 
 const spaceGrotesk = Space_Grotesk({
@@ -24,7 +23,7 @@ export default function RootLayout({
       className={`${spaceGrotesk.variable} h-full antialiased`}
     >
       <body className="h-full w-full overflow-hidden relative bg-[var(--color-canvas)] text-[var(--color-text-primary)]">
-        <ErrorBoundary>{children}</ErrorBoundary>
+        {children}
       </body>
     </html>
   );

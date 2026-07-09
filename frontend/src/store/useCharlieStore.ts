@@ -16,9 +16,9 @@ export interface Message {
 
 export interface Task {
   id: string;
-  description: string;
+  name: string;
   status: "pending" | "running" | "done" | "failed";
-  agent?: string;
+  assigned_to?: string;
 }
 
 export interface Agent {
@@ -62,10 +62,8 @@ interface CharlieState {
   currentSessionId: string;
   messages: Message[];
   messagesLoading: boolean;
-  searchQuery: string;
   alerts: Alert[];
   logs: string[];
-  activeTab: string;
   blackboard: BlackboardState;
   voiceState: VoiceState;
   audio: AudioState;
@@ -80,10 +78,8 @@ interface CharlieState {
   addMessage: (m: Message) => void;
   updateLastMessageContent: (content: string) => void;
   setMessagesLoading: (l: boolean) => void;
-  setSearchQuery: (q: string) => void;
   addAlert: (a: Alert) => void;
   addLog: (l: string) => void;
-  setActiveTab: (t: string) => void;
   setBlackboard: (b: BlackboardState) => void;
   setVoiceState: (s: VoiceState) => void;
   setAudio: (a: AudioState) => void;
@@ -98,10 +94,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   currentSessionId: "",
   messages: [],
   messagesLoading: false,
-  searchQuery: "",
   alerts: [],
   logs: [],
-  activeTab: "dashboard",
   blackboard: { tasks: [], agents: {} },
   voiceState: "idle",
   audio: { muted: false, volume: 1.0 },
@@ -128,10 +122,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
     return { messages: copy };
   }),
   setMessagesLoading: (messagesLoading) => set({ messagesLoading }),
-  setSearchQuery: (searchQuery) => set({ searchQuery }),
   addAlert: (alert) => set((state) => ({ alerts: [alert, ...state.alerts].slice(0, 100) })),
   addLog: (log) => set((state) => ({ logs: [log, ...state.logs].slice(0, 500) })),
-  setActiveTab: (activeTab) => set({ activeTab }),
   setBlackboard: (blackboard) => set({ blackboard }),
   setVoiceState: (voiceState: VoiceState) => set({ voiceState }),
   setAudio: (audio) => set({ audio }),

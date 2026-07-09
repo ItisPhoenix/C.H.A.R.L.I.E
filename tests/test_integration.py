@@ -140,7 +140,7 @@ class TestConfigBrainIntegration:
             iteration_budget_max=5,
         )
         brain = Brain(cfg)
-        assert brain._history_max_turns == 5 or True  # budget may be internal
+        assert brain._history_max_turns == 5
 
     def test_brain_small_llm_key_guard(self):
         """Brain should not create big client when key is no-key."""

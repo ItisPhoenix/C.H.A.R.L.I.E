@@ -17,6 +17,7 @@ import httpx
 
 from charlie.budget import IterationBudget
 from charlie.tools import registry as tool_registry
+from charlie.utils import build_auth_headers
 
 logger = logging.getLogger("charlie.core")
 if TYPE_CHECKING:
@@ -824,8 +825,7 @@ async def _generate_summary(
             return f"{len(messages)} earlier messages omitted due to length."
 
         headers: Dict[str, str] = {"Content-Type": "application/json"}
-        if key and key not in ("no-key", "no_key"):
-            headers["Authorization"] = f"Bearer {key}"
+        headers.update(build_auth_headers(key))
 
         payload = {
             "model": model,
@@ -1111,9 +1111,7 @@ class Brain:
         self.on_tool_result = on_tool_result
         self.on_thinking_update = on_thinking_update
         self._blackboard = blackboard
-        small_headers: Dict[str, str] = {}
-        if config.small_llm_key and config.small_llm_key not in ("no-key", "no_key", ""):
-            small_headers["Authorization"] = f"Bearer {config.small_llm_key}"
+        small_headers: Dict[str, str] = build_auth_headers(config.small_llm_key)
         self.client = httpx.AsyncClient(
             base_url=config.small_llm_url,
             headers=small_headers,
@@ -1275,12 +1273,7 @@ class Brain:
             )
             try:
                 import httpx as _httpx
-                small_headers: Dict[str, str] = {}
-                if (
-                    self.config.small_llm_key
-                    and self.config.small_llm_key not in ("no-key", "no_key", "")
-                ):
-                    small_headers["Authorization"] = f"Bearer {self.config.small_llm_key}"
+                small_headers = build_auth_headers(self.config.small_llm_key)
                 payload = {
                     "model": self.config.small_llm_model,
                     "messages": [{"role": "user", "content": prompt}],
@@ -1779,8 +1772,7 @@ class Brain:
                 ) as response:
                     response.raise_for_status()
                     async for line in response.aiter_lines():
-                        if self._chat_generation != generation:
-                            logger.info("Tool follow-up cancelled (barge-in)")
+                        if _followup_cancelled(self._chat_generation, generation):
                             return
                         if not line.startswith("data: "):
                             continue
@@ -2163,3 +2155,15 @@ def _collect_tool_calls(tc_by_index: Dict[int, Dict[str, str]]) -> List[Dict[str
             args = {}
         calls.append({"id": tc["id"], "name": tc["name"], "arguments": args})
     return calls
+
+
+def _followup_cancelled(chat_generation: int, generation: int) -> bool:
+    """Return True when a newer chat generation superseded this follow-up.
+
+    A barge-in (new user turn) bumps ``_chat_generation``; an in-flight follow-up
+    stream must stop yielding once that happens.
+    """
+    if chat_generation != generation:
+        logger.info("Tool follow-up cancelled (barge-in)")
+        return True
+    return False

@@ -18,15 +18,4 @@ Gather information, analyze findings, and produce a structured report."""
         return await self._research(prompt)
 
     async def _research(self, prompt: str) -> str:
-        if not self.llm_client:
-            return f"[EDITH placeholder - LLM not connected] Would research: {prompt[:80]}..."
-        response = await self.llm_client.post(
-            "/chat/completions",
-            json={
-                "model": self.llm_client.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 2000,
-            },
-        )
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        return await self._complete(prompt, max_tokens=2000)

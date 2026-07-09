@@ -34,7 +34,10 @@ class Config:
     log_file: str = "logs/charlie.log"
     log_level: str = "INFO"
 
-    # Runtime-tunable env overrides (set by voice.py before importing onnxruntime)
+    # Runtime-tunable env override read by onnxruntime at import time.
+    # onnxruntime reads ORT_LOG_LEVEL from the process environment, so we
+    # propagate the configured value here (the single sanctioned env-write
+    # site) before any module imports onnxruntime.
     ort_log_level: str = os.getenv("ORT_LOG_LEVEL", "3")
 
     # VAD / ASR tuning
@@ -95,8 +98,6 @@ class Config:
     memory_graph_db: str = os.getenv("MEMORY_GRAPH_DB", "charlie_memory_graph.db")
     # --- Agentic OS Toggles ---
     blackboard_enabled: bool = os.getenv("BLACKBOARD_ENABLED", "true").lower() == "true"
-    swarm_enabled: bool = os.getenv("SWARM_ENABLED", "true").lower() == "true"
-    reflection_enabled: bool = os.getenv("REFLECTION_ENABLED", "true").lower() == "true"
     mcp_enabled: bool = os.getenv("MCP_ENABLED", "false").lower() == "true"
     plugins_enabled: bool = os.getenv("PLUGINS_ENABLED", "false").lower() == "true"
 
@@ -112,6 +113,11 @@ class Config:
 
 
 config = Config()
+
+# onnxruntime reads ORT_LOG_LEVEL from the process environment at import time.
+# Propagate the configured value once, here, as the single sanctioned env-write
+# site (AGENTS.md §4). This replaces the prior os.environ write in voice.py.
+os.environ.setdefault("ORT_LOG_LEVEL", config.ort_log_level)
 
 # Load SOUL.md into config.soul at startup
 _SOUL_PATH = Path("SOUL.md")

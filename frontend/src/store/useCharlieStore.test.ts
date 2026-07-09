@@ -11,10 +11,8 @@ describe("useCharlieStore", () => {
       currentSessionId: "",
       messages: [],
       messagesLoading: false,
-      searchQuery: "",
       alerts: [],
       logs: [],
-      activeTab: "dashboard",
       blackboard: { tasks: [], agents: {} },
       voiceState: "idle",
     });
@@ -66,7 +64,7 @@ describe("useCharlieStore", () => {
       expect(messages[1].content).toBe("b");
     });
 
-    it("updates last message content in place", () => {
+    it("appends token content to the last assistant message", () => {
       useCharlieStore.getState().setMessages([
         { role: "user", content: "q" },
         { role: "assistant", content: "partial" },
@@ -75,13 +73,15 @@ describe("useCharlieStore", () => {
       const { messages } = useCharlieStore.getState();
       expect(messages).toHaveLength(2);
       expect(messages[0].content).toBe("q"); // untouched
-      expect(messages[1].content).toBe("full answer"); // updated
+      expect(messages[1].content).toBe("partialfull answer"); // streamed tokens concatenate
     });
 
     it("handles updateLastMessageContent with empty array gracefully", () => {
       useCharlieStore.getState().setMessages([]);
       useCharlieStore.getState().updateLastMessageContent("should not crash");
-      expect(useCharlieStore.getState().messages).toHaveLength(0);
+      // No assistant message exists yet, so the token starts a new one.
+      expect(useCharlieStore.getState().messages).toHaveLength(1);
+      expect(useCharlieStore.getState().messages[0].role).toBe("assistant");
     });
 
     it("preserves immutability on updateLastMessageContent", () => {
@@ -130,7 +130,7 @@ describe("useCharlieStore", () => {
   describe("blackboard", () => {
     it("sets blackboard state", () => {
       const bb = {
-        tasks: [{ id: "t1", description: "task1", status: "running" as const }],
+        tasks: [{ id: "t1", name: "task1", status: "running" as const }],
         agents: { jarvis: { name: "jarvis", role: "orchestrator", status: "active" } },
       };
       useCharlieStore.getState().setBlackboard(bb);

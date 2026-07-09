@@ -111,7 +111,7 @@ python main.py          # full mode: voice engine + web dashboard + LLM Brain
 ```
 
 Charlie will initialize the voice engine, download models on first run, and start listening.
-The web dashboard is served at http://127.0.0.1:8000 (same process).
+The web dashboard is served at http://127.0.0.1:8000 by default (configurable via `CHARLIE_HOST`/`CHARLIE_PORT`).
 
 > **Note on the dashboard and chat:** the web UI and the LLM Brain are one system.
 > In **full mode** the dashboard is fully live - chat and voice both route through the
@@ -137,7 +137,7 @@ All settings are via environment variables (`.env` file). See `.env.example` for
 | `WHISPER_MODEL` | `large-v3` | Whisper model for ASR |
 | `KOKORO_VOICE` | `af_heart` | Kokoro TTS voice |
 | `VAD_THRESHOLD` | `0.25` | Voice activity detection sensitivity (RMS) |
-| `SILENCE_TIMEOUT` | `0.6` | Seconds of silence before processing |
+| `VAD_SILENCE_TIMEOUT` | `1.5` | Seconds of silence before processing |
 | `ENABLE_BARGE_IN` | `true` | Allow interrupting Charlie mid-response |
 | `SMALL_LLM_DISABLE_REASONING` | `true` | Disable chain-of-thought for lower latency |
 | `BIG_LLM_URL` | (empty) | Secondary LLM endpoint for automatic failover |
@@ -231,7 +231,7 @@ cd frontend && npm run dev
 Charlie does not wait for the full LLM response before speaking. As tokens arrive:
 - **Sentence boundaries** (`.`, `!`, `?`) trigger immediate TTS flush
 - **Clause boundaries** (`,`, `;`, `:`) also trigger flush for faster response
-- **Force flush** at 200 characters prevents long pauses
+- **Force flush** at 250 characters prevents long pauses
 
 ### Tool Loop
 When the LLM wants to use a tool (e.g., web search):
