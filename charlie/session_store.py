@@ -3,7 +3,9 @@ import os
 import sqlite3
 import threading
 import time
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, TypeVar
+
+T = TypeVar("T")
 
 from charlie.utils import utc_now_iso
 
@@ -60,6 +62,35 @@ class SessionStore:
             except sqlite3.Error as e:
                 logger.error(f"Failed to connect to session DB at {self.db_path}: {e}")
                 raise
+
+    def _with_retry(
+        self,
+        op: "Callable[[], T]",
+        op_name: str,
+        reraise: bool = True,
+    ) -> "Optional[T]":
+        """Run a DB operation, retrying once on 'database is locked'.
+
+        On a non-locked failure, log and either re-raise (mutations) or return
+        None (read-only queries that should degrade gracefully).
+        """
+        for attempt in range(2):
+            try:
+                return op()
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e) and attempt == 0:
+                    logger.warning("Database locked during %s, retrying...", op_name)
+                    time.sleep(0.05)
+                    continue
+                logger.error("%s failed: %s", op_name, e)
+                if reraise:
+                    raise
+                return None
+            except sqlite3.Error as e:
+                logger.error("%s failed: %s", op_name, e)
+                if reraise:
+                    raise
+                return None
 
     def init_db(self) -> None:
         """Initializes tables and FTS5 search virtualization on first use."""
@@ -170,26 +201,14 @@ class SessionStore:
         turn_id: Optional[str] = None,
     ) -> None:
         """Appends a single message to history."""
-        retries = 2
-        for attempt in range(retries):
-            try:
-                with self.conn:
-                    self.conn.execute(
-                        "INSERT INTO messages (role, content, session_id, turn_id) "
-                        "VALUES (?, ?, ?, ?);",
-                        (role, content, session_id, turn_id),
-                    )
-                return
-            except sqlite3.OperationalError as e:
-                if "database is locked" in str(e) and attempt < retries - 1:
-                    logger.warning("Database locked during append, retrying...")
-                    time.sleep(0.05)
-                else:
-                    logger.error(f"Failed to append message to history: {e}")
-                    raise
-            except sqlite3.Error as e:
-                logger.error(f"Failed to append message to history: {e}")
-                raise
+        def _do():
+            with self.conn:
+                self.conn.execute(
+                    "INSERT INTO messages (role, content, session_id, turn_id) "
+                    "VALUES (?, ?, ?, ?);",
+                    (role, content, session_id, turn_id),
+                )
+        self._with_retry(_do, "append message to history")
 
     def append_tool(
         self,
@@ -217,68 +236,49 @@ class SessionStore:
 
     def search(self, query: str, limit: int = 5) -> List[Tuple[str, str]]:
         """Searches past conversation content."""
-        retries = 2
-        for attempt in range(retries):
-            try:
-                cursor = self.conn.cursor()
-                if self.fts5_supported:
-                    cursor.execute(
-                        """
-                        SELECT role, content FROM messages
-                        WHERE id IN (
-                            SELECT rowid FROM messages_fts
-                            WHERE messages_fts MATCH ?
-                        )
-                        ORDER BY id DESC LIMIT ?;
-                        """,
-                        (query, limit),
+
+        def _do():
+            cursor = self.conn.cursor()
+            if self.fts5_supported:
+                cursor.execute(
+                    """
+                    SELECT role, content FROM messages
+                    WHERE id IN (
+                        SELECT rowid FROM messages_fts
+                        WHERE messages_fts MATCH ?
                     )
-                else:
-                    # Fallback to standard SQL LIKE query
-                    cursor.execute(
-                        """
-                        SELECT role, content FROM messages
-                        WHERE content LIKE ?
-                        ORDER BY id DESC LIMIT ?;
-                        """,
-                        (f"%{query}%", limit),
-                    )
-                return cursor.fetchall()
-            except sqlite3.OperationalError as e:
-                if "database is locked" in str(e) and attempt < retries - 1:
-                    logger.warning("Database locked during search, retrying...")
-                    time.sleep(0.05)
-                else:
-                    logger.error(f"FTS5/search failed: {e}")
-                    return []
-            except sqlite3.Error as e:
-                logger.error(f"Search failed: {e}")
-                return []
+                    ORDER BY id DESC LIMIT ?;
+                    """,
+                    (query, limit),
+                )
+            else:
+                # Fallback to standard SQL LIKE query
+                cursor.execute(
+                    """
+                    SELECT role, content FROM messages
+                    WHERE content LIKE ?
+                    ORDER BY id DESC LIMIT ?;
+                    """,
+                    (f"%{query}%", limit),
+                )
+            return cursor.fetchall()
+
+        return self._with_retry(_do, "search", reraise=False) or []
 
     def get_recent(
         self, limit: int = 20, session_id: str = "default"
     ) -> List[Tuple[str, str]]:
         """Returns the most recent messages for a session, oldest first."""
-        retries = 2
-        for attempt in range(retries):
-            try:
-                cursor = self.conn.cursor()
-                cursor.execute(
-                    "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
-                    (session_id, limit),
-                )
-                rows = cursor.fetchall()
-                return list(reversed(rows))
-            except sqlite3.OperationalError as e:
-                if "database is locked" in str(e) and attempt < retries - 1:
-                    logger.warning("Database locked during get_recent, retrying...")
-                    time.sleep(0.05)
-                else:
-                    logger.error(f"get_recent failed: {e}")
-                    return []
-            except sqlite3.Error as e:
-                logger.error(f"get_recent failed: {e}")
-                return []
+
+        def _do():
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                (session_id, limit),
+            )
+            return list(reversed(cursor.fetchall()))
+
+        return self._with_retry(_do, "get_recent", reraise=False) or []
 
     def create_session(
         self,

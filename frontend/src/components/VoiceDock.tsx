@@ -13,7 +13,7 @@ interface VoiceDockProps {
   onMicControl: (patch: { mic_muted: boolean }) => void;
 }
 
-const BAR_COUNT = 24;
+const BAR_COUNT = 20;
 const CENTER = BAR_COUNT / 2;
 
 const STATE_COLOR: Record<string, string> = {
@@ -31,7 +31,7 @@ const STATE_TEXT: Record<string, string> = {
 };
 
 const MIN_HEIGHT_PX = 3;
-const MAX_HEIGHT_PX = 40;
+const MAX_HEIGHT_PX = 24;
 
 function barEnvelope(index: number): number {
   const dist = Math.abs(index - CENTER) / CENTER;
@@ -73,33 +73,45 @@ export function VoiceDock({
   return (
     <div
       data-state={state}
-      className={`mx-4 mb-4 p-3 rounded-3xl flex items-center justify-between gap-6 border bg-[var(--color-glass-bg)] backdrop-blur-xl shadow-[0_14px_40px_rgba(2,4,12,0.5)] z-20 select-none transition-colors duration-300 ${
+      className={`mx-4 mb-4 p-3 rounded-xl flex items-center justify-between gap-6 border bg-[var(--color-glass-bg)] z-20 select-none transition-colors duration-200 ${
         !connected
-          ? "border-status-error/50 shadow-[0_0_22px_rgba(255,107,129,0.2)]"
+          ? "border-status-error/50"
           : mic.mic_muted
           ? "border-status-idle/45"
           : audio.muted
-          ? "border-status-error/45 shadow-[0_0_22px_rgba(255,107,129,0.18)]"
+          ? "border-status-error/45"
           : "border-[var(--color-glass-border)]"
       }`}
     >
-      <div className="flex-1 flex items-center justify-center gap-[3px] h-11">
+      <div className="flex-1 flex items-center justify-center gap-[3px] h-7">
         {!connected ? (
           <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-status-error animate-pulse">
             Audio offline
           </span>
         ) : (
-          bars.map((i) => (
-            <div
-              key={i}
-              className={`w-[3px] rounded-full ${barColor}`}
-              style={{
-                height: `${showLevel ? barHeightFor(audioLevel, i) : MIN_HEIGHT_PX}px`,
-                transition: showLevel ? "height 80ms ease-out" : "height 200ms ease-out",
-              }}
-              aria-hidden="true"
-            />
-          ))
+          bars.map((i) => {
+            let animClass = "";
+            if (connected) {
+              if (state === "thinking") animClass = "animate-wave-thinking";
+              else if (state === "listening") animClass = "animate-wave-listening";
+              else if (state === "speaking") animClass = "animate-wave-speaking";
+            }
+            return (
+              <div
+                key={i}
+                className={`w-[3px] rounded-full ${barColor} ${animClass}`}
+                style={{
+                  height: `${MAX_HEIGHT_PX}px`,
+                  animationDelay: animClass ? `${i * 0.04}s` : undefined,
+                  transform: !animClass
+                    ? `scaleY(${MIN_HEIGHT_PX / MAX_HEIGHT_PX})`
+                    : undefined,
+                  transition: "transform 200ms ease-out",
+                }}
+                aria-hidden="true"
+              />
+            );
+          })
         )}
       </div>
 
@@ -132,7 +144,7 @@ export function VoiceDock({
             value={effectiveVolume}
             onChange={(e) => setVolume(Number(e.target.value))}
             aria-label="Speaker volume"
-            className="w-24 accent-[var(--color-aurora)] cursor-pointer"
+            className="w-24 accent-[var(--color-accent-teal)] cursor-pointer"
           />
           <span className="text-[10px] font-mono text-[var(--color-text-muted)] w-7 text-right">
             {Math.round(effectiveVolume * 100)}

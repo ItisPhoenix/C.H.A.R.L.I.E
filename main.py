@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+from typing import Callable, Tuple
 
 # Windows event-loop policy (must precede zmq/asyncio imports)
 from charlie.runtime import configure as _configure_platform
@@ -111,9 +112,67 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _MAX_FLUSH_CHARS = 200  # Force-flush at word boundary if no sentence boundary seen
 
 
+def _flush_complete_sentences(
+    buffer: str, sink: "Callable[[str], None]"
+) -> Tuple[str, bool]:
+    """Split `buffer` on sentence boundaries and feed complete sentences to `sink`.
+
+    Returns the leftover (incomplete trailing sentence) and whether any complete
+    sentence was flushed. The trailing `parts[-1]` is the carry-over for the
+    next chunk; `parts[:-1]` are complete sentences.
+    """
+    if not _SENTENCE_BOUNDARY.search(buffer):
+        return buffer, False
+    parts = _SENTENCE_BOUNDARY.split(buffer)
+    for part in parts[:-1]:
+        if part.strip():
+            sink(part)
+    return parts[-1], len(parts) > 1
+
+
+
 def _strip_think(text: str) -> str:
     """Remove reasoning/thought blocks so they never reach the chat UI."""
     return _THINK_RE.sub("", text).strip()
+
+
+def _safe_speak(voice, text: str, emotion: str, label: str = "") -> None:
+    """Speak text, logging (not swallowing) any TTS failure.
+
+    A mid-stream TTS error must never abort the answer generation loop --
+    the UI token stream and message persistence downstream must still run.
+    """
+    if not text or not text.strip():
+        return
+    try:
+        voice.speak(text.strip(), emotion)
+    except Exception:
+        logger.warning(
+            "TTS speak failed%s: dropping audio only, answer continues",
+            f" ({label})" if label else "",
+            exc_info=True,
+        )
+
+
+def _schedule_process(coro, loop):
+    """Schedule the answer coroutine and surface any failure instead of swallowing it.
+
+    run_coroutine_threadsafe returns a concurrent.futures.Future whose exception
+    is otherwise never inspected, so a turn that dies logs nothing. This callback
+    makes the failure visible and attributable.
+    """
+    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    try:
+        fut.add_done_callback(
+            lambda f: (
+                logger.error("Answer turn failed", exc_info=f.exception())
+                if f.exception() is not None
+                else None
+            )
+        )
+    except Exception:  # pragma: no cover - add_done_callback itself failed
+        logger.warning("Could not attach failure callback to answer task", exc_info=True)
+    return fut
 
 
 async def main():
@@ -276,9 +335,7 @@ async def main():
         if current_web_session_id not in (None, "default", ""):
             session_id = current_web_session_id
         ensure_session_ready(session_id)
-        asyncio.run_coroutine_threadsafe(
-            _process(text, brain, voice, session_id=session_id), loop
-        )
+        _schedule_process(_process(text, brain, voice, session_id=session_id), loop)
 
     async def _process(text, brain, voice, session_id="default", platform="voice"):
         nonlocal speech_echo_cooldown, last_emotion
@@ -311,19 +368,11 @@ async def main():
             if words & _BARGE_COMMANDS:
                 logger.info("Barge-in: Command word detected. Stopping TTS.")
                 voice.stop_tts()
+                brain.cancel_chat()
                 speech_echo_cooldown = time.time() + 1.5
             else:
                 # Echo detection: is this a subset of what Charlie is currently saying?
-                _tts_text = getattr(voice, "_last_speech_text", "").lower()
-                spoken_words = set(_tts_text.split()) if _tts_text else set()
-                new_words = set(text.lower().strip().split())
-                is_echo = (
-                    new_words
-                    and spoken_words
-                    and len(new_words) <= 4
-                    and new_words.issubset(spoken_words)
-                )
-                if is_echo:
+                if voice.is_echo(text):
                     logger.info(f"Echo suppressed (during TTS): {text}")
                     return
                 # New content during TTS -- barge in (cancel current turn)
@@ -451,33 +500,25 @@ async def main():
 
             # Early first-flush: wait for first sentence boundary, or force at 150 chars
             if is_first_flush:
-                if _SENTENCE_BOUNDARY.search(sentence_buffer):
-                    parts = _SENTENCE_BOUNDARY.split(sentence_buffer)
-                    if len(parts) > 1:
-                        for part in parts[:-1]:
-                            if part.strip():
-                                voice.speak(part.strip(), detected_emotion)
-                        sentence_buffer = parts[-1]
-                        flushed = True
-                        is_first_flush = False
+                sentence_buffer, flushed = _flush_complete_sentences(
+                    sentence_buffer,
+                    lambda part: _safe_speak(voice, part, detected_emotion, "first-flush"),
+                )
+                if flushed:
+                    is_first_flush = False
                 elif len(sentence_buffer) >= 150:
                     idx = sentence_buffer.rfind(" ", 0, 150)
                     if idx > 0:
-                        voice.speak(sentence_buffer[:idx].strip(), detected_emotion)
+                        _safe_speak(voice, sentence_buffer[:idx], detected_emotion, "first-force")
                         sentence_buffer = sentence_buffer[idx:].lstrip()
                     is_first_flush = False
                     flushed = True
 
             if not flushed:
-                # Sentence boundary flush: split on .!? and speak complete sentences
-                if _SENTENCE_BOUNDARY.search(sentence_buffer):
-                    parts = _SENTENCE_BOUNDARY.split(sentence_buffer)
-                    if len(parts) > 1:
-                        for part in parts[:-1]:
-                            if part.strip():
-                                voice.speak(part.strip(), detected_emotion)
-                        sentence_buffer = parts[-1]
-                        flushed = True
+                sentence_buffer, flushed = _flush_complete_sentences(
+                    sentence_buffer,
+                    lambda part: _safe_speak(voice, part, detected_emotion, "sentence"),
+                )
 
             if not flushed and len(sentence_buffer) >= _MAX_FLUSH_CHARS:
                 # Force-flush: prefer clause (comma/semicolon) boundary,
@@ -485,16 +526,19 @@ async def main():
                 clause_idx = _CLAUSE_BOUNDARY.search(sentence_buffer[:_MAX_FLUSH_CHARS])
                 if clause_idx:
                     flush_end = clause_idx.end()
-                    voice.speak(sentence_buffer[:flush_end].strip(), detected_emotion)
+                    _safe_speak(voice, sentence_buffer[:flush_end], detected_emotion, "clause")
                     sentence_buffer = sentence_buffer[flush_end:].lstrip()
                 else:
                     word_idx = sentence_buffer.rfind(" ", 0, _MAX_FLUSH_CHARS)
                     if word_idx > 0:
-                        voice.speak(sentence_buffer[:word_idx].strip(), detected_emotion)
+                        _safe_speak(voice, sentence_buffer[:word_idx], detected_emotion, "word")
                         sentence_buffer = sentence_buffer[word_idx:].lstrip()
                     elif sentence_buffer.strip():
-                        voice.speak(
-                            sentence_buffer[:_MAX_FLUSH_CHARS].strip(), detected_emotion
+                        _safe_speak(
+                            voice,
+                            sentence_buffer[:_MAX_FLUSH_CHARS],
+                            detected_emotion,
+                            "force",
                         )
                         sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
 
@@ -511,12 +555,9 @@ async def main():
             )
 
         # Final TTS -- chunks already printed everything.
-        # Guard so a TTS failure cannot swallow archiving or response_done.
+        # _safe_speak guards so a TTS failure cannot swallow archiving or response_done.
         if sentence_buffer.strip():
-            try:
-                voice.speak(sparkle + sentence_buffer, detected_emotion)
-            except Exception:
-                logger.warning("Final TTS flush failed", exc_info=True)
+            _safe_speak(voice, sparkle + sentence_buffer, detected_emotion, "final")
 
         # Persist whatever was generated. full_reply_buffer may be empty if the
         # turn was cancelled (e.g. voice barge-in); fall back to the streamed

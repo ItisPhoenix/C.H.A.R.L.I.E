@@ -307,8 +307,16 @@ class VoiceEngine:
         if muted is not None:
             self.muted = bool(muted)
         if volume is not None:
-            self.volume = max(0.0, min(1.0, float(volume)))
+            self.volume = self._clamp_volume(volume)
         return {"muted": self.muted, "volume": self.volume}
+
+    @staticmethod
+    def _clamp_volume(v: float) -> float:
+        return max(0.0, min(1.0, float(v)))
+
+    def _apply_gain(self) -> float:
+        """Effective output gain: silence when muted, else clamped volume."""
+        return 0.0 if self.muted else self._clamp_volume(self.volume)
 
     def get_audio_state(self) -> dict:
         return {"muted": self.muted, "volume": self.volume}
@@ -412,23 +420,32 @@ class VoiceEngine:
 
         return text
 
+    def is_echo(self, text: str) -> bool:
+        """True if `text` is a short subset of what Charlie just spoke.
+
+        Used both here (to skip re-speaking a near-duplicate) and by main.py
+        barge-in (to suppress the assistant hearing its own TTS output).
+        """
+        now = time.time()
+        if now - getattr(self, "_last_speech_time", 0.0) >= self.speech_echo_window:
+            return False
+        new_words = set(text.lower().split())
+        old_words = set(getattr(self, "_last_speech_text", "").lower().split())
+        return bool(
+            new_words
+            and len(new_words) <= self.speech_echo_max_words
+            and new_words.issubset(old_words)
+        )
+
     def speak(self, text: str, emotional_state: str = "neutral"):
         """Sanitize text for TTS and enqueue. Non-blocking."""
         # Strip reasoning tags using shared helper
         text = strip_internal_reasoning(text)
 
         # Echo detection
-        now = time.time()
-        if now - getattr(self, "_last_speech_time", 0.0) < self.speech_echo_window:
-            new_words = set(text.lower().split())
-            old_words = set(getattr(self, "_last_speech_text", "").lower().split())
-            if (
-                len(new_words) <= self.speech_echo_max_words
-                and new_words
-                and new_words.issubset(old_words)
-            ):
-                return ""
-        self._last_speech_time = now
+        if self.is_echo(text):
+            return ""
+        self._last_speech_time = time.time()
 
         # Strip URLs
         text = re.sub(r"\(https?://.*?\)", "", text)
@@ -608,7 +625,7 @@ class VoiceEngine:
 
                 # Apply dashboard volume gain; a muted device still drives the
                 # speaking callbacks (so the UI reflects state) but emits silence.
-                gain = 0.0 if self.muted else max(0.0, min(1.0, self.volume))
+                gain = self._apply_gain()
                 if gain != 1.0:
                     samples = np.asarray(samples, dtype=np.float32) * gain
 
@@ -862,7 +879,7 @@ class VoiceEngine:
     def _play_wake_chime(self) -> None:
         """Play a short chime on wake-word detection. Non-blocking."""
         # Respect the dashboard speaker controls.
-        gain = 0.0 if self.muted else max(0.0, min(1.0, self.volume))
+        gain = self._apply_gain()
         if gain == 0.0:
             return
         chime_path = self.config.wake_word_audio_chime_path

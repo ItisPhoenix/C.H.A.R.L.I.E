@@ -53,7 +53,7 @@ export function SessionRail({
 
   return (
     <aside
-      className={`glass glass-hover anim-left flex flex-col shrink-0 h-full overflow-hidden rounded-3xl shadow-[0_18px_50px_rgba(2,4,12,0.5)] ${
+      className={`glass glass-hover anim-left flex flex-col shrink-0 h-full overflow-hidden rounded-2xl ${
         collapsed ? "w-16" : "w-72"
       }`}
     >
@@ -62,7 +62,7 @@ export function SessionRail({
           <button
             onClick={onToggle}
             aria-label="Expand chats"
-            className="rounded-xl w-10 h-10 grid place-items-center bg-[var(--color-aurora)]/20 text-[var(--color-aurora-soft)] cursor-pointer transition hover:bg-[var(--color-aurora)]/30 hover:shadow-[0_0_16px_var(--color-aurora-dim)]"
+            className="rounded-xl w-10 h-10 grid place-items-center bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal-soft)] border border-[var(--color-accent-teal)]/20 cursor-pointer transition hover:bg-[var(--color-accent-teal-dim)]/80"
           >
             <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M9 18l6-6-6-6" />
@@ -71,7 +71,7 @@ export function SessionRail({
           <button
             onClick={onCreate}
             aria-label="New chat"
-            className="rounded-xl w-10 h-10 grid place-items-center bg-[var(--color-aurora)]/20 text-[var(--color-aurora-soft)] cursor-pointer transition hover:bg-[var(--color-aurora)]/30 hover:shadow-[0_0_16px_var(--color-aurora-dim)]"
+            className="rounded-xl w-10 h-10 grid place-items-center bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal-soft)] border border-[var(--color-accent-teal)]/20 cursor-pointer transition hover:bg-[var(--color-accent-teal-dim)]/80"
           >
             <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <path d="M12 5v14M5 12h14" />
@@ -97,7 +97,7 @@ export function SessionRail({
                   title={s.title}
                   className={`w-10 h-10 mx-auto grid place-items-center rounded-xl text-sm font-display transition cursor-pointer ${
                     active
-                      ? "bg-[var(--color-aurora)]/20 text-[var(--color-aurora-soft)]"
+                      ? "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal-soft)] border border-[var(--color-accent-teal)]/20"
                       : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
                   }`}
                 >
@@ -126,7 +126,7 @@ export function SessionRail({
               <button
                 onClick={onCreate}
                 aria-label="New chat"
-                className="rounded-xl w-8 h-8 grid place-items-center bg-[var(--color-aurora)]/20 text-[var(--color-aurora-soft)] cursor-pointer transition hover:bg-[var(--color-aurora)]/30 hover:shadow-[0_0_16px_var(--color-aurora-dim)]"
+                className="rounded-xl w-8 h-8 grid place-items-center bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal-soft)] border border-[var(--color-accent-teal)]/20 cursor-pointer transition hover:bg-[var(--color-accent-teal-dim)]/80"
               >
                 <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                   <path d="M12 5v14M5 12h14" />
@@ -150,7 +150,7 @@ export function SessionRail({
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search chats..."
               aria-label="Search chats"
-              className="w-full rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-aurora)]/40 transition"
+              className="w-full rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent-teal)]/40 transition"
             />
           </div>
 
@@ -168,7 +168,7 @@ export function SessionRail({
                   onClick={() => onSelect(s.id)}
                   className={`group flex items-center gap-2 rounded-xl px-3 py-2.5 cursor-pointer transition border ${
                     active
-                      ? "bg-[var(--color-aurora)]/12 border-[var(--color-aurora)]/35"
+                      ? "bg-[var(--color-accent-teal-dim)] border-[var(--color-accent-teal)]/35"
                       : "border-transparent hover:bg-[var(--color-surface-hover)]"
                   }`}
                 >
@@ -183,7 +183,7 @@ export function SessionRail({
                           if (e.key === "Enter") commitEdit(s.id);
                           if (e.key === "Escape") setEditingId(null);
                         }}
-                        className="w-full bg-transparent outline-none text-sm text-[var(--color-text-primary)] border-b border-[var(--color-aurora)]/40"
+                        className="w-full bg-transparent outline-none text-sm text-[var(--color-text-primary)] border-b border-[var(--color-accent-teal)]/40"
                       />
                     ) : (
                       <p

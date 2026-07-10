@@ -106,6 +106,9 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setSystemStatus: (systemStatus) => set({ systemStatus }),
   setSessions: (sessions) => set({ sessions }),
   setCurrentSessionId: (currentSessionId) => set({ currentSessionId }),
+  // Replace the message list with server history. fetchMessages re-pulls on every
+  // session switch with freshly generated ids, so a merge would accumulate the
+  // previous session's messages and break session isolation. Replace wholesale.
   setMessages: (messages) => set({ messages }),
   addMessage: (msg) => set((state) => ({ messages: [...state.messages, { id: crypto.randomUUID(), ...msg }] })),
   // Append a streamed token to the last assistant message. The backend emits

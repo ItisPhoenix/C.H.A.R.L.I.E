@@ -6,6 +6,7 @@ and Brain.chat_stream follow-up loops.
 
 import json
 import logging
+import re
 from typing import Any, Callable, Dict, Optional, Tuple
 
 logger = logging.getLogger("charlie.streaming")
@@ -84,6 +85,13 @@ class TextStreamFilter:
 
     def push(self, chunk: str) -> str:
         self.buffer += chunk
+        # Strip search result tags dynamically
+        self.buffer = re.sub(
+            r"\[SEARCH RESULTS.*?\]",
+            "",
+            self.buffer,
+            flags=re.IGNORECASE,
+        )
         output = ""
 
         while True:

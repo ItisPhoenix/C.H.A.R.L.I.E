@@ -227,3 +227,12 @@ In hybrid voice-first assistants, the background voice thread (which listens to 
 ### Cross-Browser SQLite DateTime Parsing
 SQLite's `strftime('%Y-%m-%d %H:%M:%f', 'now')` returns UTC space-separated datetime strings. WebKit-based browsers (like Safari) fail to parse space-separated strings, resulting in `Invalid Date` and breaking UI date groupings and relative timers (like "2m ago").
 *   **Solution:** Always normalize SQLite timestamps to ISO-8601 format by replacing the space with a `T` and appending a `Z` (e.g. `ts.replace(' ', 'T') + 'Z'`) before calling `new Date(ts)` in the frontend.
+
+### Optimistic Stop Toggles
+When the user clicks the "Stop" button in the frontend chat, the client should optimistically transition `voiceState` to `"idle"` and stop the loading indicator immediately instead of waiting for a roundtrip websocket response. This makes the UI feel instant and immediately returns the button back to the "Send" state.
+
+### Local Model Follow-Up Chat History
+Local models executing text-based tool calling require the assistant's own tool call message (`{"role": "assistant", "content": accumulated}`) to be appended to the conversation history *before* appending the tool results (`{"role": "tool", "content": summary}`). If the assistant's preceding call is missing, the sanitizer stubs it as `assistant: null`, causing the model to hallucinate that the tool hasn't run yet and repeat the execution infinitely.
+
+### Dynamic Search Result Stream Filtering
+Dynamic streaming filters (like `TextStreamFilter`) should clean any `[SEARCH RESULTS]` or `TOOL:` blocks directly from the token buffer using regex before yielding to prevent raw tool output or search headers from leaking into user-facing chat bubbles.

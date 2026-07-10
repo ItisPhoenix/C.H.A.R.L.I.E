@@ -15,13 +15,17 @@ import json
 import logging
 import os
 import time
+import uuid
 from typing import Set
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from charlie.config import config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
+from charlie.memory_graph import MemoryGraph
 from charlie.session_store import SessionStore
 
 logger = logging.getLogger("charlie.web_server")
@@ -39,6 +43,7 @@ _SESSION_SCOPED_EVENTS = ("token", "transcript")
 event_bus: EventBus | None = None
 LAUNCH_ID: str = config.charlie_launch_id
 _store: SessionStore | None = None
+_memory_graph_cache: "MemoryGraph | None" = None
 
 
 def _get_store() -> SessionStore:
@@ -46,6 +51,20 @@ def _get_store() -> SessionStore:
     if _store is None:
         _store = SessionStore(config.session_db_path)
     return _store
+
+
+def _get_memory_graph() -> "MemoryGraph | None":
+    """Open the knowledge graph in this process (the web server runs in a child subprocess)."""
+    global _memory_graph_cache
+    if _memory_graph_cache is None:
+        try:
+            _memory_graph_cache = MemoryGraph(config.memory_graph_db)
+        except Exception as e:
+            logger.error(f"Failed to open MemoryGraph: {e}", exc_info=True)
+            return None
+    return _memory_graph_cache
+
+
 pipeline_state: str = "idle"
 
 app = FastAPI(title="Charlie Dashboard")
@@ -173,6 +192,7 @@ async def shutdown():
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    global _active_frontend_session
     origin = ws.headers.get("origin")
     if origin:
         allowed_origins = (
@@ -199,29 +219,9 @@ async def websocket_endpoint(ws: WebSocket):
 
                 # Session sync: frontend tells us which session is active
                 if msg_type == "session_active":
-                    global _active_frontend_session
                     _active_frontend_session = msg.get("session_id") or msg.get("payload", {}).get("session_id")
                     ws_sessions[ws] = _active_frontend_session
                     logger.info("Active session synced: %s", _active_frontend_session)
-                    if event_bus:
-                        await event_bus.send_command(msg)
-
-                # Task management
-                elif msg_type == "task_create":
-                    if event_bus:
-                        await event_bus.send_command(msg)
-
-                # Agent control
-                elif msg_type == "agent_kill":
-                    if event_bus:
-                        await event_bus.send_command(msg)
-
-                # HITL approval
-                elif msg_type == "hitl_approve":
-                    if event_bus:
-                        await event_bus.send_command(msg)
-
-                # Forward unknown types to event bus
                 elif event_bus:
                     await event_bus.send_command(msg)
                     logger.debug("WS forwarded command: %s", msg)
@@ -278,9 +278,7 @@ async def list_sessions(request: Request):
 @app.post("/api/sessions")
 async def create_session(data: dict):
     """Create a new session."""
-    import uuid as _uuid
-
-    session_id = data.get("session_id", str(_uuid.uuid4()))
+    session_id = data.get("session_id", str(uuid.uuid4()))
     title = data.get("title", "New Chat")
     source = data.get("source", "web")
     launch_id = data.get("launch_id")
@@ -400,21 +398,21 @@ async def get_memory_facts():
     subject/predicate/object triples, so each node is mapped to a
     fact-shaped record the frontend already renders.
     """
-    try:
-        from charlie.tools import _memory_graph
-        if _memory_graph:
-            nodes = _memory_graph.get_all_nodes()
+    graph = _get_memory_graph()
+    if graph:
+        try:
+            nodes = graph.get_all_nodes()
             facts = [
                 {
                     "subject": n.get("node_type", ""),
                     "predicate": "is",
-                    "object": n.get("label", ""),
+                    "object": n.get("content", ""),
                 }
                 for n in nodes
             ]
             return {"facts": facts}
-    except Exception as e:
-        logger.error(f"Error fetching facts: {e}")
+        except Exception as e:
+            logger.error(f"Error fetching facts: {e}", exc_info=True)
     return {"facts": []}
 
 
@@ -452,9 +450,6 @@ async def set_active_session(data: dict):
 async def get_active_session():
     """Get the currently active frontend session."""
     return {"active_session": _active_frontend_session}
-
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 # Serve frontend static files if they exist (checking both 'out' for NextJS and 'dist' for Vite)
 _FRONTEND_DIR = os.path.join(

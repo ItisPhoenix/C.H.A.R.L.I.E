@@ -36,29 +36,64 @@ export default function Page() {
   const addMessage = useCharlieStore((s) => s.addMessage);
 
   const [railCollapsed, setRailCollapsed] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef<number>(0);
-  const abortRef = useRef<AbortController | null>(null);
+  const abortSessionsRef = useRef<AbortController | null>(null);
+  const abortMessagesRef = useRef<AbortController | null>(null);
   const connectWSRef = useRef<(() => void) | null>(null);
   const currentSessionIdRef = useRef<string>("");
-  const abortFetch = useCallback(() => {
-    abortRef.current?.abort();
+  // Separate controllers: a rename-triggered fetchSessions must not abort an
+  // in-flight fetchMessages (and vice versa), or the UI gets stuck loading.
+  const abortSessions = useCallback(() => {
+    abortSessionsRef.current?.abort();
     const controller = new AbortController();
-    abortRef.current = controller;
+    abortSessionsRef.current = controller;
+    return controller.signal;
+  }, []);
+  const abortMessages = useCallback(() => {
+    abortMessagesRef.current?.abort();
+    const controller = new AbortController();
+    abortMessagesRef.current = controller;
     return controller.signal;
   }, []);
 
+  const sendWS = useCallback((payload: unknown) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(payload));
+    }
+  }, []);
+
+  // Resolve session id from a top-level field or payload nesting.
+  const sessionOf = (msg: { session_id?: string; payload?: { session_id?: string } }): string | undefined =>
+    msg.session_id || msg.payload?.session_id;
+
+  const fetchJson = useCallback(async (url: string): Promise<unknown | null> => {
+    try {
+      const r = await fetch(url);
+      return r.ok ? await r.json() : null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  // Guards against overlapping fetchMessages calls (rapid session switches
+  // would otherwise race and re-render duplicate/stale message lists).
+  const fetchMessagesInFlight = useRef<string | null>(null);
+
   // Fetch all sessions
   const fetchSessions = useCallback(async (): Promise<Array<{id: string}>> => {
-    const signal = abortFetch();
+    const signal = abortSessions();
     try {
       const res = await fetch("/api/sessions", { signal });
       if (res.ok) {
         const data = await res.json();
         setSessions(data.sessions || []);
-        if (data.sessions && data.sessions.length > 0) {
+        // Only auto-focus the first session if none is active yet. Renames and
+        // background refreshes must not yank focus away from the open session.
+        if (data.sessions && data.sessions.length > 0 && !useCharlieStore.getState().currentSessionId) {
           setCurrentSessionId(data.sessions[0].id);
         }
         return data.sessions || [];
@@ -68,11 +103,13 @@ export default function Page() {
       console.error("Error fetching sessions:", err);
     }
     return [];
-  }, [setSessions, setCurrentSessionId, abortFetch]);
+  }, [setSessions, setCurrentSessionId, abortSessions]);
 
   // Fetch messages for active session
   const fetchMessages = useCallback(async (sid: string) => {
-    const signal = abortFetch();
+    if (!sid || fetchMessagesInFlight.current === sid) return;
+    fetchMessagesInFlight.current = sid;
+    const signal = abortMessages();
     setMessagesLoading(true);
     try {
       const res = await fetch(`/api/sessions/${sid}/messages`, { signal });
@@ -90,9 +127,10 @@ export default function Page() {
       if (err instanceof DOMException && err.name === "AbortError") return;
       console.error("Error fetching session messages:", err);
     } finally {
+      fetchMessagesInFlight.current = null;
       setMessagesLoading(false);
     }
-  }, [setMessages, setMessagesLoading, abortFetch]);
+  }, [setMessages, setMessagesLoading, abortMessages]);
 
 
   // Connect WebSocket
@@ -158,7 +196,7 @@ export default function Page() {
         } else if (msg.type === "mic_state") {
           setMic({ mic_muted: Boolean(msg.payload?.mic_muted) });
         } else if (msg.type === "session_updated") {
-          const sid = msg.session_id || msg.payload?.session_id;
+          const sid = sessionOf(msg);
           const title = msg.title || msg.payload?.title;
           const deleted = msg.payload?.deleted;
           if (sid && deleted) {
@@ -188,19 +226,18 @@ export default function Page() {
         // "transcript" events. Surface the final utterance as a user bubble
         // in the active session so voice and chat stay in one thread.
         else if (msg.type === "transcript") {
-          const eventSession = msg.session_id || msg.payload?.session_id;
+          const eventSession = sessionOf(msg);
           if (eventSession && eventSession !== currentSessionIdRef.current) return;
           const spoken = (msg.payload?.text || "").trim();
           if (spoken) {
             addMessage({ role: "user", content: spoken });
-            addMessage({ role: "assistant", content: "" });
           }
         }
         // Handle real-time token stream. Only render tokens for the active
         // session; the server also filters by subscription, but we guard
         // here too so a stray cross-session token can never bleed in.
         else if (msg.type === "token") {
-          const eventSession = msg.session_id || msg.payload?.session_id;
+          const eventSession = sessionOf(msg);
           if (eventSession && eventSession !== currentSessionIdRef.current) return;
           updateLastMessageContent(msg.payload?.text || "");
         }
@@ -208,7 +245,7 @@ export default function Page() {
         console.error("Error parsing WS event packet:", err);
       }
     };
-  }, [setConnected, setSystemStatus, setBlackboard, setVoiceState, setAudio, setMic, setAudioLevel, addLog, addAlert, addMessage, updateLastMessageContent, fetchMessages]);
+  }, [setConnected, setSystemStatus, setBlackboard, setVoiceState, setAudio, setMic, setAudioLevel, addLog, addAlert, addMessage, updateLastMessageContent, fetchMessages, setSessions, setCurrentSessionId]);
   useEffect(() => { connectWSRef.current = connectWS; });
   useEffect(() => { currentSessionIdRef.current = currentSessionId; }, [currentSessionId]);
 
@@ -219,18 +256,8 @@ export default function Page() {
     // Append optimistic user bubble
     addMessage({ role: "user", content: text });
 
-    // Append assistant placeholder for tokens
-    addMessage({ role: "assistant", content: "" });
-
-    // Send packet via WebSocket
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: "chat",
-          payload: { session_id: currentSessionId, text },
-        })
-      );
-    } else {
+    sendWS({ type: "chat", payload: { session_id: currentSessionId, text } });
+    if (!(wsRef.current && wsRef.current.readyState === WebSocket.OPEN)) {
       // HTTP POST fallback if socket is down
       try {
         await fetch(`/api/sessions/${currentSessionId}/chat`, {
@@ -242,6 +269,16 @@ export default function Page() {
         console.error("HTTP chat command fallback failed:", err);
       }
     }
+  };
+
+  const handleStop = () => {
+    setVoiceState("idle");
+    setMessagesLoading(false);
+    sendWS({ type: "stop" });
+  };
+
+  const handleTerminateAgent = (agentName: string) => {
+    sendWS({ type: "agent_kill", payload: { name: agentName } });
   };
 
   // Export full chat history (real backend data)
@@ -266,22 +303,14 @@ export default function Page() {
 
   // Push speaker controls to the backend audio subsystem via WebSocket
   const sendAudioControl = useCallback((patch: { muted?: boolean; volume?: number }) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({ type: "audio_control", payload: patch })
-      );
-    }
-  }, []);
+    sendWS({ type: "audio_control", payload: patch });
+  }, [sendWS]);
 
   // Push microphone mute toggle to the backend voice engine via WebSocket.
   // The backend gates captured frames, so the assistant truly stops listening.
   const sendMicControl = useCallback((patch: { mic_muted: boolean }) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({ type: "mic_control", payload: patch })
-      );
-    }
-  }, []);
+    sendWS({ type: "mic_control", payload: patch });
+  }, [sendWS]);
 
   // Create new session
   const handleCreateSession = useCallback(async (title: string = "New Chat") => {
@@ -343,23 +372,27 @@ export default function Page() {
 
   // Initial load
   useEffect(() => {
-    // Every dashboard launch starts a brand-new conversation. We create a
-    // fresh session (rather than reusing the first existing one) so a new
-    // start never inherits a prior chat's history.
-    handleCreateSession("New Chat").then(() => fetchSessions());
-    fetch("/api/audio")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (d) setAudio({ muted: Boolean(d.muted), volume: d.volume ?? 1.0 });
-      })
-      .catch(() => {});
-    fetch("/api/mic")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (d && typeof d.mic_muted === "boolean") setMic({ mic_muted: d.mic_muted });
-      })
-      .catch(() => {});
-  }, [fetchSessions, handleCreateSession, setAudio, setMic]);
+    // Create a fresh session only if none already exist. Repeated mounts
+    // (StrictMode double-invoke, HMR, reconnects) must not spawn a new
+    // "New Chat" each time -- that churn is what caused duplicate bubbles.
+    const bootstrap = async () => {
+      const existing = await fetchSessions();
+      if (existing.length === 0) {
+        await handleCreateSession("New Chat");
+        await fetchSessions();
+      }
+    };
+    const init = async () => {
+      await bootstrap();
+      const audio = await fetchJson("/api/audio");
+      if (audio) setAudio({ muted: Boolean((audio as { muted: boolean }).muted), volume: (audio as { volume: number }).volume ?? 1.0 });
+      const mic = await fetchJson("/api/mic");
+      if (mic && typeof (mic as { mic_muted: boolean }).mic_muted === "boolean") {
+        setMic({ mic_muted: (mic as { mic_muted: boolean }).mic_muted });
+      }
+    };
+    void init();
+  }, [fetchSessions, handleCreateSession, setAudio, setMic, fetchJson]);
 
   // Sync messages when active session changes
   useEffect(() => {
@@ -367,15 +400,8 @@ export default function Page() {
       fetchMessages(currentSessionId);
       
       // Sync WebSocket focus
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: "session_active",
-            payload: { session_id: currentSessionId },
-          })
-        );
-      }
-      
+      sendWS({ type: "session_active", payload: { session_id: currentSessionId } });
+
       // HTTP POST active session update fallback
       fetch("/api/session/active", {
         method: "POST",
@@ -400,41 +426,64 @@ export default function Page() {
   // Cleanup abort controller on unmount
   useEffect(() => {
     return () => {
-      abortRef.current?.abort();
+      abortSessionsRef.current?.abort();
+      abortMessagesRef.current?.abort();
     };
   }, []);
 
   return (
     <ErrorBoundary>
       <div className="h-screen w-screen flex flex-col overflow-hidden relative font-sans select-none text-[var(--color-text-primary)]">
-        {/* Living aurora backdrop */}
-        <div className="aurora" aria-hidden="true" />
 
-        <div className="flex-1 flex overflow-hidden z-10 p-4 pb-2 gap-4">
+
+        {/* Mobile Header */}
+        <header className="md:hidden flex items-center justify-between px-6 py-3 border-b border-[var(--color-glass-border)] bg-[var(--color-glass-bg)] z-30">
+          <h1 className="font-display font-semibold text-[var(--color-text-primary)]">Charlie</h1>
+          <button
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            className="p-2 rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] text-[var(--color-text-secondary)] hover:text-white"
+            aria-label="Toggle menu"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={mobileMenuOpen ? "M6 18L18 6M6 6l12 12" : "M4 6h16M4 12h16m-7 6h7"} />
+            </svg>
+          </button>
+        </header>
+
+        <div className="flex-1 flex overflow-hidden z-10 p-4 pb-2 gap-4 relative">
           {/* Left: session rail */}
-          <SessionRail
-            collapsed={railCollapsed}
-            onToggle={() => setRailCollapsed((v) => !v)}
-            sessions={sessions}
-            currentId={currentSessionId}
-            onSelect={(id) => setCurrentSessionId(id)}
-            onCreate={() => handleCreateSession("New Chat")}
-            onRename={handleRenameSession}
-            onDelete={handleDeleteSession}
-            onExport={handleExportHistory}
-          />
+          <div className={`${mobileMenuOpen ? 'flex absolute inset-y-4 left-4 z-20 shadow-2xl' : 'hidden'} md:flex md:static h-full`}>
+            <SessionRail
+              collapsed={railCollapsed}
+              onToggle={() => setRailCollapsed((v) => !v)}
+              sessions={sessions}
+              currentId={currentSessionId}
+              onSelect={(id) => setCurrentSessionId(id)}
+              onCreate={() => handleCreateSession("New Chat")}
+              onRename={handleRenameSession}
+              onDelete={handleDeleteSession}
+              onExport={handleExportHistory}
+            />
+          </div>
 
-          {/* Center: chat hero */}
-          <main className="flex-1 min-w-0 flex flex-col">
+          <main className="flex-1 min-w-0 flex flex-col h-full">
             <ChatView
               messages={messages}
               onSend={handleSendMessage}
+              onStop={handleStop}
               loading={messagesLoading}
+              voiceState={voiceState}
             />
           </main>
 
           {/* Right: insight rail (Swarm / Memory / MCP / Tasks) */}
-          <InsightRail blackboard={blackboard} systemStatus={systemStatus} />
+          <div className="hidden xl:flex h-full">
+            <InsightRail
+              blackboard={blackboard}
+              systemStatus={systemStatus}
+              onTerminateAgent={handleTerminateAgent}
+            />
+          </div>
         </div>
 
         <VoiceDock

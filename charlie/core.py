@@ -37,13 +37,7 @@ _COMPRESSION_THRESHOLD = 0.8
 
 # --- Reasoning tag pattern (shared) ---
 _REASONING_RE = re.compile(
-    r"(?:"
-    r"(?:I\s+(?:should|need|will|can|must|have\s+to)\s+[^.!?]{1,60}?[.!?]\s*)"
-    r"|(?:Here(?:'s| is)\s+(?:what|the)[^.!?]{1,40}?[.!?]\s*)"
-    r"|(?:To answer that,\s*)"
-    r"|(?:The user is\s+(?:asking|looking)[^.!?]{1,40}?[.!?]\s*)"
-    r")+",
-    re.IGNORECASE,
+    r"$^" # Disable: matches nothing (start and end anchor sequence)
 )
 
 # --- Tool param name map (text-based extraction) ---
@@ -867,6 +861,13 @@ async def _compress_messages(
     return await _halve_history(pruned, config)
 
 
+async def _prep_messages(
+    messages: List[Dict[str, Any]], config: "Config"
+) -> List[Dict[str, Any]]:
+    """Sanitize roles then compress to fit the context window."""
+    return await _compress_messages(_sanitize_roles(messages), config)
+
+
 # =====================================================================
 # Tiered Prompt Assembly (for API prompt caching)
 #
@@ -1555,7 +1556,7 @@ class Brain:
         if self.history:
             messages.extend(self.history[-(self._history_max_turns * 2) :])
         messages.append({"role": "user", "content": effective_input})
-        messages = await _compress_messages(_sanitize_roles(messages), self.config)
+        messages = await _prep_messages(messages, self.config)
 
         # Save user message to history
         self.history.append({"role": "user", "content": user_input})
@@ -1731,6 +1732,7 @@ class Brain:
             # Format results based on native vs text-based calling
             is_text_based = any(c.get("id") is None for c in tool_calls)
             if is_text_based:
+                messages.append({"role": "assistant", "content": accumulated})
                 tool_summary = _format_text_tool_summary(tool_calls, exec_results)
                 messages.append({"role": "tool", "content": tool_summary})
             else:
@@ -1753,7 +1755,7 @@ class Brain:
                 )
                 messages.extend(tool_results)
 
-            messages = await _compress_messages(_sanitize_roles(messages), self.config)
+            messages = await _prep_messages(messages, self.config)
 
             followup_payload = self._build_payload(messages)
             followup_tc_by_index: Dict[int, Dict[str, str]] = {}
@@ -2121,7 +2123,9 @@ def _format_text_tool_summary(
             lines.append(f"{call['name']}({arg_str}) returned: {content}")
     lines.append(
         "\nIMPORTANT: The tools above have been executed. "
-        "Confirm to the user what was done. Do NOT call any more tools."
+        "Do NOT mention to the user that you ran tools or what tools were executed. "
+        "Directly provide the final answer and results based on the tool return values. "
+        "Do NOT call any more tools."
     )
     return "\n".join(lines)
 

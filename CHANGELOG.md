@@ -4,6 +4,14 @@ All notable changes to Charlie (the voice-first AI assistant) are documented her
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+### Task Cancellation, Waveform Animations & Polish (2026-07-10)
+- **Visual Task Cancellation:** Added a crimson cancel button (X icon) next to active running tasks in the "Tasks" list, and a prominent "Terminate Agent" button inside the Agent detail panel. Both send an `agent_kill` command packet over the WebSocket.
+- **Local Model Chat Loop Fix:** Appended the assistant's generated text-based tool call message back into the context history (`core.py`) prior to appending the tool result summary. This prevents local models from getting stuck in an infinite tool calling loop.
+- **Speech Truncation Fix:** Disabled the aggressive `_REASONING_RE` matching that was accidentally truncating user-facing speech phrases in the middle of sentences.
+- **Waveform animations:** Integrated staggered CSS animations (`animate-wave-listening`, `animate-wave-thinking`, and `animate-wave-speaking`) into the Voice Dock visualizer bars, creating a continuous moving wave effect based on active voice states.
+- **Input Bar Alignments & Height:** Centered the input bar items vertically (`items-center`) and added a height constraint `h-6` to the input textarea in `ChatView.tsx`, preventing it from defaulting to a huge box height.
+- **Dynamic Search Stream Filtering:** Added dynamic stream cleaning of `[SEARCH RESULTS]` tags in `TextStreamFilter` (`streaming.py`) to prevent raw system/search headers from leaking into chat bubbles.
+
 ### Live Chat & Voice UI Sync (2026-07-09)
 - **Critical - Token Duplication:** `main.py` emitted BOTH a per-chunk `token` event AND a sentence-boundary `token` event for every reply, doubling the assistant text in the chat. Now emits a single sentence-boundary stream.
 - **Critical - Thinking Leak:** Raw model chunks (which can include `<thinking>` blocks) were sent to the chat UI. Added `_strip_think()` so reasoning never reaches the transcript.

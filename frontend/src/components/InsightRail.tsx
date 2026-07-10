@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { ReactElement } from "react";
 
 interface Agent {
@@ -30,6 +30,7 @@ interface SystemStatus {
 interface InsightRailProps {
   blackboard: BlackboardState | null;
   systemStatus: SystemStatus | null;
+  onTerminateAgent?: (agentName: string) => void;
 }
 
 interface Fact {
@@ -141,7 +142,7 @@ function MemoryGraph({ facts }: { facts: Fact[] }): ReactElement {
         })}
         {nodes.map((n) => (
           <g key={n.id}>
-            <circle cx={n.x} cy={n.y} r="4" fill="var(--color-aurora)" />
+            <circle cx={n.x} cy={n.y} r="4" fill="var(--color-accent-teal)" />
             <text
               x={n.x}
               y={n.y - 8}
@@ -162,6 +163,7 @@ function MemoryGraph({ facts }: { facts: Fact[] }): ReactElement {
 export function InsightRail({
   blackboard,
   systemStatus,
+  onTerminateAgent,
 }: InsightRailProps): ReactElement {
   const [tab, setTab] = useState<Tab>("swarm");
   const [facts, setFacts] = useState<Fact[]>([]);
@@ -172,37 +174,57 @@ export function InsightRail({
   const [loadingTools, setLoadingTools] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
 
+  const loadJson = useCallback(
+    async (
+      url: string,
+      onData: (data: { facts?: Fact[]; tools?: McpTool[] }) => void,
+      setLoading: (v: boolean) => void,
+      setLoaded: (v: boolean) => void
+    ) => {
+      setLoading(true);
+      try {
+        const r = await fetch(url);
+        const d = (await r.json()) as { facts?: Fact[]; tools?: McpTool[] };
+        onData(d);
+      } catch {
+        onData({});
+      } finally {
+        setLoading(false);
+        setLoaded(true);
+      }
+    },
+    []
+  );
+
   useEffect(() => {
     if (tab === "memory" && !factsLoaded && !loadingFacts) {
-      setLoadingFacts(true);
-      fetch("/api/memory/facts")
-        .then((r) => r.json())
-        .then((d) => setFacts(d.facts ?? []))
-        .catch(() => setFacts([]))
-        .finally(() => {
-          setLoadingFacts(false);
-          setFactsLoaded(true);
-        });
+      setTimeout(() => {
+        void loadJson(
+          "/api/memory/facts",
+          (d) => setFacts(d.facts ?? []),
+          setLoadingFacts,
+          setFactsLoaded
+        );
+      }, 0);
     }
     if (tab === "mcp" && !toolsLoaded && !loadingTools) {
-      setLoadingTools(true);
-      fetch("/api/mcp/tools")
-        .then((r) => r.json())
-        .then((d) => setMcpTools(d.tools ?? []))
-        .catch(() => setMcpTools([]))
-        .finally(() => {
-          setLoadingTools(false);
-          setToolsLoaded(true);
-        });
+      setTimeout(() => {
+        void loadJson(
+          "/api/mcp/tools",
+          (d) => setMcpTools(d.tools ?? []),
+          setLoadingTools,
+          setToolsLoaded
+        );
+      }, 0);
     }
-  }, [tab, factsLoaded, toolsLoaded, loadingFacts, loadingTools]);
+  }, [tab, factsLoaded, toolsLoaded, loadingFacts, loadingTools, loadJson]);
 
   const agents = blackboard?.agents ?? {};
   const tasks = blackboard?.tasks ?? [];
   const agentList = Object.values(agents);
 
   return (
-    <aside className="glass glass-hover anim-right flex flex-col w-80 shrink-0 h-full overflow-hidden rounded-3xl shadow-[0_18px_50px_rgba(2,4,12,0.5)]">
+    <aside className="glass glass-hover anim-right flex flex-col w-80 shrink-0 h-full overflow-hidden rounded-2xl">
       {/* Segmented tab control */}
       <div className="px-3 pt-3">
         <div className="flex gap-1 rounded-2xl bg-[var(--color-glass-bg-2)] p-1 border border-[var(--color-glass-border)]">
@@ -213,8 +235,8 @@ export function InsightRail({
               aria-label={t.label}
               className={`flex-1 rounded-xl py-2 text-xs font-medium transition cursor-pointer ${
                 tab === t.id
-                  ? "bg-[var(--color-aurora)]/25 text-[var(--color-aurora-soft)] shadow-[0_0_14px_var(--color-aurora-dim)]"
-                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]"
+                  ? "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal-soft)] border border-[var(--color-accent-teal)]/20"
+                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] border border-transparent"
               }`}
             >
               {t.label}
@@ -232,9 +254,9 @@ export function InsightRail({
                 return (
                   <div
                     key={st}
-                    className="rounded-2xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] p-3 text-center"
+                    className="rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] p-3 text-center"
                   >
-                    <p className="font-display text-xl text-[var(--color-text-primary)]">
+                    <p className="font-mono text-xl font-bold text-[var(--color-text-primary)]">
                       {count}
                     </p>
                     <p className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
@@ -334,22 +356,35 @@ export function InsightRail({
               tasks.map((t) => (
                 <div
                   key={t.id}
-                  className="flex items-center gap-3 rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2"
+                  className="flex items-center justify-between gap-3 rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2"
                 >
-                  <span
-                    className={`w-2 h-2 rounded-full shrink-0 ${statusColor(t.status)}`}
-                    aria-hidden="true"
-                  />
-                  <div className="min-w-0">
-                    <p className="text-sm text-[var(--color-text-primary)] truncate">
-                      {t.name}
-                    </p>
-                    {t.assigned_to && (
-                      <p className="text-xs text-[var(--color-text-muted)] truncate">
-                        {t.assigned_to}
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <span
+                      className={`w-2 h-2 rounded-full shrink-0 ${statusColor(t.status)}`}
+                      aria-hidden="true"
+                    />
+                    <div className="min-w-0">
+                      <p className="text-sm text-[var(--color-text-primary)] truncate">
+                        {t.name}
                       </p>
-                    )}
+                      {t.assigned_to && (
+                        <p className="text-xs text-[var(--color-text-muted)] truncate">
+                          {t.assigned_to}
+                        </p>
+                      )}
+                    </div>
                   </div>
+                  {t.status === "running" && t.assigned_to && onTerminateAgent && (
+                    <button
+                      onClick={() => onTerminateAgent(t.assigned_to!)}
+                      title={`Cancel task (terminate ${t.assigned_to})`}
+                      className="p-1 rounded-lg border border-[#ef4444]/30 hover:border-[#ef4444] text-[#ef4444] hover:bg-[#ef4444]/10 transition cursor-pointer shrink-0"
+                    >
+                      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                        <path d="M18 6L6 18M6 6l12 12" />
+                      </svg>
+                    </button>
+                  )}
                 </div>
               ))
             )}
@@ -375,7 +410,7 @@ export function InsightRail({
             onClick={() => setSelectedAgent(null)}
             aria-hidden="true"
           />
-          <div className="relative w-72 h-full glass rounded-l-3xl border-l border-[var(--color-glass-border)] p-5 flex flex-col gap-4 anim-right">
+          <div className="relative w-72 h-full glass rounded-l-2xl border-l border-[var(--color-glass-border)] p-5 flex flex-col gap-4 anim-right">
             <div className="flex items-center justify-between">
               <h3 className="font-display text-base font-semibold text-[var(--color-text-primary)]">
                 {selectedAgent.name}
@@ -445,6 +480,18 @@ export function InsightRail({
                 )}
               </div>
             </div>
+
+            {selectedAgent.status !== "idle" && onTerminateAgent && (
+              <button
+                onClick={() => {
+                  onTerminateAgent(selectedAgent.name);
+                  setSelectedAgent(null);
+                }}
+                className="w-full py-2.5 rounded-xl border border-[#ef4444]/40 hover:border-[#ef4444] text-[#ef4444] font-medium text-xs tracking-wider uppercase bg-[#ef4444]/5 hover:bg-[#ef4444]/10 transition cursor-pointer text-center"
+              >
+                Terminate Agent
+              </button>
+            )}
           </div>
         </div>
       )}
