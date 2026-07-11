@@ -30,30 +30,36 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 - **Agentic OS Foundation:** Blackboard pattern agent coordination, MARVEL-named agent swarm, evolving 4-layer memory system (episodic, semantic, procedural, meta), and SQLite-backed knowledge graph.
 - **Next.js Web Dashboard:** Responsive glassmorphism web UI with electric blue accent, three-column layout, and WebSocket real-time sync. Built with React 19, Zustand, and Tailwind CSS v4.
 - **Reflection Engine:** Periodic self-reflection that consolidates memory, updates knowledge graph, and optimizes agent performance.
+- **Model Context Protocol (MCP):** When enabled, register tools from external MCP servers at runtime and call them alongside the built-in tools.
+- **Plugin system:** A hybrid plugin loader adds external integration tools when `PLUGINS_ENABLED` is on.
+- **LLM failover:** Optionally configure a secondary "big" LLM that Charlie falls back to automatically if the primary (small/fast) model errors out.
+- **Mood-aware voice:** Whether you sound annoyed, excited, or depressed changes Charlie's speech energy and pacing.
 
 ---
 
-## Architecture
+## Agents & Tools
 
-```
-main.py                   Entry point, logging, voice loop, TTS flush
-charlie/
-  core.py                 Brain class -- LLM orchestration, tool loop, streaming
-  voice.py                VoiceEngine -- VAD, ASR, TTS (Kokoro), audio I/O
-  tools.py                ToolRegistry -- web_search, shell_execute, file_read/write, memory, session_search
-  config.py               Config dataclass from .env
-  personality.py          Emotion classification + voice command parsing
-  asr_worker.py           Whisper ASR subprocess
-  session_store.py        SQLite + FTS5 session history
-```
+Charlie is more than a chat loop. A **swarm of specialist agents** coordinates on a
+shared blackboard to handle complex, multi-step requests:
 
-**Pipeline**:
-1. **VAD** (Voice Activity Detection) detects when you start/stop speaking
-2. **Whisper ASR** transcribes your speech to text
-3. **Brain** sends text to LLM with system prompt, memory, and tool definitions
-4. **Streaming**: LLM response is flushed to TTS at sentence/clause boundaries
-5. **Kokoro TTS** synthesizes speech audio
-6. **Speaker** plays the audio
+| Agent | Focus |
+|---|---|
+| **J.A.R.V.I.S.** | Coordination, reporting, and status digests |
+| **F.R.I.D.A.Y.** | General assistant tasks |
+| **Vision** | Image and visual understanding (uses the vision model) |
+| **E.D.I.T.H.** | Knowledge-graph and memory consolidation |
+| **A.I.D.A.** | Scheduling and planning |
+| **Karen** | Domain-specialist tasks |
+| **H.E.R.B.I.E.** | Domain-specialist tasks |
+
+The tools these agents (and the Brain) can call include:
+
+- **Web search** — self-hosted SearXNG plus Exa / Tavily / DuckDuckGo fallbacks.
+- **Shell execution** — sandboxed command runs with a protective blocklist.
+- **File I/O** — read and write within allowed paths.
+- **Memory search** — query the vector store and knowledge graph.
+- **Session history search** — full-text (FTS5) search over past conversations.
+- **MCP / plugin tools** — anything registered from external servers or plugins.
 
 ---
 
@@ -70,11 +76,13 @@ charlie/
 
 ### 1. Install dependencies
 
+Charlie uses [`uv`](https://docs.astral.sh/uv/) for its Python dependencies.
+
 ```bash
-pip install -r requirements.txt
-# or
-uv sync
+uv sync --locked
 ```
+
+(For the dashboard UI: `cd frontend && npm ci && npm run build`.)
 
 ### 2. Configure
 
@@ -107,11 +115,13 @@ GPU_DEVICE=cuda
 ### 3. Run
 
 ```bash
-python main.py          # full mode: voice engine + web dashboard + LLM Brain
+python run.py              # full mode: voice engine + web dashboard + LLM Brain
 ```
 
 Charlie will initialize the voice engine, download models on first run, and start listening.
-The web dashboard is served at http://127.0.0.1:8000 by default (configurable via `CHARLIE_HOST`/`CHARLIE_PORT`).
+The web dashboard is served at http://localhost:8000 by default (override with `CHARLIE_PORT`).
+`3000` is only the port used by the Next.js dev server (`npm run dev`); the production
+dashboard runs on `8000`.
 
 > **Note on the dashboard and chat:** the web UI and the LLM Brain are one system.
 > In **full mode** the dashboard is fully live - chat and voice both route through the
@@ -156,6 +166,13 @@ Say these while Charlie is speaking to control behavior:
 | "be energetic" / "speak faster" | Increase speech energy and speed |
 | "calm down" / "speak slower" | Slow down and speak calmly |
 
+Charlie also understands a couple of typed directives:
+
+| Command | Effect |
+|---|---|
+| `!search <query>` | Search your past conversations (full-text) and read back the matches |
+| `/memory-review` (or `!memory-review`) | Print a summary of the knowledge graph Charlie has built from memory |
+
 ---
 
 ## Search Providers
@@ -168,93 +185,6 @@ Charlie tries search providers in this order:
 4. **DuckDuckGo** (free, no key needed, rate-limited)
 
 Set `SEARXNG_URL` in `.env` for the best experience.
-
----
-
-## Project Structure
-
-```
-.
-  main.py               # Entry point
-  .env                  # Your configuration (not tracked)
-  .env.example          # Configuration template
-  MEMORY.md             # Persistent system context
-  SOUL.md               # Personality and behavior rules
-  USER.md               # User preferences
-  sessions.db           # Conversation history (SQLite)
-  charlie/
-    __init__.py
-    core.py             # LLM orchestration
-    voice.py            # Voice pipeline
-    tools.py            # Tool definitions
-    config.py           # Configuration
-    personality.py      # Emotion detection
-    asr_worker.py       # ASR subprocess
-    session_store.py    # Session database
-    web_server.py       # FastAPI web server + WebSocket
-  frontend/             # Next.js 16 + React 19 + Zustand dashboard
-    src/app/page.tsx    # Main page (WebSocket, layout)
-    src/components/     # VoiceDock, Sidebar, SmartPanel, ErrorBoundary
-    src/store/          # Zustand store (useCharlieStore)
-  models/
-    kokoro-v1.0.onnx    # Kokoro TTS model (~310MB)
-    voices-v1.0.bin     # Voice embeddings (~27MB)
-  tests/
-    test_personality.py
-    test_tools.py
-    test_fastpaths.py
-  logs/
-    charlie.log
-```
-
----
-
-## Development
-
-```bash
-# Backend: lint + test
-uv run ruff check .
-uv run pytest -v
-
-# Frontend: type-check + test
-cd frontend && npx tsc --noEmit && npm test
-
-# Frontend: dev server (for dashboard)
-cd frontend && npm run dev
-```
-
----
-
-## How It Works
-
-### Streaming TTS
-Charlie does not wait for the full LLM response before speaking. As tokens arrive:
-- **Sentence boundaries** (`.`, `!`, `?`) trigger immediate TTS flush
-- **Clause boundaries** (`,`, `;`, `:`) also trigger flush for faster response
-- **Force flush** at 250 characters prevents long pauses
-
-### Tool Loop
-When the LLM wants to use a tool (e.g., web search):
-1. Tool executes with a 15-second timeout
-2. Result is injected into the conversation as `{"role": "tool", "content": ...}`
-3. LLM generates a final answer from the result
-- Max 12 tool rounds per question
-5. Text normalization: multi-app commands (e.g., "Open Chrome calculator notepad") get "and" inserted between app names before LLM call
-6. Multi-argument tools (memory, session_search) parsed from text-based TOOL: format
-
-### Barge-in
-When you speak during Charlie's response:
-1. Command words ("stop", "wait") trigger immediate stop
-2. New speech cancels the current LLM generation
-3. Cooldown prevents double-trigger within 0.8s
-
-### Text Humanization
-Before TTS, Charlie cleans LLM output for natural speech:
-- Ellipsis converted to natural pause
-- Dashes converted to clause breaks (commas)
-- Repeated punctuation normalized
-- Markdown artifacts stripped
-- Numbers converted to words
 
 ---
 

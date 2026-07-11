@@ -3,6 +3,9 @@
 .env.local
 .env.*.local
 
+# === Generated graph visualization output ===
+graphify-out/
+
 # === Python ===
 __pycache__/
 *.pyc
@@ -50,3 +53,10 @@ frontend/.env*
 *.key
 *.pem
 *.cert
+
+# === Non-codebase tooling & artifacts (kept on disk, not in git) ===
+docs/
+.commandcode/
+voicedock-preview.html
+.agents/
+requirements.txt
