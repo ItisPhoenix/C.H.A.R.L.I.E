@@ -5,6 +5,7 @@ Communicates with the voice process via ZeroMQ (EventBus).
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 
 # Windows event-loop policy (must precede zmq/asyncio imports)
 from charlie.runtime import configure as _configure_platform
@@ -81,7 +82,44 @@ def _get_memory_graph() -> "MemoryGraph | None":
 
 pipeline_state: str = "idle"
 
-app = FastAPI(title="Charlie Dashboard")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup: init EventBus + ZMQ guard. Shutdown: tear down EventBus."""
+    # --- startup ---
+    global event_bus
+    event_bus = EventBus(
+        pub_port=DEFAULT_EVENT_PORT,
+        pull_port=DEFAULT_COMMAND_PORT,
+        is_producer=False,
+    )
+    await event_bus.__aenter__()
+    asyncio.create_task(_event_bridge())
+    logger.info("Web server started, event bridge active")
+
+    # ZMQ guard — suppress CancelledError traceback on Windows shutdown
+    loop = asyncio.get_event_loop()
+    _orig_call = loop.call_exception_handler
+    def _guarded_call(context):
+        exc = context.get("exception")
+        if isinstance(exc, asyncio.CancelledError):
+            return
+        _orig_call(context)
+    loop.call_exception_handler = _guarded_call
+
+    yield
+
+    # --- shutdown ---
+    if event_bus:
+        try:
+            await asyncio.wait_for(
+                event_bus.__aexit__(None, None, None),
+                timeout=2.0,
+            )
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.debug("EventBus shutdown cleanup issue (non-fatal): %s", exc)
+        event_bus = None
+
+app = FastAPI(title="Charlie Dashboard", lifespan=lifespan)
 
 # SECURITY: This server has no authentication. It is intended for localhost
 # only. Never bind CHARLIE_HOST=0.0.0.0 (or any non-loopback address) without
@@ -175,33 +213,7 @@ async def _event_bridge():
         logger.error(f"Event bridge error: {e}", exc_info=True)
 
 
-@app.on_event("startup")
-async def startup():
-    global event_bus
-    event_bus = EventBus(
-        pub_port=DEFAULT_EVENT_PORT,
-        pull_port=DEFAULT_COMMAND_PORT,
-        is_producer=False,
-    )
-    await event_bus.__aenter__()
-    asyncio.create_task(_event_bridge())
-    logger.info("Web server started, event bridge active")
 
-
-@app.on_event("shutdown")
-async def shutdown():
-    global event_bus
-    if event_bus:
-        # Fire-and-forget: close sockets immediately (linger=0 handles this),
-        # then terminate context. If this hangs, run.py's force-exit timer kills us.
-        try:
-            await asyncio.wait_for(
-                event_bus.__aexit__(None, None, None),
-                timeout=2.0,
-            )
-        except (asyncio.TimeoutError, Exception) as exc:
-            logger.debug("EventBus shutdown cleanup issue (non-fatal): %s", exc)
-        event_bus = None
 
 
 @app.websocket("/ws")

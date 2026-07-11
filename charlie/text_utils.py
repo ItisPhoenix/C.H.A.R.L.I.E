@@ -71,3 +71,36 @@ def normalize_app_list(text: str) -> str:
         return f"{prefix}{normalized_apps}"
 
     return _APP_LIST_PATTERN.sub(_replace_match, text)
+
+
+def _format_item(item: str) -> str:
+    """Format a single app/domain name with proper capitalization."""
+    item_lower = item.lower().strip()
+    # Special casing for known abbreviations
+    _FORMAT_OVERRIDES = {
+        "vs code": "VS Code",
+        "vscode": "VS Code",
+        "x": "X",
+    }
+    if item_lower in _FORMAT_OVERRIDES:
+        return _FORMAT_OVERRIDES[item_lower]
+    # Keep .exe names, domain names, and URLs as-is
+    if item.endswith(".exe") or "." in item:
+        return item
+    return item.title()
+
+
+def format_app_list(items: list[str]) -> str:
+    """Format a list of app/domain names into a grammatically correct string.
+
+    Produces Oxford-comma style: "A", "A and B", "A, B, and C".
+    Handles special capitalisation (VS Code, X) and preserves domains/URLs.
+    """
+    if not items:
+        return ""
+    if len(items) == 1:
+        return _format_item(items[0])
+    capitalized = [_format_item(item) for item in items]
+    if len(capitalized) == 2:
+        return f"{capitalized[0]} and {capitalized[1]}"
+    return f"{', '.join(capitalized[:-1])}, and {capitalized[-1]}"

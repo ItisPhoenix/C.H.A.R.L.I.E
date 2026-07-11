@@ -239,6 +239,68 @@ def test_detect_open_app(monkeypatch):
     assert res is None
 
 
+
+
+
+def test_detect_open_app_partial_failure(monkeypatch):
+    """Partial launch failures must not crash and must format correctly."""
+    import os
+    import subprocess
+
+    from charlie.core import _detect_open_app
+
+    call_count = 0
+
+    def mock_popen(cmd, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+
+        class MockProcess:
+            pid = 12345
+
+        # First call succeeds, second call fails
+        if call_count == 1:
+            return MockProcess()
+        raise OSError("Mock launch failure")
+
+    def mock_startfile(_cmd, *_a, **_kw):
+        raise OSError("Mock startfile failure")
+
+    monkeypatch.setattr(subprocess, "Popen", mock_popen)
+    monkeypatch.setattr(os, "startfile", mock_startfile)
+    monkeypatch.setattr("sys.platform", "win32")
+
+    # Test: open two apps, one fails
+    res = _detect_open_app("open chrome notepad")
+    assert "Chrome" in res  # First app succeeds
+    assert "Notepad" in res  # Second app should appear in failed list
+    assert "Failed to open" in res
+    # Ensure no raw tuple syntax leaks (the old bug)
+    assert "(" not in res or res.count("(") == res.count(")")
+    # Ensure .exe/.title tuple artifacts don't leak
+    assert "error_detail" not in res.lower()
+    assert "OSError" not in res
+
+
+def test_detect_open_app_all_failures(monkeypatch):
+    """All apps failing must return a graceful error, not a crash."""
+    import os
+    import subprocess
+
+    from charlie.core import _detect_open_app
+
+    def mock_fail(*_a, **_kw):
+        raise OSError("Mock failure")
+
+    monkeypatch.setattr(subprocess, "Popen", mock_fail)
+    monkeypatch.setattr(os, "startfile", mock_fail)
+    monkeypatch.setattr("sys.platform", "win32")
+
+    res = _detect_open_app("open chrome notepad")
+    assert res is not None
+    assert "chrome" in res.lower() or "Chrome" in res
+    # Must not crash with AttributeError on tuples
+
 @pytest.mark.asyncio
 async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
     import subprocess

@@ -6,9 +6,10 @@ handles supervisor routing, presents final response.
 
 import asyncio
 import time
-from typing import Any, Dict, List
+from typing import List
 
 from charlie.agents.base import BaseAgent
+from charlie.blackboard import Task
 
 
 class JarvisAgent(BaseAgent):
@@ -34,7 +35,8 @@ class JarvisAgent(BaseAgent):
 
         # Poll (briefly) for Vision to create sub-tasks, capped at 30s.
         deadline = time.monotonic() + 30.0
-        sub_tasks: List[Dict[str, Any]] = []
+
+        sub_tasks: List[Task] = []
         while time.monotonic() < deadline:
             sub_tasks = [
                 t

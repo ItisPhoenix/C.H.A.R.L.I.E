@@ -16,6 +16,7 @@ from uuid import uuid4
 import httpx
 
 from charlie.budget import IterationBudget
+from charlie.text_utils import format_app_list
 from charlie.tools import registry as tool_registry
 from charlie.utils import build_auth_headers
 
@@ -34,11 +35,6 @@ _TOOL_TIMEOUTS = {
 }
 _TOOL_RESULT_MAX_CHARS = 2000
 _COMPRESSION_THRESHOLD = 0.8
-
-# --- Reasoning tag pattern (shared) ---
-_REASONING_RE = re.compile(
-    r"$^" # Disable: matches nothing (start and end anchor sequence)
-)
 
 # --- Tool param name map (text-based extraction) ---
 _TOOL_PARAM_NAMES: Dict[str, str] = {
@@ -462,25 +458,14 @@ def _detect_close_app(query: str) -> Optional[str]:
                 "Failed to taskkill %s (%s): %s", app, process, e, exc_info=True
             )
             failed_apps.append(app)
-
     # Build response message
-    def format_list(items):
-        capitalized = [
-            item.title() if not item.endswith(".exe") else item for item in items
-        ]
-        if len(capitalized) == 1:
-            return capitalized[0]
-        if len(capitalized) == 2:
-            return f"{capitalized[0]} and {capitalized[1]}"
-        return f"{', '.join(capitalized[:-1])}, and {capitalized[-1]}"
-
     parts = []
     if success_apps:
-        parts.append(f"{format_list(success_apps)} has been closed for you.")
+        parts.append(f"{format_app_list(success_apps)} has been closed for you.")
     if not_running_apps:
-        parts.append(f"{format_list(not_running_apps)} is not currently running.")
+        parts.append(f"{format_app_list(not_running_apps)} is not currently running.")
     if failed_apps:
-        parts.append(f"Failed to close {format_list(failed_apps)}.")
+        parts.append(f"Failed to close {format_app_list(failed_apps)}.")
 
     return " ".join(parts)
 
@@ -600,24 +585,10 @@ def _detect_open_app(query: str) -> Optional[str]:
         return f"I could not open {', '.join(failed_names)}."
 
     # Build response message
-    def format_list(items):
-        capitalized = []
-        for item in items:
-            if item in ("vs code", "vscode", "x"):
-                capitalized.append("VS Code" if "code" in item else "X")
-            elif "." in item:
-                capitalized.append(item)  # Keep domains as-is (e.g. reddit.com)
-            else:
-                capitalized.append(item.title())
-        if len(capitalized) == 1:
-            return capitalized[0]
-        if len(capitalized) == 2:
-            return f"{capitalized[0]} and {capitalized[1]}"
-        return f"{', '.join(capitalized[:-1])}, and {capitalized[-1]}"
-
-    msg = f"I've opened {format_list(success_apps)} for you."
+    msg = f"I've opened {format_app_list(success_apps)} for you."
     if failed_apps:
-        msg += f" (Failed to open: {format_list(failed_apps)})"
+        failed_names = [name for name, _ in failed_apps]
+        msg += f" (Failed to open: {format_app_list(failed_names)})"
     return msg
 
 
@@ -629,7 +600,6 @@ def strip_internal_reasoning(text: str) -> str:
         text,
         flags=re.DOTALL | re.IGNORECASE,
     )
-    text = _REASONING_RE.sub("", text)
     return text.strip()
 
 
@@ -1258,6 +1228,10 @@ class Brain:
             current_len = sum(len(e) for e in entries) + (len(entries) - 1 if entries else 0)
             if current_len / max_chars < 0.8:
                 continue
+            # Skip if no small LLM URL configured for consolidation
+            if not self.config.small_llm_url:
+                logger.debug("Skipping consolidation: no small LLM URL configured")
+                continue
 
             prompt = (
                 f"You are a memory consolidation engine. "
@@ -1704,25 +1678,15 @@ class Brain:
                     return
 
             tool_calls = allowed_calls
-
-            read_only = [
-                c for c in tool_calls if not tool_registry.is_interactive(c["name"])
-            ]
-            interactive = [
-                c for c in tool_calls if tool_registry.is_interactive(c["name"])
-            ]
-
             results_map: Dict[int, str] = {}
-            if read_only:
-                ro_results = await asyncio.gather(*[_exec_one(c) for c in read_only])
-                ro_indices = [tool_calls.index(c) for c in read_only]
-                for idx, r in zip(ro_indices, ro_results):
-                    results_map[idx] = r
+            for idx, call in enumerate(tool_calls):
+                if not tool_registry.is_interactive(call["name"]):
+                    results_map[idx] = await _exec_one(call)
 
-            if interactive:
-                for c in interactive:
-                    idx = tool_calls.index(c)
-                    results_map[idx] = await _exec_one(c)
+            # Interactive tools run sequentially after read-only tools complete.
+            for idx, call in enumerate(tool_calls):
+                if tool_registry.is_interactive(call["name"]):
+                    results_map[idx] = await _exec_one(call)
 
             exec_results = [results_map[i] for i in range(len(tool_calls))]
             # Step 3: Post-tool confidence gate - replace low-quality results
@@ -2126,10 +2090,10 @@ def _format_text_tool_summary(
             cmd = args.get("command", args) if isinstance(args, dict) else args
             if "Command executed successfully" in content:
                 lines.append(
-                    f"shell_execute{cmd} executed successfully. The command is now running."
+                    f"shell_execute {cmd} executed successfully. The command is now running."
                 )
             else:
-                lines.append(f"shell_execute{cmd} returned: {content}")
+                lines.append(f"shell_execute {cmd} returned: {content}")
         else:
             args = call.get("arguments", {})
             arg_str = args.get("command", args) if isinstance(args, dict) else args

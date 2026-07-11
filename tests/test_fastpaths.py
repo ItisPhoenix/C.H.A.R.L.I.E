@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from charlie.text_utils import KNOWN_APPS, normalize_app_list
+from charlie.text_utils import KNOWN_APPS, format_app_list, normalize_app_list
 
 
 def test_single_app_unchanged():
@@ -64,3 +64,42 @@ def test_no_apps_in_command():
     """Command with no app names returns unchanged."""
     result = normalize_app_list("open the door")
     assert result == "open the door"
+
+
+# ---------------------------------------------------------------------------
+# format_app_list tests
+# ---------------------------------------------------------------------------
+
+
+class TestFormatAppList:
+    """format_app_list: grammatically correct list formatting for apps/domains."""
+
+    def test_empty_list(self):
+        assert format_app_list([]) == ""
+
+    def test_single_item(self):
+        assert format_app_list(["chrome"]) == "Chrome"
+
+    def test_two_items(self):
+        assert format_app_list(["chrome", "notepad"]) == "Chrome and Notepad"
+
+    def test_three_items(self):
+        assert (
+            format_app_list(["chrome", "notepad", "calculator"])
+            == "Chrome, Notepad, and Calculator"
+        )
+
+    def test_preserves_domains(self):
+        assert (
+            format_app_list(["chrome", "github.com"])
+            == "Chrome and github.com"
+        )
+
+    def test_special_vscode(self):
+        assert format_app_list(["vscode"]) == "VS Code"
+
+    def test_mixed_special_and_normal(self):
+        assert (
+            format_app_list(["chrome", "vscode", "notepad"])
+            == "Chrome, VS Code, and Notepad"
+        )

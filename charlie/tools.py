@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -19,11 +20,13 @@ from charlie.session_store import SessionStore
 
 logger = logging.getLogger("charlie.tools")
 
+
 # --- Vector memory store (set via set_memory_store at init) ---
 _memory_store = None  # type: Optional[Any]
 # --- Knowledge graph store (set via set_memory_graph at init) ---
 _memory_graph = None  # type: Optional[Any]
-
+# --- Blackboard for agent swarm (set via set_blackboard at init) ---
+_blackboard = None  # type: Optional[Any]
 # --- Search tuning ---
 SEARCH_RESULT_LIMIT = 5
 CONTENT_MAX_CHARS = 800
@@ -161,6 +164,10 @@ class ToolRegistry:
         """Inject knowledge graph store for graph tools."""
         global _memory_graph
         _memory_graph = graph
+    def set_blackboard(self, blackboard: Any) -> None:
+        """Inject Blackboard for delegate_to_agent tool."""
+        global _blackboard
+        _blackboard = blackboard
 
 
 # Global tool registry
@@ -718,7 +725,6 @@ def _parse_memory_entries(text: str) -> list:
     if not text.strip():
         return []
     if _MEMORY_SEP not in text:
-        # Legacy file without separators - treat as single entry
         return [text.strip()] if text.strip() else []
     return [e.strip() for e in text.split(_MEMORY_SEP) if e.strip()]
 
@@ -1033,6 +1039,110 @@ def graph_consolidate() -> str:
     except Exception as e:
         logger.exception("graph_consolidate error")
         return f"Error consolidating graph: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Swarm delegation tool (delegate tasks to MARVEL agents)
+# ---------------------------------------------------------------------------
+
+_VALID_AGENTS = ("F.R.I.D.A.Y.", "E.D.I.T.H.", "A.I.D.A.", "K.A.R.E.N.", "H.E.R.B.I.E.")
+_POLL_INTERVAL_S = 0.5
+_POLL_TIMEOUT_S = 60.0
+
+
+@registry.register_tool(
+    name="delegate_to_agent",
+    description=(
+        "Delegate a task to a MARVEL agent for parallel execution. "
+        "Use when a subtask requires deep focus (research, analysis, file ops) "
+        "while you continue the main conversation. Returns the agent's result."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "agent_name": {
+                "type": "string",
+                "enum": list(_VALID_AGENTS),
+                "description": "Which MARVEL agent to assign the task to",
+            },
+            "task_description": {
+                "type": "string",
+                "description": "Clear, self-contained description of what to do",
+            },
+        },
+        "required": ["agent_name", "task_description"],
+    },
+)
+def delegate_to_agent(agent_name: str, task_description: str) -> str:
+    """Add a task to the blackboard, poll up to 60s, and return the result."""
+    global _blackboard
+    if _blackboard is None:
+        return (
+            "Error: Swarm orchestrator is not running. "
+            "Cannot delegate tasks without an active blackboard."
+        )
+
+    if agent_name not in _VALID_AGENTS:
+        agents_str = ", ".join(_VALID_AGENTS)
+        return f"Error: Unknown agent '{agent_name}'. Valid agents: {agents_str}"
+
+    try:
+        task = _blackboard.add_task(
+            name=task_description,
+            assigned_to=agent_name,
+            column="todo",
+        )
+        task_id = task.id
+        logger.info(
+            "Delegated task [%s] to %s: %s",
+            task_id, agent_name, task_description,
+        )
+
+        # Poll loop: wait for status to be 'done' or 'failed'
+        deadline = time.monotonic() + _POLL_TIMEOUT_S
+        last_status = "pending"
+        while time.monotonic() < deadline:
+            time.sleep(_POLL_INTERVAL_S)
+            current = _blackboard.get_task(task_id)
+            if current is None:
+                return f"Error: Task {task_id} was removed from the blackboard."
+            if current.status == "done":
+                logger.info(
+                    "Task [%s] completed by %s (result length=%d)",
+                    task_id, agent_name, len(current.result or ""),
+                )
+                result = current.result or "(no result content)"
+                elapsed = _POLL_TIMEOUT_S - (deadline - time.monotonic())
+                return (
+                    f"Agent {agent_name} completed task in {elapsed:.1f}s. "
+                    f"Result:\n{result}"
+                )
+            if current.status == "failed":
+                logger.warning("Task [%s] failed for %s", task_id, agent_name)
+                return (
+                    f"Agent {agent_name} failed to complete the task. "
+                    f"Status: {current.status}. Result: {current.result or 'N/A'}"
+                )
+            if current.status != last_status:
+                logger.info(
+                    "Task [%s] status changed: %s -> %s",
+                    task_id, last_status, current.status,
+                )
+                last_status = current.status
+
+        # Timeout
+        logger.warning(
+            "Task [%s] timed out after %.1fs (status=%s)",
+            task_id, _POLL_TIMEOUT_S, last_status,
+        )
+        return (
+            f"Agent {agent_name} did not complete the task within "
+            f"{_POLL_TIMEOUT_S:.0f} seconds. The task ({task_id}) is still "
+            f"in status '{last_status}' and will continue running."
+        )
+    except Exception as e:
+        logger.exception("delegate_to_agent error")
+        return f"Error delegating to agent: {e}"
 
 
 # ---------------------------------------------------------------------------

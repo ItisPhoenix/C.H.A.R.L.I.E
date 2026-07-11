@@ -385,7 +385,17 @@ class VoiceEngine:
         text = _RE_PAREN_SHORT.sub("", text)  # remove short asides entirely
         text = _RE_PAREN_LONG.sub(r"\1", text)  # keep content of long asides
 
-        # 7. Ensure sentence ends with punctuation (Kokoro needs this for prosody)
+        # 7. Expand contractions for natural speech
+        for full, contracted in _CONTRACTIONS.items():
+            # Case-insensitive word-boundary replacement
+            text = re.sub(
+                r"\b" + re.escape(full) + r"\b",
+                contracted,
+                text,
+                flags=re.IGNORECASE,
+            )
+
+        # 8. Ensure sentence ends with punctuation (Kokoro needs this for prosody)
         text = text.rstrip()
         if text and text[-1] not in ".!?":
             # Check if it looks like a question
@@ -412,10 +422,10 @@ class VoiceEngine:
             else:
                 text += "."
 
-        # 8. Fix missing space after sentence-ending punctuation
+        # 9. Fix missing space after sentence-ending punctuation
         text = _RE_TRAILING_PUNCT_NO_SPACE.sub(r"\1 \2", text)
 
-        # 9. Collapse multiple spaces/newlines
+        # 10. Collapse multiple spaces/newlines
         text = re.sub(r"\s+", " ", text).strip()
 
         return text

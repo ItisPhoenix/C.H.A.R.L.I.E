@@ -136,6 +136,25 @@ def _strip_think(text: str) -> str:
     return _THINK_RE.sub("", text).strip()
 
 
+_SEARCH_RESULTS_RE = re.compile(
+    r"\[SEARCH RESULTS.*?\]|\[END SEARCH RESULTS\]",
+    re.DOTALL | re.IGNORECASE,
+)
+_TOOL_LINE_RE = re.compile(r"(?m)^(TOOL:.*|\s*\{.*\}.*)$")
+
+
+def _strip_search_result_tags(text: str) -> str:
+    """Remove [SEARCH RESULTS] blocks and their end markers from text."""
+    return _SEARCH_RESULTS_RE.sub("", text).strip()
+
+
+def _strip_tool_lines(text: str) -> str:
+    """Remove TOOL: ... lines and raw JSON tool-call artifacts from text."""
+    lines = text.splitlines()
+    kept = [ln for ln in lines if not _TOOL_LINE_RE.match(ln)]
+    return "\n".join(kept).strip()
+
+
 def _safe_speak(voice, text: str, emotion: str, label: str = "") -> None:
     """Speak text, logging (not swallowing) any TTS failure.
 
@@ -155,12 +174,6 @@ def _safe_speak(voice, text: str, emotion: str, label: str = "") -> None:
 
 
 def _schedule_process(coro, loop):
-    """Schedule the answer coroutine and surface any failure instead of swallowing it.
-
-    run_coroutine_threadsafe returns a concurrent.futures.Future whose exception
-    is otherwise never inspected, so a turn that dies logs nothing. This callback
-    makes the failure visible and attributable.
-    """
     fut = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
         fut.add_done_callback(
@@ -176,8 +189,6 @@ def _schedule_process(coro, loop):
 
 
 async def main():
-    # Suppress pyzmq CancelledError traceback on Windows shutdown.
-    # See web_server_entry.py for full explanation.
     loop = asyncio.get_running_loop()
     _orig_handler = loop.call_exception_handler
 
@@ -265,6 +276,8 @@ async def main():
     # Wire knowledge graph into tool registry
     if brain is not None and hasattr(brain, "memory_graph"):
         tool_registry.set_memory_graph(brain.memory_graph)
+    # Wire blackboard into tool registry
+    tool_registry.set_blackboard(blackboard)
 
     # Wire the plugin system into the tool registry (no-op unless enabled).
     # The SAME registry the LLM calls, so when PLUGINS_ENABLED=true the
@@ -282,8 +295,7 @@ async def main():
         logger.warning(f"Plugin system failed to initialize: {e}")
         plugin_manager = None
 
-    # Wire the MCP subsystem into the SAME shared tool registry (no-op unless
-    # enabled). Tools are auto-discovered once here at startup, not per request.
+    # Wire the MCP subsystem into the SAME shared tool registry (no-op unless enabled).
     mcp_client = None
     try:
         if config.mcp_enabled:
@@ -299,8 +311,6 @@ async def main():
         mcp_client = None
 
     # Build the swarm with a real LLM client so agents do genuine work.
-    # The agents expect an object with `.post(path, json=...)` and `.model`;
-    # Brain.client is an httpx.AsyncClient (has .post) so we just expose .model.
     if brain is not None:
         from charlie.utils import build_auth_headers
 
@@ -379,15 +389,6 @@ async def main():
             logger.info(f"Echo suppressed: {text}")
             return
 
-        # Emit transcript event
-        if event_bus:
-            asyncio.create_task(
-                event_bus.emit(
-                    "transcript",
-                    {"text": text, "source": platform, "session_id": session_id},
-                )
-            )
-
         print(f"\rHeard: {text}", flush=True)
         if config.enable_barge_in and voice.is_speaking.is_set():
             # Barge-in detection: command words always interrupt immediately
@@ -457,6 +458,15 @@ async def main():
             voice.speak(response_str, last_emotion)
             return
 
+        # Emit transcript event only if this turn was not suppressed
+        if event_bus:
+            asyncio.create_task(
+                event_bus.emit(
+                    "transcript",
+                    {"text": text, "source": platform, "session_id": session_id},
+                )
+            )
+
         # Store user message
         try:
             store.append("user", text, session_id=session_id)
@@ -505,7 +515,7 @@ async def main():
         is_first_flush = True
         async for chunk in brain.chat_stream(text, platform=platform):
             if is_first_chunk:
-                print("\r" + " " * 30 + "\r", end="", flush=True)  # Clear thinking
+                print("\r" + " " * 30 + "\r", end="", flush=True)
                 is_first_chunk = False
             print(chunk, end="", flush=True)
             sentence_buffer += chunk
@@ -514,21 +524,27 @@ async def main():
 
             # Real-time UI token stream: emit whole sentences as they complete.
             # This is the ONLY source of "token" events for the chat UI, so the
-            # text accumulates without duplication. Thought blocks are stripped
-            # here so reasoning never leaks into the chat.
+            # text accumulates without duplication. Internal model text like
+            # <think>...</think>, [SEARCH RESULTS]...[/SEARCH RESULTS], and
+            # TOOL: ... lines are stripped here so reasoning/tool metadata
+            # never leaks into the chat.
             if event_bus and _SENTENCE_BOUNDARY.search(web_buffer):
                 parts = _SENTENCE_BOUNDARY.split(web_buffer)
                 for part in parts[:-1]:
                     if part.strip():
-                        asyncio.create_task(
-                            event_bus.emit(
-                                "token",
-                                {
-                                    "text": _strip_think(part.strip()) + ". ",
-                                    "session_id": session_id,
-                                },
+                        safe = _strip_search_result_tags(part.strip())
+                        safe = _strip_tool_lines(safe)
+                        safe = _strip_think(safe)
+                        if safe:
+                            asyncio.create_task(
+                                event_bus.emit(
+                                    "token",
+                                    {
+                                        "text": safe if safe.endswith((".", "!", "?")) else safe + ". ",
+                                        "session_id": session_id,
+                                    },
+                                )
                             )
-                        )
                 web_buffer = parts[-1]
 
             # Progressive flush: sentence boundary > clause boundary > force-flush.
@@ -584,20 +600,22 @@ async def main():
                 event_bus.emit(
                     "token",
                     {
-                        "text": _strip_think(web_buffer.strip()),
+                        "text": _strip_think(
+                            _strip_tool_lines(
+                                _strip_search_result_tags(web_buffer.strip())
+                            )
+                        ),
                         "session_id": session_id,
                     },
                 )
             )
 
-        # Final TTS -- chunks already printed everything.
-        # _safe_speak guards so a TTS failure cannot swallow archiving or response_done.
+
+        # Final TTS
         if sentence_buffer.strip():
             _safe_speak(voice, sparkle + sentence_buffer, detected_emotion, "final")
 
-        # Persist whatever was generated. full_reply_buffer may be empty if the
-        # turn was cancelled (e.g. voice barge-in); fall back to the streamed
-        # web_buffer so a generated answer is never silently dropped.
+        # Persist the generated reply, falling back to web_buffer if cancelled.
         final_reply = full_reply_buffer.strip() or web_buffer.strip()
         if final_reply:
             try:
