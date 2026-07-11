@@ -189,6 +189,17 @@ class SessionStore:
                     "CREATE INDEX IF NOT EXISTS idx_messages_session_id "
                     "ON messages(session_id, id);"
                 )
+                # Structured tool activity log (distinct from the free-text messages table)
+                self.conn.execute(
+                    """CREATE TABLE IF NOT EXISTS tool_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        text TEXT,
+                        created_at TEXT NOT NULL
+                    )"""
+                )
         except sqlite3.Error as e:
             logger.error(f"Database initialization failed: {e}")
             raise
@@ -234,33 +245,71 @@ class SessionStore:
         content = f"[{tool_name} args={args_str}] result: {truncated_result}"
         self.append("tool", content, session_id=session_id, turn_id=turn_id)
 
-    def search(self, query: str, limit: int = 5) -> List[Tuple[str, str]]:
-        """Searches past conversation content."""
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        launch_id: Optional[str] = None,
+    ) -> List[Tuple[str, str]]:
+        """Searches past conversation content.
+
+        When ``launch_id`` is provided, FTS hits are scoped to sessions that
+        belong to that launch (JOINed against the ``sessions`` table). When it
+        is omitted, the search falls back to the global behavior over all
+        launches (backward compatible).
+        """
 
         def _do():
             cursor = self.conn.cursor()
             if self.fts5_supported:
-                cursor.execute(
-                    """
-                    SELECT role, content FROM messages
-                    WHERE id IN (
-                        SELECT rowid FROM messages_fts
-                        WHERE messages_fts MATCH ?
+                if launch_id is not None:
+                    cursor.execute(
+                        """
+                        SELECT messages.role, messages.content FROM messages
+                        JOIN sessions ON sessions.session_id = messages.session_id
+                        WHERE messages.id IN (
+                            SELECT rowid FROM messages_fts
+                            WHERE messages_fts MATCH ?
+                        )
+                        AND sessions.launch_id = ?
+                        ORDER BY messages.id DESC LIMIT ?;
+                        """,
+                        (query, launch_id, limit),
                     )
-                    ORDER BY id DESC LIMIT ?;
-                    """,
-                    (query, limit),
-                )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT role, content FROM messages
+                        WHERE id IN (
+                            SELECT rowid FROM messages_fts
+                            WHERE messages_fts MATCH ?
+                        )
+                        ORDER BY id DESC LIMIT ?;
+                        """,
+                        (query, limit),
+                    )
             else:
                 # Fallback to standard SQL LIKE query
-                cursor.execute(
-                    """
-                    SELECT role, content FROM messages
-                    WHERE content LIKE ?
-                    ORDER BY id DESC LIMIT ?;
-                    """,
-                    (f"%{query}%", limit),
-                )
+                if launch_id is not None:
+                    cursor.execute(
+                        """
+                        SELECT messages.role, messages.content FROM messages
+                        JOIN sessions ON sessions.session_id = messages.session_id
+                        WHERE messages.content LIKE ?
+                        AND sessions.launch_id = ?
+                        ORDER BY messages.id DESC LIMIT ?;
+                        """,
+                        (f"%{query}%", launch_id, limit),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT role, content FROM messages
+                        WHERE content LIKE ?
+                        ORDER BY id DESC LIMIT ?;
+                        """,
+                        (f"%{query}%", limit),
+                    )
             return cursor.fetchall()
 
         return self._with_retry(_do, "search", reraise=False) or []
@@ -376,6 +425,36 @@ class SessionStore:
     ) -> List[Tuple[str, str]]:
         """Returns messages for a specific session, oldest first."""
         return self.get_recent(limit=limit, session_id=session_id)
+
+    def append_tool_event(
+        self,
+        session_id: str,
+        kind: str,
+        name: str,
+        text: Optional[str] = None,
+    ) -> None:
+        """Records a structured tool activity (call/result) for a session."""
+        try:
+            with self.conn:
+                self.conn.execute(
+                    "INSERT INTO tool_events (session_id, kind, name, text, created_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (session_id, kind, name, text, utc_now_iso()),
+                )
+        except sqlite3.Error as e:
+            logger.error(f"append_tool_event failed: {e}")
+
+    def get_tool_events(self, session_id: str) -> List[Tuple[str, str, Optional[str]]]:
+        """Returns (kind, name, text) tool events for a session, oldest first."""
+        try:
+            rows = self.conn.execute(
+                "SELECT kind, name, text FROM tool_events WHERE session_id = ? ORDER BY id ASC",
+                (session_id,),
+            ).fetchall()
+            return [(r[0], r[1], r[2]) for r in rows]
+        except sqlite3.Error as e:
+            logger.error(f"get_tool_events failed: {e}")
+            return []
 
     def close(self) -> None:
         """Closes connection cleanly."""

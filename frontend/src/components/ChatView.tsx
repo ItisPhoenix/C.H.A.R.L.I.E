@@ -1,15 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactElement } from "react";
-import { useCharlieStore } from "../store/useCharlieStore";
+import { useCharlieStore, type ToolActivityEntry } from "../store/useCharlieStore";
 
 interface ChatViewProps {
   messages: { id?: string; role: string; content: string }[];
   onSend: (text: string) => void;
   onStop?: () => void;
   loading: boolean;
-  sessionTitle?: string;
   voiceState?: string;
+  toolActivity?: ToolActivityEntry[];
 }
 
 function TypingDots(): ReactElement {
@@ -31,8 +31,8 @@ export function ChatView({
   onSend,
   onStop,
   loading,
-  sessionTitle,
   voiceState = "idle",
+  toolActivity,
 }: ChatViewProps): ReactElement {
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -63,7 +63,7 @@ export function ChatView({
       <header className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-glass-border)]">
         <div className="min-w-0">
           <h1 className="font-display text-lg font-semibold text-[var(--color-text-primary)] truncate">
-            {sessionTitle || "Charlie"}
+            Charlie
           </h1>
           <p className="text-xs text-[var(--color-text-muted)] font-mono">
             Assistant Control Center
@@ -123,6 +123,24 @@ export function ChatView({
           </div>
         )}
       </div>
+
+      {/* Tool activity (collapsible) */}
+      {toolActivity && toolActivity.length > 0 && (
+        <details className="tool-activity glass rounded-lg p-2 mx-6 mb-2 text-xs">
+          <summary className="cursor-pointer text-[var(--color-text-secondary)] select-none">
+            {toolActivity.length} tool {toolActivity.length === 1 ? "action" : "actions"}
+          </summary>
+          <ul className="mt-1 space-y-1">
+            {toolActivity.map((t, i) => (
+              <li key={i} className="font-mono">
+                {t.kind === "tool_call" ? "🔧 Ran" : t.kind === "tool_result" ? "↩" : "💭"}{" "}
+                {t.name}
+                {t.text ? ` → ${t.text}` : ""}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
 
       {/* Input bar */}
       <div className="px-6 py-4 border-t border-[var(--color-glass-border)]">

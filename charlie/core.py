@@ -1427,7 +1427,8 @@ class Brain:
         if opinion is not None:
             logger.info("Opinion teaching detected: %s -> %s", user_input, opinion)
             try:
-                result = tool_registry.execute_tool(
+                result = await asyncio.to_thread(
+                    tool_registry.execute_tool,
                     "memory",
                     {
                         "action": "add",
@@ -1489,7 +1490,9 @@ class Brain:
             yield open_res
             return
 
-        search_results = "" if skip_pre_search else _pre_search(user_input)
+        search_results = (
+            "" if skip_pre_search else await asyncio.to_thread(_pre_search, user_input)
+        )
 
         # --- Assemble system prompt from frozen tiers + volatile tier ---
         now = datetime.now()
@@ -1678,6 +1681,16 @@ class Brain:
             return r
 
         while True:
+            # Re-check cancellation at the top of every tool cycle so a turn
+            # cancelled mid-stream does not run another tool round before
+            # streaming. Matches the generation guard used further below.
+            if self._chat_generation != generation:
+                logger.debug(
+                    "Chat generation changed (%s != %s), aborting tool loop",
+                    self._chat_generation,
+                    generation,
+                )
+                break
             if not tool_calls:
                 break
 

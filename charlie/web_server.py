@@ -38,6 +38,20 @@ active_connections: Set[WebSocket] = set()
 # scope per-session streams (token/transcript) instead of leaking them to all
 # connected browsers.
 ws_sessions: dict[WebSocket, str] = {}
+
+# MCP tools are discovered once here at web-server startup (mirroring main.py)
+# and registered into the shared registry so /api/mcp/* reflects reality.
+mcp_client = None
+if config.mcp_enabled:
+    try:
+        from charlie.mcp_client import start_mcp
+
+        mcp_client = start_mcp(config)
+        if mcp_client is None:
+            logger.info("Web MCP subsystem not started (no servers configured)")
+    except Exception as e:
+        logger.warning("Web MCP subsystem failed to initialize: %s", e)
+        mcp_client = None
 # Events that carry a session_id and must only reach clients subscribed to it.
 _SESSION_SCOPED_EVENTS = ("token", "transcript")
 event_bus: EventBus | None = None
@@ -418,14 +432,42 @@ async def get_memory_facts():
 
 @app.get("/api/mcp/tools")
 async def get_mcp_tools():
-    """Retrieve registered tools from the global tool registry."""
+    """Return discovered MCP tool definitions.
+
+    When MCP is disabled this returns an empty list rather than every tool in
+    the shared registry, so the endpoint honestly reflects the toggle. When
+    enabled it returns the tools auto-registered with the ``mcp_`` prefix.
+    """
     try:
         from charlie.tools import registry
-        defs = registry.get_tool_definitions()
+
+        if not config.mcp_enabled:
+            return {"tools": []}
+        defs = [
+            d for d in registry.get_tool_definitions()
+            if d.get("name", "").startswith("mcp_")
+        ]
         return {"tools": defs}
     except Exception as e:
         logger.error(f"Error fetching tools: {e}")
     return {"tools": []}
+
+
+@app.get("/api/mcp/status")
+async def get_mcp_status():
+    """Report whether MCP is enabled and whether tools are connected."""
+    try:
+        from charlie.tools import registry
+
+        enabled = config.mcp_enabled
+        connected = enabled and any(
+            d.get("name", "").startswith("mcp_")
+            for d in registry.get_tool_definitions()
+        )
+        return {"enabled": enabled, "connected": connected}
+    except Exception as e:
+        logger.error(f"Error fetching MCP status: {e}")
+    return {"enabled": False, "connected": False}
 
 
 @app.post("/api/session/active")

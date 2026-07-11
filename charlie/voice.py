@@ -1110,8 +1110,20 @@ class VoiceEngine:
                     f"vad_speech_offset | duration_ms={duration_ms:.0f} samples={len(audio)}"
                 )
 
-                # Send to ASR (must be tuple: bytes, sample_rate)
-                self.asr_input_queue.put((audio.tobytes(), samplerate))
+                # Send to ASR (must be tuple: bytes, sample_rate). Use
+                # put_nowait with drop-oldest backpressure so the capture
+                # thread never blocks on a full ASR queue.
+                try:
+                    self.asr_input_queue.put_nowait((audio.tobytes(), samplerate))
+                except queue.Full:
+                    try:
+                        self.asr_input_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self.asr_input_queue.put_nowait((audio.tobytes(), samplerate))
+                    except queue.Full:
+                        pass  # drop oldest phrase on overflow
 
     def _asr_poller_loop(self):
         """Poll ASR results and forward to on_speech callback."""

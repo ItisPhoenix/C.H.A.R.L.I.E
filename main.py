@@ -218,13 +218,17 @@ async def main():
     def on_tool_call(name, args):
         if event_bus:
             asyncio.run_coroutine_threadsafe(
-                event_bus.emit("tool_call", {"name": name, "args": args}), loop
+                event_bus.emit("tool_call", {"name": name, "args": args, "session_id": current_web_session_id}), loop
             )
 
     def on_tool_result(name, result):
         if event_bus:
             asyncio.run_coroutine_threadsafe(
-                event_bus.emit("tool_result", {"name": name, "text": result}), loop
+                event_bus.emit(
+                    "tool_result",
+                    {"name": name, "text": result, "session_id": current_web_session_id},
+                ),
+                loop,
             )
 
     def on_thinking_update(name, args):
@@ -234,7 +238,7 @@ async def main():
                 summary = str(args)[:80]
                 desc += f" with {summary}"
             asyncio.run_coroutine_threadsafe(
-                event_bus.emit("thinking_update", {"text": desc}), loop
+                event_bus.emit("thinking_update", {"text": desc, "session_id": current_web_session_id}), loop
             )
 
     try:
@@ -261,6 +265,38 @@ async def main():
     # Wire knowledge graph into tool registry
     if brain is not None and hasattr(brain, "memory_graph"):
         tool_registry.set_memory_graph(brain.memory_graph)
+
+    # Wire the plugin system into the tool registry (no-op unless enabled).
+    # The SAME registry the LLM calls, so when PLUGINS_ENABLED=true the
+    # plugin_* tools appear alongside the built-in tools and are gated by
+    # the flag off by default.
+    from charlie.tools import register_plugin_tools
+
+    try:
+        plugin_manager = register_plugin_tools(config)
+        if plugin_manager is None:
+            logger.info("Plugin system disabled (PLUGINS_ENABLED=false).")
+        else:
+            logger.info("Plugin system ACTIVE: plugin_* tools registered.")
+    except Exception as e:
+        logger.warning(f"Plugin system failed to initialize: {e}")
+        plugin_manager = None
+
+    # Wire the MCP subsystem into the SAME shared tool registry (no-op unless
+    # enabled). Tools are auto-discovered once here at startup, not per request.
+    mcp_client = None
+    try:
+        if config.mcp_enabled:
+            from charlie.mcp_client import start_mcp
+
+            mcp_client = start_mcp(config)
+            if mcp_client is None:
+                logger.info("MCP subsystem not started (no servers configured)")
+        else:
+            logger.info("MCP subsystem not enabled (MCP_ENABLED=false)")
+    except Exception as e:
+        logger.warning(f"MCP subsystem failed to initialize: {e}")
+        mcp_client = None
 
     # Build the swarm with a real LLM client so agents do genuine work.
     # The agents expect an object with `.post(path, json=...)` and `.model`;
@@ -456,7 +492,7 @@ async def main():
 
         # Emit thinking event
         if event_bus:
-            asyncio.create_task(event_bus.emit("thinking", {}))
+            asyncio.create_task(event_bus.emit("thinking", {"session_id": session_id}))
 
         print("Charlie is thinking...", end="\r", flush=True)
 
@@ -708,13 +744,13 @@ async def main():
         def on_tts_start():
             if event_bus:
                 asyncio.run_coroutine_threadsafe(
-                    event_bus.emit("speaking_start", {}), loop
+                    event_bus.emit("speaking_start", {"session_id": current_web_session_id}), loop
                 )
 
         def on_tts_stop():
             if event_bus:
                 asyncio.run_coroutine_threadsafe(
-                    event_bus.emit("speaking_stop", {}), loop
+                    event_bus.emit("speaking_stop", {"session_id": current_web_session_id}), loop
                 )
 
         voice = VoiceEngine(
@@ -801,7 +837,7 @@ async def main():
                     await bus.emit("system_status", {
                         "cpu": cpu_percent,
                         "ram": ram_percent,
-                        "gpu": _read_gpu_percent(),
+                        "gpu": await asyncio.to_thread(_read_gpu_percent),
                         "active_agents": list(swarm.active_agents) if hasattr(swarm, "active_agents") else []
                     })
                     # Emit blackboard update
@@ -858,6 +894,12 @@ async def main():
             await brain.close()
         if "store" in locals() and store is not None:
             store.close()
+        if mcp_client is not None:
+            try:
+                mcp_client.stop()
+                logger.info("MCP subsystem stopped")
+            except Exception as e:
+                logger.warning(f"MCP subsystem stop error: {e}")
         if web_proc is not None:
             web_proc.terminate()
             try:

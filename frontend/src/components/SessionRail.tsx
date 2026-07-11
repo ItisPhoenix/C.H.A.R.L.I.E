@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { ReactElement } from "react";
+import { useCharlieStore } from "@/store/useCharlieStore";
 
 interface SessionItem {
   id: string;
@@ -19,6 +20,7 @@ interface SessionRailProps {
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
   onExport: () => void;
+  onScopeChange: () => void;
 }
 
 export function SessionRail({
@@ -31,7 +33,10 @@ export function SessionRail({
   onRename,
   onDelete,
   onExport,
+  onScopeChange,
 }: SessionRailProps): ReactElement {
+  const sessionScope = useCharlieStore((s) => s.sessionScope);
+  const launchId = useCharlieStore((s) => s.launchId);
   const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -153,6 +158,39 @@ export function SessionRail({
               className="w-full rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent-teal)]/40 transition"
             />
           </div>
+
+          {launchId && (
+            <div className="px-4 pb-3">
+              <div className="flex rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] p-0.5 text-xs">
+                <button
+                  onClick={() => {
+                    if (sessionScope !== "this_launch") onScopeChange();
+                  }}
+                  aria-pressed={sessionScope === "this_launch"}
+                  className={`flex-1 rounded-lg py-1.5 font-medium cursor-pointer transition ${
+                    sessionScope === "this_launch"
+                      ? "bg-[var(--color-accent-teal)] text-[var(--color-bg-deep)]"
+                      : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+                  }`}
+                >
+                  This Launch
+                </button>
+                <button
+                  onClick={() => {
+                    if (sessionScope !== "all") onScopeChange();
+                  }}
+                  aria-pressed={sessionScope === "all"}
+                  className={`flex-1 rounded-lg py-1.5 font-medium cursor-pointer transition ${
+                    sessionScope === "all"
+                      ? "bg-[var(--color-accent-teal)] text-[var(--color-bg-deep)]"
+                      : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+                  }`}
+                >
+                  All
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="flex-1 overflow-y-auto px-3 pb-4 space-y-1 scrollbar">
             {filtered.length === 0 && (

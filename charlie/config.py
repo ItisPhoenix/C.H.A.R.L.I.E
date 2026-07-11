@@ -1,6 +1,7 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import List
 
 from dotenv import load_dotenv
 
@@ -99,7 +100,25 @@ class Config:
     # --- Agentic OS Toggles ---
     blackboard_enabled: bool = os.getenv("BLACKBOARD_ENABLED", "true").lower() == "true"
     mcp_enabled: bool = os.getenv("MCP_ENABLED", "false").lower() == "true"
+    # Comma-separated MCP server specs; each is "name|command|arg1,arg2,...".
+    # Empty means no servers are started even when mcp_enabled is true.
+    mcp_servers: List[str] = field(
+        default_factory=lambda: [
+            s.strip()
+            for s in os.getenv("MCP_SERVERS", "").split(",")
+            if s.strip()
+        ]
+    )
     plugins_enabled: bool = os.getenv("PLUGINS_ENABLED", "false").lower() == "true"
+    # Restrict plugin filesystem access to these directories (comma-separated).
+    # Empty means the plugins default to the current working directory only.
+    plugin_allow_dirs: List[str] = field(
+        default_factory=lambda: [
+            d.strip()
+            for d in os.getenv("PLUGIN_ALLOW_DIRS", "").split(",")
+            if d.strip()
+        ]
+    )
 
 
     charlie_host: str = os.getenv("CHARLIE_HOST", "127.0.0.1")

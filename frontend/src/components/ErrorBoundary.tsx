@@ -24,8 +24,8 @@ export class ErrorBoundary extends React.Component<
     return { hasError: true, error };
   }
 
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
-    console.error("ErrorBoundary caught:", error, errorInfo);
+  componentDidCatch(): void {
+    // Errors are surfaced via the fallback UI; no logger dependency.
   }
 
   render() {

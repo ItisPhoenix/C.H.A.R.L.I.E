@@ -148,3 +148,25 @@ class TestGroundingRules:
         now = datetime(2026, 1, 15, 10, 30)
         tier = _build_volatile_tier("voice", now, 10)
         assert "none" in tier
+
+
+class TestCancelGeneration:
+    """Barge-in / cancel must bump _chat_generation so the tool loop breaks."""
+
+    def test_cancel_chat_bumps_generation(self):
+        brain = _make_brain(use_native_tools=True)
+        before = brain._chat_generation
+        brain.cancel_chat()
+        assert brain._chat_generation == before + 1
+
+    def test_tool_loop_breaks_on_stale_generation(self):
+        """Mirror the exact top-of-loop guard used by chat_stream.
+
+        If generation is captured at turn start, a cancel (which increments
+        _chat_generation) must make the guard `self._chat_generation != generation`
+        True, breaking the loop before another tool cycle runs.
+        """
+        brain = _make_brain(use_native_tools=True)
+        generation_at_loop_top = brain._chat_generation
+        brain.cancel_chat()
+        assert brain._chat_generation != generation_at_loop_top

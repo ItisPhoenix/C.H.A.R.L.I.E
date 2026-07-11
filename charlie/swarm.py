@@ -31,7 +31,6 @@ class SwarmOrchestrator:
         self._llm_client = llm_client
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_AGENTS)
         self._active_tasks: Dict[str, asyncio.Task] = {}
-        self._agent_instances: Dict[str, BaseAgent] = {}
         self._active_agents: set[str] = set()
         self._running = False
         self._broadcast = broadcast_callback  # Optional: async fn(snapshot)
@@ -42,20 +41,21 @@ class SwarmOrchestrator:
         return sorted(self._active_agents)
 
     def _get_agent(self, name: str) -> Optional[BaseAgent]:
-        """Get or create agent instance by name."""
-        if name in self._agent_instances:
-            return self._agent_instances[name]
+        """Build a fresh agent instance per dispatch.
+
+        Agents are NOT reentrant: concurrent tasks for the same agent name
+        must each get their own instance, or shared state corrupts. We do not
+        cache, so every dispatched task constructs a new instance.
+        """
         agent_cls = AGENT_REGISTRY.get(name)
         if not agent_cls:
             logger.warning("Unknown agent: %s", name)
             return None
         try:
-            agent = agent_cls(self.blackboard, self._llm_client)
+            return agent_cls(self.blackboard, self._llm_client)
         except Exception:
             logger.error("Failed to instantiate agent %s", name, exc_info=True)
             return None
-        self._agent_instances[name] = agent
-        return agent
 
     async def _run_agent(self, task: Task) -> None:
         """Execute a single task with semaphore-controlled concurrency."""
@@ -106,8 +106,7 @@ class SwarmOrchestrator:
         """
         target_task_id: Optional[str] = None
         for task_id, task in self._active_tasks.items():
-            agent = self._agent_instances.get(name)
-            if agent is not None and not task.done():
+            if task.assigned_to == name and not task.done():
                 target_task_id = task_id
                 break
         if target_task_id is None:

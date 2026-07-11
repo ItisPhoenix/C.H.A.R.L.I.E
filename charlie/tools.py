@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
@@ -458,8 +458,12 @@ def _single_search(query: str) -> str:
 
 
 # --- Shell safety ---
+# Risky substring keywords blocked in every mode (voice and web UI alike).
 _BLOCKED_KEYWORDS = (
     "rm -rf",
+    "rm -r -f",
+    "rd /s /q",
+    "del /f /s",
     "mkfs",
     "dd if=",
     "format ",
@@ -468,7 +472,19 @@ _BLOCKED_KEYWORDS = (
     "poweroff",
     "pkill",
     "killall",
+    "reg delete",
+    "net user",
+    "wmic",
+    "schtasks",
+    "takeown",
+    "icacls",
+    "certutil",
+    "bitsadmin",
+    "diskpart",
 )
+# Shell metacharacters used for command chaining / substitution. Blocked in
+# every mode to prevent injection (e.g. "echo a & type secrets.txt").
+_SHELL_METACHARS = (";", "|", "&", "`", "$", "(", ")")
 _SHELL_NAMES = ("cmd", "cmd.exe", "powershell", "powershell.exe")
 _CONVERSATIONAL = ("stop", "start", "cancel", "wait", "halt")
 
@@ -513,9 +529,10 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
                 "Error: Command not on the allowed list for voice mode. "
                 "Use the web UI for unrestricted shell access."
             )
-        if any(ch in command for ch in ";|&`$()"):
-            return "Error: Shell metacharacters are not allowed in voice mode."
 
+    # Universal guards: apply in every mode (voice and web UI).
+    if any(ch in command for ch in _SHELL_METACHARS):
+        return "Error: Shell metacharacters (;, |, &, `, $, (, )) are not allowed."
     for keyword in _BLOCKED_KEYWORDS:
         if keyword in lowered:
             return f"Error: Command blocked -- risky keyword '{keyword}'"
@@ -904,9 +921,12 @@ def vector_memory(action: str, content: str) -> str:
 )
 def session_search(query: str) -> str:
     store = None
+    # Scope FTS to the active launch when one is known, to avoid leaking
+    # history from other launches. Empty string means "no launch" -> global.
+    launch_id = config.charlie_launch_id or None
     try:
         store = SessionStore(db_path=config.session_db_path)
-        results = store.search(query, limit=5)
+        results = store.search(query, limit=5, launch_id=launch_id)
     except Exception as e:
         logger.exception("Session search error: %s", query)
         return f"Error searching session history: {e}"
@@ -1013,3 +1033,114 @@ def graph_consolidate() -> str:
     except Exception as e:
         logger.exception("graph_consolidate error")
         return f"Error consolidating graph: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Plugin system bridge
+# ---------------------------------------------------------------------------
+# Plugins are only wired into the LLM when config.plugins_enabled is true
+# (off by default). When active, every plugin action is exposed as a
+# registry tool named `plugin_<action>` so the model can call it directly.
+# The underlying PluginManager/plugins are never instantiated unless the
+# flag is set (the plugins module is otherwise dead weight).
+
+# Maps each plugin action to a human-honest tool description. Keys are the
+# raw plugin tool names (e.g. "fs_read_file") so wrappers can look them up.
+_PLUGIN_ACTION_DESCRIPTIONS: Dict[str, str] = {
+    "fs_list_dir": "List files and subdirectories inside a local directory.",
+    "fs_read_file": "Read the text contents of a file on the local filesystem.",
+    "fs_write_file": "Write text content to a file on the local filesystem.",
+    "fs_search": "Search the local filesystem for files matching a glob pattern.",
+    "browser_fetch": "Fetch and return the rendered HTML/text of a web URL.",
+    "browser_screenshot": "Capture a screenshot image of a web URL.",
+    "cal_list_events": "List events from the local calendar store.",
+    "code_exec_python": (
+        "Execute a snippet of Python in a sandboxed interpreter. "
+        "Network and system-level calls are blocked. Use only when the user "
+        "explicitly asks to run code."
+    ),
+}
+
+
+def _build_plugin_manager(
+    allow_dirs: List[str],
+) -> Any:
+    """Construct a fully-populated PluginManager.
+
+    Imports are local so the rest of tools.py never depends on the plugins
+    module unless plugins are actually enabled.
+    """
+    from charlie.plugins import (
+        BrowserPlugin,
+        CalendarPlugin,
+        CodeExecPlugin,
+        FilesystemPlugin,
+        PluginManager,
+    )
+
+    manager = PluginManager()
+    manager.register(FilesystemPlugin(allowed_dirs=allow_dirs))
+    manager.register(BrowserPlugin())
+    manager.register(CalendarPlugin())
+    manager.register(CodeExecPlugin())
+    return manager
+
+
+def register_plugin_tools_into(reg: "ToolRegistry", cfg: Any) -> Optional[Any]:
+    """Register plugin actions into `reg` if `cfg.plugins_enabled` is true.
+
+    Returns the active PluginManager when plugins are enabled, otherwise None.
+    The returned manager is the single source of truth used to execute the
+    registered `plugin_*` tools.
+    """
+    if not getattr(cfg, "plugins_enabled", False):
+        logger.debug("Plugin system disabled (plugins_enabled=false); skipping.")
+        return None
+
+    manager = _build_plugin_manager(getattr(cfg, "plugin_allow_dirs", []))
+
+    tool_defs = manager.get_all_tool_definitions()
+    for tool_def in tool_defs:
+        action = tool_def["name"]
+        description = _PLUGIN_ACTION_DESCRIPTIONS.get(action, tool_def["description"])
+        runner = _make_plugin_runner(manager, action)
+
+        reg.register_tool(
+            name=f"plugin_{action}",
+            description=description,
+            schema=tool_def["parameters"],
+        )(runner)
+
+    logger.info(
+        "Plugin system enabled: registered %d plugin tools (plugin_*).",
+        len(tool_defs),
+    )
+    return manager
+
+
+def _make_plugin_runner(manager: Any, action: str) -> Callable[..., str]:
+    """Build a registry-tool wrapper that delegates to a plugin action."""
+
+    def _runner(**arguments: Any) -> str:
+        try:
+            result = manager.call_tool(action, arguments)
+        except Exception as exc:  # surface, never swallow
+            logger.error("Plugin tool %s failed", action, exc_info=True)
+            return f"Plugin {action} error: {exc}"
+        if isinstance(result, dict) and result.get("success") is False:
+            return f"Plugin {action} failed: {result.get('error', 'unknown error')}"
+        return str(result)
+
+    _runner.__name__ = f"plugin_{action}"
+    return _runner
+
+
+def register_plugin_tools(cfg: Any = None) -> Optional[Any]:
+    """Register plugin tools into the global `registry` if enabled.
+
+    Convenience wrapper used by main.py and the test suite. Returns the
+    active PluginManager (or None when disabled).
+    """
+    if cfg is None:
+        from charlie.config import config as cfg
+    return register_plugin_tools_into(registry, cfg)

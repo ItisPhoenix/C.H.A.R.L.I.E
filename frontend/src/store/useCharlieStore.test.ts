@@ -15,6 +15,8 @@ describe("useCharlieStore", () => {
       logs: [],
       blackboard: { tasks: [], agents: {} },
       voiceState: "idle",
+      audioLevel: 0,
+      toolActivity: [],
     });
   });
 
@@ -150,6 +152,24 @@ describe("useCharlieStore", () => {
       const status = { cpu: 45.2, ram: 68.1, gpu: 30.0, active_agents: ["jarvis"] };
       useCharlieStore.getState().setSystemStatus(status);
       expect(useCharlieStore.getState().systemStatus).toEqual(status);
+    });
+  });
+
+  describe("tool activity & audio level", () => {
+    it("appendToolActivity adds entry and setAudioLevel updates", () => {
+      const s = useCharlieStore.getState();
+      s.appendToolActivity({ kind: "tool_call", name: "web_search", text: "ran" });
+      expect(useCharlieStore.getState().toolActivity).toHaveLength(1);
+      s.setAudioLevel(0.5);
+      expect(useCharlieStore.getState().audioLevel).toBe(0.5);
+    });
+
+    it("clearToolActivity empties the list", () => {
+      const s = useCharlieStore.getState();
+      s.appendToolActivity({ kind: "tool_result", name: "web_search", text: "done" });
+      expect(useCharlieStore.getState().toolActivity).toHaveLength(1);
+      s.clearToolActivity();
+      expect(useCharlieStore.getState().toolActivity).toHaveLength(0);
     });
   });
 });

@@ -45,6 +45,22 @@ class MCPServerConfig:
     timeout: float = 30.0
 
 
+def parse_server_spec(spec: str) -> MCPServerConfig:
+    """Parse a "name|command|arg1,arg2,..." spec into a config.
+
+    The pipe-separated form keeps command names unambiguous when args
+    themselves contain spaces. Missing args default to an empty list.
+    """
+    parts = [p.strip() for p in spec.split("|")]
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        raise ValueError(
+            f"Invalid MCP server spec '{spec}'; expected 'name|command[|args]'"
+        )
+    name, command = parts[0], parts[1]
+    args = [a.strip() for a in parts[2].split(",") if a.strip()] if len(parts) > 2 else []
+    return MCPServerConfig(name=name, command=command, args=args)
+
+
 # ---------------------------------------------------------------------------
 # MCP Client
 # ---------------------------------------------------------------------------
@@ -189,6 +205,36 @@ class MCPClient:
         self._tool_call_log.append(entry)
         if len(self._tool_call_log) > self._max_log:
             self._tool_call_log = self._tool_call_log[-self._max_log:]
+
+    def register_tools_into(self, registry: Any, prefix: str = "mcp_") -> List[str]:
+        """Register every discovered tool into the shared ToolRegistry.
+
+        Each MCP tool becomes callable through the same ``execute_tool`` path
+        the built-in tools use, so the LLM invokes them transparently. Tool
+        names are prefixed (default ``mcp_``) to avoid colliding with built-ins.
+
+        Returns the list of registered tool names.
+        """
+        registered: List[str] = []
+        for tool in self.list_tools():
+            full_name = f"{prefix}{tool.server_name}_{tool.name}"
+            server_name = tool.server_name
+            tool_name = tool.name
+
+            def _invoke(server_name=server_name, tool_name=tool_name, **kwargs: Any) -> str:
+                result = self.call_tool(server_name, tool_name, kwargs)
+                if result.get("success"):
+                    return str(result.get("result", ""))
+                return f"MCP tool error: {result.get('error', 'unknown error')}"
+
+            registry.register_tool(
+                name=full_name,
+                description=f"[{tool.server_name}] {tool.description}",
+                schema=tool.input_schema or {"type": "object", "properties": {}},
+            )(_invoke)
+            registered.append(full_name)
+        logger.info("Registered %d MCP tools into the shared registry", len(registered))
+        return registered
 
 
 # ---------------------------------------------------------------------------
@@ -405,3 +451,35 @@ class _ManagedServer:
                 logger.debug("Reader thread for '%s' exited", self.config.name)
             else:
                 self._log_stderr()
+
+
+def start_mcp(config: Any) -> Optional["MCPClient"]:
+    """Build, start, and register MCP servers from config.
+
+    Returns the started client, or None when MCP is disabled or there are no
+    server specs. Tool discovery happens here once, at startup, and the tools
+    are registered into the shared ToolRegistry so the LLM can call them.
+    """
+    from charlie.tools import registry
+
+    if not config.mcp_enabled:
+        logger.debug("MCP disabled (MCP_ENABLED=false)")
+        return None
+    if not config.mcp_servers:
+        logger.debug("MCP enabled but no MCP_SERVERS configured")
+        return None
+
+    client = MCPClient()
+    for spec in config.mcp_servers:
+        try:
+            client.add_server(parse_server_spec(spec))
+        except ValueError as exc:
+            logger.warning("Skipping MCP server spec: %s", exc)
+    client.start()
+    registered = client.register_tools_into(registry)
+    logger.info(
+        "MCP active: %d server(s) connected, %d tool(s) registered",
+        len(client._servers),
+        len(registered),
+    )
+    return client

@@ -1,8 +1,15 @@
 """Tests for charlie.mcp_client -- MCP Client module."""
 
+from typing import Any, Callable, Dict, List
 from unittest.mock import MagicMock, patch
 
-from charlie.mcp_client import MCPClient, MCPServerConfig, MCPTool
+from charlie.mcp_client import (
+    MCPClient,
+    MCPServerConfig,
+    MCPTool,
+    parse_server_spec,
+    start_mcp,
+)
 
 
 class TestMCPTool:
@@ -120,3 +127,107 @@ class TestMCPClient:
         prompt = client.get_tools_for_prompt()
         assert "my_server:my_tool" in prompt
         assert "query" in prompt
+
+
+class _FakeRegistry:
+    """Minimal ToolRegistry stand-in recording register_tool calls."""
+
+    def __init__(self) -> None:
+        self._tools: Dict[str, Dict[str, Any]] = {}
+
+    def register_tool(self, name: str, description: str, schema: Dict[str, Any]) -> Callable:
+        def decorator(func: Callable) -> Callable:
+            self._tools[name] = {
+                "name": name,
+                "description": description,
+                "schema": schema,
+                "func": func,
+            }
+            return func
+
+        return decorator
+
+
+class _FakeServer:
+    """Stand-in for MCPServerProcess; no real subprocess is spawned."""
+
+    def __init__(self, server_config: MCPServerConfig) -> None:
+        self.config = server_config
+        self._process = MagicMock()
+        self._process.poll.return_value = None
+        self._tools: List[MCPTool] = []
+
+    def start(self) -> None:
+        self._tools = [
+            MCPTool(name="read", description="Read a file", server_name=self.config.name),
+            MCPTool(name="write", description="Write a file", server_name=self.config.name),
+        ]
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    def list_tools(self) -> List[MCPTool]:
+        return self._tools
+
+    def stop(self) -> None:
+        self._process = None
+
+
+def test_parse_server_spec():
+    spec = "files|python -m server|/tmp,verbose"
+    cfg = parse_server_spec(spec)
+    assert cfg.name == "files"
+    assert cfg.command == "python -m server"
+    assert cfg.args == ["/tmp", "verbose"]
+
+
+def test_parse_server_spec_requires_name_and_command():
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        parse_server_spec("|command")
+    with _pytest.raises(ValueError):
+        parse_server_spec("name|")
+
+
+def test_start_mcp_disabled_registers_nothing():
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(mcp_enabled=False, mcp_servers=["files|echo"])
+    assert start_mcp(cfg) is None
+
+
+def test_start_mcp_registers_into_registry(monkeypatch):
+    from types import SimpleNamespace
+
+    import charlie.mcp_client as mcp_mod
+
+    monkeypatch.setattr(mcp_mod, "_ManagedServer", _FakeServer)
+
+    fake = _FakeRegistry()
+    # Patch start_mcp's registry import indirectly by wrapping register_tools_into
+    # to target our fake recorder.
+    captured: Dict[str, _FakeRegistry] = {}
+    original = mcp_mod.MCPClient.register_tools_into
+
+    def _fake_register(self, registry, prefix="mcp_"):  # type: ignore[no-untyped-def]
+        captured["reg"] = fake
+        return original(self, fake, prefix)
+
+    monkeypatch.setattr(mcp_mod.MCPClient, "register_tools_into", _fake_register)
+
+    cfg = SimpleNamespace(mcp_enabled=True, mcp_servers=["files|python -m server"])
+    client = start_mcp(cfg)
+
+    assert client is not None
+    assert len(fake._tools) == 2
+    names = list(fake._tools.keys())
+    assert names[0].startswith("mcp_files_")
+    assert "read" in names[0] and "write" in names[1]
+
+
+def test_start_mcp_enabled_without_servers_returns_none():
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(mcp_enabled=True, mcp_servers=[])
+    assert start_mcp(cfg) is None

@@ -32,7 +32,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Docs Update:** Replaced stale Tauri 2.0 references with Next.js 16 + React 19. Updated project structure. Added frontend dev commands.
 ### Agentic OS Foundation (2026-07-05)
 - **Config Toggles:** Added `blackboard_enabled`, `swarm_enabled`, `reflection_enabled`, `mcp_enabled`, `plugins_enabled` to `Config` dataclass with env var backing.
-- **Module Boundaries:** Expanded AGENTS.md module table to include `blackboard.py`, `swarm.py`, `agents/`, `memory_v2.py`, `memory_graph.py`, `reflection.py`, `mcp_client.py`, `plugins.py`.
+- **Module Boundaries:** Expanded AGENTS.md module table to include `blackboard.py`, `swarm.py`, `agents/`, `memory_store.py`, `memory_graph.py`, `core.py` (`_reflect_and_consolidate`), `mcp_client.py`, `plugins.py`.
 - **Environment:** Added Agentic OS toggle section to `.env.example` with all 5 new env vars.
 - **Version bump:** `1.1.0` -> `2.0.0-alpha.1` for Agentic OS milestone.
 ### Stabilization Pass (2026-06-27)

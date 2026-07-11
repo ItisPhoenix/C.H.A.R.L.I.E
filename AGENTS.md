@@ -88,28 +88,28 @@ Use the exact tuple `("no-key", "no_key")`. Never `== "no-key"` alone -- this ha
 | Module | Responsibility | Must NOT |
 |---|---|---|
 | `charlie/core.py` | `Brain` class. LLM streaming, tool loop, system prompt, cancel mechanism. | Import GUI or voice logic. |
-| `charlie/voice.py` | `VoiceEngine`. VAD, ASR, TTS (Kokoro), audio I/O, text humanization. | Call `Brain` directly; receive callbacks only. |
+| `charlie/voice.py` | `VoiceEngine`. Audio capture (sounddevice), VAD, ASR, TTS (Kokoro), audio I/O, text humanization -- all inline, including the capture loop in `VoiceEngine._run`. | Call `Brain` directly; receive callbacks only. |
 | `charlie/tools.py` | `ToolRegistry` + built-in tools. Web search, shell execution, file I/O. | Business logic or LLM calls. |
 | `charlie/config.py` | `Config` dataclass + singleton. Single source of `.env` keys. | Business logic. |
 | `charlie/personality.py` | Emotion classification + voice command parsing. Pure keyword matching. | LLM calls or I/O. |
 | `charlie/asr_worker.py` | Subprocess entry for Whisper. Only file that imports `faster_whisper`. | Other Charlie modules. |
 | `charlie/session_store.py` | SQLite + FTS5 session history. Session isolation via `launch_id` column. | Anything outside session scope. |
-| `charlie/blackboard.py` | `Blackboard` class. Shared state for agent coordination via publish/subscribe. | Direct LLM calls; must remain sync-friendly. |
+| `charlie/blackboard.py` | `Blackboard` class. Task state for agent coordination (`add_task`/`update_task`). | Direct LLM calls; must remain sync-friendly. NOTE: pub/sub is NOT here -- see `charlie/ipc.py:EventBus`. |
 | `charlie/swarm.py` | `SwarmOrchestrator`. Routes tasks to MARVEL-named agents, manages lifecycle. | Business logic; delegates to agent classes. |
 | `charlie/agents/base.py` | `BaseAgent` ABC. Defines agent interface for the swarm. | Direct LLM or voice calls; must go through Brain. |
 | `charlie/agents/*.py` | MARVEL-named agents (Jarvis, Vision, Friday, etc.). Each handles a domain. | Cross-import between agent modules; must be self-contained. |
-| `charlie/memory_v2.py` | Evolving memory system. Episodic, semantic, procedural, meta layers. | Direct file I/O; uses SessionStore or MemoryGraph. |
+| `charlie/memory_store.py` | ChromaDB-backed vector memory store. | Direct file I/O; pure data access. |
 | `charlie/memory_graph.py` | `MemoryGraph` class. SQLite-backed knowledge graph with triple storage. | Business logic; pure data access. |
-| `charlie/reflection.py` | Periodic reflection engine. Consolidates memory, updates knowledge graph. | Direct LLM calls; uses Brain for generation. |
-| `charlie/mcp_client.py` | MCP (Model Context Protocol) client. Connects to external tool servers. | Business logic; protocol handling only. |
-| `charlie/plugins.py` | Hybrid plugin system. Loads and manages external integrations. | Core Charlie logic; plugins must be sandboxed. |
+| `charlie/core.py` | `Brain._reflect_and_consolidate` consolidates memory and updates the knowledge graph, scheduled every ~5 turns. | Called directly; uses Brain for generation. |
+| `charlie/mcp_client.py` | MCP (Model Context Protocol) client. When `mcp_enabled` is true, instantiates and registers MCP server tools. | Business logic; protocol handling only. |
+| `charlie/plugins.py` | Hybrid plugin system. When `plugins_enabled` is true, loads and registers external integration tools. plugins must be sandboxed. | Core Charlie logic. |
 | `main.py` | Entry point. Logging setup, voice loop, TTS flush logic, barge-in, text normalization for multi-app commands. | Feature code -- delegate to modules. |
 
 ---
 
 ## 7. Voice Pipeline Rules
 
-- **PipelineTimer reset** MUST happen in `voice.py` at VAD onset, not in `main.py`.
+- **Latency logging:** Voice pipeline latency is measured in `voice.py` (e.g. at VAD onset). There is no `PipelineTimer` class -- latency is logged directly from the capture loop in `VoiceEngine._run`. Keep first-audio latency visible; log onset and emit points.
 - **Barge-in** must call `voice.stop_tts()`, `brain.cancel_chat()`, then set cooldown. Check `chat_generation >= generation` for cancel, not `cancel_chat_event.is_set()`.
 - **TTS flush**: Sentence boundaries first, then clause, then force-flush at 250 chars.
 - **Text humanization** runs in `voice.py:speak()` before queuing to Kokoro. Strip markdown, normalize unicode, convert dashes to commas, remove wrapper quotes.
@@ -224,9 +224,8 @@ In hybrid voice-first assistants, the background voice thread (which listens to 
 1.  **Frontend Broadcaster:** The React UI must send `{ type: 'session_active', session_id: currentSessionId }` over the WebSocket on load or whenever the active session changes.
 2.  **Backend Sync:** `main.py:consume_web_commands` must intercept this event and update `current_web_session_id`, ensuring subsequent microphone speech is recorded and processed directly in the active session.
 
-### Cross-Browser SQLite DateTime Parsing
-SQLite's `strftime('%Y-%m-%d %H:%M:%f', 'now')` returns UTC space-separated datetime strings. WebKit-based browsers (like Safari) fail to parse space-separated strings, resulting in `Invalid Date` and breaking UI date groupings and relative timers (like "2m ago").
-*   **Solution:** Always normalize SQLite timestamps to ISO-8601 format by replacing the space with a `T` and appending a `Z` (e.g. `ts.replace(' ', 'T') + 'Z'`) before calling `new Date(ts)` in the frontend.
+### SQLite DateTime Format
+Charlie's `session_store.py` schema already emits ISO-8601 UTC timestamps via `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` (note the `T` separator and trailing `Z`, NO space). These parse correctly across browsers, including WebKit/Safari. The earlier pitfall (space-separated `'%Y-%m-%d %H:%M:%f'` strings breaking `new Date()`) does NOT apply to this schema -- do not "fix" what is already correct. If a new table is added, reuse the `...T...Z` format rather than the space-separated variant.
 
 ### Optimistic Stop Toggles
 When the user clicks the "Stop" button in the frontend chat, the client should optimistically transition `voiceState` to `"idle"` and stop the loading indicator immediately instead of waiting for a roundtrip websocket response. This makes the UI feel instant and immediately returns the button back to the "Send" state.

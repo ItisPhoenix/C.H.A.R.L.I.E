@@ -191,3 +191,59 @@ def test_tool_content_in_session_messages():
                     os.remove(f)
                 except OSError:
                     pass
+
+
+def _cleanup_db(db_path: str) -> None:
+    for f in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+
+def test_tool_events_roundtrip(tmp_path):
+    store = SessionStore(db_path=str(tmp_path / "s.db"))
+    store.create_session("s1", "t")
+    store.append_tool_event("s1", "tool_call", "web_search", "ran")
+    rows = store.get_tool_events("s1")
+    assert rows == [("tool_call", "web_search", "ran")], rows
+    store.close()
+
+
+def test_search_scoped_by_launch_id():
+    """search(launch_id) returns only hits from that launch; no launch = all."""
+    db_path = "test_sessions_launch_scope.db"
+    _cleanup_db(db_path)
+
+    store = SessionStore(db_path)
+    try:
+        # Two launches, each owning one distinct session with a unique token.
+        store.create_session("s_launch_a", title="A", source="web", launch_id="launch_a")
+        store.create_session("s_launch_b", title="B", source="web", launch_id="launch_b")
+
+        store.append("user", "zebraplanner alpha token", session_id="s_launch_a")
+        store.append("user", "moonsculptor beta token", session_id="s_launch_b")
+
+        # Scoped to launch A: only A's unique token matches.
+        a_hits = store.search("zebraplanner", launch_id="launch_a")
+        assert len(a_hits) == 1
+        assert "alpha" in a_hits[0][1]
+
+        # Scoped to launch B: only B's unique token matches.
+        b_hits = store.search("moonsculptor", launch_id="launch_b")
+        assert len(b_hits) == 1
+        assert "beta" in b_hits[0][1]
+
+        # Scoped to A searching the OTHER launch's token: no leak.
+        a_no_leak = store.search("moonsculptor", launch_id="launch_a")
+        assert len(a_no_leak) == 0
+
+        # Global fallback (no launch_id): both tokens returned.
+        all_hits_a = store.search("zebraplanner")
+        all_hits_b = store.search("moonsculptor")
+        assert len(all_hits_a) == 1
+        assert len(all_hits_b) == 1
+    finally:
+        store.close()
+        _cleanup_db(db_path)

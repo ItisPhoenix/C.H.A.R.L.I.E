@@ -49,6 +49,13 @@ export interface MicState {
   mic_muted: boolean;
 }
 
+export interface ToolActivityEntry {
+  kind: "tool_call" | "tool_result" | "thinking_update";
+  name: string;
+  text: string;
+  sessionId?: string;
+}
+
 export interface Alert {
   severity: "info" | "warn" | "error";
   message: string;
@@ -69,6 +76,9 @@ interface CharlieState {
   audio: AudioState;
   mic: MicState;
   audioLevel: number;
+  toolActivity: ToolActivityEntry[];
+  launchId: string;
+  sessionScope: "all" | "this_launch";
 
   setConnected: (c: boolean) => void;
   setSystemStatus: (s: SystemStatus) => void;
@@ -85,6 +95,10 @@ interface CharlieState {
   setAudio: (a: AudioState) => void;
   setMic: (m: MicState) => void;
   setAudioLevel: (level: number) => void;
+  appendToolActivity: (e: ToolActivityEntry) => void;
+  clearToolActivity: () => void;
+  setLaunchId: (id: string) => void;
+  setSessionScope: (scope: "all" | "this_launch") => void;
 }
 
 export const useCharlieStore = create<CharlieState>((set) => ({
@@ -101,6 +115,9 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   audio: { muted: false, volume: 1.0 },
   mic: { mic_muted: false },
   audioLevel: 0,
+  toolActivity: [],
+  launchId: "",
+  sessionScope: "all",
 
   setConnected: (connected) => set({ connected }),
   setSystemStatus: (systemStatus) => set({ systemStatus }),
@@ -132,4 +149,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setAudio: (audio) => set({ audio }),
   setMic: (mic) => set({ mic }),
   setAudioLevel: (audioLevel) => set({ audioLevel }),
+  appendToolActivity: (e) => set((st) => ({ toolActivity: [...st.toolActivity, e] })),
+  clearToolActivity: () => set({ toolActivity: [] }),
+  setLaunchId: (launchId) => set({ launchId }),
+  setSessionScope: (sessionScope) => set({ sessionScope }),
 }));

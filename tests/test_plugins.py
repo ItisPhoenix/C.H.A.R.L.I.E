@@ -256,3 +256,78 @@ class TestCodeExecPlugin:
         plugin = CodeExecPlugin()
         with pytest.raises(ValueError, match="Unknown tool"):
             plugin.call_tool("nonexistent", {})
+
+
+# ---------------------------------------------------------------------------
+# Plugin -> registry tool bridge
+# ---------------------------------------------------------------------------
+
+class _FakeConfig:
+    """Minimal config stand-in carrying only the fields the bridge reads."""
+
+    def __init__(self, enabled: bool, allow_dirs: list = None):
+        self.plugins_enabled = enabled
+        self.plugin_allow_dirs = allow_dirs or []
+
+
+def _enabled_config():
+    import tempfile
+
+    tmpdir = tempfile.mkdtemp()
+    return _FakeConfig(enabled=True, allow_dirs=[tmpdir]), tmpdir
+
+
+class TestPluginToolBridge:
+    def test_disabled_registers_nothing(self):
+        from charlie.tools import ToolRegistry, register_plugin_tools_into
+
+        reg = ToolRegistry()
+        manager = register_plugin_tools_into(reg, _FakeConfig(enabled=False))
+        assert manager is None
+        assert reg.get_tool_definitions() == []
+
+    def test_enabled_registers_plugin_tools(self):
+        from charlie.tools import ToolRegistry, register_plugin_tools_into
+
+        reg = ToolRegistry()
+        manager = register_plugin_tools_into(reg, _FakeConfig(enabled=True))
+        assert manager is not None
+        names = {t["function"]["name"] for t in reg.get_tool_definitions()}
+        # All four plugins should be represented.
+        assert "plugin_fs_read_file" in names
+        assert "plugin_fs_write_file" in names
+        assert "plugin_browser_fetch" in names
+        assert "plugin_cal_list_events" in names
+        assert "plugin_code_exec_python" in names
+
+    def test_disabled_then_enabled_is_isolated(self):
+        from charlie.tools import ToolRegistry, register_plugin_tools_into
+
+        reg_off = ToolRegistry()
+        register_plugin_tools_into(reg_off, _FakeConfig(enabled=False))
+        reg_on = ToolRegistry()
+        register_plugin_tools_into(reg_on, _FakeConfig(enabled=True))
+        assert reg_off.get_tool_definitions() == []
+        assert len(reg_on.get_tool_definitions()) > 0
+
+    def test_filesystem_read_tool_works(self):
+        from charlie.tools import ToolRegistry, register_plugin_tools_into
+
+        cfg, tmpdir = _enabled_config()
+        reg = ToolRegistry()
+        register_plugin_tools_into(reg, cfg)
+
+        import os
+
+        test_file = os.path.join(tmpdir, "hello.txt")
+        with open(test_file, "w", encoding="utf-8") as fh:
+            fh.write("plugin bridge works")
+
+        result = reg.execute_tool(
+            "plugin_fs_read_file", {"path": test_file}
+        )
+        assert "plugin bridge works" in result
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
