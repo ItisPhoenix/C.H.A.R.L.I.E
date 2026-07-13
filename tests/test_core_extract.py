@@ -123,7 +123,7 @@ class TestGroundingRules:
 
     def test_soul_has_grounding_line(self):
         from charlie.config import config
-        assert "grounded" in config.soul.lower()
+        assert "never guess" in config.soul.lower()
 
     def test_volatile_tier_shows_evidence_blocks(self):
         from datetime import datetime

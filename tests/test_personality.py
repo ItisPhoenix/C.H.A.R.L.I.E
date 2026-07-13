@@ -38,8 +38,14 @@ class TestGetEmotionForContext:
     def test_frustrated_keywords(self):
         assert get_emotion_for_context("this is so frustrating") == "calm"
 
-    def test_frustrated_keyword_hate(self):
-        assert get_emotion_for_context("I hate this error") == "calm"
+    def test_bare_hate_is_not_calm(self):
+        """Regression test: bare 'hate' with no other distress signal must
+        not trigger calm/sad tone -- it's frequently used jokingly/casually
+        ('I hate this error' as a mild aside) without genuine distress."""
+        assert get_emotion_for_context("I hate this error") == "neutral"
+
+    def test_hate_alone_in_casual_use_is_not_sad(self):
+        assert get_emotion_for_context("I hate when that happens lol") == "neutral"
 
     def test_frustrated_keyword_stupid(self):
         assert get_emotion_for_context("stupid compiler won't work") == "calm"
@@ -55,6 +61,18 @@ class TestGetEmotionForContext:
 
     def test_empty_text(self):
         assert get_emotion_for_context("") == "neutral"
+
+    def test_bare_help_is_not_energetic(self):
+        """Regression test: bare 'help' with no other urgency signal must not
+        trigger energetic tone -- countless neutral requests ('can you help
+        me write an email') contain it."""
+        assert get_emotion_for_context("can you help me write an email") == "neutral"
+
+    def test_help_still_energetic_with_real_urgency_signal(self):
+        """'help' co-occurring with a genuine urgency word (crash/emergency/
+        asap/urgent) must still read as energetic -- only the bare word was
+        the false-positive risk, not the concept of asking for help urgently."""
+        assert get_emotion_for_context("system crash! help ASAP") == "energetic"
 
 
 # ── parse_voice_command ────────────────────────────────────────────────────

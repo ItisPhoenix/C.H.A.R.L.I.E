@@ -10,13 +10,19 @@ from typing import Optional
 # -- Emotion keyword maps --------------------------------------------------
 
 _ENERGETIC_RE = re.compile(
-    r"\b(?:urgent|emergency|crash|asap|now|broken|help|happy|amazing|awesome|yay|love|great news|excited)\b",
+    # "help" deliberately excluded: it's the single most common word in
+    # completely neutral requests ("can you help me write an email"), so it
+    # produced false-positive "energetic" tone on ordinary asks.
+    r"\b(?:urgent|emergency|crash|asap|now|broken|happy|amazing|awesome|yay|love|great news|excited)\b",
     re.IGNORECASE,
 )
 
 _SAD_CALM_RE = re.compile(
+    # "hate" deliberately excluded: it's frequently used jokingly/casually
+    # ("I hate when that happens lol") without genuine distress, so it
+    # produced false-positive "calm/sad" tone on lighthearted remarks.
     r"\b(?:sad|sorry|terrible|depressed|lonely|miss|unfortunately"
-    r"|bad day|frustrat\w*|annoyed|hate|stupid|why won't|useless)\b",
+    r"|bad day|frustrat\w*|annoyed|stupid|why won't|useless)\b",
     re.IGNORECASE,
 )
 # -- Voice command patterns ------------------------------------------------
