@@ -423,6 +423,38 @@ class TestFacts:
             graph.close()
             _remove_db(db)
 
+    def test_get_all_facts_returns_triples(self):
+        graph, db = _make_graph()
+        try:
+            graph.add_fact("Alice", "works_on", "graphs")
+            graph.add_fact("Bob", "knows", "Alice")
+            facts = graph.get_all_facts()
+            assert ("Alice", "works_on", "graphs") in facts
+            assert ("Bob", "knows", "Alice") in facts
+            assert all(len(f) == 3 for f in facts)
+        finally:
+            graph.close()
+            _remove_db(db)
+
+    def test_get_all_facts_empty_graph(self):
+        graph, db = _make_graph()
+        try:
+            assert graph.get_all_facts() == []
+        finally:
+            graph.close()
+            _remove_db(db)
+
+    def test_get_all_facts_respects_limit(self):
+        graph, db = _make_graph()
+        try:
+            for i in range(5):
+                graph.add_fact(f"subject{i}", "knows", f"object{i}")
+            facts = graph.get_all_facts(limit=2)
+            assert len(facts) == 2
+        finally:
+            graph.close()
+            _remove_db(db)
+
     def test_consolidate_removes_duplicate_edges(self):
         graph, db = _make_graph()
         try:

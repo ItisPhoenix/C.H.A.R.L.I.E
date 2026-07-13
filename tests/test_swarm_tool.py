@@ -35,6 +35,19 @@ def test_delegate_to_agent_unknown_agent():
     assert "F.R.I.D.A.Y." in result
 
 
+def test_valid_agents_matches_agent_registry():
+    """Regression test: _VALID_AGENTS must include every agent in
+    AGENT_REGISTRY. Before this fix, it was a hand-maintained tuple listing
+    only 5 of the 7 registered agents, silently excluding J.A.R.V.I.S. and
+    Vision from delegate_to_agent."""
+    from charlie.agents import AGENT_REGISTRY
+    from charlie.tools import _VALID_AGENTS
+
+    assert set(_VALID_AGENTS) == set(AGENT_REGISTRY.keys())
+    assert "J.A.R.V.I.S." in _VALID_AGENTS
+    assert "Vision" in _VALID_AGENTS
+
+
 def test_delegate_to_agent_no_blackboard(monkeypatch):
     """With _blackboard as None, tool returns 'not running' error."""
     import charlie.tools as tools_mod

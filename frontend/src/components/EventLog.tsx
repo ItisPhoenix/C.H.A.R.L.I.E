@@ -2,18 +2,20 @@
 
 import { useState } from "react";
 import type { ReactElement } from "react";
-import { useCharlieStore } from "@/store/useCharlieStore";
+import { useCharlieStore, lighten } from "@/store/useCharlieStore";
 
 const SEVERITY_COLOR: Record<string, string> = {
-  info: "text-[var(--color-accent-teal-soft)]",
-  warning: "text-status-warning",
-  error: "text-status-error",
+  warning: "#f59e0b",
+  error: "#ef4444",
 };
 
 export function EventLog(): ReactElement {
   const [open, setOpen] = useState(false);
   const logs = useCharlieStore((s) => s.logs);
   const alerts = useCharlieStore((s) => s.alerts);
+  const accentColor = useCharlieStore((s) => s.accentColor);
+
+  const infoColor = lighten(accentColor, 0.35);
 
   // Combine alerts (newest last) and recent logs into a single stream.
   const lines = [
@@ -45,14 +47,22 @@ export function EventLog(): ReactElement {
           ) : (
             lines.map((line, i) => {
               const alertMatch = line.match(/^(\S+) \[(\w+)\]/);
-              const color =
-                alertMatch && SEVERITY_COLOR[alertMatch[2]]
-                  ? SEVERITY_COLOR[alertMatch[2]]
-                  : "text-[var(--color-text-secondary)]";
+              let colorStyle = { color: "#d1d5db" };
+              if (alertMatch) {
+                const severity = alertMatch[2];
+                if (severity === "info") {
+                  colorStyle = { color: infoColor };
+                } else if (SEVERITY_COLOR[severity]) {
+                  colorStyle = { color: SEVERITY_COLOR[severity] };
+                }
+              } else {
+                colorStyle = { color: infoColor };
+              }
               return (
                 <p
                   key={i}
-                  className={`text-xs font-mono leading-relaxed ${color}`}
+                  style={colorStyle}
+                  className="text-xs font-mono leading-relaxed"
                 >
                   {line}
                 </p>

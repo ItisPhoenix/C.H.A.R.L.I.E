@@ -309,6 +309,26 @@ class MemoryGraph:
         params.append(limit)
         return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
 
+    def get_all_facts(self, limit: int = 500) -> List[Tuple[str, str, str]]:
+        """Return all facts as (subject, predicate, object) triples.
+
+        Reads the edges table (the real subject/predicate/object relationships
+        added by add_fact), unlike get_all_nodes() which only returns each
+        node's own type/content in isolation.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT n1.content AS subject, e.relation AS predicate, n2.content AS object
+            FROM edges e
+            JOIN nodes n1 ON n1.id = e.from_node_id
+            JOIN nodes n2 ON n2.id = e.to_node_id
+            ORDER BY e.created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [(r["subject"], r["predicate"], r["object"]) for r in rows]
+
     def get_stats(self) -> Dict[str, Any]:
         """Return graph statistics."""
         node_count = self.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]

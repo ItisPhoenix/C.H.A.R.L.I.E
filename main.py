@@ -458,8 +458,14 @@ async def main():
             voice.speak(response_str, last_emotion)
             return
 
-        # Emit transcript event only if this turn was not suppressed
-        if event_bus:
+        # Emit transcript event for voice-originated turns only. The web
+        # client already renders its own optimistic user bubble the instant
+        # it sends the chat command (see handleSendMessage in page.tsx), so
+        # echoing a "transcript" event for platform="web" too produced a
+        # duplicate user bubble on every web chat message. Voice has no
+        # client-side echo of its own -- this event is its only way to get
+        # recognized speech into the web UI transcript feed.
+        if event_bus and platform == "voice":
             asyncio.create_task(
                 event_bus.emit(
                     "transcript",
@@ -690,6 +696,8 @@ async def main():
                 if cmd_type == "chat":
                     payload_sid = cmd.get("payload", {}).get("session_id")
                     current_web_session_id = cmd.get("session_id") or payload_sid or "default"
+                    from charlie.recovery import set_active_session_id
+                    set_active_session_id(current_web_session_id)
                     chat_text = cmd.get("text") or cmd.get("payload", {}).get("text", "")
                     await _process(
                         chat_text,
@@ -701,7 +709,67 @@ async def main():
                 elif cmd_type == "session_active":
                     payload_sid = cmd.get("payload", {}).get("session_id")
                     current_web_session_id = cmd.get("session_id") or payload_sid or "default"
+                    from charlie.recovery import set_active_session_id
+                    set_active_session_id(current_web_session_id)
                     logger.info(f"Active session updated to: {current_web_session_id}")
+                elif cmd_type == "ws_connection_count":
+                    from charlie.recovery import set_active_ws_count
+                    set_active_ws_count(cmd.get("count", 0))
+                elif cmd_type == "recovery_approve":
+                    payload = cmd.get("payload", {})
+                    proposal_id = payload.get("proposal_id")
+                    if proposal_id:
+                        from charlie.recovery import pending_proposals
+                        fut = pending_proposals.get(proposal_id)
+                        if fut and not fut.done():
+                            fut.set_result(True)
+                elif cmd_type == "recovery_reject":
+                    payload = cmd.get("payload", {})
+                    proposal_id = payload.get("proposal_id")
+                    if proposal_id:
+                        from charlie.recovery import pending_proposals
+                        fut = pending_proposals.get(proposal_id)
+                        if fut and not fut.done():
+                            fut.set_result(False)
+                elif cmd_type == "task_approve":
+                    payload = cmd.get("payload", {})
+                    task_id = payload.get("task_id")
+                    if task_id:
+                        blackboard.update_task(task_id, approval_status="approved")
+                        await event_bus.emit("blackboard_update", blackboard.snapshot())
+                elif cmd_type == "task_reject":
+                    payload = cmd.get("payload", {})
+                    task_id = payload.get("task_id")
+                    reason = payload.get("reason", "Rejected by user")
+                    if task_id:
+                        blackboard.update_task(
+                            task_id,
+                            approval_status="rejected",
+                            status="failed",
+                            result=f"Rejection: {reason}"
+                        )
+                        await event_bus.emit("blackboard_update", blackboard.snapshot())
+                elif cmd_type == "task_retry":
+                    payload = cmd.get("payload", {})
+                    task_id = payload.get("task_id")
+                    if task_id:
+                        blackboard.update_task(
+                            task_id,
+                            status="pending",
+                            approval_status="approved",
+                            retry_count=0
+                        )
+                        await event_bus.emit("blackboard_update", blackboard.snapshot())
+                elif cmd_type == "task_cancel":
+                    payload = cmd.get("payload", {})
+                    task_id = payload.get("task_id")
+                    if task_id:
+                        task = blackboard.get_task(task_id)
+                        if task:
+                            blackboard.update_task(task_id, status="cancelled")
+                            if task.assigned_to:
+                                swarm.terminate_agent(task.assigned_to)
+                            await event_bus.emit("blackboard_update", blackboard.snapshot())
                 elif cmd_type == "stop":
                     voice.stop_tts()
                     brain.cancel_chat()
@@ -870,6 +938,9 @@ async def main():
         async with EventBus(pub_port=5555, pull_port=5556, is_producer=True) as bus:
             event_bus = bus
             voice.set_event_bus(bus)
+            import charlie.recovery
+            charlie.recovery._event_bus = bus
+            charlie.recovery.set_active_session_id(current_web_session_id)
 
             class ZmqLogHandler(logging.Handler):
                 def emit(self, record):

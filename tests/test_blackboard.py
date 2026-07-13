@@ -45,8 +45,8 @@ class TestTaskOperations:
         assert result is None
 
     def test_get_pending_tasks(self, board: Blackboard):
-        t1 = board.add_task("Step 1")
-        t2 = board.add_task("Step 2", dependencies=[t1.id])
+        t1 = board.add_task("Step 1", approval_status="approved")
+        t2 = board.add_task("Step 2", dependencies=[t1.id], approval_status="approved")
         board.update_task(t1.id, status="done")
 
         pending = board.get_pending_tasks()
@@ -54,8 +54,8 @@ class TestTaskOperations:
         assert pending[0].id == t2.id
 
     def test_pending_tasks_respect_dependencies(self, board: Blackboard):
-        t1 = board.add_task("Prerequisite")
-        board.add_task("Dependent", dependencies=[t1.id])
+        t1 = board.add_task("Prerequisite", approval_status="approved")
+        board.add_task("Dependent", dependencies=[t1.id], approval_status="approved")
 
         pending = board.get_pending_tasks()
         assert len(pending) == 1
@@ -75,6 +75,21 @@ class TestTaskOperations:
         escalated = board.check_escalation()
         assert len(escalated) == 1
         assert escalated[0].id == task.id
+
+    def test_escalation_check_includes_retry_exhausted_tasks(self, board: Blackboard):
+        """Regression test: a task that has exhausted its retries must still
+        be returned by check_escalation so the caller (swarm's
+        _handle_escalation) can mark it permanently failed. Before this fix,
+        the retry_count < MAX_RETRIES filter excluded these tasks entirely,
+        so they sat in "failed" status forever with no terminal message."""
+        from charlie.blackboard import MAX_RETRIES
+
+        task = board.add_task("Chronically failing task")
+        board.update_task(task.id, status="failed", retry_count=MAX_RETRIES)
+        escalated = board.check_escalation()
+        assert len(escalated) == 1
+        assert escalated[0].id == task.id
+        assert escalated[0].retry_count == MAX_RETRIES
 
 
 # ---------------------------------------------------------------------------

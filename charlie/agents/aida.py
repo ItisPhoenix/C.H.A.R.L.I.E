@@ -9,7 +9,6 @@ class AIDA(BaseAgent):
     _action_verb = "Creating"
     _done_log = "Created"
     _fail_log = "Creation failed"
-    _success_msg = "Content created"
 
     async def _do_action(self, task_name: str, task=None) -> str:
         prompt = f"""Create high-quality content based on this brief: {task_name}

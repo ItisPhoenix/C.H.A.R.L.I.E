@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { ReactElement } from "react";
-import { useCharlieStore } from "@/store/useCharlieStore";
+import { useCharlieStore, rgba, lighten } from "@/store/useCharlieStore";
 
 interface SessionItem {
   id: string;
@@ -37,6 +37,8 @@ export function SessionRail({
 }: SessionRailProps): ReactElement {
   const sessionScope = useCharlieStore((s) => s.sessionScope);
   const launchId = useCharlieStore((s) => s.launchId);
+  const accentColor = useCharlieStore((s) => s.accentColor);
+  const setAccentColor = useCharlieStore((s) => s.setAccentColor);
   const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -56,10 +58,14 @@ export function SessionRail({
     setEditingId(null);
   };
 
+  const accentDim = rgba(accentColor, 0.12);
+  const accentBorder = rgba(accentColor, 0.25);
+  const accentSoft = lighten(accentColor, 0.35);
+
   return (
     <aside
       className={`glass glass-hover anim-left flex flex-col shrink-0 h-full overflow-hidden rounded-2xl ${
-        collapsed ? "w-16" : "w-72"
+        collapsed ? "w-[72px]" : "w-72"
       }`}
     >
       {collapsed ? (
@@ -67,7 +73,8 @@ export function SessionRail({
           <button
             onClick={onToggle}
             aria-label="Expand chats"
-            className="rounded-xl w-10 h-10 grid place-items-center bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal-soft)] border border-[var(--color-accent-teal)]/20 cursor-pointer transition hover:bg-[var(--color-accent-teal-dim)]/80"
+            style={{ background: accentDim, color: accentSoft, borderColor: accentBorder }}
+            className="rounded-xl w-10 h-10 grid place-items-center border cursor-pointer transition hover:opacity-80"
           >
             <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M9 18l6-6-6-6" />
@@ -76,7 +83,8 @@ export function SessionRail({
           <button
             onClick={onCreate}
             aria-label="New chat"
-            className="rounded-xl w-10 h-10 grid place-items-center bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal-soft)] border border-[var(--color-accent-teal)]/20 cursor-pointer transition hover:bg-[var(--color-accent-teal-dim)]/80"
+            style={{ background: accentDim, color: accentSoft, borderColor: accentBorder }}
+            className="rounded-xl w-10 h-10 grid place-items-center border cursor-pointer transition hover:opacity-80"
           >
             <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <path d="M12 5v14M5 12h14" />
@@ -100,11 +108,12 @@ export function SessionRail({
                   onClick={() => onSelect(s.id)}
                   aria-label={s.title}
                   title={s.title}
-                  className={`w-10 h-10 mx-auto grid place-items-center rounded-xl text-sm font-display transition cursor-pointer ${
-                    active
-                      ? "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal-soft)] border border-[var(--color-accent-teal)]/20"
-                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                  }`}
+                  style={{
+                    background: active ? accentDim : "transparent",
+                    color: active ? accentSoft : "#6b7280",
+                    borderColor: active ? accentBorder : "transparent",
+                  }}
+                  className={`w-10 h-10 mx-auto grid place-items-center rounded-xl text-sm font-display transition cursor-pointer border`}
                 >
                   {(s.title || "?").charAt(0).toUpperCase()}
                 </button>
@@ -131,7 +140,8 @@ export function SessionRail({
               <button
                 onClick={onCreate}
                 aria-label="New chat"
-                className="rounded-xl w-8 h-8 grid place-items-center bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal-soft)] border border-[var(--color-accent-teal)]/20 cursor-pointer transition hover:bg-[var(--color-accent-teal-dim)]/80"
+                style={{ background: accentDim, color: accentSoft, borderColor: accentBorder }}
+                className="rounded-xl w-8 h-8 grid place-items-center border cursor-pointer transition hover:opacity-80"
               >
                 <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                   <path d="M12 5v14M5 12h14" />
@@ -156,6 +166,9 @@ export function SessionRail({
               placeholder="Search chats..."
               aria-label="Search chats"
               className="w-full rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent-teal)]/40 transition"
+              style={{
+                borderColor: query ? accentBorder : undefined,
+              }}
             />
           </div>
 
@@ -167,11 +180,11 @@ export function SessionRail({
                     if (sessionScope !== "this_launch") onScopeChange();
                   }}
                   aria-pressed={sessionScope === "this_launch"}
-                  className={`flex-1 rounded-lg py-1.5 font-medium cursor-pointer transition ${
-                    sessionScope === "this_launch"
-                      ? "bg-[var(--color-accent-teal)] text-[var(--color-bg-deep)]"
-                      : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
-                  }`}
+                  style={{
+                    background: sessionScope === "this_launch" ? accentColor : "transparent",
+                    color: sessionScope === "this_launch" ? "#03151a" : "#6b7280",
+                  }}
+                  className={`flex-1 rounded-lg py-1.5 font-medium cursor-pointer transition`}
                 >
                   This Launch
                 </button>
@@ -180,11 +193,11 @@ export function SessionRail({
                     if (sessionScope !== "all") onScopeChange();
                   }}
                   aria-pressed={sessionScope === "all"}
-                  className={`flex-1 rounded-lg py-1.5 font-medium cursor-pointer transition ${
-                    sessionScope === "all"
-                      ? "bg-[var(--color-accent-teal)] text-[var(--color-bg-deep)]"
-                      : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
-                  }`}
+                  style={{
+                    background: sessionScope === "all" ? accentColor : "transparent",
+                    color: sessionScope === "all" ? "#03151a" : "#6b7280",
+                  }}
+                  className={`flex-1 rounded-lg py-1.5 font-medium cursor-pointer transition`}
                 >
                   All
                 </button>
@@ -204,11 +217,11 @@ export function SessionRail({
                 <div
                   key={s.id}
                   onClick={() => onSelect(s.id)}
-                  className={`group flex items-center gap-2 rounded-xl px-3 py-2.5 cursor-pointer transition border ${
-                    active
-                      ? "bg-[var(--color-accent-teal-dim)] border-[var(--color-accent-teal)]/35"
-                      : "border-transparent hover:bg-[var(--color-surface-hover)]"
-                  }`}
+                  style={{
+                    background: active ? rgba(accentColor, 0.1) : "transparent",
+                    borderColor: active ? accentBorder : "transparent",
+                  }}
+                  className={`group flex items-center gap-2 rounded-xl px-3 py-2.5 cursor-pointer transition border`}
                 >
                   <div className="min-w-0 flex-1">
                     {editingId === s.id ? (
@@ -221,7 +234,8 @@ export function SessionRail({
                           if (e.key === "Enter") commitEdit(s.id);
                           if (e.key === "Escape") setEditingId(null);
                         }}
-                        className="w-full bg-transparent outline-none text-sm text-[var(--color-text-primary)] border-b border-[var(--color-accent-teal)]/40"
+                        style={{ borderBottomColor: accentBorder }}
+                        className="w-full bg-transparent outline-none text-sm text-[var(--color-text-primary)] border-b"
                       />
                     ) : (
                       <p
@@ -264,6 +278,26 @@ export function SessionRail({
                 </div>
               );
             })}
+          </div>
+
+          {/* Accent Color Settings Picker */}
+          <div className="px-5 py-3 border-t border-[var(--color-glass-border)] flex items-center justify-between shrink-0">
+            <span className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] font-mono">Accent</span>
+            <div className="flex gap-1.5">
+              {["#a855f7", "#3b82f6", "#ef4444", "#f59e0b", "#06b6d4"].map((color) => (
+                <button
+                  key={color}
+                  onClick={() => setAccentColor(color)}
+                  className="w-3.5 h-3.5 rounded-full border border-white/20 transition hover:scale-110 cursor-pointer"
+                  style={{
+                    background: color,
+                    outline: accentColor === color ? `1.5px solid ${lighten(color, 0.35)}` : "none",
+                    outlineOffset: "1px",
+                  }}
+                  aria-label={`Set accent to ${color}`}
+                />
+              ))}
+            </div>
           </div>
         </>
       )}

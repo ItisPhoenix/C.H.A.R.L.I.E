@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactElement } from "react";
-import { useCharlieStore, type ToolActivityEntry } from "../store/useCharlieStore";
+import { useCharlieStore, type ToolActivityEntry, rgba, lighten } from "../store/useCharlieStore";
 
 interface ChatViewProps {
   messages: { id?: string; role: string; content: string }[];
@@ -13,13 +13,18 @@ interface ChatViewProps {
 }
 
 function TypingDots(): ReactElement {
+  const accentColor = useCharlieStore((s) => s.accentColor);
   return (
     <span className="inline-flex gap-1.5 ml-1" aria-label="Charlie is typing">
       {[0, 1, 2].map((i) => (
         <span
           key={i}
-          className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent-teal)] animate-pulse"
-          style={{ animationDelay: `${i * 180}ms` }}
+          className="w-1.5 h-1.5 rounded-full"
+          style={{
+            background: accentColor,
+            animation: "dotPulse 1.2s ease-in-out infinite",
+            animationDelay: `${i * 180}ms`,
+          }}
         />
       ))}
     </span>
@@ -38,6 +43,7 @@ export function ChatView({
   const scrollRef = useRef<HTMLDivElement>(null);
   const isSubmittingRef = useRef(false);
   const connected = useCharlieStore((s) => s.connected);
+  const accentColor = useCharlieStore((s) => s.accentColor);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -57,6 +63,9 @@ export function ChatView({
     setTimeout(() => { isSubmittingRef.current = false; }, 500);
   };
 
+  const accentDim = rgba(accentColor, 0.12);
+  const accentBorder = rgba(accentColor, 0.25);
+
   return (
     <section className="glass anim-rise relative flex flex-col h-full overflow-hidden rounded-2xl">
       {/* Header */}
@@ -72,7 +81,7 @@ export function ChatView({
         <span className="flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-[var(--color-text-secondary)]">
           <span
             className={`w-2 h-2 rounded-full ${
-              connected ? "bg-status-speaking" : "bg-status-idle"
+              connected ? "bg-[var(--color-accent-teal)] animate-pulse" : "bg-status-idle"
             }`}
             aria-hidden="true"
           />
@@ -104,11 +113,11 @@ export function ChatView({
               className={`flex ${isUser ? "justify-end" : "justify-start"}`}
             >
               <div
-                className={`anim-message max-w-[78%] px-4 py-3 rounded-2xl text-[15px] leading-relaxed ${
-                  isUser
-                    ? "bg-[var(--color-accent-teal-dim)] border border-[var(--color-accent-teal)]/20 text-[var(--color-text-primary)]"
-                    : "bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] text-[var(--color-text-primary)]"
-                }`}
+                style={{
+                  background: isUser ? accentDim : "rgba(255,255,255,0.04)",
+                  borderColor: isUser ? accentBorder : "rgba(255,255,255,0.07)",
+                }}
+                className={`anim-message max-w-[78%] px-4 py-3 rounded-2xl text-[15px] border leading-relaxed text-[var(--color-text-primary)]`}
               >
                 {m.content || (isUser ? "" : <TypingDots />)}
               </div>
@@ -163,7 +172,7 @@ export function ChatView({
             <button
               onClick={onStop}
               aria-label="Stop generation"
-              className="shrink-0 rounded-xl px-4 py-1.5 text-xs font-semibold uppercase tracking-wider bg-red-500/20 text-red-400 border border-red-500/30 cursor-pointer transition hover:bg-red-500/30 hover:text-red-300"
+              className="shrink-0 rounded-xl px-4 py-1.5 text-xs font-semibold uppercase tracking-wider bg-red-500/16 text-red-400 border border-red-500/30 cursor-pointer transition hover:bg-red-500/26 hover:text-red-300"
             >
               Stop
             </button>
@@ -172,7 +181,13 @@ export function ChatView({
               onClick={submit}
               disabled={!input.trim()}
               aria-label="Send message"
-              className="shrink-0 rounded-xl px-4 py-1.5 text-xs font-semibold uppercase tracking-wider bg-[var(--color-accent-teal)] text-slate-950 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition hover:bg-[var(--color-accent-teal-soft)]"
+              style={{
+                background: !input.trim() ? "transparent" : accentColor,
+                color: !input.trim() ? "#6b7280" : "#03151a",
+                border: !input.trim() ? "1px solid rgba(255,255,255,0.07)" : "none",
+                opacity: !input.trim() ? 0.4 : 1,
+              }}
+              className="shrink-0 rounded-xl px-4 py-1.5 text-xs font-semibold uppercase tracking-wider disabled:cursor-not-allowed cursor-pointer transition hover:opacity-80"
             >
               Send
             </button>

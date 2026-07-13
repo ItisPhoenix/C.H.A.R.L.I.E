@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
+from charlie.agents import AGENT_REGISTRY
 from charlie.config import config
 from charlie.session_store import SessionStore
 
@@ -81,7 +82,6 @@ _WIN_CMD_PATTERNS = [
 
 # Cross-platform volume command translations (wrong OS -> Windows equivalent)
 _AMIXER_SET_RE = re.compile(r"amixer\s+set\s+Master\s+(\d+)\%", re.IGNORECASE)
-_AMIXER_DOWN_RE = re.compile(r"amixer\s+set\s+Master\s+(\d+)\%-", re.IGNORECASE)
 _OSCRIPT_VOL_RE = re.compile(
     r"osascript\s.*[Ss]et\s+[Vv]olume\s+([\d.]+)", re.IGNORECASE
 )
@@ -496,6 +496,25 @@ _SHELL_NAMES = ("cmd", "cmd.exe", "powershell", "powershell.exe")
 _CONVERSATIONAL = ("stop", "start", "cancel", "wait", "halt")
 
 
+def is_shell_command_blocked(command: str) -> Optional[str]:
+    """Check `command` against the shell-execute safety guards (metacharacters
+    and risky keyword list). Returns a human-readable block reason, or None
+    if the command passes.
+
+    Shared with charlie.recovery so LLM-suggested and strategy-rewritten
+    recovery commands go through the exact same guard as direct
+    shell_execute calls, instead of only the narrower path/process/port
+    checks in recovery.is_safe_to_recover.
+    """
+    if any(ch in command for ch in _SHELL_METACHARS):
+        return "Shell metacharacters (;, |, &, `, $, (, )) are not allowed."
+    lowered = command.lower().strip()
+    for keyword in _BLOCKED_KEYWORDS:
+        if keyword in lowered:
+            return f"Command blocked -- risky keyword '{keyword}'"
+    return None
+
+
 @registry.register_tool(
     name="shell_execute",
     description="Run a shell command and get output. Risky commands are blocked.",
@@ -538,11 +557,9 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
             )
 
     # Universal guards: apply in every mode (voice and web UI).
-    if any(ch in command for ch in _SHELL_METACHARS):
-        return "Error: Shell metacharacters (;, |, &, `, $, (, )) are not allowed."
-    for keyword in _BLOCKED_KEYWORDS:
-        if keyword in lowered:
-            return f"Error: Command blocked -- risky keyword '{keyword}'"
+    blocked_reason = is_shell_command_blocked(command)
+    if blocked_reason:
+        return f"Error: {blocked_reason}"
 
     # Block bare interactive shells and conversational nonsense
     if lowered in _SHELL_NAMES:
@@ -1045,7 +1062,11 @@ def graph_consolidate() -> str:
 # Swarm delegation tool (delegate tasks to MARVEL agents)
 # ---------------------------------------------------------------------------
 
-_VALID_AGENTS = ("F.R.I.D.A.Y.", "E.D.I.T.H.", "A.I.D.A.", "K.A.R.E.N.", "H.E.R.B.I.E.")
+# Derived from AGENT_REGISTRY (the swarm's single source of truth for
+# registered agents) so this list can never drift out of sync with which
+# agents actually exist -- it previously hand-listed only 5 of the 7
+# registered agents, silently excluding J.A.R.V.I.S. and Vision.
+_VALID_AGENTS = tuple(AGENT_REGISTRY.keys())
 _POLL_INTERVAL_S = 0.5
 _POLL_TIMEOUT_S = 60.0
 

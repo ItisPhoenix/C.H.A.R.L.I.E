@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useCallback, useRef, useState } from "react";
-import { useCharlieStore } from "../store/useCharlieStore";
+import { useCharlieStore, rgba } from "../store/useCharlieStore";
 import { SessionRail } from "../components/SessionRail";
 import { ChatView } from "../components/ChatView";
 import { InsightRail } from "../components/InsightRail";
@@ -9,6 +9,7 @@ import { VoiceDock } from "../components/VoiceDock";
 import { EventLog } from "../components/EventLog";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { MicMeter } from "../components/MicMeter";
+import { RecoveryDialog } from "../components/RecoveryDialog";
 
 export default function Page() {
   const connected = useCharlieStore((s) => s.connected);
@@ -43,9 +44,21 @@ export default function Page() {
   const setSessionScope = useCharlieStore((s) => s.setSessionScope);
   const updateLastMessageContent = useCharlieStore((s) => s.updateLastMessageContent);
   const addMessage = useCharlieStore((s) => s.addMessage);
+  const accentColor = useCharlieStore((s) => s.accentColor);
+  const activeProposal = useCharlieStore((s) => s.activeProposal);
+  const setActiveProposal = useCharlieStore((s) => s.setActiveProposal);
 
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 1440);
+
+  useEffect(() => {
+    const handleResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  const effectiveCollapsed = railCollapsed || viewportWidth < 860;
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -157,6 +170,13 @@ export default function Page() {
 
 
   // Connect WebSocket
+  const fetchMessagesRef = useRef(fetchMessages);
+  useEffect(() => {
+    fetchMessagesRef.current = fetchMessages;
+  }, [fetchMessages]);
+
+
+  // Connect WebSocket
   const connectWS = useCallback(() => {
     if (wsRef.current) return;
 
@@ -167,7 +187,7 @@ export default function Page() {
     wsRef.current = socket;
 
     socket.onopen = () => {
-      setConnected(true);
+      useCharlieStore.getState().setConnected(true);
       reconnectAttemptsRef.current = 0;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
@@ -177,7 +197,7 @@ export default function Page() {
       // so the UI self-heals after a dropout without a manual page refresh.
       if (currentSessionIdRef.current) {
         socket.send(JSON.stringify({ type: "session_active", payload: { session_id: currentSessionIdRef.current } }));
-        fetchMessages(currentSessionIdRef.current);
+        fetchMessagesRef.current(currentSessionIdRef.current);
         // Re-send the subscription shortly after, guarded by a still-open
         // socket. This survives the ZMQ slow-joiner race where the first
         // session_active can arrive before the subscriber is wired up.
@@ -190,7 +210,7 @@ export default function Page() {
     };
 
     socket.onclose = () => {
-      setConnected(false);
+      useCharlieStore.getState().setConnected(false);
       wsRef.current = null;
       const attempt = reconnectAttemptsRef.current++;
       const delay = Math.min(3000 * 2 ** attempt, 30000);
@@ -204,55 +224,56 @@ export default function Page() {
     socket.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
+        const store = useCharlieStore.getState();
         
         // Handle telemetry and status updates
         if (msg.type === "system_status") {
-          setSystemStatus(msg.payload);
+          store.setSystemStatus(msg.payload);
         } else if (msg.type === "blackboard_update") {
-          setBlackboard(msg.payload);
+          store.setBlackboard(msg.payload);
         } else if (msg.type === "vad_start" || msg.type === "wake_word") {
-          setVoiceState("listening");
+          store.setVoiceState("listening");
         } else if (msg.type === "thinking") {
-          setVoiceState("thinking");
+          store.setVoiceState("thinking");
         } else if (msg.type === "speaking_start") {
-          setVoiceState("speaking");
+          store.setVoiceState("speaking");
         } else if (msg.type === "speaking_stop" || msg.type === "response_done") {
-          setVoiceState("idle");
+          store.setVoiceState("idle");
           // A reply turn has finished: drop this session from the streaming set
           // so the HTTP fallback can run again, and reset per-reply tool rows.
           if (msg.type === "response_done") {
             const eventSession = sessionOf(msg);
             wsStreamingRef.current.delete(eventSession || currentSessionIdRef.current);
-            clearToolActivity();
+            store.clearToolActivity();
           }
         } else if (msg.type === "audio_state") {
-          setAudio({
+          store.setAudio({
             muted: Boolean(msg.payload?.muted),
             volume: typeof msg.payload?.volume === "number" ? msg.payload.volume : 1.0,
           });
         } else if (msg.type === "mic_state") {
-          setMic({ mic_muted: Boolean(msg.payload?.mic_muted) });
+          store.setMic({ mic_muted: Boolean(msg.payload?.mic_muted) });
         } else if (msg.type === "session_updated") {
           const sid = sessionOf(msg);
           const title = msg.title || msg.payload?.title;
           const deleted = msg.payload?.deleted;
           if (sid && deleted) {
-            const cur = useCharlieStore.getState().sessions;
-            setSessions(cur.filter((s) => s.id !== sid));
-            if (useCharlieStore.getState().currentSessionId === sid) {
-              setCurrentSessionId("");
+            const cur = store.sessions;
+            store.setSessions(cur.filter((s) => s.id !== sid));
+            if (store.currentSessionId === sid) {
+              store.setCurrentSessionId("");
             }
           } else if (sid && title) {
-            const cur = useCharlieStore.getState().sessions;
-            setSessions(cur.map((s) => (s.id === sid ? { ...s, title } : s)));
+            const cur = store.sessions;
+            store.setSessions(cur.map((s) => (s.id === sid ? { ...s, title } : s)));
           }
         } else if (msg.type === "audio_level") {
           const level = typeof msg.payload?.level === "number" ? msg.payload.level : 0;
-          setAudioLevel(Math.max(0, Math.min(1, level)));
+          store.setAudioLevel(Math.max(0, Math.min(1, level)));
         } else if (msg.type === "log") {
-          addLog(msg.payload?.line || "");
+          store.addLog(msg.payload?.line || "");
         } else if (msg.type === "alert") {
-          addAlert({
+          store.addAlert({
             severity: msg.payload?.severity || "info",
             message: msg.payload?.message || "",
             timestamp: new Date().toLocaleTimeString(),
@@ -265,17 +286,17 @@ export default function Page() {
         else if (msg.type === "tool_call") {
           const eventSession = sessionOf(msg);
           if (eventSession && eventSession !== currentSessionIdRef.current) return;
-          appendToolActivity({ kind: "tool_call", name: msg.payload?.name || "tool", text: msg.payload?.text || "", sessionId: eventSession });
+          store.appendToolActivity({ kind: "tool_call", name: msg.payload?.name || "tool", text: msg.payload?.text || "", sessionId: eventSession });
         }
         else if (msg.type === "tool_result") {
           const eventSession = sessionOf(msg);
           if (eventSession && eventSession !== currentSessionIdRef.current) return;
-          appendToolActivity({ kind: "tool_result", name: msg.payload?.name || "tool", text: msg.payload?.text || "", sessionId: eventSession });
+          store.appendToolActivity({ kind: "tool_result", name: msg.payload?.name || "tool", text: msg.payload?.text || "", sessionId: eventSession });
         }
         else if (msg.type === "thinking_update") {
           const eventSession = sessionOf(msg);
           if (eventSession && eventSession !== currentSessionIdRef.current) return;
-          appendToolActivity({ kind: "thinking_update", name: "thinking", text: msg.payload?.text || "", sessionId: eventSession });
+          store.appendToolActivity({ kind: "thinking_update", name: "thinking", text: msg.payload?.text || "", sessionId: eventSession });
         }
 
         // Spoken input (STT): the backend streams recognized speech as
@@ -286,8 +307,13 @@ export default function Page() {
           if (eventSession && eventSession !== currentSessionIdRef.current) return;
           const spoken = (msg.payload?.text || "").trim();
           if (spoken) {
-            addMessage({ role: "user", content: spoken });
+            store.addMessage({ role: "user", content: spoken });
           }
+        }
+        else if (msg.type === "recovery_proposal") {
+          const eventSession = sessionOf(msg);
+          if (eventSession && eventSession !== currentSessionIdRef.current) return;
+          store.setActiveProposal(msg.payload);
         }
         // Handle real-time token stream. Only render tokens for the active
         // session; the server also filters by subscription, but we guard
@@ -298,13 +324,13 @@ export default function Page() {
           // Mark this session as actively streaming so the HTTP /chat fallback
           // in handleSendMessage is suppressed for the duration of the reply.
           wsStreamingRef.current.add(eventSession || currentSessionIdRef.current);
-          updateLastMessageContent(msg.payload?.text || "");
+          store.updateLastMessageContent(msg.payload?.text || "");
         }
       } catch {
         // Malformed WS packet: ignore so the socket stays alive.
       }
     };
-  }, [setConnected, setSystemStatus, setBlackboard, setVoiceState, setAudio, setMic, setAudioLevel, addLog, addAlert, addMessage, updateLastMessageContent, fetchMessages, setSessions, setCurrentSessionId]);
+  }, []);
   useEffect(() => { connectWSRef.current = connectWS; });
   useEffect(() => { currentSessionIdRef.current = currentSessionId; }, [currentSessionId]);
 
@@ -343,6 +369,22 @@ export default function Page() {
     sendWS({ type: "agent_kill", payload: { name: agentName } });
   };
 
+  const handleApproveTask = (taskId: string) => {
+    sendWS({ type: "task_approve", payload: { task_id: taskId } });
+  };
+
+  const handleRejectTask = (taskId: string, reason: string = "Rejected by user") => {
+    sendWS({ type: "task_reject", payload: { task_id: taskId, reason } });
+  };
+
+  const handleCancelTask = (taskId: string) => {
+    sendWS({ type: "task_cancel", payload: { task_id: taskId } });
+  };
+
+  const handleRetryTask = (taskId: string) => {
+    sendWS({ type: "task_retry", payload: { task_id: taskId } });
+  };
+
   // Export full chat history (real backend data)
   const handleExportHistory = useCallback(async () => {
     try {
@@ -365,14 +407,20 @@ export default function Page() {
 
   // Push speaker controls to the backend audio subsystem via WebSocket
   const sendAudioControl = useCallback((patch: { muted?: boolean; volume?: number }) => {
+    const currentAudio = useCharlieStore.getState().audio;
+    setAudio({
+      ...currentAudio,
+      ...patch,
+    });
     sendWS({ type: "audio_control", payload: patch });
-  }, [sendWS]);
+  }, [sendWS, setAudio]);
 
   // Push microphone mute toggle to the backend voice engine via WebSocket.
   // The backend gates captured frames, so the assistant truly stops listening.
   const sendMicControl = useCallback((patch: { mic_muted: boolean }) => {
+    setMic({ mic_muted: patch.mic_muted });
     sendWS({ type: "mic_control", payload: patch });
-  }, [sendWS]);
+  }, [sendWS, setMic]);
 
   // Create new session
   const handleCreateSession = useCallback(async (title: string = "New Chat") => {
@@ -505,10 +553,39 @@ export default function Page() {
     };
   }, []);
 
+  const canvasBg = `radial-gradient(1200px 700px at 12% -8%, ${rgba(accentColor, 0.12)}, transparent 60%), radial-gradient(1000px 600px at 105% 10%, ${rgba(accentColor, 0.06)}, transparent 55%), #000000`;
+
   return (
     <ErrorBoundary>
-      <div className="h-screen w-screen flex flex-col overflow-hidden relative font-sans select-none text-[var(--color-text-primary)]">
-
+      <div 
+        style={{ background: canvasBg }}
+        className="h-screen w-screen flex flex-col overflow-hidden relative font-sans select-none text-[var(--color-text-primary)]"
+      >
+        {/* Glow Blobs */}
+        <div style={{
+          position: "absolute",
+          top: "-160px",
+          left: "-120px",
+          width: "520px",
+          height: "520px",
+          borderRadius: "50%",
+          background: `radial-gradient(circle, ${rgba(accentColor, 0.16)}, transparent 70%)`,
+          filter: "blur(10px)",
+          animation: "glowDrift 22s ease-in-out infinite",
+          pointerEvents: "none",
+        }} />
+        <div style={{
+          position: "absolute",
+          bottom: "-200px",
+          right: "-160px",
+          width: "600px",
+          height: "600px",
+          borderRadius: "50%",
+          background: `radial-gradient(circle, ${rgba(accentColor, 0.1)}, transparent 70%)`,
+          filter: "blur(10px)",
+          animation: "glowDrift 26s ease-in-out infinite reverse",
+          pointerEvents: "none",
+        }} />
 
         {/* Mobile Header */}
         <header className="md:hidden flex items-center justify-between px-6 py-3 border-b border-[var(--color-glass-border)] bg-[var(--color-glass-bg)] z-30">
@@ -529,7 +606,7 @@ export default function Page() {
           {/* Left: session rail */}
           <div className={`${mobileMenuOpen ? 'flex absolute inset-y-4 left-4 z-20 shadow-2xl' : 'hidden'} md:flex md:static h-full`}>
             <SessionRail
-              collapsed={railCollapsed}
+              collapsed={effectiveCollapsed}
               onToggle={() => setRailCollapsed((v) => !v)}
               sessions={sessions}
               currentId={currentSessionId}
@@ -559,6 +636,10 @@ export default function Page() {
               blackboard={blackboard}
               systemStatus={systemStatus}
               onTerminateAgent={handleTerminateAgent}
+              onApproveTask={handleApproveTask}
+              onRejectTask={handleRejectTask}
+              onCancelTask={handleCancelTask}
+              onRetryTask={handleRetryTask}
             />
           </div>
         </div>
@@ -574,6 +655,11 @@ export default function Page() {
           mic={mic}
           onAudioControl={sendAudioControl}
           onMicControl={sendMicControl}
+        />
+
+        <RecoveryDialog
+          onApprove={handleApproveTask}
+          onReject={handleRejectTask}
         />
       </div>
     </ErrorBoundary>

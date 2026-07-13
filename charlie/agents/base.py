@@ -17,7 +17,6 @@ class BaseAgent(ABC):
     _action_verb: str = "Working"
     _done_log: str = "Done"
     _fail_log: str = "Failed"
-    _success_msg: str = "Completed"
 
     def __init__(self, blackboard: "Blackboard", llm_client: Any = None) -> None:
         self.blackboard = blackboard
@@ -80,7 +79,7 @@ class BaseAgent(ABC):
         if not self.llm_client:
             return f"[{self.name} placeholder - LLM not connected] Would process: {prompt[:80]}..."
         response = await self.llm_client.post(
-            "/chat/completions",
+            "chat/completions",
             json={
                 "model": self.llm_client.model,
                 "messages": [{"role": "user", "content": prompt}],

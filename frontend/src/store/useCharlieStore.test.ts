@@ -172,4 +172,26 @@ describe("useCharlieStore", () => {
       expect(useCharlieStore.getState().toolActivity).toHaveLength(0);
     });
   });
+
+  describe("recovery proposals", () => {
+    it("manages active recovery proposal state", () => {
+      const proposal = {
+        proposal_id: "prop-123",
+        original_command: "dir_fake",
+        proposed_command: "dir",
+        failure_class: "CMD_ERROR",
+        explanation: "Proposed dir as fix for dir_fake",
+        source: "strategy",
+        safeguard_passed: true,
+        session_id: "session_A",
+      };
+
+      const s = useCharlieStore.getState();
+      expect(s.activeProposal).toBeNull();
+      s.setActiveProposal(proposal);
+      expect(useCharlieStore.getState().activeProposal).toEqual(proposal);
+      s.setActiveProposal(null);
+      expect(useCharlieStore.getState().activeProposal).toBeNull();
+    });
+  });
 });

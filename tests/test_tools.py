@@ -13,6 +13,7 @@ from charlie.tools import (
     _needs_decomposition,
     file_read,
     file_write,
+    is_shell_command_blocked,
     memory,
     registry,
     session_search,
@@ -72,6 +73,27 @@ def test_shell_execute_lists_env(monkeypatch):
     assert "OK" in output
     env_output = shell_execute("set" if os.name == "nt" else "env")
     assert isinstance(env_output, str)
+
+
+def test_shell_execute_blocks_metacharacters_and_keywords():
+    """Locks the exact error text shell_execute returns via the shared
+    is_shell_command_blocked() guard, now also reused by charlie.recovery."""
+    assert shell_execute("echo a & type secrets.txt") == (
+        "Error: Shell metacharacters (;, |, &, `, $, (, )) are not allowed."
+    )
+    assert shell_execute("format c: /q") == (
+        "Error: Command blocked -- risky keyword 'format '"
+    )
+
+
+def test_is_shell_command_blocked_direct():
+    assert is_shell_command_blocked("dir") is None
+    assert is_shell_command_blocked("rm -rf /") == (
+        "Command blocked -- risky keyword 'rm -rf'"
+    )
+    assert is_shell_command_blocked("echo `whoami`") == (
+        "Shell metacharacters (;, |, &, `, $, (, )) are not allowed."
+    )
 
 
 def test_tool_registry_unknown_tool_returns_error():

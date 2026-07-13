@@ -1,5 +1,7 @@
 """Tests for charlie.mcp_client -- MCP Client module."""
 
+import logging
+import sys
 from typing import Any, Callable, Dict, List
 from unittest.mock import MagicMock, patch
 
@@ -7,6 +9,7 @@ from charlie.mcp_client import (
     MCPClient,
     MCPServerConfig,
     MCPTool,
+    _ManagedServer,
     parse_server_spec,
     start_mcp,
 )
@@ -231,3 +234,98 @@ def test_start_mcp_enabled_without_servers_returns_none():
 
     cfg = SimpleNamespace(mcp_enabled=True, mcp_servers=[])
     assert start_mcp(cfg) is None
+
+
+# ---------------------------------------------------------------------------
+# _ManagedServer: single-reader-thread regression tests (real subprocess)
+# ---------------------------------------------------------------------------
+
+_STUB_SERVER_SCRIPT = """
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        # Stray notification interleaved before the real response, to prove
+        # the reader demuxes by id/method instead of assuming line order.
+        print(json.dumps({"jsonrpc": "2.0", "method": "log", "params": {"msg": "starting"}}))
+        sys.stdout.flush()
+        print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"ok": True}}))
+        sys.stdout.flush()
+    elif method == "ping":
+        print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"pong": True}}))
+        sys.stdout.flush()
+"""
+
+
+class TestManagedServerSingleReader:
+    """Regression tests for the dual-stdout-reader race.
+
+    Before this fix, _ManagedServer had both a background _read_loop thread
+    and a second synchronous reader inside _send_request/_raw_exchange,
+    both consuming the same subprocess stdout pipe. Whichever one happened
+    to read a line first could steal the JSON-RPC response another call was
+    waiting for, so initialize/tools/list/tools/call would time out
+    unpredictably. Now there is exactly one reader thread, and responses are
+    routed to the correct waiting caller by request id.
+    """
+
+    def _make_server(self) -> _ManagedServer:
+        config = MCPServerConfig(
+            name="stub",
+            command=sys.executable,
+            args=["-c", _STUB_SERVER_SCRIPT],
+            timeout=5.0,
+        )
+        return _ManagedServer(config)
+
+    def test_initialize_succeeds_despite_interleaved_notification(self, caplog):
+        server = self._make_server()
+        try:
+            with caplog.at_level(logging.WARNING, logger="charlie.mcp_client"):
+                server.start()
+            assert server.is_running()
+            assert "init failed" not in caplog.text
+        finally:
+            server.stop()
+
+    def test_sequential_requests_get_correctly_matched_responses(self):
+        server = self._make_server()
+        try:
+            server.start()
+            assert server.is_running()
+
+            resp1 = server._send_request("ping", {})
+            assert resp1 is not None
+            assert resp1["result"]["pong"] is True
+
+            resp2 = server._send_request("ping", {})
+            assert resp2 is not None
+            assert resp2["result"]["pong"] is True
+        finally:
+            server.stop()
+
+    def test_unknown_method_times_out_without_hanging(self):
+        """A request the stub script never answers must time out cleanly
+        (not hang forever, and not crash the reader thread)."""
+        config = MCPServerConfig(
+            name="stub",
+            command=sys.executable,
+            args=["-c", _STUB_SERVER_SCRIPT],
+            timeout=0.5,
+        )
+        server = _ManagedServer(config)
+        try:
+            server.start()
+            resp = server._send_request("no_such_method", {})
+            assert resp is None
+            # Reader thread must still be alive/functional for later calls.
+            resp2 = server._send_request("ping", {})
+            assert resp2 is not None
+            assert resp2["result"]["pong"] is True
+        finally:
+            server.stop()

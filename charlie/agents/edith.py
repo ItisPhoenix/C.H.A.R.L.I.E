@@ -9,7 +9,6 @@ class EDITH(BaseAgent):
     _action_verb = "Researching"
     _done_log = "Research complete"
     _fail_log = "Research failed"
-    _success_msg = "Research completed"
 
     async def _do_action(self, task_name: str, task=None) -> str:
         prompt = f"""Research this topic thoroughly: {task_name}

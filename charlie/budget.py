@@ -19,7 +19,6 @@ class IterationBudget:
             "shell_execute": 1,
             "file_read": 1,
             "file_write": 1,
-            "delegate_task": 3,
             "delegate_to_agent": 3,
         }
     )

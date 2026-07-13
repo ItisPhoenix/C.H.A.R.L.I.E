@@ -17,8 +17,26 @@ export interface Message {
 export interface Task {
   id: string;
   name: string;
-  status: "pending" | "running" | "done" | "failed";
+  status: "pending" | "running" | "done" | "failed" | "cancelled";
   assigned_to?: string;
+  column?: "backlog" | "todo" | "in_progress" | "done";
+  priority?: number;
+  dependencies?: string[];
+  parent_task_id?: string | null;
+  result?: string;
+  retry_count?: number;
+  approval_status?: "pending_approval" | "approved" | "rejected";
+}
+
+export interface RecoveryProposal {
+  proposal_id: string;
+  original_command: string;
+  proposed_command: string;
+  failure_class: string;
+  explanation: string;
+  source: string;
+  safeguard_passed: boolean;
+  session_id: string;
 }
 
 export interface Agent {
@@ -79,6 +97,7 @@ interface CharlieState {
   toolActivity: ToolActivityEntry[];
   launchId: string;
   sessionScope: "all" | "this_launch";
+  accentColor: string;
 
   setConnected: (c: boolean) => void;
   setSystemStatus: (s: SystemStatus) => void;
@@ -99,6 +118,9 @@ interface CharlieState {
   clearToolActivity: () => void;
   setLaunchId: (id: string) => void;
   setSessionScope: (scope: "all" | "this_launch") => void;
+  setAccentColor: (color: string) => void;
+  activeProposal: RecoveryProposal | null;
+  setActiveProposal: (p: RecoveryProposal | null) => void;
 }
 
 export const useCharlieStore = create<CharlieState>((set) => ({
@@ -118,6 +140,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   toolActivity: [],
   launchId: "",
   sessionScope: "all",
+  accentColor: typeof window !== "undefined" ? localStorage.getItem("charlie_accent") || "#a855f7" : "#a855f7",
 
   setConnected: (connected) => set({ connected }),
   setSystemStatus: (systemStatus) => set({ systemStatus }),
@@ -153,4 +176,30 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   clearToolActivity: () => set({ toolActivity: [] }),
   setLaunchId: (launchId) => set({ launchId }),
   setSessionScope: (sessionScope) => set({ sessionScope }),
+  setAccentColor: (color) => set(() => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("charlie_accent", color);
+    }
+    return { accentColor: color };
+  }),
+  activeProposal: null,
+  setActiveProposal: (activeProposal) => set({ activeProposal }),
 }));
+
+export function hexToRgb(hex: string) {
+  const h = hex.replace("#", "");
+  const n = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
+  const num = parseInt(n, 16);
+  return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
+}
+
+export function rgba(hex: string, a: number): string {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+export function lighten(hex: string, amt: number): string {
+  const { r, g, b } = hexToRgb(hex);
+  const l = (c: number) => Math.min(255, Math.round(c + (255 - c) * amt));
+  return `rgb(${l(r)},${l(g)},${l(b)})`;
+}

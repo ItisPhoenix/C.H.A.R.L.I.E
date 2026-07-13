@@ -16,6 +16,13 @@ from uuid import uuid4
 import httpx
 
 from charlie.budget import IterationBudget
+from charlie.streaming import (
+    FollowupStreamState,
+    TextStreamFilter,
+    collect_tool_calls,
+    parse_sse_stream,
+    stream_followup_content,
+)
 from charlie.text_utils import format_app_list
 from charlie.tools import registry as tool_registry
 from charlie.utils import build_auth_headers
@@ -34,7 +41,6 @@ _TOOL_TIMEOUTS = {
     "shell_execute": 30.0,
 }
 _TOOL_RESULT_MAX_CHARS = 2000
-_COMPRESSION_THRESHOLD = 0.8
 
 # --- Tool param name map (text-based extraction) ---
 _TOOL_PARAM_NAMES: Dict[str, str] = {
@@ -820,7 +826,8 @@ async def _compress_messages(
 ) -> List[Dict[str, Any]]:
     total = _token_count(messages)
     window = getattr(config, "context_window", 8192)
-    threshold = int(_COMPRESSION_THRESHOLD * window)
+    compression_threshold = getattr(config, "compression_threshold", 0.8)
+    threshold = int(compression_threshold * window)
     if total <= threshold:
         return messages
 
@@ -942,7 +949,7 @@ _TEXT_TOOL_INSTRUCTIONS = (
 )
 
 
-def _build_stable_tier(soul_text: str, use_native_tools: bool) -> str:
+def _build_stable_tier(soul_text: str) -> str:
     """Build the stable tier: identity, skills, security, tool rules.
     This tier is byte-identical across turns for maximum cache hits."""
     parts = [soul_text, _SKILLS_INDEX, _SECURITY_DIRECTIVES]
@@ -1003,9 +1010,7 @@ _UNINFORMATIVE_PATTERNS = re.compile(
 _TOOL_RESULT_MIN_CHARS = 50
 
 
-def _assess_tool_result_relevance(
-    tool_name: str, tool_result: str, user_query: str = ""
-) -> bool:
+def _assess_tool_result_relevance(tool_name: str, tool_result: str) -> bool:
     """Heuristic: is this tool result useful? Returns True if relevant."""
     if not tool_result or len(tool_result.strip()) < _TOOL_RESULT_MIN_CHARS:
         return False
@@ -1099,7 +1104,7 @@ class Brain:
         self._reflect_interval: int = 5  # reflect every N turns
 
         # --- Hybrid tool calling: detect native support ---
-        # Auto-detect local models (Ollama, LM Studio, etc.) - they ignore native tools payload
+        # Auto-detect local model servers -- they ignore the native tools payload
         _url = config.small_llm_url.lower()
         _is_local = any(h in _url for h in ("127.0.0.1", "localhost"))
         if _is_local:
@@ -1110,7 +1115,7 @@ class Brain:
 
         # --- Frozen tiers (cached once at init for prompt cache stability) ---
         soul_text = config.soul or "You are Charlie. Be concise and warm."
-        self._stable_tier: str = _build_stable_tier(soul_text, self._use_native_tools)
+        self._stable_tier: str = _build_stable_tier(soul_text)
 
         # --- Frozen context tier (read once, reloaded only on explicit request) ---
         max_chars = config.prompt_memory_max // 2
@@ -1290,8 +1295,6 @@ class Brain:
 
         Returns (accumulated_text, tool_calls_list, fallback_used).
         """
-        from charlie.streaming import parse_sse_stream
-
         client = self.client
         model = self.config.small_llm_model
 
@@ -1306,7 +1309,7 @@ class Brain:
                 if cancelled:
                     logger.info("Chat generation cancelled (barge-in)")
                     return ("", [], False)
-                tool_calls = _collect_tool_calls(tc_by_index)
+                tool_calls = collect_tool_calls(tc_by_index)
                 return (accumulated, tool_calls, False)
 
         except Exception as exc:
@@ -1329,7 +1332,7 @@ class Brain:
             if cancelled:
                 logger.info("Chat generation cancelled (barge-in)")
                 return ("", [], True)
-            tool_calls = _collect_tool_calls(tc_by_index)
+            tool_calls = collect_tool_calls(tc_by_index)
             return (accumulated, tool_calls, True)
 
     def _build_payload(
@@ -1350,6 +1353,38 @@ class Brain:
         if getattr(self.config, "llm_disable_reasoning", False):
             payload["reasoning"] = {"effort": "none"}
         return payload
+
+    async def _stream_followup_once(
+        self,
+        client: httpx.AsyncClient,
+        model: str,
+        payload: Dict[str, Any],
+        generation: int,
+        state: FollowupStreamState,
+    ) -> AsyncGenerator[str, None]:
+        """Run one tool-followup completion attempt against `client`.
+
+        Yields filtered content chunks live (low Time-To-First-Audio); writes
+        accumulated text / tool-call deltas / cancellation onto `state` since
+        an async generator can't return extra values through `async for`.
+        Raises on HTTP/connection errors so the caller can retry against the
+        fallback client -- this is the one piece shared by all three
+        follow-up attempts (primary, on-error fallback, empty-response retry).
+        """
+        payload = dict(payload, model=model)
+        stream_filter = TextStreamFilter()
+        async with client.stream("POST", "chat/completions", json=payload) as response:
+            response.raise_for_status()
+            async for content in stream_followup_content(
+                response, generation, lambda: self._chat_generation, state
+            ):
+                filtered = stream_filter.push(content)
+                if filtered:
+                    yield filtered
+        if not state.cancelled:
+            filtered = stream_filter.flush()
+            if filtered:
+                yield filtered
 
     async def chat_stream(
         self,
@@ -1552,7 +1587,6 @@ class Brain:
 
         if not tool_calls:
             if accumulated:
-                from charlie.streaming import TextStreamFilter
                 stream_filter = TextStreamFilter()
                 filtered = stream_filter.push(accumulated) + stream_filter.flush()
                 # Save assistant response to history
@@ -1691,7 +1725,7 @@ class Brain:
             exec_results = [results_map[i] for i in range(len(tool_calls))]
             # Step 3: Post-tool confidence gate - replace low-quality results
             exec_results = [
-                r if _assess_tool_result_relevance(c["name"], r, user_input)
+                r if _assess_tool_result_relevance(c["name"], r)
                 else "Error: Search returned no useful results. Proceed with general knowledge."
                 for c, r in zip(tool_calls, exec_results)
             ]
@@ -1735,43 +1769,18 @@ class Brain:
             messages = await _prep_messages(messages, self.config)
 
             followup_payload = self._build_payload(messages)
-            followup_tc_by_index: Dict[int, Dict[str, str]] = {}
             if used_fallback and self._big_client:
                 followup_client = self._big_client
                 followup_model = self._big_model
             else:
                 followup_client = self.client
                 followup_model = self.config.small_llm_model
+
+            state = FollowupStreamState()
             try:
-                accumulated = ""
-                from charlie.streaming import TextStreamFilter
-                stream_filter = TextStreamFilter()
-                async with followup_client.stream(
-                    "POST", "chat/completions", json=followup_payload
-                ) as response:
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if _followup_cancelled(self._chat_generation, generation):
-                            return
-                        if not line.startswith("data: "):
-                            continue
-                        if line.strip() == "data: [DONE]":
-                            break
-                        try:
-                            chunk = json.loads(line[6:])
-                            delta = chunk.get("choices", [{}])[0].get("delta", {})
-                            content = delta.get("content", "")
-                            if content:
-                                accumulated += content
-                                filtered = stream_filter.push(content)
-                                if filtered:
-                                    yield filtered
-                            for tc in delta.get("tool_calls", []):
-                                _parse_followup_tool_call(tc, followup_tc_by_index)
-                        except Exception:
-                            continue
-                filtered = stream_filter.flush()
-                if filtered:
+                async for filtered in self._stream_followup_once(
+                    followup_client, followup_model, followup_payload, generation, state
+                ):
                     yield filtered
             except Exception as tool_exc:
                 if self._big_client:
@@ -1780,43 +1789,11 @@ class Brain:
                     )
                     followup_client = self._big_client
                     followup_model = self._big_model
-                    followup_payload["model"] = followup_model
-                    followup_tc_by_index.clear()
+                    state = FollowupStreamState()
                     try:
-                        accumulated = ""
-                        from charlie.streaming import TextStreamFilter
-                        stream_filter = TextStreamFilter()
-                        async with followup_client.stream(
-                            "POST", "chat/completions", json=followup_payload
-                        ) as response:
-                            response.raise_for_status()
-                            async for line in response.aiter_lines():
-                                if self._chat_generation != generation:
-                                    logger.info("Tool follow-up cancelled (barge-in)")
-                                    return
-                                if not line.startswith("data: "):
-                                    continue
-                                if line.strip() == "data: [DONE]":
-                                    break
-                                try:
-                                    chunk = json.loads(line[6:])
-                                    delta = chunk.get("choices", [{}]).get(
-                                        "delta", {}
-                                    )
-                                    content = delta.get("content", "")
-                                    if content:
-                                        accumulated += content
-                                        filtered = stream_filter.push(content)
-                                        if filtered:
-                                            yield filtered
-                                    for tc in delta.get("tool_calls", []):
-                                        _parse_followup_tool_call(
-                                            tc, followup_tc_by_index
-                                        )
-                                except Exception:
-                                    continue
-                        filtered = stream_filter.flush()
-                        if filtered:
+                        async for filtered in self._stream_followup_once(
+                            followup_client, followup_model, followup_payload, generation, state
+                        ):
                             yield filtered
                     except Exception as fb_exc:
                         logger.warning("Follow-up fallback LLM also failed: %s", fb_exc)
@@ -1825,7 +1802,12 @@ class Brain:
                     logger.warning("Tool follow-up LLM error: %s", tool_exc)
                     break
 
-            tool_calls = _collect_tool_calls(followup_tc_by_index)
+            if state.cancelled:
+                logger.info("Tool follow-up cancelled (barge-in)")
+                return
+
+            accumulated = state.accumulated
+            tool_calls = collect_tool_calls(state.tc_by_index)
             # If follow-up returned empty and we haven't tried fallback yet, retry
             if (
                 not accumulated
@@ -1837,46 +1819,20 @@ class Brain:
                 used_fallback = True
                 followup_client = self._big_client
                 followup_model = self._big_model
-                followup_payload["model"] = followup_model
-                followup_tc_by_index.clear()
+                state = FollowupStreamState()
                 try:
-                    accumulated = ""
-                    from charlie.streaming import TextStreamFilter
-                    stream_filter = TextStreamFilter()
-                    async with followup_client.stream(
-                        "POST", "chat/completions", json=followup_payload
-                    ) as response:
-                        response.raise_for_status()
-                        async for line in response.aiter_lines():
-                            if self._chat_generation != generation:
-                                logger.info("Tool follow-up cancelled (barge-in)")
-                                return
-                            if not line.startswith("data: "):
-                                continue
-                            if line.strip() == "data: [DONE]":
-                                break
-                            try:
-                                chunk = json.loads(line[6:])
-                                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                                content = delta.get("content", "")
-                                if content:
-                                    accumulated += content
-                                    filtered = stream_filter.push(content)
-                                    if filtered:
-                                        yield filtered
-                                for tc in delta.get("tool_calls", []):
-                                    _parse_followup_tool_call(tc, followup_tc_by_index)
-                            except Exception:
-                                continue
-                    filtered = stream_filter.flush()
-                    if filtered:
+                    async for filtered in self._stream_followup_once(
+                        followup_client, followup_model, followup_payload, generation, state
+                    ):
                         yield filtered
                 except Exception as fb_exc:
                     logger.warning("Follow-up fallback retry also failed: %s", fb_exc)
-                tool_calls = _collect_tool_calls(followup_tc_by_index)
+                if state.cancelled:
+                    return
+                accumulated = state.accumulated
+                tool_calls = collect_tool_calls(state.tc_by_index)
             # Save final follow-up response to history (after tool loop)
             if accumulated:
-                from charlie.streaming import TextStreamFilter
                 hist_filter = TextStreamFilter()
                 clean_accumulated = hist_filter.push(accumulated) + hist_filter.flush()
                 self.history.append({"role": "assistant", "content": clean_accumulated})
@@ -1938,7 +1894,7 @@ class Brain:
             )
 
             response = await client.post(
-                "/chat/completions",
+                "chat/completions",
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
@@ -2105,46 +2061,3 @@ def _format_text_tool_summary(
         "Do NOT call any more tools."
     )
     return "\n".join(lines)
-
-
-def _parse_followup_tool_call(
-    tc: Dict[str, Any],
-    tc_by_index: Dict[int, Dict[str, str]],
-) -> None:
-    """Parse a single tool_call delta from a follow-up streaming response."""
-    idx = tc.get("index", 0)
-    if idx not in tc_by_index:
-        tc_by_index[idx] = {"id": "", "name": "", "arguments": ""}
-    entry = tc_by_index[idx]
-    if tc.get("id"):
-        entry["id"] = tc["id"]
-    func = tc.get("function", {})
-    if func.get("name"):
-        entry["name"] = func["name"]
-    if func.get("arguments"):
-        entry["arguments"] += func["arguments"]
-
-
-def _collect_tool_calls(tc_by_index: Dict[int, Dict[str, str]]) -> List[Dict[str, Any]]:
-    """Collect parsed tool calls from the follow-up streaming accumulation."""
-    calls: List[Dict[str, Any]] = []
-    for idx in sorted(tc_by_index.keys()):
-        tc = tc_by_index[idx]
-        try:
-            args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-        except json.JSONDecodeError:
-            args = {}
-        calls.append({"id": tc["id"], "name": tc["name"], "arguments": args})
-    return calls
-
-
-def _followup_cancelled(chat_generation: int, generation: int) -> bool:
-    """Return True when a newer chat generation superseded this follow-up.
-
-    A barge-in (new user turn) bumps ``_chat_generation``; an in-flight follow-up
-    stream must stop yielding once that happens.
-    """
-    if chat_generation != generation:
-        logger.info("Tool follow-up cancelled (barge-in)")
-        return True
-    return False

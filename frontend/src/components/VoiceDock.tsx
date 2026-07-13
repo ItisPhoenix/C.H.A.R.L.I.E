@@ -2,7 +2,7 @@
 
 import { useMemo, type ReactElement } from "react";
 import { Mic, MicOff, Volume2, VolumeX } from "lucide-react";
-import { useCharlieStore, type VoiceState, type AudioState, type MicState } from "../store/useCharlieStore";
+import { useCharlieStore, type VoiceState, type AudioState, type MicState, rgba, lighten } from "../store/useCharlieStore";
 
 interface VoiceDockProps {
   state: VoiceState;
@@ -16,33 +16,8 @@ interface VoiceDockProps {
 const BAR_COUNT = 20;
 const CENTER = BAR_COUNT / 2;
 
-const STATE_COLOR: Record<string, string> = {
-  idle: "bg-status-idle",
-  listening: "bg-status-listening",
-  thinking: "bg-status-thinking",
-  speaking: "bg-status-speaking",
-};
-
-const STATE_TEXT: Record<string, string> = {
-  idle: "text-[var(--color-status-idle)]",
-  listening: "text-[var(--color-status-listening)]",
-  thinking: "text-[var(--color-status-thinking)]",
-  speaking: "text-[var(--color-status-speaking)]",
-};
-
 const MIN_HEIGHT_PX = 3;
-const MAX_HEIGHT_PX = 24;
-
-function barEnvelope(index: number): number {
-  const dist = Math.abs(index - CENTER) / CENTER;
-  return 1 - dist * 0.65;
-}
-
-function barHeightFor(level: number, index: number): number {
-  const env = barEnvelope(index);
-  const scaled = MIN_HEIGHT_PX + level * env * (MAX_HEIGHT_PX - MIN_HEIGHT_PX);
-  return Math.min(MAX_HEIGHT_PX, Math.max(MIN_HEIGHT_PX, scaled));
-}
+const MAX_HEIGHT_PX = 22;
 
 export function VoiceDock({
   state,
@@ -52,40 +27,45 @@ export function VoiceDock({
   onAudioControl,
   onMicControl,
 }: VoiceDockProps): ReactElement {
-  const audioLevel = useCharlieStore((s) => s.audioLevel);
   const toggleSpeakerMute = () => onAudioControl({ muted: !audio.muted });
   const setVolume = (value: number) =>
     onAudioControl({ volume: value, muted: value === 0 ? audio.muted : false });
   const toggleMic = () => onMicControl({ mic_muted: !mic.mic_muted });
+  const accentColor = useCharlieStore((s) => s.accentColor);
 
   const bars = useMemo(
     () => Array.from({ length: BAR_COUNT }).map((_, i) => i),
     []
   );
 
-  const barColor = STATE_COLOR[state] ?? STATE_COLOR.idle;
-  const labelColor = STATE_TEXT[state] ?? STATE_TEXT.idle;
+  const stateColor = {
+    idle: "#4b5563",
+    listening: accentColor,
+    thinking: lighten(accentColor, 0.25),
+    speaking: lighten(accentColor, 0.5),
+  }[state] || "#4b5563";
+
   const effectiveVolume = audio.muted ? 0 : audio.volume;
-  const liveMic = connected && !mic.mic_muted;
-  const liveAudio = !audio.muted && (state === "speaking" || state === "listening");
-  const showLevel = connected && (liveMic || liveAudio);
+
+  const voiceDockBorder = !connected 
+    ? "rgba(239, 68, 68, 0.4)" 
+    : mic.mic_muted 
+    ? "rgba(75, 85, 99, 0.4)" 
+    : audio.muted 
+    ? "rgba(239, 68, 68, 0.35)" 
+    : "rgba(255, 255, 255, 0.07)";
 
   return (
     <div
       data-state={state}
-      className={`mx-4 mb-4 p-3 rounded-xl flex items-center justify-between gap-6 border bg-[var(--color-glass-bg)] z-20 select-none transition-colors duration-200 ${
-        !connected
-          ? "border-status-error/50"
-          : mic.mic_muted
-          ? "border-status-idle/45"
-          : audio.muted
-          ? "border-status-error/45"
-          : "border-[var(--color-glass-border)]"
-      }`}
+      style={{
+        border: `1px solid ${voiceDockBorder}`,
+      }}
+      className="mx-4 mb-4 p-3 rounded-2xl flex items-center justify-between gap-6 bg-black/60 backdrop-blur-[20px] z-20 select-none transition-all duration-200"
     >
-      <div className="flex-1 flex items-center justify-center gap-[3px] h-7">
+      <div className="flex-1 flex items-center justify-center gap-[3px] h-[26px]">
         {!connected ? (
-          <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-status-error animate-pulse">
+          <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-status-error animate-pulse font-mono">
             Audio offline
           </span>
         ) : (
@@ -99,8 +79,9 @@ export function VoiceDock({
             return (
               <div
                 key={i}
-                className={`w-[3px] rounded-full ${barColor} ${animClass}`}
+                className={`w-[3px] rounded-full ${animClass}`}
                 style={{
+                  backgroundColor: stateColor,
                   height: `${MAX_HEIGHT_PX}px`,
                   animationDelay: animClass ? `${i * 0.04}s` : undefined,
                   transform: !animClass
@@ -116,25 +97,35 @@ export function VoiceDock({
       </div>
 
       <span
-        className={`text-[11px] font-bold uppercase tracking-[0.18em] min-w-[88px] text-center ${labelColor}`}
+        style={{
+          color: !connected ? "#ef4444" : stateColor,
+        }}
+        className={`text-[11px] font-bold uppercase tracking-[0.18em] min-w-[88px] text-center font-mono`}
         aria-live="polite"
       >
         {!connected ? "offline" : state}
       </span>
 
       <div className="flex items-center gap-3 border-l border-[var(--color-glass-border)] pl-6">
-        <div className="flex items-center gap-2">
+        <div 
+          onWheel={(e) => {
+            const delta = e.deltaY < 0 ? 0.05 : -0.05;
+            const nextVol = Math.max(0, Math.min(1, audio.volume + delta));
+            setVolume(nextVol);
+          }}
+          className="flex items-center gap-2"
+        >
           <button
             onClick={toggleSpeakerMute}
             aria-label={audio.muted ? "Unmute speaker" : "Mute speaker"}
             aria-pressed={audio.muted}
-            className={`rounded-xl w-9 h-9 grid place-items-center cursor-pointer transition ${
+            className={`rounded-xl w-[34px] h-[34px] grid place-items-center cursor-pointer transition ${
               audio.muted
-                ? "bg-status-error/20 text-status-error"
+                ? "bg-[#ef4444]/16 text-[#ef4444]"
                 : "text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
             }`}
           >
-            {audio.muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+            {audio.muted ? <VolumeX className="w-[15px] h-[15px]" /> : <Volume2 className="w-[15px] h-[15px]" />}
           </button>
           <input
             type="range"
@@ -144,7 +135,8 @@ export function VoiceDock({
             value={effectiveVolume}
             onChange={(e) => setVolume(Number(e.target.value))}
             aria-label="Speaker volume"
-            className="w-24 accent-[var(--color-accent-teal)] cursor-pointer"
+            style={{ accentColor }}
+            className="w-22 cursor-pointer"
           />
           <span className="text-[10px] font-mono text-[var(--color-text-muted)] w-7 text-right">
             {Math.round(effectiveVolume * 100)}
@@ -156,28 +148,25 @@ export function VoiceDock({
             onClick={toggleMic}
             aria-label={mic.mic_muted ? "Unmute microphone" : "Mute microphone"}
             aria-pressed={mic.mic_muted}
-            className={`rounded-xl w-9 h-9 grid place-items-center cursor-pointer transition ${
+            className={`rounded-xl w-[34px] h-[34px] grid place-items-center cursor-pointer transition ${
               !connected
-                ? "bg-status-error/20 text-status-error animate-pulse"
+                ? "bg-[#ef4444]/16 text-[#ef4444] animate-pulse"
                 : mic.mic_muted
-                ? "bg-status-idle/20 text-status-idle"
-                : "text-status-speaking hover:text-[var(--color-text-primary)]"
+                ? "bg-[rgba(75,85,99,0.2)] text-[#6b7280]"
+                : "text-[var(--color-accent-teal)] hover:text-[var(--color-text-primary)]"
             }`}
           >
-            {mic.mic_muted || !connected ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+            {mic.mic_muted || !connected ? <MicOff className="w-[15px] h-[15px]" /> : <Mic className="w-[15px] h-[15px]" />}
           </button>
           <div className="flex flex-col text-right">
             <span className="text-[9px] font-mono font-bold tracking-widest uppercase text-[var(--color-text-muted)]">
               Voice Link
             </span>
             <span
-              className={`text-xs font-bold uppercase ${
-                !connected
-                  ? "text-status-error"
-                  : mic.mic_muted
-                  ? "text-status-idle"
-                  : "text-status-speaking"
-              }`}
+              style={{
+                color: !connected ? "#ef4444" : mic.mic_muted ? "#6b7280" : "var(--color-accent-teal)",
+              }}
+              className={`text-xs font-bold uppercase`}
             >
               {!connected ? "offline" : mic.mic_muted ? "muted" : "live"}
             </span>

@@ -34,6 +34,7 @@ class Task:
     parent_task_id: Optional[str] = None
     result: str = ""
     retry_count: int = 0
+    approval_status: str = "approved"  # pending_approval | approved | rejected
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -119,6 +120,7 @@ class Blackboard:
         parent_task_id: Optional[str] = None,
         priority: int = 2,
         column: str = "backlog",
+        approval_status: str = "pending_approval",
     ) -> Task:
         """Add a new task to the blackboard Kanban board."""
         task = Task(
@@ -129,11 +131,15 @@ class Blackboard:
             parent_task_id=parent_task_id,
             priority=priority,
             column=column,
+            approval_status=approval_status,
         )
         with self._lock:
             self._tasks[task.id] = task
             self._dirty = True
-        logger.info("Task added: %s [%s] col=%s pri=%d", task.name, task.id, task.column, task.priority)
+        logger.info(
+            "Task added: %s [%s] col=%s pri=%d app=%s",
+            task.name, task.id, task.column, task.priority, task.approval_status
+        )
         return task
 
     def update_task(self, task_id: str, **kwargs: Any) -> Optional[Task]:
@@ -156,6 +162,7 @@ class Blackboard:
                 t
                 for t in self._tasks.values()
                 if t.status == "pending"
+                and getattr(t, "approval_status", "approved") == "approved"
                 and all(dep in done_ids for dep in t.dependencies)
             ]
             return sorted(ready, key=lambda t: t.priority)
@@ -248,13 +255,16 @@ class Blackboard:
     # -- Escalation --
 
     def check_escalation(self) -> List[Task]:
-        """Return tasks that failed and need escalation."""
+        """Return failed tasks for the swarm to either retry or permanently
+        fail. Includes tasks at or past MAX_RETRIES -- the caller
+        (SwarmOrchestrator._handle_escalation) is what decides retry vs.
+        terminal failure, and needs to see retry-exhausted tasks at least
+        once to mark them permanently failed. Previously this filtered out
+        retry_count >= MAX_RETRIES entirely, so a task that ran out of
+        retries was silently excluded before it ever reached that decision
+        and just sat in "failed" status forever with no terminal message."""
         with self._lock:
-            return [
-                t
-                for t in self._tasks.values()
-                if t.status == "failed" and t.retry_count < MAX_RETRIES
-            ]
+            return [t for t in self._tasks.values() if t.status == "failed"]
 
     def reset_for_retry(self, task_id: str) -> Optional[Task]:
         with self._lock:

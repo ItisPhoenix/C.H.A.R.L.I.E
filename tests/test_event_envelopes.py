@@ -149,3 +149,50 @@ def _dict_has_session_id(node: ast.AST) -> bool:
         if isinstance(key, ast.Constant) and key.value == "session_id":
             return True
     return False
+
+
+def test_transcript_emit_gated_to_voice_platform():
+    """Regression test: the 'transcript' event must only fire for
+    platform == "voice". The web client already renders its own optimistic
+    user bubble the instant it sends a chat command (see handleSendMessage
+    in page.tsx), so emitting 'transcript' for platform == "web" too
+    produced a duplicate user bubble on every web chat message. Voice has no
+    client-side echo of its own, so it still needs this event.
+
+    Structural (AST) check, matching this file's approach elsewhere: fully
+    executing _process() would require faking voice/store/brain deeply, so
+    instead we verify the emit call site's guard condition directly from
+    main.py's real source.
+    """
+    module_ast = ast.parse(_MAIN_SOURCE)
+    process_fn = None
+    for n in ast.walk(module_ast):
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_process":
+            process_fn = n
+            break
+    assert process_fn is not None, "_process() not found in main.py"
+
+    found_guard = None
+    for n in ast.walk(process_fn):
+        if isinstance(n, ast.If):
+            has_transcript_emit = any(
+                isinstance(c, ast.Call)
+                and isinstance(c.func, ast.Attribute)
+                and c.func.attr == "emit"
+                and c.args
+                and isinstance(c.args[0], ast.Constant)
+                and c.args[0].value == "transcript"
+                for c in ast.walk(n)
+            )
+            if has_transcript_emit:
+                found_guard = n
+                break
+
+    assert found_guard is not None, "'transcript' emit not found in _process()"
+    guard_src = ast.unparse(found_guard.test)
+    assert "platform" in guard_src, (
+        f"'transcript' emit guard does not check platform at all: {guard_src}"
+    )
+    assert "voice" in guard_src, (
+        f"'transcript' emit guard does not gate on platform == 'voice': {guard_src}"
+    )

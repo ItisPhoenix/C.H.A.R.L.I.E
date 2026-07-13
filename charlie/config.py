@@ -18,22 +18,18 @@ class Config:
     big_llm_key: str = os.getenv("BIG_LLM_API_KEY", "no-key")
     big_llm_model: str = os.getenv("BIG_LLM_MODEL", "")
 
-    # -1 = system default input/output device; >=0 = specific device index
+    # -1 = system default input device; >=0 = specific device index
     mic_index: int = int(os.getenv("MIC_INDEX", "-1"))
-    output_index: int = int(os.getenv("OUTPUT_INDEX", "-1"))
 
     # Speech / ASR / TTS
     whisper_model: str = os.getenv("WHISPER_MODEL", "large-v3")
-    silence_timeout: float = float(os.getenv("SILENCE_TIMEOUT", "1.5"))
     phrase_min_duration: float = float(os.getenv("PHRASE_MIN_DURATION", "0.35"))
     phrase_max_duration: float = float(os.getenv("PHRASE_MAX_DURATION", "45.0"))
     kokoro_voice: str = os.getenv("KOKORO_VOICE", "af_heart")
     kokoro_model_dir: str = os.getenv("KOKORO_MODEL_DIR", "models")
     gpu_device: str = os.getenv("GPU_DEVICE", "cuda")
-    kokoro_lang: str = "en-us"
+    kokoro_lang: str = os.getenv("KOKORO_LANG", "en-us")
     default_language: str = os.getenv("DEFAULT_LANGUAGE", "en")
-    log_file: str = "logs/charlie.log"
-    log_level: str = "INFO"
 
     # Runtime-tunable env override read by onnxruntime at import time.
     # onnxruntime reads ORT_LOG_LEVEL from the process environment, so we
@@ -129,6 +125,10 @@ class Config:
     program_files_x86: str = os.getenv("ProgramFiles(x86)", r"C:\Program Files (x86)")
 
     soul: str = ""
+
+    def __post_init__(self) -> None:
+        if self.kokoro_lang == "en":
+            self.kokoro_lang = "en-us"
 
 
 config = Config()

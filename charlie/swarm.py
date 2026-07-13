@@ -105,8 +105,11 @@ class SwarmOrchestrator:
         Returns True if a running task was cancelled, False otherwise.
         """
         target_task_id: Optional[str] = None
-        for task_id, task in self._active_tasks.items():
-            if task.assigned_to == name and not task.done():
+        for task_id, atask in self._active_tasks.items():
+            if atask.done():
+                continue
+            bb_task = self.blackboard.get_task(task_id)
+            if bb_task is not None and bb_task.assigned_to == name:
                 target_task_id = task_id
                 break
         if target_task_id is None:
@@ -124,6 +127,8 @@ class SwarmOrchestrator:
         failed = self.blackboard.check_escalation()
         for task in failed:
             if task.retry_count >= MAX_RETRIES:
+                if task.result == "Exceeded max retries":
+                    continue  # already escalated -- don't re-log every poll
                 logger.warning(
                     "Task %s exceeded %d retries, marking permanently failed",
                     task.id,

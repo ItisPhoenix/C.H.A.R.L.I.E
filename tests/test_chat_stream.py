@@ -14,6 +14,93 @@ def brain_config():
     )
 
 
+@pytest.fixture
+def brain_config_with_fallback():
+    return Config(
+        small_llm_url="http://localhost:11434",
+        small_llm_key="no-key",
+        small_llm_model="dummy",
+        big_llm_url="http://example.com/v1",
+        big_llm_key="real-key",
+        big_llm_model="big-dummy",
+        iteration_budget_max=5,
+    )
+
+
+@pytest.mark.asyncio
+async def test_followup_fallback_on_primary_error_streams_content(
+    monkeypatch, brain_config_with_fallback
+):
+    """Regression test: when the primary follow-up stream errors mid-turn,
+    the fallback (big) LLM's response must be parsed correctly and its
+    content must reach the caller. This was broken by a missing [0] index
+    on `chunk.get("choices", [{}]).get("delta", {})` in the on-error
+    fallback branch, which raised AttributeError on every fallback chunk
+    (silently swallowed) and produced no output at all.
+    """
+    brain = Brain(brain_config_with_fallback)
+
+    primary_call_count = 0
+
+    def mock_primary_stream(*args, **kwargs):
+        nonlocal primary_call_count
+        primary_call_count += 1
+        call_num = primary_call_count
+
+        class MockResponse:
+            def raise_for_status(self):
+                pass
+
+            async def aiter_lines(self):
+                # Initial completion call: return a tool call.
+                yield (
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"1",'
+                    '"function":{"name":"web_search","arguments":"{\\"query\\":\\"x\\"}"}}]}}]}'
+                )
+                yield "data: [DONE]"
+
+            async def __aenter__(self):
+                if call_num == 2:
+                    # Simulate a connection drop on the follow-up request.
+                    raise RuntimeError("simulated primary connection drop")
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        return MockResponse()
+
+    def mock_fallback_stream(*args, **kwargs):
+        class MockResponse:
+            def raise_for_status(self):
+                pass
+
+            async def aiter_lines(self):
+                yield 'data: {"choices":[{"delta":{"content":"fallback answer"}}]}'
+                yield "data: [DONE]"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        return MockResponse()
+
+    monkeypatch.setattr(brain.client, "stream", mock_primary_stream)
+    monkeypatch.setattr(brain._big_client, "stream", mock_fallback_stream)
+    monkeypatch.setattr(
+        "charlie.tools.registry.execute_tool",
+        lambda name, args: "mock search result",
+    )
+
+    results = []
+    async for chunk in brain.chat_stream("test"):
+        results.append(chunk)
+
+    assert "fallback answer" in "".join(results)
+
+
 @pytest.mark.asyncio
 async def test_budget_exhaustion(monkeypatch, brain_config):
     brain = Brain(brain_config)

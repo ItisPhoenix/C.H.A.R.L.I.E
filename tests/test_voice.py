@@ -261,6 +261,23 @@ class TestVoiceEngineInit:
         engine.volume = 0.5
         assert engine.volume == 0.5
 
+    def test_stop_before_run_does_not_raise(self):
+        """Regression test: self.audio_stream is only assigned inside
+        _run() (which starts on a background thread via start()). If the
+        audio device fails to open, or stop() is called before start(),
+        _run() never runs and audio_stream was never set -- stop()'s
+        `if self.audio_stream is not None` check then raised AttributeError.
+        audio_stream must be initialized to None in __init__ so stop() is
+        always safe to call."""
+        engine = self._make_engine()
+        assert engine.audio_stream is None
+        engine.input_thread = None
+        engine.tts_worker = None
+        engine.playback_worker = None
+        engine.asr_poller_thread = None
+        engine.asr_process = None
+        engine.stop()  # must not raise AttributeError
+
     def test_rms_static_method(self):
         samples = np.zeros(100, dtype=np.float32)
         assert VoiceEngine._rms(samples) == 0.0

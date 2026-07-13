@@ -118,6 +118,9 @@ class VoiceEngine:
         self.tts_queue: queue.Queue = queue.Queue()
         self.playback_queue: queue.Queue = queue.Queue()
         self.tts_lock = threading.Lock()
+        # Set for real in _run(); stop() checks this before start() has run
+        # (or if opening the audio device failed), so it must exist here too.
+        self.audio_stream = None
         self._last_speech_time = 0.0
         self._last_speech_text = ""
         self._last_speech_end = 0.0

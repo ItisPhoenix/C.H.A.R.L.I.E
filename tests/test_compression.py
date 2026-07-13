@@ -52,6 +52,42 @@ async def test_compression_trigger():
 
 
 @pytest.mark.asyncio
+async def test_compression_threshold_from_config_is_honored():
+    """Regression test: config.compression_threshold must actually control
+    when compression kicks in. Before this fix, core.py used a hardcoded
+    module constant (_COMPRESSION_THRESHOLD = 0.8) and silently ignored the
+    COMPRESSION_THRESHOLD env / config value entirely."""
+    messages = [
+        {"role": "system", "content": "You are Charlie."},
+        {"role": "user", "content": "word " * 150},
+        {"role": "assistant", "content": "word " * 150},
+        {"role": "user", "content": "recent question"},
+        {"role": "assistant", "content": "recent answer"},
+    ]
+    total = _token_count(messages)
+    assert 100 < total < 800  # falls between the two thresholds below
+
+    # history_keep_recent=2 so the two large messages fall in the
+    # summarizable "middle" once compression triggers (5 msgs > 2 + 1 system).
+
+    # High threshold (0.8 of a 1000-token window = 800): must NOT compress.
+    high_config = Config(
+        context_window=1000, compression_threshold=0.8,
+        history_keep_recent=2, small_llm_url="",
+    )
+    result_high = await _compress_messages(messages, high_config)
+    assert result_high == messages
+
+    # Low threshold (0.1 of a 1000-token window = 100): must compress.
+    low_config = Config(
+        context_window=1000, compression_threshold=0.1,
+        history_keep_recent=2, small_llm_url="",
+    )
+    result_low = await _compress_messages(messages, low_config)
+    assert _token_count(result_low) < total
+
+
+@pytest.mark.asyncio
 async def test_halve_keeps_system_and_recent():
     """_halve_history must keep system msg + last N messages verbatim."""
     config = MagicMock()

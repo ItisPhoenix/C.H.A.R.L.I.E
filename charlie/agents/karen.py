@@ -9,7 +9,6 @@ class KAREN(BaseAgent):
     _action_verb = "Running diagnostics"
     _done_log = "Diagnostics complete"
     _fail_log = "Diagnostics failed"
-    _success_msg = "Diagnostics completed"
 
     async def _do_action(self, task_name: str, task=None) -> str:
         prompt = f"""Run diagnostics for: {task_name}

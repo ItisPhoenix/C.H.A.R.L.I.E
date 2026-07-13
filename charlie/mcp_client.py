@@ -249,8 +249,11 @@ class _ManagedServer:
         self._process: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
         self._lock = threading.Lock()
         self._request_id = 0
-        self._response_cache: Dict[int, Dict[str, Any]] = {}
         self._reader_thread: Optional[threading.Thread] = None
+        # Pending requests awaiting a response, keyed by request id. The
+        # reader thread (the only code that reads stdout) delivers the
+        # response here and sets the event; _send_request just waits on it.
+        self._pending: Dict[int, Dict[str, Any]] = {}
 
     def start(self) -> None:
         """Launch the server subprocess."""
@@ -286,18 +289,29 @@ class _ManagedServer:
 
     def stop(self) -> None:
         """Stop the server subprocess."""
-        self._log_stderr()
         if self._process and self._process.poll() is None:
             self._process.terminate()
             try:
                 self._process.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 self._process.kill()
+        # Only after the process has exited: _log_stderr() does a blocking
+        # full-pipe read, which would hang forever against a still-running
+        # child (the pipe only reaches EOF once it's closed at exit).
+        self._log_stderr()
         self._process = None
 
     def _log_stderr(self) -> None:
-        """Emit captured server stderr to logs if present."""
+        """Emit captured server stderr to logs if present.
+
+        Only safe to call once the process has exited (poll() is not None):
+        reading a pipe with no size argument blocks until EOF, which for a
+        still-running child never comes -- calling this while the process is
+        alive would hang the caller indefinitely.
+        """
         if not self._process or not self._process.stderr:
+            return
+        if self._process.poll() is None:
             return
         try:
             err = self._process.stderr.read()
@@ -343,10 +357,13 @@ class _ManagedServer:
         return result
 
     def _send_request(self, method: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Send a JSON-RPC request and wait for response."""
+        """Send a JSON-RPC request and wait for the reader thread to deliver
+        its response (matched by request id)."""
         with self._lock:
             self._request_id += 1
             req_id = self._request_id
+            event = threading.Event()
+            self._pending[req_id] = {"event": event, "response": None}
 
         request = {
             "jsonrpc": "2.0",
@@ -354,7 +371,14 @@ class _ManagedServer:
             "method": method,
             "params": params,
         }
-        return self._raw_exchange(request, req_id)
+        self._write_message(request)
+
+        got_response = event.wait(timeout=self.config.timeout)
+        with self._lock:
+            entry = self._pending.pop(req_id, None)
+        if not got_response or entry is None:
+            return None
+        return entry["response"]
 
     def _send_notification(self, method: str, params: Dict[str, Any]) -> None:
         """Send a JSON-RPC notification (no response expected)."""
@@ -364,28 +388,6 @@ class _ManagedServer:
             "params": params,
         }
         self._write_message(notification)
-
-    def _raw_exchange(
-        self, request: Dict[str, Any], req_id: int
-    ) -> Optional[Dict[str, Any]]:
-        """Write a request and read the response."""
-        self._write_message(request)
-
-        # Read lines until we get our response
-        deadline = time.monotonic() + self.config.timeout
-        while time.monotonic() < deadline:
-            line = self._read_line(timeout=max(0.1, deadline - time.monotonic()))
-            if line is None:
-                continue
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            # Check if this is the response to our request
-            if msg.get("id") == req_id:
-                return msg
-            # Otherwise it might be a notification -- skip
-        return None
 
     def _write_message(self, msg: Dict[str, Any]) -> None:
         if not self._process or not self._process.stdin:
@@ -397,34 +399,18 @@ class _ManagedServer:
         except (BrokenPipeError, OSError):
             logger.warning("Failed to write to MCP server '%s'", self.config.name)
 
-    def _read_line(self, timeout: float = 1.0) -> Optional[str]:
-        if not self._process or not self._process.stdout:
-            return None
-        # Use a simple approach: read with a small timeout
-        # For production, use select or threading
-        import select
-        import sys
-        if sys.platform == "win32":
-            # Windows: no select on pipes, use threading
-            result = [None]
-            def _read():
-                try:
-                    result[0] = self._process.stdout.readline()  # type: ignore[union-attr]
-                except Exception:
-                    pass
-            t = threading.Thread(target=_read, daemon=True)
-            t.start()
-            t.join(timeout=timeout)
-            return result[0] if result[0] else None
-        else:
-            # Unix: use select
-            ready, _, _ = select.select([self._process.stdout], [], [], timeout)
-            if ready:
-                return self._process.stdout.readline()
-            return None
-
     def _read_loop(self) -> None:
-        """Background thread to read server notifications."""
+        """The single reader thread for this server's stdout.
+
+        This is the ONLY code that reads self._process.stdout -- a prior
+        version also read it synchronously from _send_request (via a second
+        thread per call), and the two readers raced for lines: whichever one
+        happened to read first could steal the JSON-RPC response the other
+        was waiting for, causing initialize/tools/list/tools/call to time
+        out unpredictably. Responses (messages with an "id") are routed to
+        the waiting _send_request call via self._pending; notifications
+        (messages with a "method" and no "id") are just logged.
+        """
         if not self._process or not self._process.stdout:
             return
         try:
@@ -434,17 +420,27 @@ class _ManagedServer:
                     continue
                 try:
                     msg = json.loads(line)
-                    if "method" in msg and "id" not in msg:
-                        logger.debug(
-                            "MCP server '%s' notification: %s",
-                            self.config.name,
-                            msg.get("method"),
-                        )
                 except json.JSONDecodeError:
                     logger.warning(
                         "MCP server '%s' sent non-JSON line, skipping: %r",
                         self.config.name,
                         line[:200],
+                    )
+                    continue
+                msg_id = msg.get("id")
+                if msg_id is not None:
+                    with self._lock:
+                        entry = self._pending.get(msg_id)
+                    if entry is not None:
+                        entry["response"] = msg
+                        entry["event"].set()
+                    # else: response to a request we've already given up on
+                    # (timed out) -- nothing waiting for it, safe to drop.
+                elif "method" in msg:
+                    logger.debug(
+                        "MCP server '%s' notification: %s",
+                        self.config.name,
+                        msg.get("method"),
                     )
         except Exception:
             if self.is_running():

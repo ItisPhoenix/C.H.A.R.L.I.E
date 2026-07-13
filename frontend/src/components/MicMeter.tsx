@@ -17,7 +17,7 @@ export function MicMeter(): ReactElement {
         className="h-1.5 w-24 rounded-full bg-[var(--color-glass-border)] overflow-hidden"
       >
         <div
-          className="h-full bg-[var(--color-accent)] transition-[width] duration-100"
+          className="h-full bg-[var(--color-accent-teal)] transition-[width] duration-100"
           style={{ width: `${pct}%` }}
         />
       </div>

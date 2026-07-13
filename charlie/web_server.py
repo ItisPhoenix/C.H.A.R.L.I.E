@@ -235,6 +235,18 @@ async def websocket_endpoint(ws: WebSocket):
     active_connections.add(ws)
     ws_sessions[ws] = _active_frontend_session
     logger.info("WebSocket connected: %d active", len(active_connections))
+
+    # Send initial cached state immediately to prevent empty UI states on connection
+    try:
+        await ws.send_text(json.dumps({"type": "blackboard_update", "payload": _blackboard_state}))
+        await ws.send_text(json.dumps({"type": "system_status", "payload": _system_status}))
+        await ws.send_text(json.dumps({"type": "audio_state", "payload": _audio_state}))
+        await ws.send_text(json.dumps({"type": "mic_state", "payload": _mic_state}))
+    except Exception as e:
+        logger.warning("Failed to send initial cached state to WebSocket: %s", e)
+
+    if event_bus:
+        await event_bus.send_command({"type": "ws_connection_count", "count": len(active_connections)})
     try:
         while True:
             data = await ws.receive_text()
@@ -257,10 +269,14 @@ async def websocket_endpoint(ws: WebSocket):
         active_connections.discard(ws)
         ws_sessions.pop(ws, None)
         logger.info("WebSocket disconnected: %d active", len(active_connections))
+        if event_bus:
+            await event_bus.send_command({"type": "ws_connection_count", "count": len(active_connections)})
     except Exception as e:
         active_connections.discard(ws)
         ws_sessions.pop(ws, None)
         logger.error("WebSocket error: %s", e)
+        if event_bus:
+            await event_bus.send_command({"type": "ws_connection_count", "count": len(active_connections)})
 
 
 @app.get("/api/history")
@@ -418,23 +434,14 @@ async def get_audio_level():
 
 @app.get("/api/memory/facts")
 async def get_memory_facts():
-    """Retrieve all known facts from the SQLite knowledge graph.
-
-    The graph stores nodes (node_type/label/properties) rather than
-    subject/predicate/object triples, so each node is mapped to a
-    fact-shaped record the frontend already renders.
-    """
+    """Retrieve all known facts (subject/predicate/object triples) from the
+    knowledge graph's edges, as stored by MemoryGraph.add_fact."""
     graph = _get_memory_graph()
     if graph:
         try:
-            nodes = graph.get_all_nodes()
             facts = [
-                {
-                    "subject": n.get("node_type", ""),
-                    "predicate": "is",
-                    "object": n.get("content", ""),
-                }
-                for n in nodes
+                {"subject": s, "predicate": p, "object": o}
+                for s, p, o in graph.get_all_facts()
             ]
             return {"facts": facts}
         except Exception as e:

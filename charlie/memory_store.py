@@ -24,8 +24,10 @@ _FACT_EXTRACT_MODEL = ""
 class _RemoteEmbeddingFunction:
     """Embedding function for ChromaDB using a remote embedding service.
 
-    Supports both OpenAI-compatible (/v1/embeddings) and Ollama (/api/embeddings) endpoints.
-    Automatically detects the endpoint format from the URL.
+    Supports two request shapes, auto-detected from the base URL: a batch
+    endpoint (POST {model, input: [...]} to <base>/v1/embeddings) and a
+    single-input endpoint (POST {model, prompt} per text to
+    <base>/api/embeddings).
     """
 
     def __init__(self, model: str = _DEFAULT_EMBEDDING_MODEL, base_url: str = _DEFAULT_EMBEDDING_URL):
@@ -33,10 +35,10 @@ class _RemoteEmbeddingFunction:
         base = base_url.rstrip("/")
         if "/v1" in base:
             self._url = f"{base}/embeddings"
-            self._format = "openai"
+            self._request_shape = "batch"
         else:
             self._url = f"{base}/api/embeddings"
-            self._format = "ollama"
+            self._request_shape = "single"
         self._name = f"remote-{model}"
 
     def name(self) -> str:
@@ -45,7 +47,7 @@ class _RemoteEmbeddingFunction:
     def _call_api(self, texts: List[str]) -> List[List[float]]:
         import httpx
 
-        if self._format == "openai":
+        if self._request_shape == "batch":
             payload = {"model": self.model, "input": texts}
             resp = httpx.post(self._url, json=payload, timeout=10.0)
             resp.raise_for_status()

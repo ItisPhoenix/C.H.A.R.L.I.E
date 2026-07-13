@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { ReactElement } from "react";
+import { useCharlieStore, rgba, lighten } from "../store/useCharlieStore";
+import type { Task } from "../store/useCharlieStore";
 
 interface Agent {
   name: string;
@@ -9,12 +11,6 @@ interface Agent {
   current_task?: string;
   logs?: string[];
   token_cost?: number;
-}
-interface Task {
-  id: string;
-  name: string;
-  status: string;
-  assigned_to?: string;
 }
 interface BlackboardState {
   tasks: Task[];
@@ -31,6 +27,10 @@ interface InsightRailProps {
   blackboard: BlackboardState | null;
   systemStatus: SystemStatus | null;
   onTerminateAgent?: (agentName: string) => void;
+  onApproveTask?: (taskId: string) => void;
+  onRejectTask?: (taskId: string, reason: string) => void;
+  onCancelTask?: (taskId: string) => void;
+  onRetryTask?: (taskId: string) => void;
 }
 
 interface Fact {
@@ -52,17 +52,27 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "tasks", label: "Tasks" },
 ];
 
+export const AGENT_COLOR: Record<string, string> = {
+  "J.A.R.V.I.S.": "#3b82f6",
+  "F.R.I.D.A.Y.": "#06b6d4",
+  "Vision": "#8b5cf6",
+  "E.D.I.T.H.": "#10b981",
+  "A.I.D.A.": "#f59e0b",
+  "Karen": "#ec4899",
+  "H.E.R.B.I.E.": "#f97316",
+};
+
 function statusColor(status: string): string {
   switch (status) {
     case "running":
     case "working":
-      return "bg-status-listening";
+      return "bg-[var(--color-accent-teal)] animate-pulse";
     case "done":
-      return "bg-status-speaking";
+      return "bg-[#9ca3af]";
     case "failed":
-      return "bg-status-error";
+      return "bg-[#ef4444]";
     default:
-      return "bg-status-idle";
+      return "bg-[#4b5563]";
   }
 }
 
@@ -164,6 +174,10 @@ export function InsightRail({
   blackboard,
   systemStatus,
   onTerminateAgent,
+  onApproveTask,
+  onRejectTask,
+  onCancelTask,
+  onRetryTask,
 }: InsightRailProps): ReactElement {
   const [tab, setTab] = useState<Tab>("swarm");
   const [facts, setFacts] = useState<Fact[]>([]);
@@ -222,6 +236,11 @@ export function InsightRail({
   const agents = blackboard?.agents ?? {};
   const tasks = blackboard?.tasks ?? [];
   const agentList = Object.values(agents);
+  const accentColor = useCharlieStore((s) => s.accentColor);
+
+  const accentDim = rgba(accentColor, 0.12);
+  const accentBorder = rgba(accentColor, 0.25);
+  const accentSoft = lighten(accentColor, 0.35);
 
   return (
     <aside className="glass glass-hover anim-right flex flex-col w-80 shrink-0 h-full overflow-hidden rounded-2xl">
@@ -233,11 +252,12 @@ export function InsightRail({
               key={t.id}
               onClick={() => setTab(t.id)}
               aria-label={t.label}
-              className={`flex-1 rounded-xl py-2 text-xs font-medium transition cursor-pointer ${
-                tab === t.id
-                  ? "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal-soft)] border border-[var(--color-accent-teal)]/20"
-                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] border border-transparent"
-              }`}
+              style={{
+                background: tab === t.id ? accentDim : "transparent",
+                color: tab === t.id ? accentSoft : "#6b7280",
+                borderColor: tab === t.id ? accentBorder : "transparent",
+              }}
+              className={`flex-1 rounded-xl py-2 text-xs font-medium transition cursor-pointer border`}
             >
               {t.label}
             </button>
@@ -284,7 +304,8 @@ export function InsightRail({
                       className="w-full text-left flex items-center gap-3 rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2 cursor-pointer transition hover:border-[var(--color-glass-border-hover)]"
                     >
                       <span
-                        className={`w-2 h-2 rounded-full shrink-0 ${statusColor(a.status)}`}
+                        style={{ backgroundColor: AGENT_COLOR[a.name] || "#4b5563" }}
+                        className={`w-2 h-2 rounded-full shrink-0`}
                         aria-hidden="true"
                       />
                       <div className="min-w-0">
@@ -349,44 +370,137 @@ export function InsightRail({
         )}
 
         {tab === "tasks" && (
-          <div className="space-y-2">
+          <div className="space-y-3">
             {tasks.length === 0 ? (
               <EmptyState text="No tasks on the board yet." />
             ) : (
-              tasks.map((t) => (
-                <div
-                  key={t.id}
-                  className="flex items-center justify-between gap-3 rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2"
-                >
-                  <div className="flex items-center gap-3 min-w-0 flex-1">
-                    <span
-                      className={`w-2 h-2 rounded-full shrink-0 ${statusColor(t.status)}`}
-                      aria-hidden="true"
-                    />
-                    <div className="min-w-0">
-                      <p className="text-sm text-[var(--color-text-primary)] truncate">
-                        {t.name}
-                      </p>
-                      {t.assigned_to && (
-                        <p className="text-xs text-[var(--color-text-muted)] truncate">
-                          {t.assigned_to}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                  {t.status === "running" && t.assigned_to && onTerminateAgent && (
-                    <button
-                      onClick={() => onTerminateAgent(t.assigned_to!)}
-                      title={`Cancel task (terminate ${t.assigned_to})`}
-                      className="p-1 rounded-lg border border-[#ef4444]/30 hover:border-[#ef4444] text-[#ef4444] hover:bg-[#ef4444]/10 transition cursor-pointer shrink-0"
+              (() => {
+                const doneTaskIds = new Set(tasks.filter((t) => t.status === "done").map((t) => t.id));
+                return tasks.map((t) => {
+                  const dotBg = t.assigned_to && AGENT_COLOR[t.assigned_to] 
+                    ? AGENT_COLOR[t.assigned_to] 
+                    : (t.status === "running" ? "var(--color-accent-teal)" : t.status === "done" ? "#10b981" : t.status === "failed" ? "#ef4444" : "#4b5563");
+                  
+                  const depsCount = t.dependencies ? t.dependencies.length : 0;
+                  const depsReady = !t.dependencies || t.dependencies.every((depId) => doneTaskIds.has(depId));
+                  
+                  const priorities = ["Critical", "High", "Normal", "Low"];
+                  const priorityVal = t.priority ?? 2;
+                  const priorityLabel = priorities[priorityVal] || "Normal";
+                  const priorityColor = priorityVal === 0 ? "text-red-400 bg-red-500/10 border-red-500/20" :
+                                        priorityVal === 1 ? "text-orange-400 bg-orange-500/10 border-orange-500/20" :
+                                        priorityVal === 2 ? "text-blue-400 bg-blue-500/10 border-blue-500/20" :
+                                        "text-gray-400 bg-gray-500/10 border-gray-500/20";
+
+                  return (
+                    <div
+                      key={t.id}
+                      className="rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] p-3 flex flex-col gap-2 transition hover:bg-[var(--color-glass-bg-3)]"
                     >
-                      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                        <path d="M18 6L6 18M6 6l12 12" />
-                      </svg>
-                    </button>
-                  )}
-                </div>
-              ))
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            style={{ backgroundColor: dotBg }}
+                            className={`w-2.5 h-2.5 rounded-full shrink-0 ${t.status === "running" ? "animate-pulse" : ""}`}
+                            aria-hidden="true"
+                          />
+                          <p className="text-sm font-medium text-[var(--color-text-primary)] truncate">
+                            {t.name}
+                          </p>
+                        </div>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${priorityColor} shrink-0`}>
+                          {priorityLabel}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1 text-[11px] text-[var(--color-text-muted)] border-t border-[var(--color-glass-border)] pt-2">
+                        {t.assigned_to ? (
+                          <div className="truncate">
+                            <span className="text-[10px] text-gray-500">Agent:</span> <strong style={{ color: AGENT_COLOR[t.assigned_to] || "inherit" }}>{t.assigned_to}</strong>
+                          </div>
+                        ) : (
+                          <div>
+                            <span className="text-[10px] text-gray-500">Agent:</span> None
+                          </div>
+                        )}
+                        <div className="truncate text-right">
+                          <span className="text-[10px] text-gray-500">Deps:</span>{" "}
+                          {depsCount === 0 ? (
+                            <span className="text-emerald-400">None</span>
+                          ) : depsReady ? (
+                            <span className="text-emerald-400">Ready</span>
+                          ) : (
+                            <span className="text-amber-400">Blocked</span>
+                          )}
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-gray-500">Retries:</span> {t.retry_count ?? 0}
+                        </div>
+                        <div className="truncate text-right">
+                          <span className="text-[10px] text-gray-500">Approval:</span>{" "}
+                          <span className={
+                            (t.approval_status ?? "approved") === "approved" ? "text-emerald-400" :
+                            (t.approval_status ?? "approved") === "rejected" ? "text-red-400" : "text-amber-400"
+                          }>
+                            {t.approval_status === "pending_approval" ? "Pending" : (t.approval_status ?? "approved")}
+                          </span>
+                        </div>
+                      </div>
+
+                      {t.result && (
+                        <div className="text-[11px] px-2 py-1 rounded bg-black/20 border border-white/5 font-mono break-all max-h-16 overflow-y-auto text-gray-300">
+                          {t.result}
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-end gap-1.5 border-t border-[var(--color-glass-border)] pt-2 mt-1">
+                        {t.approval_status === "pending_approval" && onApproveTask && onRejectTask && (
+                          <>
+                            <button
+                              onClick={() => onRejectTask(t.id, "Rejected by user")}
+                              className="px-2 py-1 text-[10px] font-medium rounded-lg border border-red-500/30 hover:border-red-500 text-red-400 hover:bg-red-500/10 transition cursor-pointer"
+                            >
+                              Reject
+                            </button>
+                            <button
+                              onClick={() => onApproveTask(t.id)}
+                              className="px-2 py-1 text-[10px] font-medium rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white transition cursor-pointer"
+                            >
+                              Approve
+                            </button>
+                          </>
+                        )}
+
+                        {t.status === "failed" && onRetryTask && (
+                          <button
+                            onClick={() => onRetryTask(t.id)}
+                            title="Retry task"
+                            className="px-2 py-1 text-[10px] font-medium rounded-lg border border-[var(--color-accent-teal)]/30 hover:border-[var(--color-accent-teal)] text-[var(--color-accent-teal)] hover:bg-[var(--color-accent-teal)]/10 transition cursor-pointer flex items-center gap-1"
+                          >
+                            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+                              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+                            </svg>
+                            Retry
+                          </button>
+                        )}
+
+                        {(t.status === "running" || t.status === "pending" || t.approval_status === "pending_approval") && onCancelTask && (
+                          <button
+                            onClick={() => onCancelTask(t.id)}
+                            title="Cancel task"
+                            className="px-2 py-1 text-[10px] font-medium rounded-lg border border-red-500/30 hover:border-red-500 text-red-400 hover:bg-red-500/10 transition cursor-pointer flex items-center gap-1"
+                          >
+                            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+                              <path d="M18 6L6 18M6 6l12 12" />
+                            </svg>
+                            Cancel
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                });
+              })()
             )}
           </div>
         )}
@@ -406,13 +520,16 @@ export function InsightRail({
       {selectedAgent && (
         <div className="absolute inset-0 z-30 flex justify-end">
           <div
-            className="absolute inset-0 bg-black/40"
+            className="absolute inset-0 bg-black/45"
             onClick={() => setSelectedAgent(null)}
             aria-hidden="true"
           />
-          <div className="relative w-72 h-full glass rounded-l-2xl border-l border-[var(--color-glass-border)] p-5 flex flex-col gap-4 anim-right">
+          <div className="relative w-[280px] h-full bg-black/88 backdrop-blur-[20px] border-l border-[var(--color-glass-border)] p-5 flex flex-col gap-4 anim-right">
             <div className="flex items-center justify-between">
-              <h3 className="font-display text-base font-semibold text-[var(--color-text-primary)]">
+              <h3 
+                style={{ color: AGENT_COLOR[selectedAgent.name] || "var(--color-text-primary)" }}
+                className="font-display text-base font-semibold"
+              >
                 {selectedAgent.name}
               </h3>
               <button
@@ -428,17 +545,18 @@ export function InsightRail({
 
             <div className="flex items-center gap-2">
               <span
-                className={`w-2 h-2 rounded-full ${statusColor(selectedAgent.status)}`}
+                style={{ backgroundColor: AGENT_COLOR[selectedAgent.name] || "#4b5563" }}
+                className={`w-2 h-2 rounded-full`}
                 aria-hidden="true"
               />
-              <span className="text-xs uppercase tracking-widest text-[var(--color-text-muted)]">
+              <span className="text-xs uppercase tracking-widest text-[var(--color-text-muted)] font-mono">
                 {selectedAgent.status}
               </span>
             </div>
 
             {selectedAgent.current_task && (
               <div>
-                <p className="text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] mb-1">
+                <p className="text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] mb-1 font-mono">
                   Current task
                 </p>
                 <p className="text-sm text-[var(--color-text-primary)]">
@@ -448,7 +566,7 @@ export function InsightRail({
             )}
 
             <div>
-              <p className="text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] mb-1">
+              <p className="text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] mb-1 font-mono">
                 Token cost
               </p>
               <p className="text-sm text-[var(--color-text-primary)] font-mono">
@@ -457,7 +575,7 @@ export function InsightRail({
             </div>
 
             <div className="flex-1 min-h-0 flex flex-col">
-              <p className="text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] mb-1">
+              <p className="text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] mb-1 font-mono">
                 Activity log
               </p>
               <div className="flex-1 overflow-y-auto rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] p-2 scrollbar">

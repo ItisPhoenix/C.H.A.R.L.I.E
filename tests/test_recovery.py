@@ -52,6 +52,26 @@ def test_is_safe_to_recover():
     assert is_safe_to_recover("netstat -an | findstr :80") is False
     assert is_safe_to_recover("curl localhost:443") is False
 
+
+def test_is_safe_to_recover_shares_shell_execute_blocklist():
+    """Regression test: recovery commands (LLM-suggested or strategy-rewritten)
+    must be blocked by the same metacharacter/risky-keyword guard as
+    shell_execute, not just the narrower path/process/port checks. Before
+    this fix, a recovery-suggested "format c: /q" or "echo a & del secrets"
+    would pass is_safe_to_recover and execute."""
+    # Risky keywords blocked by shell_execute's _BLOCKED_KEYWORDS.
+    assert is_safe_to_recover("format c: /q") is False
+    assert is_safe_to_recover("shutdown /s /t 0") is False
+    assert is_safe_to_recover("reg delete HKCU\\Software\\Test") is False
+
+    # Shell metacharacters blocked by shell_execute's _SHELL_METACHARS.
+    assert is_safe_to_recover("echo a & type secrets.txt") is False
+    assert is_safe_to_recover("dir; del test.txt") is False
+    assert is_safe_to_recover("echo $(whoami)") is False
+
+    # A command with none of the above still passes.
+    assert is_safe_to_recover("notepad test.txt") is True
+
 def test_strategies_can_handle():
     timeout_strategy = DeclassProcessStrategy()
     search_strategy = SystemPathSearchStrategy()
