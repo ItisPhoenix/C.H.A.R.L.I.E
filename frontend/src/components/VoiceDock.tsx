@@ -19,6 +19,13 @@ const CENTER = BAR_COUNT / 2;
 const MIN_HEIGHT_PX = 3;
 const MAX_HEIGHT_PX = 22;
 
+const STATE_LABELS: Record<VoiceState, string> = {
+  idle: "Idle",
+  listening: "Listening",
+  thinking: "Thinking",
+  speaking: "Speaking",
+};
+
 export function VoiceDock({
   state,
   connected,
@@ -58,6 +65,8 @@ export function VoiceDock({
   return (
     <div
       data-state={state}
+      role="status"
+      aria-label={`Voice pipeline: ${!connected ? "offline" : STATE_LABELS[state]}`}
       style={{
         border: `1px solid ${voiceDockBorder}`,
       }}
@@ -103,11 +112,16 @@ export function VoiceDock({
         className={`text-[11px] font-bold uppercase tracking-[0.18em] min-w-[88px] text-center font-mono`}
         aria-live="polite"
       >
-        {!connected ? "offline" : state}
+        {!connected ? "Offline" : STATE_LABELS[state]}
       </span>
 
-      <div className="flex items-center gap-3 border-l border-[var(--color-glass-border)] pl-6">
-        <div 
+      <div
+        className={`flex items-center gap-3 border-l border-[var(--color-glass-border)] pl-6 transition-opacity duration-200 ${
+          !connected ? "opacity-40 pointer-events-none" : ""
+        }`}
+        aria-disabled={!connected}
+      >
+        <div
           onWheel={(e) => {
             const delta = e.deltaY < 0 ? 0.05 : -0.05;
             const nextVol = Math.max(0, Math.min(1, audio.volume + delta));

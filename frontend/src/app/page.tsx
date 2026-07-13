@@ -10,6 +10,7 @@ import { EventLog } from "../components/EventLog";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { MicMeter } from "../components/MicMeter";
 import { RecoveryDialog } from "../components/RecoveryDialog";
+import SettingsDialog from "../components/SettingsDialog";
 
 export default function Page() {
   const connected = useCharlieStore((s) => s.connected);
@@ -122,13 +123,18 @@ export default function Page() {
       const res = await fetch(url, { signal });
       if (res.ok) {
         const data = await res.json();
-        setSessions(data.sessions || []);
-        // Only auto-focus the first session if none is active yet. Renames and
-        // background refreshes must not yank focus away from the open session.
-        if (data.sessions && data.sessions.length > 0 && !useCharlieStore.getState().currentSessionId) {
-          setCurrentSessionId(data.sessions[0].id);
+        // Sort newest-first so most-recently-updated session floats to top
+        const sorted = (data.sessions || []).sort((a: {updated_at?: string; created_at?: string}, b: {updated_at?: string; created_at?: string}) => {
+          const ta = a.updated_at || a.created_at || "";
+          const tb = b.updated_at || b.created_at || "";
+          return tb.localeCompare(ta);
+        });
+        setSessions(sorted);
+        // Only auto-focus the first session if none is active yet.
+        if (sorted.length > 0 && !useCharlieStore.getState().currentSessionId) {
+          setCurrentSessionId(sorted[0].id);
         }
-        return data.sessions || [];
+        return sorted;
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return [];
@@ -370,11 +376,11 @@ export default function Page() {
   };
 
   const handleApproveTask = (taskId: string) => {
-    sendWS({ type: "task_approve", payload: { task_id: taskId } });
+    sendWS({ type: "hitl_approve", payload: { task_id: taskId, decision: "approve" } });
   };
 
   const handleRejectTask = (taskId: string, reason: string = "Rejected by user") => {
-    sendWS({ type: "task_reject", payload: { task_id: taskId, reason } });
+    sendWS({ type: "hitl_approve", payload: { task_id: taskId, decision: "reject", reason } });
   };
 
   const handleCancelTask = (taskId: string) => {
@@ -467,12 +473,9 @@ export default function Page() {
       if (res.ok) {
         const updatedSessions = await fetchSessions();
         if (currentSessionId === id) {
-          if (updatedSessions.length > 0) {
-            const nextActive = updatedSessions.find((s) => s.id !== id)?.id || updatedSessions[0].id;
-            setCurrentSessionId(nextActive);
-          } else {
-            setCurrentSessionId("");
-          }
+          // Exclude the just-deleted id when picking a fallback
+          const remaining = updatedSessions.filter((s) => s.id !== id);
+          setCurrentSessionId(remaining.length > 0 ? remaining[0].id : "");
         }
       }
     } catch {
@@ -480,34 +483,62 @@ export default function Page() {
     }
   }, [fetchSessions, currentSessionId, setCurrentSessionId]);
 
-  // Initial load
-  const toggleSessionScope = useCallback(() => {
-    const next = sessionScope === "this_launch" ? "all" : "this_launch";
-    setSessionScope(next);
-    void fetchSessions();
+  // Scope toggle: caller passes target scope explicitly so fetchSessions
+  // always reads the committed value rather than the stale closure.
+  const toggleSessionScope = useCallback((target: "all" | "this_launch") => {
+    if (target === sessionScope) return;
+    setSessionScope(target);
+    // fetchSessions reads from getState() internally, so we need a microtask
+    // gap for Zustand to flush the new value before the URL is built.
+    setTimeout(() => void fetchSessions(), 0);
   }, [sessionScope, setSessionScope, fetchSessions]);
 
   useEffect(() => {
-    // Create a fresh session only if none already exist. Repeated mounts
-    // (StrictMode double-invoke, HMR, reconnects) must not spawn a new
-    // "New Chat" each time -- that churn is what caused duplicate bubbles.
-    const bootstrap = async () => {
-      const existing = await fetchSessions();
-      if (existing.length === 0) {
-        await handleCreateSession("New Chat");
-        await fetchSessions();
-      }
-    };
     const init = async () => {
-      // Fetch launch_id first so the sidebar "This Launch" filter is exercised.
+      // 1. Fetch launch_id first — needed for session scoping.
       const status = await fetchJson("/api/status");
-      if (status && typeof (status as { launch_id?: string }).launch_id === "string") {
-        setLaunchId((status as { launch_id: string }).launch_id);
-        setSessionScope("this_launch");
+      const lid =
+        status && typeof (status as { launch_id?: string }).launch_id === "string"
+          ? (status as { launch_id: string }).launch_id
+          : "";
+      if (lid) {
+        setLaunchId(lid);
       }
-      await bootstrap();
+      // 2. Always default to This Launch scope.
+      setSessionScope("this_launch");
+
+      // 3. Boot session: create exactly ONE fresh session per launch_id, not
+      //    per page load. sessionStorage is tab-scoped and survives a
+      //    refresh, so re-mounting the page during the SAME Charlie launch
+      //    reuses that session instead of throwing away the active
+      //    conversation. A genuinely new launch_id (real Charlie restart)
+      //    still gets a brand-new blank thread.
+      const bootKey = lid ? `charlie_boot_session::${lid}` : "";
+      const storedBootSid =
+        bootKey && typeof window !== "undefined"
+          ? window.sessionStorage.getItem(bootKey)
+          : null;
+      const existingSessions = await fetchSessions();
+      const bootSessionStillValid = Boolean(
+        storedBootSid && existingSessions.some((s) => s.id === storedBootSid)
+      );
+      if (bootSessionStillValid && storedBootSid) {
+        setCurrentSessionId(storedBootSid);
+      } else {
+        await handleCreateSession("New Chat"); // also refreshes the session list
+        if (bootKey && typeof window !== "undefined") {
+          const created = useCharlieStore.getState().currentSessionId;
+          if (created) window.sessionStorage.setItem(bootKey, created);
+        }
+      }
+
+      // 4. Restore audio/mic state.
       const audio = await fetchJson("/api/audio");
-      if (audio) setAudio({ muted: Boolean((audio as { muted: boolean }).muted), volume: (audio as { volume: number }).volume ?? 1.0 });
+      if (audio)
+        setAudio({
+          muted: Boolean((audio as { muted: boolean }).muted),
+          volume: (audio as { volume: number }).volume ?? 1.0,
+        });
       const mic = await fetchJson("/api/mic");
       if (mic && typeof (mic as { mic_muted: boolean }).mic_muted === "boolean") {
         setMic({ mic_muted: (mic as { mic_muted: boolean }).mic_muted });
@@ -661,6 +692,7 @@ export default function Page() {
           onApprove={handleApproveTask}
           onReject={handleRejectTask}
         />
+        <SettingsDialog />
       </div>
     </ErrorBoundary>
   );

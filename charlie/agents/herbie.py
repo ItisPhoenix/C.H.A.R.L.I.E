@@ -9,6 +9,7 @@ class HERBIE(BaseAgent):
     _action_verb = "Verifying"
     _done_log = "Verification passed"
     _fail_log = "Verification failed"
+    allowed_tools = ("file_read",)
 
     async def _do_action(self, task_name: str, task=None) -> str:
         prompt = f"""Verify this deliverable: {task_name}

@@ -4,13 +4,13 @@ Runs in a separate subprocess spawned by main.py.
 Communicates with the voice process via ZeroMQ (EventBus).
 """
 
-import asyncio
-from contextlib import asynccontextmanager
-
-# Windows event-loop policy (must precede zmq/asyncio imports)
+# ruff: noqa: I001 -- import order intentional: runtime must configure the
+# Windows event-loop policy before asyncio or zmq are imported.
 from charlie.runtime import configure as _configure_platform
+_configure_platform()  # noqa: E402
 
-_configure_platform()
+import asyncio  # noqa: E402
+from contextlib import asynccontextmanager  # noqa: E402
 
 import json
 import logging
@@ -323,7 +323,9 @@ async def create_session(data: dict):
     session_id = data.get("session_id", str(uuid.uuid4()))
     title = data.get("title", "New Chat")
     source = data.get("source", "web")
-    launch_id = data.get("launch_id")
+    # Fall back to the process-level launch_id so web-created sessions are
+    # captured by the "This Launch" sidebar filter.
+    launch_id = data.get("launch_id") or config.charlie_launch_id or None
     store = _get_store()
     store.create_session(session_id, title, source=source, launch_id=launch_id)
     return {
@@ -336,10 +338,21 @@ async def create_session(data: dict):
 
 @app.get("/api/sessions/{session_id}/messages")
 async def session_messages(session_id: str, limit: int = 50):
-    """Get messages for a specific session."""
+    """Get messages for a specific session.
+
+    Filters out tool and system role rows so raw tool output
+    (e.g. [web_search args=...]) never reaches the chat UI.
+    """
+    _HIDDEN_ROLES = {"tool", "system"}
     store = _get_store()
     messages = store.get_session_messages(session_id, limit=limit)
-    return {"messages": [{"role": r, "content": c} for r, c in messages]}
+    return {
+        "messages": [
+            {"role": r, "content": c}
+            for r, c in messages
+            if r not in _HIDDEN_ROLES
+        ]
+    }
 
 
 @app.put("/api/sessions/{session_id}")
@@ -512,6 +525,121 @@ async def get_active_session():
     """Get the currently active frontend session."""
     return {"active_session": _active_frontend_session}
 
+
+def _update_env_file(updates: dict):
+    from pathlib import Path
+    env_path = Path(".env")
+    if not env_path.exists():
+        env_path.touch()
+    content = env_path.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    new_lines = []
+    matched_keys = set()
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in line:
+            parts = line.split("=", 1)
+            key = parts[0].strip()
+            if key in updates:
+                val = updates[key]
+                if isinstance(val, list):
+                    val = ",".join(val)
+                elif isinstance(val, bool):
+                    val = "true" if val else "false"
+                new_lines.append(f"{key}={val}")
+                matched_keys.add(key)
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+    for key, val in updates.items():
+        if key not in matched_keys:
+            if isinstance(val, list):
+                val = ",".join(val)
+            elif isinstance(val, bool):
+                val = "true" if val else "false"
+            new_lines.append(f"{key}={val}")
+    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+
+@app.get("/api/config")
+async def get_dashboard_config():
+    """Expose standard dashboard configurations."""
+    return {
+        "GPU_DEVICE": config.gpu_device,
+        "KOKORO_LANG": config.kokoro_lang,
+        "KOKORO_VOICE": config.kokoro_voice,
+        "WHISPER_MODEL": config.whisper_model,
+        "WAKE_WORD_ENABLED": config.wake_word_enabled,
+        "BLACKBOARD_ENABLED": config.blackboard_enabled,
+        "MCP_ENABLED": config.mcp_enabled,
+        "PLUGINS_ENABLED": config.plugins_enabled,
+        "MCP_SERVERS": config.mcp_servers,
+        "PLUGIN_ALLOW_DIRS": config.plugin_allow_dirs,
+    }
+
+
+@app.post("/api/config")
+async def update_dashboard_config(data: dict):
+    """Update configurations both in-memory and in .env on disk."""
+    try:
+        env_updates = {}
+        if "GPU_DEVICE" in data:
+            config.gpu_device = str(data["GPU_DEVICE"])
+            env_updates["GPU_DEVICE"] = config.gpu_device
+        if "KOKORO_LANG" in data:
+            config.kokoro_lang = str(data["KOKORO_LANG"])
+            env_updates["KOKORO_LANG"] = config.kokoro_lang
+        if "KOKORO_VOICE" in data:
+            config.kokoro_voice = str(data["KOKORO_VOICE"])
+            env_updates["KOKORO_VOICE"] = config.kokoro_voice
+        if "WHISPER_MODEL" in data:
+            config.whisper_model = str(data["WHISPER_MODEL"])
+            env_updates["WHISPER_MODEL"] = config.whisper_model
+        if "WAKE_WORD_ENABLED" in data:
+            config.wake_word_enabled = bool(data["WAKE_WORD_ENABLED"])
+            env_updates["WAKE_WORD_ENABLED"] = config.wake_word_enabled
+        if "BLACKBOARD_ENABLED" in data:
+            config.blackboard_enabled = bool(data["BLACKBOARD_ENABLED"])
+            env_updates["BLACKBOARD_ENABLED"] = config.blackboard_enabled
+        if "MCP_ENABLED" in data:
+            config.mcp_enabled = bool(data["MCP_ENABLED"])
+            env_updates["MCP_ENABLED"] = config.mcp_enabled
+        if "PLUGINS_ENABLED" in data:
+            config.plugins_enabled = bool(data["PLUGINS_ENABLED"])
+            env_updates["PLUGINS_ENABLED"] = config.plugins_enabled
+        if "MCP_SERVERS" in data:
+            config.mcp_servers = list(data["MCP_SERVERS"])
+            env_updates["MCP_SERVERS"] = config.mcp_servers
+        if "PLUGIN_ALLOW_DIRS" in data:
+            config.plugin_allow_dirs = list(data["PLUGIN_ALLOW_DIRS"])
+            env_updates["PLUGIN_ALLOW_DIRS"] = config.plugin_allow_dirs
+
+        if env_updates:
+            _update_env_file(env_updates)
+
+        return {"status": "ok", "config": await get_dashboard_config()}
+    except Exception as e:
+        logger.error(f"Error updating config: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.delete("/api/memory/facts")
+async def delete_memory_fact(subject: str, predicate: str, object: str):
+    """Delete a fact from the memory graph SQLite database."""
+    graph = _get_memory_graph()
+    if graph:
+        try:
+            success = graph.remove_fact(subject, predicate, object)
+            if success:
+                return {"status": "ok"}
+            else:
+                return {"status": "error", "message": "Failed to remove fact"}
+        except Exception as e:
+            logger.error(f"Error deleting fact: {e}", exc_info=True)
+            return {"status": "error", "message": str(e)}
+    return {"status": "error", "message": "Memory graph not available"}
+
 # Serve frontend static files if they exist (checking both 'out' for NextJS and 'dist' for Vite)
 _FRONTEND_DIR = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "frontend", "out"
@@ -569,6 +697,7 @@ def start_server(
     pub_port: int = DEFAULT_EVENT_PORT, pull_port: int = DEFAULT_COMMAND_PORT
 ):
     """Entry point for the web server subprocess."""
+    _configure_platform()
     import uvicorn
 
     host = config.charlie_host

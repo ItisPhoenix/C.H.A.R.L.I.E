@@ -8,6 +8,19 @@ interface SessionItem {
   id: string;
   title: string;
   created_at?: string;
+  updated_at?: string;
+}
+
+function relativeTime(iso?: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  return d.toLocaleDateString();
 }
 
 interface SessionRailProps {
@@ -20,7 +33,7 @@ interface SessionRailProps {
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
   onExport: () => void;
-  onScopeChange: () => void;
+  onScopeChange: (target: "all" | "this_launch") => void;
 }
 
 export function SessionRail({
@@ -176,54 +189,62 @@ export function SessionRail({
             <div className="px-4 pb-3">
               <div className="flex rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] p-0.5 text-xs">
                 <button
-                  onClick={() => {
-                    if (sessionScope !== "this_launch") onScopeChange();
-                  }}
-                  aria-pressed={sessionScope === "this_launch"}
-                  style={{
-                    background: sessionScope === "this_launch" ? accentColor : "transparent",
-                    color: sessionScope === "this_launch" ? "#03151a" : "#6b7280",
-                  }}
-                  className={`flex-1 rounded-lg py-1.5 font-medium cursor-pointer transition`}
-                >
-                  This Launch
-                </button>
-                <button
-                  onClick={() => {
-                    if (sessionScope !== "all") onScopeChange();
-                  }}
-                  aria-pressed={sessionScope === "all"}
-                  style={{
-                    background: sessionScope === "all" ? accentColor : "transparent",
-                    color: sessionScope === "all" ? "#03151a" : "#6b7280",
-                  }}
-                  className={`flex-1 rounded-lg py-1.5 font-medium cursor-pointer transition`}
-                >
-                  All
-                </button>
+                onClick={() => onScopeChange("this_launch")}
+                aria-pressed={sessionScope === "this_launch"}
+                style={{
+                  background: sessionScope === "this_launch" ? accentColor : "transparent",
+                  color: sessionScope === "this_launch" ? "#03151a" : "#6b7280",
+                }}
+                className={`flex-1 rounded-lg py-1.5 font-medium cursor-pointer transition`}
+              >
+                This Launch
+              </button>
+              <button
+                onClick={() => onScopeChange("all")}
+                aria-pressed={sessionScope === "all"}
+                style={{
+                  background: sessionScope === "all" ? accentColor : "transparent",
+                  color: sessionScope === "all" ? "#03151a" : "#6b7280",
+                }}
+                className={`flex-1 rounded-lg py-1.5 font-medium cursor-pointer transition`}
+              >
+                All
+              </button>
               </div>
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto px-3 pb-4 space-y-1 scrollbar">
+          <div className="flex-1 overflow-y-auto px-3 pb-4 space-y-0.5 scrollbar">
             {filtered.length === 0 && (
-              <p className="text-xs text-[var(--color-text-muted)] px-2 py-3">
-                No chats yet.
-              </p>
+              <div className="flex flex-col items-center gap-2 py-8 px-2">
+                <svg viewBox="0 0 24 24" className="w-8 h-8 text-[var(--color-text-muted)] opacity-30" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                <p className="text-xs text-[var(--color-text-muted)] text-center">
+                  {query ? "No chats match your search." : "No chats yet. Create one above."}
+                </p>
+              </div>
             )}
             {filtered.map((s) => {
               const active = s.id === currentId;
+              const ts = relativeTime(s.updated_at || s.created_at);
               return (
                 <div
                   key={s.id}
                   onClick={() => onSelect(s.id)}
                   style={{
-                    background: active ? rgba(accentColor, 0.1) : "transparent",
+                    background: active ? rgba(accentColor, 0.13) : "transparent",
                     borderColor: active ? accentBorder : "transparent",
                   }}
-                  className={`group flex items-center gap-2 rounded-xl px-3 py-2.5 cursor-pointer transition border`}
+                  className={`group relative flex items-center gap-2 rounded-xl px-3 py-2.5 cursor-pointer transition border`}
                 >
-                  <div className="min-w-0 flex-1">
+                  {active && (
+                    <span
+                      style={{ backgroundColor: accentSoft }}
+                      className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-4 rounded-full"
+                    />
+                  )}
+                  <div className="min-w-0 flex-1 pl-1">
                     {editingId === s.id ? (
                       <input
                         autoFocus
@@ -238,17 +259,23 @@ export function SessionRail({
                         className="w-full bg-transparent outline-none text-sm text-[var(--color-text-primary)] border-b"
                       />
                     ) : (
-                      <p
-                        onDoubleClick={() => startEdit(s)}
-                        className="text-sm text-[var(--color-text-primary)] truncate"
-                        title={s.title}
-                      >
-                        {s.title}
-                      </p>
+                      <>
+                        <p
+                          onDoubleClick={() => startEdit(s)}
+                          className="text-sm text-[var(--color-text-primary)] truncate leading-tight"
+                          style={{ color: active ? accentSoft : undefined }}
+                          title={s.title}
+                        >
+                          {s.title}
+                        </p>
+                        {ts && (
+                          <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">{ts}</p>
+                        )}
+                      </>
                     )}
                   </div>
                   {editingId !== s.id && (
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition shrink-0">
                       <button
                         aria-label="Rename chat"
                         onClick={(e) => {
@@ -267,7 +294,7 @@ export function SessionRail({
                           e.stopPropagation();
                           onDelete(s.id);
                         }}
-                        className="rounded-md w-6 h-6 grid place-items-center text-[var(--color-text-muted)] hover:text-status-error cursor-pointer"
+                        className="rounded-md w-6 h-6 grid place-items-center text-[var(--color-text-muted)] hover:text-red-400 cursor-pointer"
                       >
                         <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                           <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
@@ -280,9 +307,18 @@ export function SessionRail({
             })}
           </div>
 
-          {/* Accent Color Settings Picker */}
+          {/* Settings & Accent Color Pickers */}
           <div className="px-5 py-3 border-t border-[var(--color-glass-border)] flex items-center justify-between shrink-0">
-            <span className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] font-mono">Accent</span>
+            <button
+              onClick={() => useCharlieStore.getState().setSettingsOpen(true)}
+              className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)] hover:text-white transition cursor-pointer"
+            >
+              <svg viewBox="0 0 24 24" className="w-4 h-4 animate-[spin_10s_linear_infinite]" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+              <span>Settings</span>
+            </button>
             <div className="flex gap-1.5">
               {["#a855f7", "#3b82f6", "#ef4444", "#f59e0b", "#06b6d4"].map((color) => (
                 <button

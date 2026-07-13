@@ -223,6 +223,19 @@ class Blackboard:
         with self._lock:
             return dict(self._agents)
 
+    def add_token_cost(self, name: str, tokens: float) -> None:
+        """Atomically increment an agent's cumulative token_cost.
+
+        A read-modify-write via update_agent(name, token_cost=old+new) would
+        race under the swarm's concurrent dispatch; this increments under
+        the same lock that guards every other mutation.
+        """
+        with self._lock:
+            card = self._agents.get(name)
+            if card:
+                card.token_cost += float(tokens)
+                self._dirty = True
+
     # -- Findings --
 
     def add_finding(self, key: str, value: Any) -> None:

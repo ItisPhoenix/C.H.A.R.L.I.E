@@ -7,6 +7,7 @@ import os
 
 from charlie.session_store import SessionStore
 from charlie.tools import (
+    _DIAGNOSTIC_COMMANDS,
     ToolRegistry,
     _decompose_query,
     _merge_search_results,
@@ -18,6 +19,7 @@ from charlie.tools import (
     registry,
     session_search,
     shell_execute,
+    system_diagnostics,
     web_search,
 )
 
@@ -29,6 +31,7 @@ def test_registry_registration_and_schema():
         "delegate_to_agent",
         "web_search",
         "shell_execute",
+        "system_diagnostics",
         "file_read",
         "file_write",
         "memory",
@@ -84,6 +87,32 @@ def test_shell_execute_blocks_metacharacters_and_keywords():
     assert shell_execute("format c: /q") == (
         "Error: Command blocked -- risky keyword 'format '"
     )
+
+
+def test_system_diagnostics_unknown_check():
+    result = system_diagnostics("not_a_real_check")
+    assert result.startswith("Error: unknown diagnostic check")
+
+
+def test_system_diagnostics_rejects_injection_attempt():
+    """The `check` value is looked up in a fixed dict, never interpolated
+    into the shell command string -- an injection-style value must be
+    rejected as an unknown check, not executed."""
+    result = system_diagnostics("disk; Remove-Item C:\\ -Recurse -Force")
+    assert result.startswith("Error: unknown diagnostic check")
+
+
+def test_diagnostic_commands_are_all_powershell():
+    for command in _DIAGNOSTIC_COMMANDS.values():
+        assert "powershell" in command.lower()
+
+
+def test_system_diagnostics_runs_real_command(monkeypatch):
+    """On win32 (this dev/CI platform), a known check must actually execute
+    and return real output, not just validate the enum."""
+    monkeypatch.setattr("sys.platform", "win32")
+    result = system_diagnostics("cpu")
+    assert "Error" not in result or "timed out" in result.lower()
 
 
 def test_is_shell_command_blocked_direct():

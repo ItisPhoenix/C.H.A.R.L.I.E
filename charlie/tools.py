@@ -621,6 +621,74 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
         return f"Error executing shell command: {e}"
 
 
+# --- System diagnostics: fixed commands only, no user-supplied string ever
+# reaches the shell. Used by the K.A.R.E.N. swarm agent, which is not
+# supervised turn-by-turn like shell_execute's caller, so it must not be
+# given an open command parameter.
+_DIAGNOSTIC_COMMANDS: Dict[str, str] = {
+    "disk": (
+        'powershell -NoProfile -Command "Get-PSDrive -PSProvider FileSystem | '
+        'Select-Object Name,Used,Free | Format-Table -AutoSize | Out-String -Width 200"'
+    ),
+    "memory": (
+        'powershell -NoProfile -Command "Get-CimInstance Win32_OperatingSystem | '
+        'Select-Object FreePhysicalMemory,TotalVisibleMemorySize | Format-List | Out-String -Width 200"'
+    ),
+    "cpu": (
+        'powershell -NoProfile -Command "Get-CimInstance Win32_Processor | '
+        'Select-Object Name,LoadPercentage | Format-List | Out-String -Width 200"'
+    ),
+    "processes": (
+        'powershell -NoProfile -Command "Get-Process | Sort-Object CPU -Descending | '
+        'Select-Object -First 10 Name,CPU,WorkingSet | Format-Table -AutoSize | Out-String -Width 200"'
+    ),
+    "network": (
+        "powershell -NoProfile -Command \"Get-NetAdapter | Where-Object Status -eq 'Up' | "
+        "Select-Object Name,LinkSpeed,Status | Format-Table -AutoSize | Out-String -Width 200\""
+    ),
+}
+
+
+@registry.register_tool(
+    name="system_diagnostics",
+    description=(
+        "Run a fixed, safe system diagnostic check (disk, memory, cpu, processes, "
+        "or network). No user-supplied command reaches the shell -- each check maps "
+        "to one hardcoded, read-only command."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "check": {
+                "type": "string",
+                "enum": list(_DIAGNOSTIC_COMMANDS.keys()),
+                "description": "Which diagnostic to run.",
+            }
+        },
+        "required": ["check"],
+    },
+)
+def system_diagnostics(check: str) -> str:
+    if sys.platform != "win32":
+        return f"System diagnostics are only supported on Windows (detected {sys.platform})."
+
+    command = _DIAGNOSTIC_COMMANDS.get(check)
+    if command is None:
+        return f"Error: unknown diagnostic check '{check}'. Valid checks: {', '.join(_DIAGNOSTIC_COMMANDS)}."
+
+    try:
+        process = subprocess.run(
+            command, shell=True, capture_output=True, text=True, timeout=SHELL_TIMEOUT,
+        )
+        output = (process.stdout or "").strip() or (process.stderr or "").strip()
+        return output or f"Diagnostic '{check}' completed with no output."
+    except subprocess.TimeoutExpired:
+        return f"Error: diagnostic '{check}' timed out after {SHELL_TIMEOUT}s."
+    except Exception as e:
+        logger.exception("system_diagnostics error: check=%s", check)
+        return f"Error running diagnostic '{check}': {e}"
+
+
 _WORKSPACE_DIR = Path(__file__).parent.parent.resolve()
 
 

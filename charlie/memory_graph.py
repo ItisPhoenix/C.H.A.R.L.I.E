@@ -362,6 +362,35 @@ class MemoryGraph:
         object_id = self.add_node("fact", obj)
         return self.add_edge(subject_id, object_id, relation)
 
+    def remove_fact(self, subject: str, predicate: str, obj: str) -> bool:
+        """Remove a fact triple (edge) from the memory graph."""
+        relation = predicate.lower().replace(" ", "_")
+        try:
+            self.conn.execute(
+                """
+                DELETE FROM edges
+                WHERE relation = ?
+                  AND from_node_id IN (SELECT id FROM nodes WHERE content = ?)
+                  AND to_node_id IN (SELECT id FROM nodes WHERE content = ?)
+                """,
+                (relation, subject, obj),
+            )
+            # Also handle the default/fallback relation mapping ('mentions' or others)
+            self.conn.execute(
+                """
+                DELETE FROM edges
+                WHERE (relation = 'mentions' OR relation = ?)
+                  AND from_node_id IN (SELECT id FROM nodes WHERE content = ?)
+                  AND to_node_id IN (SELECT id FROM nodes WHERE content = ?)
+                """,
+                (relation, subject, obj),
+            )
+            self.conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("remove_fact failed: %s", e)
+            return False
+
     def search_facts(
         self,
         query: str,

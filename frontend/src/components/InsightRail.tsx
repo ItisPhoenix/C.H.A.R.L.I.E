@@ -40,7 +40,15 @@ interface Fact {
 }
 interface McpTool {
   type: string;
-  function?: { name: string; description?: string };
+  function?: {
+    name: string;
+    description?: string;
+    parameters?: {
+      type: string;
+      properties?: Record<string, { type: string; description?: string }>;
+      required?: string[];
+    };
+  };
 }
 
 type Tab = "swarm" | "memory" | "mcp" | "tasks";
@@ -187,6 +195,9 @@ export function InsightRail({
   const [loadingFacts, setLoadingFacts] = useState(false);
   const [loadingTools, setLoadingTools] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
+  const [factSearch, setFactSearch] = useState("");
+  const [mcpSearch, setMcpSearch] = useState("");
+  const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
 
   const loadJson = useCallback(
     async (
@@ -210,28 +221,31 @@ export function InsightRail({
     []
   );
 
+  const loadFacts = useCallback(async () => {
+    await loadJson(
+      "/api/memory/facts",
+      (d) => setFacts(d.facts ?? []),
+      setLoadingFacts,
+      setFactsLoaded
+    );
+  }, [loadJson]);
+
+  const loadTools = useCallback(async () => {
+    await loadJson(
+      "/api/mcp/tools",
+      (d) => setMcpTools(d.tools ?? []),
+      setLoadingTools,
+      setToolsLoaded
+    );
+  }, [loadJson]);
+
   useEffect(() => {
-    if (tab === "memory" && !factsLoaded && !loadingFacts) {
-      setTimeout(() => {
-        void loadJson(
-          "/api/memory/facts",
-          (d) => setFacts(d.facts ?? []),
-          setLoadingFacts,
-          setFactsLoaded
-        );
-      }, 0);
+    if (tab === "memory") {
+      void loadFacts();
+    } else if (tab === "mcp") {
+      void loadTools();
     }
-    if (tab === "mcp" && !toolsLoaded && !loadingTools) {
-      setTimeout(() => {
-        void loadJson(
-          "/api/mcp/tools",
-          (d) => setMcpTools(d.tools ?? []),
-          setLoadingTools,
-          setToolsLoaded
-        );
-      }, 0);
-    }
-  }, [tab, factsLoaded, toolsLoaded, loadingFacts, loadingTools, loadJson]);
+  }, [tab, loadFacts, loadTools]);
 
   const agents = blackboard?.agents ?? {};
   const tasks = blackboard?.tasks ?? [];
@@ -265,6 +279,22 @@ export function InsightRail({
         </div>
       </div>
 
+      {/* Refresh trigger row */}
+      {(tab === "memory" || tab === "mcp") && (
+        <div className="px-4 pt-2 flex justify-end shrink-0 select-none">
+          <button
+            onClick={() => (tab === "memory" ? void loadFacts() : void loadTools())}
+            className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] hover:text-white transition cursor-pointer"
+            disabled={loadingFacts || loadingTools}
+          >
+            <svg viewBox="0 0 24 24" className={`w-3 h-3 ${loadingFacts || loadingTools ? "animate-spin" : ""}`} fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+            </svg>
+            <span>Refresh</span>
+          </button>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto p-4 scrollbar">
         {tab === "swarm" && (
           <div className="space-y-4">
@@ -286,7 +316,7 @@ export function InsightRail({
                 );
               })}
             </div>
-
+ 
             <div>
               <p className="text-xs uppercase tracking-widest text-[var(--color-text-muted)] mb-2">
                 Active Agents
@@ -304,16 +334,28 @@ export function InsightRail({
                       className="w-full text-left flex items-center gap-3 rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2 cursor-pointer transition hover:border-[var(--color-glass-border-hover)]"
                     >
                       <span
-                        style={{ backgroundColor: AGENT_COLOR[a.name] || "#4b5563" }}
-                        className={`w-2 h-2 rounded-full shrink-0`}
+                        style={{
+                          backgroundColor: AGENT_COLOR[a.name] || "#4b5563",
+                          boxShadow: a.status === "running" ? `0 0 10px ${AGENT_COLOR[a.name] || "#4b5563"}` : "none",
+                        }}
+                        className={`w-2 h-2 rounded-full shrink-0 ${a.status === "running" ? "animate-pulse" : ""}`}
                         aria-hidden="true"
                       />
                       <div className="min-w-0">
                         <p className="text-sm text-[var(--color-text-primary)] truncate">
                           {a.name}
                         </p>
+                        {a.status === "running" && (
+                          <div className="flex items-center gap-1 mt-0.5">
+                            <span className="flex h-1.5 w-1.5 relative">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-purple-500"></span>
+                            </span>
+                            <span className="text-[10px] text-purple-400 font-mono animate-pulse">Thinking...</span>
+                          </div>
+                        )}
                         {a.current_task && (
-                          <p className="text-xs text-[var(--color-text-muted)] truncate">
+                          <p className="text-xs text-[var(--color-text-muted)] truncate mt-0.5">
                             {a.current_task}
                           </p>
                         )}
@@ -325,16 +367,73 @@ export function InsightRail({
             </div>
           </div>
         )}
-
+ 
         {tab === "memory" && (
-          <div className="space-y-2">
+          <div className="space-y-4">
             {loadingFacts ? (
               <EmptyState text="Loading memory graph..." />
-            ) : facts.length === 0 ? (
-              <EmptyState text="No facts consolidated yet. Charlie builds its knowledge graph as you chat." />
             ) : (
               <>
                 <MemoryGraph facts={facts} />
+                
+                <input
+                  type="text"
+                  value={factSearch}
+                  onChange={(e) => setFactSearch(e.target.value)}
+                  placeholder="Search facts..."
+                  className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none"
+                />
+
+                {facts.length === 0 ? (
+                  <EmptyState text="No facts consolidated yet. Charlie builds its knowledge graph as you chat." />
+                ) : (
+                  (() => {
+                    const filtered = facts.filter(f => 
+                      f.subject.toLowerCase().includes(factSearch.toLowerCase()) ||
+                      f.predicate.toLowerCase().includes(factSearch.toLowerCase()) ||
+                      f.object.toLowerCase().includes(factSearch.toLowerCase())
+                    );
+
+                    return (
+                      <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1 scrollbar">
+                        {filtered.length === 0 ? (
+                          <p className="text-xs text-gray-500 font-mono py-4 text-center">No matching facts found.</p>
+                        ) : (
+                          filtered.map((f, i) => (
+                            <div
+                              key={i}
+                              className="p-2 rounded-xl bg-white/5 border border-white/5 flex items-center justify-between text-[11px] hover:bg-white/10 group transition"
+                            >
+                              <div className="flex flex-wrap items-center gap-1.5 min-w-0 pr-2">
+                                <span className="text-gray-300 font-semibold truncate max-w-[70px]" title={f.subject}>{f.subject}</span>
+                                <span className="text-purple-400 text-[9px] font-mono px-1 bg-purple-500/10 rounded border border-purple-500/10">{f.predicate}</span>
+                                <span className="text-gray-300 truncate max-w-[70px]" title={f.object}>{f.object}</span>
+                              </div>
+                              <button
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  const res = await fetch(`/api/memory/facts?subject=${encodeURIComponent(f.subject)}&predicate=${encodeURIComponent(f.predicate)}&object=${encodeURIComponent(f.object)}`, {
+                                    method: "DELETE"
+                                  });
+                                  if (res.ok) {
+                                    void loadFacts();
+                                  }
+                                }}
+                                className="text-gray-400 hover:text-red-400 opacity-0 group-hover:opacity-100 transition cursor-pointer"
+                                title="Delete fact"
+                              >
+                                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
+                                </svg>
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    );
+                  })()
+                )}
+
                 <p className="text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] px-1 pt-1">
                   {facts.length} facts
                 </p>
@@ -342,29 +441,101 @@ export function InsightRail({
             )}
           </div>
         )}
-
+ 
         {tab === "mcp" && (
-          <div className="space-y-2">
+          <div className="space-y-4">
+            <input
+              type="text"
+              value={mcpSearch}
+              onChange={(e) => setMcpSearch(e.target.value)}
+              placeholder="Search tools..."
+              className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none"
+            />
+
             {loadingTools ? (
               <EmptyState text="Loading tools..." />
             ) : mcpTools.length === 0 ? (
               <EmptyState text="No tools registered." />
             ) : (
-              mcpTools.map((t, i) => (
-                <div
-                  key={i}
-                  className="rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2"
-                >
-                  <p className="text-sm text-[var(--color-text-primary)] font-mono truncate">
-                    {t.function?.name ?? t.type}
-                  </p>
-                  {t.function?.description && (
-                    <p className="text-xs text-[var(--color-text-muted)] truncate">
-                      {t.function.description}
-                    </p>
-                  )}
-                </div>
-              ))
+              (() => {
+                const filtered = mcpTools.filter((t) => {
+                  const name = t.function?.name ?? t.type;
+                  const desc = t.function?.description ?? "";
+                  return (
+                    name.toLowerCase().includes(mcpSearch.toLowerCase()) ||
+                    desc.toLowerCase().includes(mcpSearch.toLowerCase())
+                  );
+                });
+
+                return (
+                  <div className="space-y-2 max-h-[350px] overflow-y-auto pr-1 scrollbar">
+                    {filtered.length === 0 ? (
+                      <p className="text-xs text-gray-500 font-mono py-4 text-center">No matching tools found.</p>
+                    ) : (
+                      filtered.map((t, i) => {
+                        const name = t.function?.name ?? t.type;
+                        const isExpanded = expandedTools[name];
+                        const serverName = name.startsWith("mcp_") ? name.split("_")[1] : "server";
+                        
+                        return (
+                          <div
+                            key={i}
+                            onClick={() => setExpandedTools({ ...expandedTools, [name]: !isExpanded })}
+                            className="rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2 cursor-pointer hover:bg-white/[0.02] transition flex flex-col"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-xs font-semibold text-[var(--color-text-primary)] font-mono truncate">
+                                {name.replace(`mcp_${serverName}_`, "")}
+                              </p>
+                              <span className="text-[8px] font-semibold uppercase tracking-wider px-1 bg-purple-500/10 text-purple-400 border border-purple-500/20 rounded shrink-0">
+                                {serverName}
+                              </span>
+                            </div>
+                            
+                            {t.function?.description && (
+                              <p className="text-xs text-[var(--color-text-muted)] mt-0.5 line-clamp-2">
+                                {t.function.description}
+                              </p>
+                            )}
+
+                            {isExpanded && t.function?.parameters?.properties && (
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="mt-2 pt-2 border-t border-white/5 space-y-1.5 text-[10px] font-mono text-gray-400"
+                              >
+                                <p className="font-semibold text-gray-300">Parameters:</p>
+                                {Object.entries(t.function.parameters.properties).map(([pName, pInfo]: [string, any]) => {
+                                  const isRequired = t.function?.parameters?.required?.includes(pName);
+                                  return (
+                                    <div key={pName} className="flex flex-col bg-black/20 p-1.5 rounded border border-white/5">
+                                      <div className="flex items-center justify-between">
+                                        <span className="text-purple-300 font-bold">{pName}</span>
+                                        <div className="flex gap-1.5">
+                                          <span className="text-gray-500">[{pInfo.type}]</span>
+                                          {isRequired && (
+                                            <span className="text-red-400 text-[8px] bg-red-500/10 px-1 border border-red-500/20 rounded">
+                                              Required
+                                            </span>
+                                          )}
+                                        </div>
+                                      </div>
+                                      {pInfo.description && (
+                                        <p className="text-[9px] text-gray-500 mt-0.5 leading-normal">
+                                          {pInfo.description}
+                                        </p>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                );
+              })()
             )}
           </div>
         )}

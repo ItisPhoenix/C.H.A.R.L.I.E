@@ -121,6 +121,8 @@ interface CharlieState {
   setAccentColor: (color: string) => void;
   activeProposal: RecoveryProposal | null;
   setActiveProposal: (p: RecoveryProposal | null) => void;
+  settingsOpen: boolean;
+  setSettingsOpen: (open: boolean) => void;
 }
 
 export const useCharlieStore = create<CharlieState>((set) => ({
@@ -184,6 +186,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   }),
   activeProposal: null,
   setActiveProposal: (activeProposal) => set({ activeProposal }),
+  settingsOpen: false,
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
 }));
 
 export function hexToRgb(hex: string) {

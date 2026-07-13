@@ -23,6 +23,9 @@ logs/
 *.db-shm
 sessions.db
 
+# === Runtime state (regenerated, not source) ===
+blackboard.json
+
 # === ML Models (large files) ===
 models/
 charlie_memory_db/
@@ -65,3 +68,4 @@ OPINIONS.md
 CHANGELOG.md
 AGENTS.md
 CLAUDE.md
+design-system.md

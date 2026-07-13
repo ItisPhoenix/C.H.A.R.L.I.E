@@ -1,8 +1,9 @@
 """Base class for all Charlie agents."""
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 if __name__ != "__main__":
     from charlie.blackboard import Blackboard
@@ -17,6 +18,12 @@ class BaseAgent(ABC):
     _action_verb: str = "Working"
     _done_log: str = "Done"
     _fail_log: str = "Failed"
+    # Tool names (from charlie.tools.registry) this agent may call via
+    # _call_tool. Empty by default -- subclasses that need real tool access
+    # override it (see edith.py, karen.py, etc.). Deliberately does NOT
+    # include shell_execute/delegate_to_agent/graph_consolidate/memory for
+    # any agent: those are supervised-Brain-only (see agents design notes).
+    allowed_tools: Tuple[str, ...] = ()
 
     def __init__(self, blackboard: "Blackboard", llm_client: Any = None) -> None:
         self.blackboard = blackboard
@@ -68,6 +75,32 @@ class BaseAgent(ABC):
             self.name, status=status, current_task=task_id
         )
 
+    async def _call_tool(self, name: str, arguments: Dict[str, Any]) -> str:
+        """Call a tool from the shared registry, gated by allowed_tools.
+
+        Swarm agents run unsupervised in the background (no human watching
+        turn-by-turn like the main Brain conversation), so each agent gets a
+        narrow, explicit tool allowlist instead of open-ended access. The
+        registry import is local/lazy: charlie/tools.py imports
+        `from charlie.agents import AGENT_REGISTRY` at module level, so a
+        top-level `from charlie.tools import registry` here would create a
+        circular import.
+        """
+        if name not in self.allowed_tools:
+            self.logger.warning(
+                "[%s] Rejected tool call '%s': not in allowed_tools %s",
+                self.name, name, self.allowed_tools,
+            )
+            return f"Error: tool '{name}' is not permitted for agent '{self.name}'."
+
+        from charlie.tools import registry
+
+        self.log(f"Calling tool: {name}({arguments})")
+        result = await asyncio.get_running_loop().run_in_executor(
+            None, registry.execute_tool, name, arguments
+        )
+        return result
+
     async def _complete(self, prompt: str, max_tokens: int = 1000) -> str:
         """Call the LLM chat endpoint and return the assistant message text.
 
@@ -87,4 +120,9 @@ class BaseAgent(ABC):
             },
         )
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        data = response.json()
+        usage = data.get("usage") or {}
+        tokens = usage.get("total_tokens", 0)
+        if tokens:
+            self.blackboard.add_token_cost(self.name, tokens)
+        return data["choices"][0]["message"]["content"]

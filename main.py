@@ -685,9 +685,9 @@ async def main():
             # Fire-and-forget: learning runs in background, doesn't block user
             asyncio.create_task(_background_learn(text, full_reply_buffer))
 
-    async def consume_web_commands(event_bus, brain, voice):
+    async def consume_web_commands(event_bus, brain):
         """Read commands from the web UI and dispatch them."""
-        nonlocal current_web_session_id
+        nonlocal current_web_session_id, voice, mcp_client
         while True:
             try:
                 cmd = await event_bus.next_command()
@@ -731,17 +731,22 @@ async def main():
                         fut = pending_proposals.get(proposal_id)
                         if fut and not fut.done():
                             fut.set_result(False)
-                elif cmd_type == "task_approve":
+                elif cmd_type == "hitl_approve":
+                    # Single approval entry point. Payload: {task_id, decision:
+                    # "approve"|"reject", reason?}. "approve" flips
+                    # approval_status so get_pending_tasks() picks the task up
+                    # and runs it through the normal pending->running->done
+                    # lifecycle -- it does NOT fake completion by setting
+                    # status="done" directly (the previous version of this
+                    # handler did, skipping the task ever actually running).
                     payload = cmd.get("payload", {})
                     task_id = payload.get("task_id")
-                    if task_id:
+                    decision = payload.get("decision")
+                    reason = payload.get("reason", "Rejected by user")
+                    if task_id and decision == "approve":
                         blackboard.update_task(task_id, approval_status="approved")
                         await event_bus.emit("blackboard_update", blackboard.snapshot())
-                elif cmd_type == "task_reject":
-                    payload = cmd.get("payload", {})
-                    task_id = payload.get("task_id")
-                    reason = payload.get("reason", "Rejected by user")
-                    if task_id:
+                    elif task_id and decision == "reject":
                         blackboard.update_task(
                             task_id,
                             approval_status="rejected",
@@ -785,13 +790,6 @@ async def main():
                     if agent_name:
                         swarm.terminate_agent(agent_name)
                         await event_bus.emit("blackboard_update", blackboard.snapshot())
-                elif cmd_type == "hitl_approve":
-                    task_id = cmd.get("payload", {}).get("task_id")
-                    approved = cmd.get("payload", {}).get("approved", True)
-                    if task_id:
-                        # Feed the feedback/approval into the swarm orchestrator or task result
-                        blackboard.update_task(task_id, status="done" if approved else "failed")
-                        await event_bus.emit("blackboard_update", blackboard.snapshot())
                 elif cmd_type == "audio_control":
                     payload = cmd.get("payload", {})
                     state = voice.set_audio_state(
@@ -803,6 +801,82 @@ async def main():
                     payload = cmd.get("payload", {})
                     mic_state = voice.set_mic_state(bool(payload.get("mic_muted", True)))
                     await event_bus.emit("mic_state", mic_state)
+                elif cmd_type == "system_restart":
+                    logger.info("System restart command received. Reloading configuration and engine...")
+
+                    try:
+                        voice.stop()
+                    except Exception as ex:
+                        logger.warning(f"Error stopping voice engine on hot reload: {ex}")
+
+                    if mcp_client is not None:
+                        try:
+                            mcp_client.stop()
+                        except Exception as ex:
+                            logger.warning(f"Error stopping MCP client on hot reload: {ex}")
+                        mcp_client = None
+
+                    from dotenv import load_dotenv
+                    load_dotenv(override=True)
+
+                    from charlie.config import config
+                    config.gpu_device = os.getenv("GPU_DEVICE", config.gpu_device)
+                    config.kokoro_lang = os.getenv("KOKORO_LANG", config.kokoro_lang)
+                    config.kokoro_voice = os.getenv("KOKORO_VOICE", config.kokoro_voice)
+                    config.whisper_model = os.getenv("WHISPER_MODEL", config.whisper_model)
+                    config.wake_word_enabled = os.getenv("WAKE_WORD_ENABLED", "false").lower() == "true"
+                    config.blackboard_enabled = os.getenv("BLACKBOARD_ENABLED", "true").lower() == "true"
+                    config.mcp_enabled = os.getenv("MCP_ENABLED", "false").lower() == "true"
+                    config.plugins_enabled = os.getenv("PLUGINS_ENABLED", "false").lower() == "true"
+                    config.mcp_servers = [s.strip() for s in os.getenv("MCP_SERVERS", "").split(",") if s.strip()]
+                    config.plugin_allow_dirs = [
+                        d.strip()
+                        for d in os.getenv("PLUGIN_ALLOW_DIRS", "").split(",")
+                        if d.strip()
+                    ]
+
+                    # Update ORT log level if needed
+                    config.ort_log_level = os.getenv("ORT_LOG_LEVEL", config.ort_log_level)
+
+                    from charlie.tools import registry
+                    keys_to_remove = [
+                        k for k in registry._tools.keys()
+                        if k.startswith("plugin_") or k.startswith("mcp_")
+                    ]
+                    for k in keys_to_remove:
+                        registry._tools.pop(k, None)
+
+                    if config.mcp_enabled:
+                        try:
+                            from charlie.mcp_client import start_mcp
+                            mcp_client = start_mcp(config)
+                        except Exception as ex:
+                            logger.warning(f"Error starting MCP client on hot reload: {ex}")
+
+                    if config.plugins_enabled:
+                        try:
+                            from charlie.tools import register_plugin_tools
+                            register_plugin_tools(config)
+                        except Exception as ex:
+                            logger.warning(f"Error starting plugins on hot reload: {ex}")
+
+                    try:
+                        voice = VoiceEngine(
+                            config,
+                            on_speech=on_speech,
+                            on_tts_start=on_tts_start,
+                            on_tts_stop=on_tts_stop,
+                        )
+                        voice.start()
+                        voice.set_wake_word_callback(on_wake_word)
+                        logger.info("VoiceEngine successfully restarted and initialized.")
+                    except Exception as ex:
+                        logger.error(f"Error restarting VoiceEngine: {ex}", exc_info=True)
+
+                    await event_bus.emit("alert", {
+                        "severity": "success",
+                        "message": "System configuration successfully reloaded and engine restarted.",
+                    })
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -964,7 +1038,7 @@ async def main():
             try:
                 await asyncio.gather(
                     _voice_loop_idle(voice),
-                    consume_web_commands(bus, brain, voice),
+                    consume_web_commands(bus, brain),
                     swarm.run(),
                     _emit_system_status_and_blackboard(bus),
                 )

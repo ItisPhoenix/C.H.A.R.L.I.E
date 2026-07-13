@@ -9,6 +9,7 @@ class FRIDAY(BaseAgent):
     _action_verb = "Coding"
     _done_log = "Completed"
     _fail_log = "Failed"
+    allowed_tools = ("file_read", "file_write")
 
     async def _do_action(self, task_name: str, task=None) -> str:
         prompt = f"""Write code for: {task_name}

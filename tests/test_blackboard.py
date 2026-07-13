@@ -61,6 +61,23 @@ class TestTaskOperations:
         assert len(pending) == 1
         assert pending[0].id == t1.id  # Only t1 is unblocked
 
+    def test_get_pending_tasks_excludes_pending_approval(self, board: Blackboard):
+        """Regression test: a task with approval_status='pending_approval'
+        (the default add_task() applies) must be excluded from
+        get_pending_tasks() until approved. This is the actual gate that
+        hitl_approve manipulates -- previously only tested indirectly by
+        patching other tests to pass approval_status='approved' explicitly,
+        never proving the gate itself works."""
+        task = board.add_task("Needs approval first")
+        assert task.approval_status == "pending_approval"
+
+        pending = board.get_pending_tasks()
+        assert task.id not in [t.id for t in pending]
+
+        board.update_task(task.id, approval_status="approved")
+        pending_after = board.get_pending_tasks()
+        assert task.id in [t.id for t in pending_after]
+
     def test_task_retry(self, board: Blackboard):
         task = board.add_task("Flaky task")
         board.update_task(task.id, status="failed")

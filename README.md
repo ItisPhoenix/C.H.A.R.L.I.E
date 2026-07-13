@@ -27,7 +27,7 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 - **Persistent memory**: Remembers facts across sessions via `MEMORY.md` and `USER.md`.
 - **Local-first**: All speech processing runs locally. Only the LLM call goes to the network.
 - **Self-hosted search**: SearXNG integration for private web search with no API key.
-- **Agentic OS Foundation:** Blackboard pattern agent coordination, MARVEL-named agent swarm, evolving 4-layer memory system (episodic, semantic, procedural, meta), and SQLite-backed knowledge graph.
+- **Agentic OS Foundation:** Blackboard pattern agent coordination, MARVEL-named agent swarm, episodic + semantic memory (session history, vector store, and SQLite-backed knowledge graph).
 - **Next.js Web Dashboard:** Responsive glassmorphism web UI with electric blue accent, three-column layout, and WebSocket real-time sync. Built with React 19, Zustand, and Tailwind CSS v4.
 - **Reflection Engine:** Periodic self-reflection that consolidates memory, updates knowledge graph, and optimizes agent performance.
 - **Model Context Protocol (MCP):** When enabled, register tools from external MCP servers at runtime and call them alongside the built-in tools.
@@ -44,13 +44,13 @@ shared blackboard to handle complex, multi-step requests:
 
 | Agent | Focus |
 |---|---|
-| **J.A.R.V.I.S.** | Coordination, reporting, and status digests |
-| **F.R.I.D.A.Y.** | General assistant tasks |
-| **Vision** | Image and visual understanding (uses the vision model) |
-| **E.D.I.T.H.** | Knowledge-graph and memory consolidation |
-| **A.I.D.A.** | Scheduling and planning |
-| **Karen** | Domain-specialist tasks |
-| **H.E.R.B.I.E.** | Domain-specialist tasks |
+| **J.A.R.V.I.S.** | Orchestrator -- analyzes requests, coordinates tasks, spawns planning |
+| **Vision** | Planner -- decomposes requests into sub-task graphs and dependencies |
+| **F.R.I.D.A.Y.** | Code generation and file operations specialist |
+| **E.D.I.T.H.** | Research specialist -- gathers intelligence via web search |
+| **A.I.D.A.** | Content creation specialist -- copy, emails, reports |
+| **K.A.R.E.N.** | System diagnostics and health monitoring specialist |
+| **H.E.R.B.I.E.** | Verification specialist -- checks deliverables against acceptance criteria |
 
 The tools these agents (and the Brain) can call include:
 

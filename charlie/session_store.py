@@ -211,7 +211,7 @@ class SessionStore:
         session_id: str = "default",
         turn_id: Optional[str] = None,
     ) -> None:
-        """Appends a single message to history."""
+        """Appends a single message to history and bumps the session timestamp."""
         def _do():
             with self.conn:
                 self.conn.execute(
@@ -219,7 +219,13 @@ class SessionStore:
                     "VALUES (?, ?, ?, ?);",
                     (role, content, session_id, turn_id),
                 )
+                # Keep updated_at current so the sidebar sorts by latest activity
+                self.conn.execute(
+                    "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                    (utc_now_iso(), session_id),
+                )
         self._with_retry(_do, "append message to history")
+
 
     def append_tool(
         self,
