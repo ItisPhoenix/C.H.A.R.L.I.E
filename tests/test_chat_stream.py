@@ -354,7 +354,7 @@ def test_detect_open_app_partial_failure(monkeypatch):
         raise OSError("Mock startfile failure")
 
     monkeypatch.setattr(subprocess, "Popen", mock_popen)
-    monkeypatch.setattr(os, "startfile", mock_startfile)
+    monkeypatch.setattr(os, "startfile", mock_startfile, raising=False)
     monkeypatch.setattr("sys.platform", "win32")
 
     # Test: open two apps, one fails
@@ -380,7 +380,7 @@ def test_detect_open_app_all_failures(monkeypatch):
         raise OSError("Mock failure")
 
     monkeypatch.setattr(subprocess, "Popen", mock_fail)
-    monkeypatch.setattr(os, "startfile", mock_fail)
+    monkeypatch.setattr(os, "startfile", mock_fail, raising=False)
     monkeypatch.setattr("sys.platform", "win32")
 
     res = _detect_open_app("open chrome notepad")

@@ -765,17 +765,21 @@ def get_path_gate_reason(path_str: str) -> Optional[str]:
 
 
 def _resolve_user_placeholders(path: str) -> str:
+    """Replace Windows user-folder placeholders (e.g. C:\\Users\\YourUsername\\...)
+    with the real username. Splits on a literal backslash rather than
+    os.path.sep -- Charlie targets Windows paths regardless of the host
+    platform this runs on (e.g. pure-logic tests on Linux CI)."""
     import getpass
     placeholders = {"yourusername", "username", "user"}
     current_user = getpass.getuser()
     parts = []
-    for part in os.path.normpath(path).split(os.path.sep):
+    for part in path.split("\\"):
         clean_part = part.strip("<>").lower()
         if clean_part in placeholders:
             parts.append(current_user)
         else:
             parts.append(part)
-    return os.path.sep.join(parts)
+    return "\\".join(parts)
 
 
 @registry.register_tool(

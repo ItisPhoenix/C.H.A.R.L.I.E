@@ -98,15 +98,17 @@ def test_shell_execute_blocks_metacharacters_and_keywords():
     )
 
 
-def test_system_diagnostics_unknown_check():
+def test_system_diagnostics_unknown_check(monkeypatch):
+    monkeypatch.setattr("sys.platform", "win32")
     result = system_diagnostics("not_a_real_check")
     assert result.startswith("Error: unknown diagnostic check")
 
 
-def test_system_diagnostics_rejects_injection_attempt():
+def test_system_diagnostics_rejects_injection_attempt(monkeypatch):
     """The `check` value is looked up in a fixed dict, never interpolated
     into the shell command string -- an injection-style value must be
     rejected as an unknown check, not executed."""
+    monkeypatch.setattr("sys.platform", "win32")
     result = system_diagnostics("disk; Remove-Item C:\\ -Recurse -Force")
     assert result.startswith("Error: unknown diagnostic check")
 
