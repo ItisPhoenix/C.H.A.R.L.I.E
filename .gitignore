@@ -67,6 +67,7 @@ docs/
 voicedock-preview.html
 .agents/
 requirements.txt
+plans/
 # === Personal / project docs excluded from git ===
 OPINIONS.md
 CHANGELOG.md
