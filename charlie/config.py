@@ -105,6 +105,10 @@ class Config:
             if s.strip()
         ]
     )
+    # Optional standard "mcpServers" JSON config file (Claude Desktop / Cursor /
+    # VS Code format) -- an alternative to MCP_SERVERS for hand-editing servers.
+    # Both sources are merged; missing file is not an error.
+    mcp_config_path: str = os.getenv("MCP_CONFIG_PATH", "mcp_config.json")
     plugins_enabled: bool = os.getenv("PLUGINS_ENABLED", "false").lower() == "true"
     # Restrict plugin filesystem access to these directories (comma-separated).
     # Empty means the plugins default to the current working directory only.

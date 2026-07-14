@@ -13,6 +13,7 @@ spec -- just enough for Charlie to extend its toolset via MCP servers.
 
 import json
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -59,6 +60,40 @@ def parse_server_spec(spec: str) -> MCPServerConfig:
     name, command = parts[0], parts[1]
     args = [a.strip() for a in parts[2].split(",") if a.strip()] if len(parts) > 2 else []
     return MCPServerConfig(name=name, command=command, args=args)
+
+
+def load_config_file(path: str) -> List[MCPServerConfig]:
+    """Load MCP server definitions from a standard "mcpServers" JSON config file
+    (the same map format used by Claude Desktop / Cursor / VS Code):
+    {"mcpServers": {"name": {"command": "...", "args": [...], "env": {...}}}}.
+
+    Missing file returns an empty list (not an error) -- this is an optional,
+    equally-valid alternative to the MCP_SERVERS env var, not a replacement for it.
+    """
+    if not path or not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to read MCP config file '%s': %s", path, exc)
+        return []
+
+    configs: List[MCPServerConfig] = []
+    for name, entry in data.get("mcpServers", {}).items():
+        command = entry.get("command", "")
+        if not name or not command:
+            logger.warning("Skipping MCP config entry '%s': missing command", name)
+            continue
+        configs.append(
+            MCPServerConfig(
+                name=name,
+                command=command,
+                args=list(entry.get("args", [])),
+                env=dict(entry.get("env", {})),
+            )
+        )
+    return configs
 
 
 # ---------------------------------------------------------------------------
@@ -461,16 +496,28 @@ def start_mcp(config: Any) -> Optional["MCPClient"]:
     if not config.mcp_enabled:
         logger.debug("MCP disabled (MCP_ENABLED=false)")
         return None
-    if not config.mcp_servers:
-        logger.debug("MCP enabled but no MCP_SERVERS configured")
+
+    # Two equally-valid, mergeable sources: the JSON config file (standard
+    # "mcpServers" format, easiest for hand-editing) and the MCP_SERVERS env
+    # var (pipe-spec, easiest for the web dashboard to write). Same-name
+    # entries: file wins, since add_server() skips a name it's already seen.
+    server_configs: List[MCPServerConfig] = load_config_file(config.mcp_config_path)
+    for spec in config.mcp_servers:
+        try:
+            server_configs.append(parse_server_spec(spec))
+        except ValueError as exc:
+            logger.warning("Skipping MCP server spec: %s", exc)
+
+    if not server_configs:
+        logger.debug(
+            "MCP enabled but no servers configured (MCP_SERVERS or %s)",
+            config.mcp_config_path,
+        )
         return None
 
     client = MCPClient()
-    for spec in config.mcp_servers:
-        try:
-            client.add_server(parse_server_spec(spec))
-        except ValueError as exc:
-            logger.warning("Skipping MCP server spec: %s", exc)
+    for server_config in server_configs:
+        client.add_server(server_config)
     client.start()
     registered = client.register_tools_into(registry)
     logger.info(
