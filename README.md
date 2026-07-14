@@ -13,28 +13,45 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 
 ## Features
 
-- **Voice-first**: Continuous listening, speaks responses aloud. No keyboard needed.
-- **Streaming TTS**: Speaks as the LLM generates -- no waiting for full replies.
-- **Barge-in**: Interrupt Charlie mid-sentence. Say "stop", "wait", or just start talking.
-- **Tool calling**: Web search, shell commands, file I/O, persistent memory, session history search.
-- **Premium Glassmorphism Web Dashboard**: Frost-glass UI with liquid depth, ambient glows, and responsive three-column layouts (Sidebar, Chat, Smart Panel).
-- **Smart Activity Panel**: Live feed showing the assistant's intermediate thinking steps, active tool calls, and results.
-- **Persistent Voice Dock**: Animate-on-state SVG waveform reflecting VAD listening, thinking, and speaking phases.
-- **Deterministic Multi-App & Website Control**: High-speed fast-paths that bypass the LLM for opening/closing single or multiple local apps, popular websites, or arbitrary domain names.
-- **Agentic desktop control** (Windows, opt-in): Charlie can see and operate your desktop -- click, type, and send key chords through native UI Automation, with OCR and an optional local vision model as fallback tiers for windows with no accessible UI tree. Off by default; requires one-time approval before it touches your mouse or keyboard, with a global panic hotkey and auto-halt on repeated failures.
-- **Active Session Synchronization**: Real-time WebSocket syncing ensures background voice interactions are recorded directly in the active browser chat.
-- **Cross-Browser SQLite Datetime Parsing**: Normalizes UTC timestamps to ISO-8601, ensuring relative time tickers render flawlessly on all browsers (including Safari/WebKit).
-- **Emotional tone**: Adapts speech speed and energy based on your mood.
-- **Persistent memory**: Remembers facts across sessions via `MEMORY.md` and `USER.md`.
-- **Local-first**: All speech processing runs locally. Only the LLM call goes to the network.
-- **Self-hosted search**: SearXNG integration for private web search with no API key.
-- **Agentic OS Foundation:** Blackboard pattern agent coordination, MARVEL-named agent swarm, episodic + semantic memory (session history, vector store, and SQLite-backed knowledge graph).
-- **Next.js Web Dashboard:** Responsive glassmorphism web UI with electric blue accent, three-column layout, and WebSocket real-time sync. Built with React 19, Zustand, and Tailwind CSS v4.
-- **Reflection Engine:** Periodic self-reflection that consolidates memory, updates knowledge graph, and optimizes agent performance.
-- **Model Context Protocol (MCP):** When enabled, register tools from external MCP servers at runtime and call them alongside the built-in tools.
-- **Plugin system:** A hybrid plugin loader adds external integration tools when `PLUGINS_ENABLED` is on.
-- **LLM failover:** Optionally configure a secondary "big" LLM that Charlie falls back to automatically if the primary (small/fast) model errors out.
-- **Mood-aware voice:** Whether you sound annoyed, excited, or depressed changes Charlie's speech energy and pacing.
+### 🎙️ Voice & Conversation
+| | |
+|---|---|
+| **Voice-first** | Continuous listening, speaks responses aloud -- no keyboard needed. |
+| **Streaming TTS** | Speaks as the LLM generates -- no waiting for full replies. |
+| **Barge-in** | Interrupt Charlie mid-sentence. Say "stop", "wait", or just start talking. |
+| **Mood-aware voice** | Sounding annoyed, excited, or depressed changes Charlie's speech energy and pacing. |
+
+### 🖥️ Desktop & Automation
+| | |
+|---|---|
+| **Deterministic app & website control** | Fast-paths that bypass the LLM for opening/closing local apps, popular sites, or arbitrary domains. |
+| **Agentic desktop control** *(Windows, opt-in)* | Sees and operates your desktop -- click, type, key chords via native UI Automation, with OCR and a local vision model as fallback tiers. Off by default; needs one-time approval, a global panic hotkey, and auto-halts on repeated failures. |
+
+### 🧠 Memory & Intelligence
+| | |
+|---|---|
+| **Persistent memory** | Remembers facts across sessions via `MEMORY.md` and `USER.md`. |
+| **Agentic OS foundation** | Blackboard-coordinated agent swarm, episodic + semantic memory (session history, vector store, knowledge graph). |
+| **Reflection engine** | Periodic self-reflection consolidates memory, updates the knowledge graph, and tunes agent performance. |
+| **Tool calling** | Web search, shell commands, file I/O, persistent memory, session history search. |
+
+### 🪟 Dashboard
+| | |
+|---|---|
+| **Glassmorphism web dashboard** | Frost-glass three-column layout (Sidebar, Chat, Smart Panel) built with Next.js, React 19, Zustand, and Tailwind CSS v4, synced live over WebSocket. |
+| **Smart Activity Panel** | Live feed of the assistant's intermediate thinking, active tool calls, and results. |
+| **Persistent Voice Dock** | Animated waveform reflecting listening, thinking, and speaking phases. |
+| **Active session sync** | Background voice interactions land directly in the active browser chat, in real time. |
+
+### 🔌 Extensibility & Reliability
+| | |
+|---|---|
+| **Local-first** | All speech processing runs locally -- only the LLM call goes to the network. |
+| **Self-hosted search** | SearXNG integration for private web search, no API key required. |
+| **LLM failover** | Optional secondary "big" LLM that Charlie falls back to automatically if the primary errors out. |
+| **Model Context Protocol (MCP)** | Register tools from external MCP servers at runtime, callable alongside the built-ins. |
+| **Plugin system** | A hybrid plugin loader adds external integration tools when `PLUGINS_ENABLED` is on. |
+| **Cross-browser datetime parsing** | UTC timestamps normalized to ISO-8601 so relative time tickers render correctly everywhere (including Safari/WebKit). |
 
 ---
 
