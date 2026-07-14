@@ -3,6 +3,41 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
 import { useCharlieStore, type ToolActivityEntry, rgba, lighten } from "../store/useCharlieStore";
 
+const TYPEWRITER_CHARS_PER_SEC = 1200;
+
+// Assistant text streams in per-sentence chunks (backend batches for TTS
+// latency, see CLAUDE.md's flush-boundary design) -- this animates each
+// chunk's reveal so it still reads as live typing instead of jumping in.
+function useTypewriter(fullText: string, charsPerSecond: number): string {
+  const [displayed, setDisplayed] = useState(fullText);
+  const revealedRef = useRef(fullText.length);
+  const rafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (fullText.length <= revealedRef.current) {
+      revealedRef.current = fullText.length;
+      setDisplayed(fullText);
+      return;
+    }
+    let last = performance.now();
+    const step = (now: number): void => {
+      const dt = (now - last) / 1000;
+      last = now;
+      revealedRef.current = Math.min(fullText.length, revealedRef.current + dt * charsPerSecond);
+      setDisplayed(fullText.slice(0, Math.floor(revealedRef.current)));
+      if (revealedRef.current < fullText.length) {
+        rafRef.current = requestAnimationFrame(step);
+      }
+    };
+    rafRef.current = requestAnimationFrame(step);
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    };
+  }, [fullText, charsPerSecond]);
+
+  return displayed;
+}
+
 interface ChatViewProps {
   messages: { id?: string; role: string; content: string }[];
   onSend: (text: string) => void;

@@ -109,6 +109,17 @@ class Config:
     # VS Code format) -- an alternative to MCP_SERVERS for hand-editing servers.
     # Both sources are merged; missing file is not an error.
     mcp_config_path: str = os.getenv("MCP_CONFIG_PATH", "mcp_config.json")
+    # --- Desktop control (UI Automation) ---
+    desktop_control_enabled: bool = os.getenv("DESKTOP_CONTROL_ENABLED", "false").lower() == "true"
+    desktop_panic_hotkey: str = os.getenv("DESKTOP_PANIC_HOTKEY", "ctrl+alt+q")
+    desktop_max_actions: int = int(os.getenv("DESKTOP_MAX_ACTIONS", "40"))
+    desktop_ocr_enabled: bool = os.getenv("DESKTOP_OCR_ENABLED", "true").lower() == "true"
+    tesseract_cmd: str = os.getenv("TESSERACT_CMD", "")
+    # Separate, independently-configured vision endpoint -- small/big LLMs stay text-only.
+    vision_enabled: bool = os.getenv("VISION_ENABLED", "false").lower() == "true"
+    vision_llm_url: str = os.getenv("VISION_LLM_URL", "")
+    vision_llm_key: str = os.getenv("VISION_LLM_KEY", "no-key")
+    vision_llm_model: str = os.getenv("VISION_LLM_MODEL", "")
     plugins_enabled: bool = os.getenv("PLUGINS_ENABLED", "false").lower() == "true"
     # Restrict plugin filesystem access to these directories (comma-separated).
     # Empty means the plugins default to the current working directory only.

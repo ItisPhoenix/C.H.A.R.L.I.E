@@ -40,22 +40,36 @@ tesseract_cmd: str = os.getenv("TESSERACT_CMD", "")
 
 ## Wiring into the existing tool (`charlie/tools.py`)
 
-- Extend `desktop_observe` (from Phase 1): after `snapshot_tree()`, if the result is empty or
-  near-empty (below a small constant threshold, e.g. fewer than 2 elements), and
-  `config.desktop_ocr_enabled`, call `ocr.capture()` + `ocr.ocr_marks()` and **merge** the OCR elements
-  into the same per-turn mark cache that UIA elements use, continuing the `mark_id` sequence. The model
-  receives one unified set-of-marks list and never needs to know which tier produced which mark.
+- Extend `desktop_observe` (from Phase 1): after `snapshot_tree()`, if `config.desktop_ocr_enabled`,
+  always also call `ocr.capture()` + `ocr.ocr_marks()` and **merge** the OCR elements into the same
+  per-turn mark cache that UIA elements use, continuing the `mark_id` sequence. The model receives one
+  unified set-of-marks list and never needs to know which tier produced which mark.
+  **Revised from an element-count threshold** ("skip OCR if UIA found >= 2 elements"): a browser's
+  toolbar alone can hand back 2+ real UIA elements while the entire page content underneath is
+  invisible to UIA, so a count threshold can't reliably distinguish "UIA-blind window" from "window
+  with a toolbar and nothing else exposed." Always running both is simpler and correct at the cost of
+  one extra screenshot+OCR pass per `desktop_observe` call.
 - Optional new tool `desktop_read_screen` (ungated, read-only) that force-runs an OCR pass regardless of
   UIA results - useful for "read what's on my screen" requests with no interactive elements involved.
 
 ## What does NOT change
 
-- `charlie/desktop/actions.py` (click/type/invoke/key) - unchanged. OCR marks resolve to a bounding-box
-  center and click there via the same `pyautogui`/UIA effector path already gated in Phase 1.
 - The gate ladder in `core.py:_exec_one`, the arm/confirm logic, the panic hotkey, the credential
   hard-stop, the dedup bypass - all unchanged and automatically apply to OCR-resolved clicks too, since
   they're driven through the same `desktop_click`/`desktop_type`/etc. tools.
 - No multimodal/image message plumbing - OCR output is plain text, same as UIA.
+
+## Actual implementation note: `actions.py` needed a small generalization
+
+OCR marks have no live UIA control handle (only a bounding box), so `click_mark`/`type_text`/
+`invoke_mark` could not stay byte-for-byte unchanged as originally assumed above. `charlie/desktop/uia.py`
+gained duck-typing helpers -- `resolve_bounds()`, `resolve_is_password()`, `resolve_name()` -- that
+return the right value whether the resolved mark is a live UIA control or an OCR `Element`.
+`charlie/desktop/actions.py`'s effectors call these instead of reading `control.BoundingRectangle`/
+`control.IsPassword` directly. `invoke_mark` on an OCR-sourced mark returns an error string (no invoke
+pattern exists for recognized text) rather than crashing. The gate ladder, arm/confirm, panic hotkey,
+credential hard-stop, and dedup bypass are still exactly as designed above -- only the mark-resolution
+layer underneath them changed.
 
 ## New dependency
 

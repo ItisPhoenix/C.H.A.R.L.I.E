@@ -10,7 +10,7 @@ import logging
 import os
 import re
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 import httpx
@@ -24,9 +24,18 @@ from charlie.streaming import (
     stream_followup_content,
 )
 from charlie.text_utils import format_app_list
-from charlie.tools import get_path_gate_reason, is_shell_command_gated
+from charlie.tools import get_path_gate_reason, is_shell_command_gated, pop_pending_vision_image
 from charlie.tools import registry as tool_registry
 from charlie.utils import build_auth_headers, make_id
+
+try:
+    from charlie.desktop import DESKTOP_AVAILABLE as _DESKTOP_AVAILABLE
+    from charlie.desktop import UIA_EXECUTOR as _UIA_EXECUTOR
+    from charlie.desktop import actions as desktop_actions
+except ImportError:  # pragma: no cover - guard mirrors charlie/desktop/__init__.py
+    _DESKTOP_AVAILABLE = False
+    _UIA_EXECUTOR = None
+    desktop_actions = None
 
 logger = logging.getLogger("charlie.core")
 if TYPE_CHECKING:
@@ -35,11 +44,37 @@ if TYPE_CHECKING:
 # --- LLM tuning ---
 _LLM_TEMPERATURE = 0.3
 _TOOL_TIMEOUT_SEC = 15.0
+_DESKTOP_CONTROL_TOOLS = frozenset({"desktop_click", "desktop_type", "desktop_invoke", "desktop_key"})
+# All tools that touch the UIA/comtypes COM apartment -- perception too, not
+# just the gated effectors -- must run on the single dedicated COM thread.
+_DESKTOP_COM_TOOLS = _DESKTOP_CONTROL_TOOLS | frozenset(
+    {"desktop_observe", "desktop_read_screen", "desktop_screenshot"}
+)
+# Voice/text phrase to revoke a session-long desktop-control arm early.
+_DESKTOP_DISARM_RE = re.compile(
+    r"\b(stop|disable|revoke|disarm)\b.{0,20}\bdesktop\b|\bdesktop\b.{0,20}\b(stop|disable|revoke|disarm)\b",
+    re.IGNORECASE,
+)
+# Screen-content questions must always be answered from a fresh observation,
+# never from history -- the model has shown it will otherwise repeat an old
+# answer verbatim instead of re-observing (see core.py:_desktop_gate_reason
+# neighbourhood for the related arm/confirm design).
+_SCREEN_QUERY_RE = re.compile(
+    r"\bwhat'?s (on|happening on) (my |the )?screen\b"
+    r"|\bwhat (do|can) you see\b"
+    r"|\b(read|look at|check) (my |the )?screen\b",
+    re.IGNORECASE,
+)
 _TOOL_TIMEOUTS = {
     "web_search": 15.0,
     "file_read": 10.0,
     "file_write": 10.0,
     "shell_execute": 30.0,
+    "desktop_observe": 15.0,
+    "desktop_click": 15.0,
+    "desktop_type": 15.0,
+    "desktop_invoke": 15.0,
+    "desktop_key": 15.0,
 }
 _TOOL_RESULT_MAX_CHARS = 2000
 # How long a gated tool call waits for an approve/decline before it's treated
@@ -1100,6 +1135,33 @@ def _assemble_system_prompt(stable: str, context: str, volatile: str) -> str:
     return f"{stable}\n\n{context}\n\n{volatile}"
 
 
+def _with_vision_image(messages: List[Dict[str, Any]], image_url: str) -> List[Dict[str, Any]]:
+    """Return a copy of `messages` with the last user message's content turned
+    multimodal, for this one outgoing payload only. Never mutates `messages`
+    or its dicts in place -- history persistence (string-only) stays untouched."""
+    last_user_idx = next(
+        (i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"),
+        None,
+    )
+    if last_user_idx is None:
+        return messages
+    out = list(messages)
+    original = out[last_user_idx]
+    out[last_user_idx] = {
+        **original,
+        "content": [
+            {"type": "text", "text": original.get("content", "")},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ],
+    }
+    return out
+
+
+def _payload_is_vision(payload: Dict[str, Any]) -> bool:
+    """True if _build_payload injected an image block into this payload."""
+    return any(isinstance(m.get("content"), list) for m in payload.get("messages", []))
+
+
 # =====================================================================
 # Brain
 # =====================================================================
@@ -1134,6 +1196,22 @@ class Brain:
             timeout=60.0,
         )
         self._chat_generation = 0
+        self._desktop_armed: bool = False
+        self._panic_hotkey_listener = None
+        if self.config.desktop_control_enabled and _DESKTOP_AVAILABLE:
+            try:
+                from pynput import keyboard as _pynput_keyboard
+                hotkey_str = "+".join(
+                    f"<{p}>" if p in ("ctrl", "alt", "shift", "cmd") else p
+                    for p in self.config.desktop_panic_hotkey.lower().split("+")
+                )
+                self._panic_hotkey_listener = _pynput_keyboard.GlobalHotKeys(
+                    {hotkey_str: self._panic}
+                )
+                self._panic_hotkey_listener.start()
+                logger.info("Desktop panic hotkey armed: %s", self.config.desktop_panic_hotkey)
+            except Exception:
+                logger.warning("Failed to start desktop panic hotkey listener", exc_info=True)
         self._tool_locks: Dict[str, asyncio.Lock] = {}
         self.history: List[Dict[str, Any]] = []
         self._history_max_turns = 5
@@ -1180,6 +1258,22 @@ class Brain:
             )
             self._big_model = config.big_llm_model
             logger.info("Big LLM configured: %s", config.big_llm_url)
+
+        # --- Vision LLM client (separate, opt-in endpoint for desktop_screenshot) ---
+        self._vision_client = None
+        if (
+            config.vision_enabled
+            and config.vision_llm_url
+            and config.vision_llm_key
+            and config.vision_llm_key not in ("no-key", "no_key")
+        ):
+            self._vision_client = httpx.AsyncClient(
+                base_url=config.vision_llm_url,
+                headers=build_auth_headers(config.vision_llm_key),
+                timeout=60.0,
+            )
+            self._vision_model = config.vision_llm_model
+            logger.info("Vision LLM configured: %s", config.vision_llm_url)
 
         # --- Knowledge graph memory ---
         from charlie.memory_graph import MemoryGraph
@@ -1320,6 +1414,21 @@ class Brain:
         """Cancel the current chat generation (barge-in support)."""
         self._chat_generation += 1
 
+    def _panic(self) -> None:
+        """Global panic hotkey handler: halt desktop motion and cancel the turn."""
+        if desktop_actions is not None:
+            desktop_actions.halt()
+        self.cancel_chat()
+        logger.warning("Desktop panic hotkey triggered -- halting desktop control and cancelling chat.")
+
+    def _desktop_gate_reason(self) -> Optional[str]:
+        """Arm once per session: first approval covers every desktop action
+        until you explicitly disarm it (say e.g. "stop controlling my
+        desktop") or the session restarts."""
+        if self._desktop_armed:
+            return None
+        return "take control of your desktop"
+
     async def request_tool_approval(self, tool_name: str, arguments: Dict[str, Any], reason: str) -> bool:
         """Ask the user to approve/decline a gated tool call and wait for the
         answer. Web dashboard is primary: broadcasts a "tool_approval_request"
@@ -1375,6 +1484,10 @@ class Brain:
         await self.client.aclose()
         if self._big_client:
             await self._big_client.aclose()
+        if self._vision_client:
+            await self._vision_client.aclose()
+        if self._panic_hotkey_listener is not None:
+            self._panic_hotkey_listener.stop()
 
     async def _stream_completion(
         self,
@@ -1442,7 +1555,23 @@ class Brain:
             payload["tool_choice"] = "auto"
         if getattr(self.config, "llm_disable_reasoning", False):
             payload["reasoning"] = {"effort": "none"}
+        if self.config.vision_enabled and self._use_native_tools:
+            image_url = pop_pending_vision_image()
+            if image_url:
+                payload["messages"] = _with_vision_image(messages, image_url)
         return payload
+
+    def _select_followup_route(
+        self, payload: Dict[str, Any], used_fallback: bool
+    ) -> Tuple[httpx.AsyncClient, str, bool]:
+        """Pick which endpoint serves a follow-up completion: vision (if this
+        payload carries an image block from desktop_screenshot), big (if
+        already using it), else small. Returns (client, model, is_vision)."""
+        if self._vision_client is not None and _payload_is_vision(payload):
+            return self._vision_client, self._vision_model, True
+        if used_fallback and self._big_client:
+            return self._big_client, self._big_model, False
+        return self.client, self.config.small_llm_model, False
 
     async def _stream_followup_once(
         self,
@@ -1575,6 +1704,12 @@ class Brain:
                 logger.warning("Failed to update verbosity: %s", ve)
 
 
+        # --- Fast-path: disarm desktop control (deterministic, no LLM needed) ---
+        if self._desktop_armed and _DESKTOP_DISARM_RE.search(user_input):
+            self._desktop_armed = False
+            yield "Desktop control disarmed. I'll ask again before touching your mouse or keyboard."
+            return
+
         # --- Fast-path: close app (deterministic, no LLM needed) ---
         close_res = await asyncio.to_thread(_detect_close_app, user_input)
         if close_res is not None:
@@ -1592,6 +1727,27 @@ class Brain:
         search_results = (
             "" if skip_pre_search else await asyncio.to_thread(_pre_search, user_input)
         )
+
+        # --- Force a fresh screen observation for screen-content questions ---
+        # Injected the same way as web search results (below) so the model is
+        # told, in its own prompt, not to answer from training data / memory --
+        # relying on the model to decide to call desktop_observe itself isn't
+        # reliable enough: it has repeated a stale answer from history instead.
+        # Uses desktop_observe (UIA + OCR text), not desktop_screenshot -- the
+        # initial completion isn't vision-routed (only follow-ups are, via
+        # _select_followup_route), so queuing an image here would just send
+        # it to the wrong, text-only client.
+        if self.config.desktop_control_enabled and _SCREEN_QUERY_RE.search(user_input):
+            try:
+                screen_observation = await asyncio.get_running_loop().run_in_executor(
+                    _UIA_EXECUTOR, tool_registry.execute_tool, "desktop_observe", {}
+                )
+                search_results = (
+                    f"{search_results}\n\n{screen_observation}" if search_results else screen_observation
+                )
+                logger.info("Forced fresh screen observation for screen-content query")
+            except Exception:
+                logger.warning("Forced screen observation failed", exc_info=True)
 
         # --- Assemble system prompt from frozen tiers + volatile tier ---
         now = datetime.now()
@@ -1694,20 +1850,29 @@ class Brain:
 
         # --- Tool execution loop ---
         _seen_tool_calls: Dict[str, str] = {}
+        # Desktop clicks/types are not idempotent -- two identical calls are
+        # two real actions, not a cache hit. Desktop perception (observe/
+        # read_screen/screenshot) isn't cacheable either -- the screen can
+        # change between calls even with identical (empty) arguments, e.g.
+        # another tool call opening/closing a window in between; a cached
+        # mark would then resolve to a dead COM proxy. Tracks consecutive
+        # failures of the same call for anomaly auto-halt.
+        _desktop_fail_counts: Dict[str, int] = {}
+        _desktop_action_count = [0]  # mutable cell, closed over by _exec_one
 
         async def _exec_one(call: Dict[str, Any]) -> str:
+            tool_name = call["name"]
             ck = f"{call['name']}({json.dumps(call['arguments'], sort_keys=True)})"
-            if ck in _seen_tool_calls:
+            if tool_name not in _DESKTOP_COM_TOOLS and ck in _seen_tool_calls:
                 logger.info("Tool %s already executed, reusing result", call["name"])
                 return _seen_tool_calls[ck]
-
-            tool_name = call["name"]
             timeout = _TOOL_TIMEOUTS.get(tool_name, _TOOL_TIMEOUT_SEC)
             lock = self._tool_locks.setdefault(tool_name, asyncio.Lock())
 
             async def _run() -> str:
+                executor = _UIA_EXECUTOR if tool_name in _DESKTOP_COM_TOOLS else None
                 return await asyncio.get_running_loop().run_in_executor(
-                    None, tool_registry.execute_tool, call["name"], call["arguments"]
+                    executor, tool_registry.execute_tool, call["name"], call["arguments"]
                 )
 
             if self.on_thinking_update:
@@ -1715,19 +1880,40 @@ class Brain:
             if self.on_tool_call:
                 self.on_tool_call(call["name"], call["arguments"])
 
-            # Gated tools (destructive shell keywords, sensitive file paths)
-            # require explicit approve/decline before _run() is ever called --
-            # see charlie.tools.is_shell_command_gated / get_path_gate_reason
-            # and Brain.request_tool_approval.
+            # Gated tools (destructive shell keywords, sensitive file paths,
+            # desktop control) require explicit approve/decline before _run()
+            # is ever called -- see charlie.tools.is_shell_command_gated /
+            # get_path_gate_reason, Brain._desktop_gate_reason, and
+            # Brain.request_tool_approval.
             gate_reason: Optional[str] = None
             if tool_name == "shell_execute":
                 gate_reason = is_shell_command_gated(call["arguments"].get("command", ""))
             elif tool_name in ("file_read", "file_write"):
                 gate_reason = get_path_gate_reason(call["arguments"].get("path", ""))
+            elif tool_name in _DESKTOP_CONTROL_TOOLS:
+                gate_reason = self._desktop_gate_reason()
 
-            if gate_reason and not await self.request_tool_approval(tool_name, call["arguments"], gate_reason):
+            approved = True
+            if gate_reason:
+                approved = await self.request_tool_approval(tool_name, call["arguments"], gate_reason)
+                if approved and tool_name in _DESKTOP_CONTROL_TOOLS:
+                    self._desktop_armed = True
+
+            if gate_reason and not approved:
                 r = f"Error: Command declined by user (required approval: {gate_reason})."
+            elif (
+                tool_name in _DESKTOP_CONTROL_TOOLS
+                and desktop_actions is not None
+                and desktop_actions.is_halted()
+            ):
+                r = "Error: Desktop control is halted (panic or repeated failure). Say 'continue' to resume."
+            elif tool_name in _DESKTOP_CONTROL_TOOLS and _desktop_action_count[0] >= self.config.desktop_max_actions:
+                r = f"Error: Desktop action limit reached ({self.config.desktop_max_actions} for this turn)."
+                if desktop_actions is not None:
+                    desktop_actions.halt()
             else:
+                if tool_name in _DESKTOP_CONTROL_TOOLS:
+                    _desktop_action_count[0] += 1
                 try:
                     if tool_registry.is_interactive(tool_name):
                         async with lock:
@@ -1772,6 +1958,21 @@ class Brain:
                     else:
                         r = f"Error executing tool '{tool_name}': {e}"
                     logger.warning("Tool %s raised an exception: %s", tool_name, e)
+
+            # Anomaly auto-halt: the same desktop call failing twice in a row
+            # (e.g. a stale mark id) means the model is looping, not making
+            # progress -- halt rather than let it keep retrying blind.
+            if tool_name in _DESKTOP_CONTROL_TOOLS:
+                if r.startswith("Error"):
+                    _desktop_fail_counts[ck] = _desktop_fail_counts.get(ck, 0) + 1
+                    if _desktop_fail_counts[ck] >= 2 and desktop_actions is not None:
+                        desktop_actions.halt()
+                        logger.warning(
+                            "Desktop action %s failed twice consecutively -- auto-halting.", tool_name
+                        )
+                else:
+                    _desktop_fail_counts[ck] = 0
+
             if self.on_tool_result:
                 self.on_tool_result(call["name"], r)
 
@@ -1788,7 +1989,8 @@ class Brain:
                 except Exception as persist_exc:
                     logger.debug("Tool result persist skipped: %s", persist_exc)
 
-            _seen_tool_calls[ck] = r
+            if tool_name not in _DESKTOP_COM_TOOLS:
+                _seen_tool_calls[ck] = r
             return r
 
         while True:
@@ -1801,6 +2003,11 @@ class Brain:
                     self._chat_generation,
                     generation,
                 )
+                break
+            if desktop_actions is not None and desktop_actions.is_halted():
+                logger.info("Desktop control halted -- stopping tool loop.")
+                yield "Desktop control halted (panic hotkey or repeated failure). Stopping here."
+                desktop_actions.clear_halt()
                 break
             if not tool_calls:
                 break
@@ -1872,12 +2079,9 @@ class Brain:
             messages = await _prep_messages(messages, self.config)
 
             followup_payload = self._build_payload(messages)
-            if used_fallback and self._big_client:
-                followup_client = self._big_client
-                followup_model = self._big_model
-            else:
-                followup_client = self.client
-                followup_model = self.config.small_llm_model
+            followup_client, followup_model, is_vision = self._select_followup_route(
+                followup_payload, used_fallback
+            )
 
             state = FollowupStreamState()
             try:
@@ -1886,7 +2090,13 @@ class Brain:
                 ):
                     yield filtered
             except Exception as tool_exc:
-                if self._big_client:
+                if is_vision:
+                    # Vision is a separate, feature-flagged tier -- an image
+                    # payload must never retry against the text-only big/small
+                    # clients, which would 400 on the image_url content block.
+                    logger.warning("Vision follow-up LLM error: %s", tool_exc)
+                    break
+                elif self._big_client:
                     logger.warning(
                         "Follow-up primary LLM error: %s, falling back", tool_exc
                     )
@@ -1916,6 +2126,7 @@ class Brain:
                 not accumulated
                 and not tool_calls
                 and not used_fallback
+                and not is_vision
                 and self._big_client
             ):
                 logger.warning("Follow-up returned empty, retrying with fallback LLM")

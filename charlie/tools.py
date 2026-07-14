@@ -28,6 +28,9 @@ _memory_store = None  # type: Optional[Any]
 _memory_graph = None  # type: Optional[Any]
 # --- Blackboard for agent swarm (set via set_blackboard at init) ---
 _blackboard = None  # type: Optional[Any]
+# --- Pending vision-tier screenshot: written by desktop_screenshot, consumed
+# --- once by Brain._build_payload for the very next outgoing payload. ---
+_pending_vision_image = None  # type: Optional[str]
 # --- Search tuning ---
 SEARCH_RESULT_LIMIT = 5
 CONTENT_MAX_CHARS = 800
@@ -1373,6 +1376,214 @@ def _make_plugin_runner(manager: Any, action: str) -> Callable[..., str]:
 
     _runner.__name__ = f"plugin_{action}"
     return _runner
+
+
+# ---------------------------------------------------------------------------
+# Desktop control tools (Windows UI Automation) -- gated, off by default.
+# ---------------------------------------------------------------------------
+
+_DESKTOP_DISABLED_MSG = (
+    "Desktop control is disabled (set DESKTOP_CONTROL_ENABLED=true and install "
+    "uiautomation/pyautogui to enable)."
+)
+
+
+def _desktop_ready() -> bool:
+    if not config.desktop_control_enabled:
+        return False
+    from charlie.desktop import DESKTOP_AVAILABLE
+    return DESKTOP_AVAILABLE
+
+
+def _ocr_fallback_marks(uia_elements: List[Any]) -> List[Any]:
+    """Merge an OCR pass into uia_elements.
+
+    Always runs, not just when the UIA tree looks sparse -- a browser's
+    toolbar can hand back a couple of real UIA elements while the entire
+    page content underneath is invisible to UIA, so an element-count
+    threshold can't reliably tell "UIA-blind" from "just a toolbar."
+    """
+    if not config.desktop_ocr_enabled:
+        return uia_elements
+    from charlie.desktop import ocr as desktop_ocr
+    if not desktop_ocr.OCR_AVAILABLE:
+        return uia_elements
+    from charlie.desktop.uia import merge_ocr_elements
+    try:
+        ocr_elements = desktop_ocr.ocr_marks(desktop_ocr.capture())
+    except Exception:
+        logger.warning("OCR fallback pass failed", exc_info=True)
+        return uia_elements
+    return merge_ocr_elements(uia_elements, ocr_elements) if ocr_elements else uia_elements
+
+
+@registry.register_tool(
+    name="desktop_observe",
+    description=(
+        "Observe the foreground window and return a numbered list of clickable "
+        "UI elements (set-of-marks text, e.g. '[3] Button \"Save\"'). Also OCRs "
+        "the window so on-screen text with no accessible UI tree is included "
+        "(e.g. browser page content, canvases)."
+    ),
+    schema={"type": "object", "properties": {}, "required": []},
+)
+def desktop_observe() -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.uia import serialize_marks, snapshot_tree
+    elements = _ocr_fallback_marks(snapshot_tree(max_depth=8))
+    if not elements:
+        return "No UI elements found in the foreground window."
+    return serialize_marks(elements)
+
+
+@registry.register_tool(
+    name="desktop_read_screen",
+    description=(
+        "Force an OCR pass over the foreground window and return recognized text as "
+        "set-of-marks, regardless of whether it has an accessible UI tree. Use for "
+        "'read what's on my screen' requests."
+    ),
+    schema={"type": "object", "properties": {}, "required": []},
+)
+def desktop_read_screen() -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    if not config.desktop_ocr_enabled:
+        return "OCR is disabled (set DESKTOP_OCR_ENABLED=true and install pytesseract/mss/Pillow)."
+    from charlie.desktop import ocr as desktop_ocr
+    if not desktop_ocr.OCR_AVAILABLE:
+        return "OCR dependencies not installed (pytesseract/mss/Pillow)."
+    from charlie.desktop.uia import merge_ocr_elements, serialize_marks
+    try:
+        elements = merge_ocr_elements([], desktop_ocr.ocr_marks(desktop_ocr.capture()))
+    except Exception:
+        logger.warning("desktop_read_screen OCR pass failed", exc_info=True)
+        return "Error: OCR pass failed."
+    if not elements:
+        return "No readable text found on screen."
+    return serialize_marks(elements)
+
+
+@registry.register_tool(
+    name="desktop_click",
+    description="Click a UI element by its mark id (from desktop_observe).",
+    schema={
+        "type": "object",
+        "properties": {
+            "mark_id": {"type": "integer", "description": "Mark id from desktop_observe."},
+        },
+        "required": ["mark_id"],
+    },
+    is_interactive=True,
+)
+def desktop_click(mark_id: int) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import click_mark
+    return click_mark(mark_id)
+
+
+@registry.register_tool(
+    name="desktop_type",
+    description="Type text into a UI element by its mark id. Refuses password/payment fields.",
+    schema={
+        "type": "object",
+        "properties": {
+            "mark_id": {"type": "integer", "description": "Mark id from desktop_observe."},
+            "text": {"type": "string", "description": "Text to type."},
+        },
+        "required": ["mark_id", "text"],
+    },
+    is_interactive=True,
+)
+def desktop_type(mark_id: int, text: str) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import type_text
+    return type_text(mark_id, text)
+
+
+@registry.register_tool(
+    name="desktop_invoke",
+    description="Invoke the default action (toggle/expand/select) of a UI element by its mark id.",
+    schema={
+        "type": "object",
+        "properties": {
+            "mark_id": {"type": "integer", "description": "Mark id from desktop_observe."},
+        },
+        "required": ["mark_id"],
+    },
+    is_interactive=True,
+)
+def desktop_invoke(mark_id: int) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import invoke_mark
+    return invoke_mark(mark_id)
+
+
+@registry.register_tool(
+    name="desktop_key",
+    description="Send a keyboard chord to the foreground window, e.g. 'ctrl+s'.",
+    schema={
+        "type": "object",
+        "properties": {
+            "keys": {"type": "string", "description": "Key chord, e.g. 'ctrl+s' or 'enter'."},
+        },
+        "required": ["keys"],
+    },
+    is_interactive=True,
+)
+def desktop_key(keys: str) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import key_press
+    return key_press(keys)
+
+
+@registry.register_tool(
+    name="desktop_screenshot",
+    description=(
+        "Capture the foreground window as an annotated screenshot for the vision model, "
+        "for graphical targets desktop_observe can't describe (icons, canvases, images). "
+        "Always returns the current set-of-marks text; also queues the image for the next "
+        "reply if a vision model is configured."
+    ),
+    schema={"type": "object", "properties": {}, "required": []},
+)
+def desktop_screenshot() -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.uia import serialize_marks, snapshot_tree
+    elements = _ocr_fallback_marks(snapshot_tree(max_depth=8))
+    text_result = serialize_marks(elements) if elements else "No UI elements found in the foreground window."
+    if not config.vision_enabled:
+        return text_result
+    from charlie.desktop import ocr as desktop_ocr
+    from charlie.desktop import vision as desktop_vision
+    if not desktop_ocr.OCR_AVAILABLE or not desktop_vision.VISION_AVAILABLE:
+        return text_result
+    try:
+        png = desktop_ocr.capture()
+        annotated = desktop_vision.annotate_som(png, elements)
+        set_pending_vision_image(desktop_vision.to_data_url(annotated))
+    except Exception:
+        logger.warning("desktop_screenshot vision annotation failed", exc_info=True)
+    return text_result
+
+
+def set_pending_vision_image(url: Optional[str]) -> None:
+    """Queue an image data URL for the very next outgoing LLM payload."""
+    global _pending_vision_image
+    _pending_vision_image = url
+
+
+def pop_pending_vision_image() -> Optional[str]:
+    """Read and clear the queued vision image -- consumed exactly once."""
+    global _pending_vision_image
+    url, _pending_vision_image = _pending_vision_image, None
+    return url
 
 
 def register_plugin_tools(cfg: Any = None) -> Optional[Any]:

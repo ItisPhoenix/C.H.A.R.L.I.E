@@ -42,6 +42,13 @@ def test_registry_registration_and_schema():
         "graph_add_fact",
         "graph_query",
         "graph_consolidate",
+        "desktop_observe",
+        "desktop_read_screen",
+        "desktop_screenshot",
+        "desktop_click",
+        "desktop_type",
+        "desktop_invoke",
+        "desktop_key",
     }
     assert any(
         d["function"]["parameters"]["required"] == ["query"] for d in definitions

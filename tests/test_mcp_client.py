@@ -196,7 +196,7 @@ def test_parse_server_spec_requires_name_and_command():
 def test_start_mcp_disabled_registers_nothing():
     from types import SimpleNamespace
 
-    cfg = SimpleNamespace(mcp_enabled=False, mcp_servers=["files|echo"])
+    cfg = SimpleNamespace(mcp_enabled=False, mcp_servers=["files|echo"], mcp_config_path="")
     assert start_mcp(cfg) is None
 
 
@@ -219,7 +219,7 @@ def test_start_mcp_registers_into_registry(monkeypatch):
 
     monkeypatch.setattr(mcp_mod.MCPClient, "register_tools_into", _fake_register)
 
-    cfg = SimpleNamespace(mcp_enabled=True, mcp_servers=["files|python -m server"])
+    cfg = SimpleNamespace(mcp_enabled=True, mcp_servers=["files|python -m server"], mcp_config_path="")
     client = start_mcp(cfg)
 
     assert client is not None
@@ -232,7 +232,7 @@ def test_start_mcp_registers_into_registry(monkeypatch):
 def test_start_mcp_enabled_without_servers_returns_none():
     from types import SimpleNamespace
 
-    cfg = SimpleNamespace(mcp_enabled=True, mcp_servers=[])
+    cfg = SimpleNamespace(mcp_enabled=True, mcp_servers=[], mcp_config_path="")
     assert start_mcp(cfg) is None
 
 

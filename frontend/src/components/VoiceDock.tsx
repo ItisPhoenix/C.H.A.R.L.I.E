@@ -39,6 +39,7 @@ export function VoiceDock({
     onAudioControl({ volume: value, muted: value === 0 ? audio.muted : false });
   const toggleMic = () => onMicControl({ mic_muted: !mic.mic_muted });
   const accentColor = useCharlieStore((s) => s.accentColor);
+  const audioLevel = useCharlieStore((s) => s.audioLevel);
 
   const bars = useMemo(
     () => Array.from({ length: BAR_COUNT }).map((_, i) => i),
@@ -162,6 +163,13 @@ export function VoiceDock({
             onClick={toggleMic}
             aria-label={mic.mic_muted ? "Unmute microphone" : "Mute microphone"}
             aria-pressed={mic.mic_muted}
+            style={{
+              boxShadow:
+                connected && !mic.mic_muted
+                  ? `0 0 ${6 + audioLevel * 44}px ${2 + audioLevel * 8}px rgba(6, 182, 212, ${0.18 + audioLevel * 0.55})`
+                  : "none",
+              transition: "box-shadow 80ms ease-out",
+            }}
             className={`rounded-xl w-[34px] h-[34px] grid place-items-center cursor-pointer transition ${
               !connected
                 ? "bg-[#ef4444]/16 text-[#ef4444] animate-pulse"

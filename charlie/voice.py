@@ -199,6 +199,21 @@ class VoiceEngine:
         except Exception:
             logger.debug("audio_level emit failed", exc_info=True)
 
+    def _emit_vad_start(self) -> None:
+        """Publish speech-onset so the dashboard can show a listening state.
+
+        Without wake-word mode, nothing else ever emits "vad_start" -- the
+        dashboard's listening animation would otherwise never trigger.
+        """
+        bus = getattr(self, "_event_bus", None)
+        loop = getattr(self, "_event_loop", None)
+        if bus is None or loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(bus.emit("vad_start", {}), loop)
+        except Exception:
+            logger.debug("vad_start emit failed", exc_info=True)
+
     @staticmethod
     def _rms(samples: "np.ndarray") -> float:
         """Root-mean-square amplitude of a float32 audio buffer, 0.0-1.0."""
@@ -1090,6 +1105,7 @@ class VoiceEngine:
                     logger.info(
                         f"vad_speech_onset | rms={rms:.4f} threshold={_vad_threshold}"
                     )
+                    self._emit_vad_start()
                     # Prepend pre-roll buffer to prevent clipping first words
                     speech_buffer = list(_pre_roll_buffer)
                     speech_buffer.append(data.copy())

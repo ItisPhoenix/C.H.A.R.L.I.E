@@ -39,26 +39,33 @@ is opt-in and independently configured (matches "local vision model" decision). 
 
 ## The multimodal seam - core.py changes (keep this conditional and narrow)
 
-1. Add `self._pending_vision_image: Optional[str] = None` to `Brain.__init__`, plus a setter
-   `set_pending_vision_image(url: Optional[str])` (same injection pattern as `set_blackboard`/`set_memory_store`).
+1. **Actual injection point differs from the original plan below.** `Brain` has no `set_*` setter
+   methods for this kind of thing (`blackboard`/`memory_store` are constructor params, not setters).
+   The real pattern reused instead: `charlie/tools.py` gets a module-global `_pending_vision_image`
+   plus `set_pending_vision_image(url)` / `pop_pending_vision_image()` (read-and-clear-atomically),
+   mirroring the existing `_blackboard`/`_memory_store` globals in the same file. `core.py` imports
+   `pop_pending_vision_image` and calls it from `_build_payload`.
 2. New tool `desktop_screenshot` (registered in `charlie/tools.py`, ungated/read-only): captures the
    screen, SoM-annotates it against the current mark cache (UIA + OCR marks from Phases 1/2a), and:
    - **Returns the text set-of-marks as its string tool-result** (so even without vision enabled, or on
      a text-only model, the model still gets a usable result - never a dead end).
-   - As a side effect, stashes the annotated image's data URL via `brain.set_pending_vision_image(...)`.
-3. **`_build_payload`** (`core.py:1428`) is the *only* place the image is folded into the actual LLM
-   request, and only when all of these hold: `config.vision_enabled` AND `self._use_native_tools` AND
-   `self._pending_vision_image` is set. When true, rewrite **only the last user message's** `content`
-   from a plain string to `[{"type":"text",...}, {"type":"image_url","image_url":{"url":...}}]`. Clear
-   `self._pending_vision_image` immediately after building that one payload - it must never leak into a
-   later turn or a later message.
-4. **History persistence stays string-only.** The data URL is never written to `session_store`
-   (`core.py:1493-1495` and the SQLite schema are untouched). The image exists only for the single
-   payload build that consumes it. This is what keeps the change small and safe: no schema migration, no
-   risk of images bloating stored history.
-5. Route requests that carry an image to `vision_llm_url`/`vision_llm_model` (either a third httpx
-   client alongside `self.client`/`self._big_client`, or swap the target URL/model in
-   `_stream_completion` specifically when the payload contains an image block).
+   - As a side effect, stashes the annotated image's data URL via `set_pending_vision_image(...)`.
+3. **`_build_payload`** is the *only* place the image is folded into the actual LLM request, and only
+   when `config.vision_enabled` AND `self._use_native_tools` hold and `pop_pending_vision_image()`
+   returns non-None. When true, `_with_vision_image()` returns a **copy** of the messages list with
+   only the last user message's `content` rewritten from a plain string to
+   `[{"type":"text",...}, {"type":"image_url","image_url":{"url":...}}]` -- the original `messages`
+   list and its dicts are never mutated in place. The pop already cleared the pending image, so it
+   can't leak into a later turn or message.
+4. **History persistence stays string-only.** `self.history.append(...)` always appends the original
+   string `user_input`, never the `messages` list `_build_payload` copies-and-rewrites, so the SQLite
+   schema and `session_store` need no changes -- confirmed unchanged.
+5. **Routing**: a third `self._vision_client` (httpx.AsyncClient, built in `Brain.__init__` only when
+   `vision_enabled` + `vision_llm_url` + a real `vision_llm_key` are set) plus
+   `Brain._select_followup_route(payload, used_fallback)`, which every follow-up call site now goes
+   through: if the payload carries an image block, route to `_vision_client`/`_vision_model` and -- on
+   error or an empty response -- do **not** retry against the text big/small clients (an image payload
+   would just 400 there). Otherwise falls through to the existing big/small selection unchanged.
 
 ## When this tier engages
 
