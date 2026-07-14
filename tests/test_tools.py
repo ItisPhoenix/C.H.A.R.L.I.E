@@ -14,7 +14,9 @@ from charlie.tools import (
     _needs_decomposition,
     file_read,
     file_write,
+    get_path_gate_reason,
     is_shell_command_blocked,
+    is_shell_command_gated,
     memory,
     registry,
     session_search,
@@ -117,11 +119,33 @@ def test_system_diagnostics_runs_real_command(monkeypatch):
 
 def test_is_shell_command_blocked_direct():
     assert is_shell_command_blocked("dir") is None
-    assert is_shell_command_blocked("rm -rf /") == (
-        "Command blocked -- risky keyword 'rm -rf'"
+    # "rm -rf" is gated (approve/decline), not hard-blocked -- see
+    # test_is_shell_command_gated_direct.
+    assert is_shell_command_blocked("rm -rf /") is None
+    assert is_shell_command_blocked("format c:") == (
+        "Command blocked -- risky keyword 'format '"
     )
     assert is_shell_command_blocked("echo `whoami`") == (
         "Shell metacharacters (;, |, &, `, $, (, )) are not allowed."
+    )
+
+
+def test_is_shell_command_gated_direct():
+    assert is_shell_command_gated("dir") is None
+    assert is_shell_command_gated("rm -rf /tmp/foo") == "risky keyword 'rm -rf'"
+    assert is_shell_command_gated("taskkill /IM notepad.exe /F") == (
+        "risky keyword 'taskkill'"
+    )
+    # Hard-blocked keywords aren't in the gated list -- is_shell_command_blocked
+    # already refuses them outright, no approval flow involved.
+    assert is_shell_command_gated("format c:") is None
+
+
+def test_get_path_gate_reason(tmp_path):
+    assert get_path_gate_reason(str(tmp_path / "notes.txt")) is None
+    assert "sensitive path" in get_path_gate_reason(str(tmp_path / ".env"))
+    assert "sensitive path" in get_path_gate_reason(
+        str(tmp_path / ".ssh" / "id_rsa")
     )
 
 

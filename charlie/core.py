@@ -24,8 +24,9 @@ from charlie.streaming import (
     stream_followup_content,
 )
 from charlie.text_utils import format_app_list
+from charlie.tools import get_path_gate_reason, is_shell_command_gated
 from charlie.tools import registry as tool_registry
-from charlie.utils import build_auth_headers
+from charlie.utils import build_auth_headers, make_id
 
 logger = logging.getLogger("charlie.core")
 if TYPE_CHECKING:
@@ -41,6 +42,45 @@ _TOOL_TIMEOUTS = {
     "shell_execute": 30.0,
 }
 _TOOL_RESULT_MAX_CHARS = 2000
+# How long a gated tool call waits for an approve/decline before it's treated
+# as declined (matches charlie.recovery.request_recovery_approval's 30s, plus
+# headroom for the voice fallback's speak-prompt-then-listen round trip).
+_TOOL_APPROVAL_TIMEOUT_SEC = 45.0
+
+# request_id -> Future[bool], resolved by main.py:consume_web_commands (web
+# "tool_approve"/"tool_reject" commands) or by the voice yes/no fallback in
+# main.py:_process. Mirrors charlie.recovery.pending_proposals.
+pending_tool_approvals: Dict[str, "asyncio.Future[bool]"] = {}
+# request_id of the tool approval currently waiting on a spoken yes/no, or
+# None. Single-slot: the tool loop runs gated calls sequentially (see
+# is_interactive handling below), so at most one voice approval is ever
+# outstanding at a time.
+_active_voice_approval_id: Optional[str] = None
+
+
+def get_active_voice_approval() -> Optional[str]:
+    """The request_id currently waiting on a spoken yes/no, or None.
+
+    Checked by main.py's speech handler before routing a transcript to a
+    normal chat turn -- if set, the transcript is parsed as an approval
+    answer instead.
+    """
+    return _active_voice_approval_id
+
+
+def resolve_tool_approval(request_id: str, approved: bool) -> bool:
+    """Resolve a pending tool approval. Returns True if a matching pending
+    request was found and resolved, False otherwise (already resolved,
+    timed out, or unknown id).
+    """
+    global _active_voice_approval_id
+    fut = pending_tool_approvals.get(request_id)
+    if fut is None or fut.done():
+        return False
+    fut.set_result(approved)
+    if _active_voice_approval_id == request_id:
+        _active_voice_approval_id = None
+    return True
 
 # --- Tool param name map (text-based extraction) ---
 _TOOL_PARAM_NAMES: Dict[str, str] = {
@@ -1280,6 +1320,56 @@ class Brain:
         """Cancel the current chat generation (barge-in support)."""
         self._chat_generation += 1
 
+    async def request_tool_approval(self, tool_name: str, arguments: Dict[str, Any], reason: str) -> bool:
+        """Ask the user to approve/decline a gated tool call and wait for the
+        answer. Web dashboard is primary: broadcasts a "tool_approval_request"
+        event and waits for a "tool_approve"/"tool_reject" WS command. If no
+        dashboard is connected, falls back to voice: speaks the prompt via
+        `on_thought_callback` and waits for main.py's speech handler to route
+        the next transcript here as a yes/no (see get_active_voice_approval).
+        Times out to declined (safe default) after _TOOL_APPROVAL_TIMEOUT_SEC,
+        matching charlie.recovery.request_recovery_approval's fail-safe stance.
+        """
+        global _active_voice_approval_id
+        from charlie import recovery
+
+        request_id = f"tool_{make_id(6)}"
+        describe = arguments.get("command") or arguments.get("path") or str(arguments)
+        prompt = f"I need your permission to {reason}: {describe}. Say yes to continue or no to cancel."
+
+        loop = asyncio.get_running_loop()
+        fut: "asyncio.Future[bool]" = loop.create_future()
+        pending_tool_approvals[request_id] = fut
+
+        try:
+            if recovery.get_active_ws_count() > 0 and recovery._event_bus:
+                await recovery._event_bus.emit(
+                    "tool_approval_request",
+                    {
+                        "request_id": request_id,
+                        "tool_name": tool_name,
+                        "arguments": arguments,
+                        "reason": reason,
+                        "session_id": recovery.get_active_session_id(),
+                    },
+                )
+            elif self.on_thought_callback:
+                _active_voice_approval_id = request_id
+                self.on_thought_callback(prompt)
+            else:
+                logger.warning("Gated tool call with no approval channel available -- declining safely.")
+                return False
+
+            try:
+                return await asyncio.wait_for(fut, timeout=_TOOL_APPROVAL_TIMEOUT_SEC)
+            except asyncio.TimeoutError:
+                logger.warning("Tool approval %s timed out, declining", request_id)
+                return False
+        finally:
+            pending_tool_approvals.pop(request_id, None)
+            if _active_voice_approval_id == request_id:
+                _active_voice_approval_id = None
+
     async def close(self) -> None:
         """Close the HTTP client."""
         await self.client.aclose()
@@ -1625,50 +1715,63 @@ class Brain:
             if self.on_tool_call:
                 self.on_tool_call(call["name"], call["arguments"])
 
-            try:
-                if tool_registry.is_interactive(tool_name):
-                    async with lock:
-                        r = await asyncio.wait_for(_run(), timeout=timeout)
-                else:
-                    r = await asyncio.wait_for(_run(), timeout=timeout)
+            # Gated tools (destructive shell keywords, sensitive file paths)
+            # require explicit approve/decline before _run() is ever called --
+            # see charlie.tools.is_shell_command_gated / get_path_gate_reason
+            # and Brain.request_tool_approval.
+            gate_reason: Optional[str] = None
+            if tool_name == "shell_execute":
+                gate_reason = is_shell_command_gated(call["arguments"].get("command", ""))
+            elif tool_name in ("file_read", "file_write"):
+                gate_reason = get_path_gate_reason(call["arguments"].get("path", ""))
 
-                # Check for standard returned shell/file failures to attempt recovery
-                if tool_name == "shell_execute" and r.startswith("Error"):
-                    logger.info("Shell execution returned an error. Running recovery pipeline...")
-                    from charlie.recovery import recover_tool
-                    recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
-                    if recovered_res is not None:
-                        r = recovered_res
-                elif tool_name == "file_write" and r.startswith("Error"):
-                    logger.info("File write returned an error. Running recovery pipeline...")
-                    from charlie.recovery import recover_tool
-                    recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
-                    if recovered_res is not None:
-                        r = recovered_res
-            except asyncio.TimeoutError as te:
-                if tool_name in ("shell_execute", "file_write"):
-                    logger.info("Tool %s timed out. Running recovery pipeline...", tool_name)
-                    from charlie.recovery import recover_tool
-                    recovered_res = await recover_tool(self, tool_name, call["arguments"], te)
-                    if recovered_res is not None:
-                        r = recovered_res
+            if gate_reason and not await self.request_tool_approval(tool_name, call["arguments"], gate_reason):
+                r = f"Error: Command declined by user (required approval: {gate_reason})."
+            else:
+                try:
+                    if tool_registry.is_interactive(tool_name):
+                        async with lock:
+                            r = await asyncio.wait_for(_run(), timeout=timeout)
+                    else:
+                        r = await asyncio.wait_for(_run(), timeout=timeout)
+
+                    # Check for standard returned shell/file failures to attempt recovery
+                    if tool_name == "shell_execute" and r.startswith("Error"):
+                        logger.info("Shell execution returned an error. Running recovery pipeline...")
+                        from charlie.recovery import recover_tool
+                        recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
+                        if recovered_res is not None:
+                            r = recovered_res
+                    elif tool_name == "file_write" and r.startswith("Error"):
+                        logger.info("File write returned an error. Running recovery pipeline...")
+                        from charlie.recovery import recover_tool
+                        recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
+                        if recovered_res is not None:
+                            r = recovered_res
+                except asyncio.TimeoutError as te:
+                    if tool_name in ("shell_execute", "file_write"):
+                        logger.info("Tool %s timed out. Running recovery pipeline...", tool_name)
+                        from charlie.recovery import recover_tool
+                        recovered_res = await recover_tool(self, tool_name, call["arguments"], te)
+                        if recovered_res is not None:
+                            r = recovered_res
+                        else:
+                            r = f"Error: Tool '{tool_name}' timed out after {timeout}s"
                     else:
                         r = f"Error: Tool '{tool_name}' timed out after {timeout}s"
-                else:
-                    r = f"Error: Tool '{tool_name}' timed out after {timeout}s"
-                logger.warning("Tool %s timed out", tool_name)
-            except Exception as e:
-                if tool_name in ("shell_execute", "file_write"):
-                    logger.info("Tool %s raised exception. Running recovery pipeline...", tool_name)
-                    from charlie.recovery import recover_tool
-                    recovered_res = await recover_tool(self, tool_name, call["arguments"], e)
-                    if recovered_res is not None:
-                        r = recovered_res
+                    logger.warning("Tool %s timed out", tool_name)
+                except Exception as e:
+                    if tool_name in ("shell_execute", "file_write"):
+                        logger.info("Tool %s raised exception. Running recovery pipeline...", tool_name)
+                        from charlie.recovery import recover_tool
+                        recovered_res = await recover_tool(self, tool_name, call["arguments"], e)
+                        if recovered_res is not None:
+                            r = recovered_res
+                        else:
+                            r = f"Error executing tool '{tool_name}': {e}"
                     else:
                         r = f"Error executing tool '{tool_name}': {e}"
-                else:
-                    r = f"Error executing tool '{tool_name}': {e}"
-                logger.warning("Tool %s raised an exception: %s", tool_name, e)
+                    logger.warning("Tool %s raised an exception: %s", tool_name, e)
             if self.on_tool_result:
                 self.on_tool_result(call["name"], r)
 

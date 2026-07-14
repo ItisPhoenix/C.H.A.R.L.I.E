@@ -69,3 +69,30 @@ def parse_voice_command(user_text: str) -> Optional[str]:
         if pattern.search(user_text):
             return emotion
     return None
+
+
+_YES_RE = re.compile(
+    r"\b(?:yes|yeah|yep|yup|sure|confirm|confirmed|do it|go ahead|approved?|correct)\b",
+    re.IGNORECASE,
+)
+_NO_RE = re.compile(
+    r"\b(?:no|nope|nah|cancel|stop|don't|do not|decline\w*|reject\w*|negative)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_yes_no(user_text: str) -> Optional[bool]:
+    """Parse a spoken approve/decline answer for a pending tool approval.
+
+    Returns True/False for a clear yes/no, or None if the utterance doesn't
+    match either -- callers should re-prompt rather than guess. Checks "no"
+    first since negations like "no, don't do it" would otherwise also match
+    the yes pattern's "do it".
+    """
+    if not user_text or not user_text.strip():
+        return None
+    if _NO_RE.search(user_text):
+        return False
+    if _YES_RE.search(user_text):
+        return True
+    return None

@@ -10,6 +10,7 @@ import { EventLog } from "../components/EventLog";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { MicMeter } from "../components/MicMeter";
 import { RecoveryDialog } from "../components/RecoveryDialog";
+import { ToolApprovalDialog } from "../components/ToolApprovalDialog";
 import SettingsDialog from "../components/SettingsDialog";
 
 export default function Page() {
@@ -321,6 +322,11 @@ export default function Page() {
           if (eventSession && eventSession !== currentSessionIdRef.current) return;
           store.setActiveProposal(msg.payload);
         }
+        else if (msg.type === "tool_approval_request") {
+          const eventSession = sessionOf(msg);
+          if (eventSession && eventSession !== currentSessionIdRef.current) return;
+          store.setActiveToolApproval(msg.payload);
+        }
         // Handle real-time token stream. Only render tokens for the active
         // session; the server also filters by subscription, but we guard
         // here too so a stray cross-session token can never bleed in.
@@ -381,6 +387,22 @@ export default function Page() {
 
   const handleRejectTask = (taskId: string, reason: string = "Rejected by user") => {
     sendWS({ type: "hitl_approve", payload: { task_id: taskId, decision: "reject", reason } });
+  };
+
+  const handleApproveRecovery = (proposalId: string) => {
+    sendWS({ type: "recovery_approve", payload: { proposal_id: proposalId } });
+  };
+
+  const handleRejectRecovery = (proposalId: string) => {
+    sendWS({ type: "recovery_reject", payload: { proposal_id: proposalId } });
+  };
+
+  const handleApproveToolCall = (requestId: string) => {
+    sendWS({ type: "tool_approve", payload: { request_id: requestId } });
+  };
+
+  const handleRejectToolCall = (requestId: string) => {
+    sendWS({ type: "tool_reject", payload: { request_id: requestId } });
   };
 
   const handleCancelTask = (taskId: string) => {
@@ -689,8 +711,12 @@ export default function Page() {
         />
 
         <RecoveryDialog
-          onApprove={handleApproveTask}
-          onReject={handleRejectTask}
+          onApprove={handleApproveRecovery}
+          onReject={handleRejectRecovery}
+        />
+        <ToolApprovalDialog
+          onApprove={handleApproveToolCall}
+          onReject={handleRejectToolCall}
         />
         <SettingsDialog />
       </div>

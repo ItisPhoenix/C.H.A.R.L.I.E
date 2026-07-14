@@ -92,7 +92,7 @@ from charlie.config import config
 from charlie.core import Brain
 from charlie.ipc import EventBus
 from charlie.memory_store import MemoryStore
-from charlie.personality import get_emotion_for_context, parse_voice_command
+from charlie.personality import get_emotion_for_context, parse_voice_command, parse_yes_no
 from charlie.session_store import SessionStore
 from charlie.voice import VoiceEngine
 from charlie.blackboard import Blackboard
@@ -387,6 +387,22 @@ async def main():
         nonlocal speech_echo_cooldown, last_emotion
         if time.time() < speech_echo_cooldown:
             logger.info(f"Echo suppressed: {text}")
+            return
+
+        # A gated tool call (destructive shell command / sensitive file path)
+        # is waiting on a spoken yes/no -- route this utterance to the answer
+        # instead of starting a new chat turn. See
+        # charlie.core.Brain.request_tool_approval / get_active_voice_approval.
+        from charlie.core import get_active_voice_approval
+        pending_approval_id = get_active_voice_approval()
+        if pending_approval_id:
+            answer = parse_yes_no(text)
+            if answer is None:
+                voice.speak("Sorry, I didn't catch that. Say yes to continue or no to cancel.", last_emotion)
+                return
+            from charlie.core import resolve_tool_approval
+            resolve_tool_approval(pending_approval_id, answer)
+            voice.speak("Okay, running it." if answer else "Cancelled.", last_emotion)
             return
 
         print(f"\rHeard: {text}", flush=True)
@@ -731,6 +747,18 @@ async def main():
                         fut = pending_proposals.get(proposal_id)
                         if fut and not fut.done():
                             fut.set_result(False)
+                elif cmd_type == "tool_approve":
+                    payload = cmd.get("payload", {})
+                    request_id = payload.get("request_id")
+                    if request_id:
+                        from charlie.core import resolve_tool_approval
+                        resolve_tool_approval(request_id, True)
+                elif cmd_type == "tool_reject":
+                    payload = cmd.get("payload", {})
+                    request_id = payload.get("request_id")
+                    if request_id:
+                        from charlie.core import resolve_tool_approval
+                        resolve_tool_approval(request_id, False)
                 elif cmd_type == "hitl_approve":
                     # Single approval entry point. Payload: {task_id, decision:
                     # "approve"|"reject", reason?}. "approve" flips

@@ -712,7 +712,11 @@ def start_server(
         host=host,
         port=config.charlie_port,
         log_level="info",
-        loop="asyncio",
+        # "asyncio" hardcodes ProactorEventLoop on win32 regardless of the process-wide
+        # event loop policy, which breaks pyzmq (needs add_reader, Proactor doesn't have it).
+        # "none" defers loop creation to the current policy, which _configure_platform()
+        # already set to WindowsSelectorEventLoopPolicy.
+        loop="none",
     )
     server = uvicorn.Server(server_config)
     server.run()

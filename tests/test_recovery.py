@@ -55,14 +55,14 @@ def test_is_safe_to_recover():
 
 def test_is_safe_to_recover_shares_shell_execute_blocklist():
     """Regression test: recovery commands (LLM-suggested or strategy-rewritten)
-    must be blocked by the same metacharacter/risky-keyword guard as
+    must be blocked by the same metacharacter/hard-keyword guard as
     shell_execute, not just the narrower path/process/port checks. Before
     this fix, a recovery-suggested "format c: /q" or "echo a & del secrets"
     would pass is_safe_to_recover and execute."""
-    # Risky keywords blocked by shell_execute's _BLOCKED_KEYWORDS.
+    # Irreversible keywords blocked outright by shell_execute's
+    # _HARD_BLOCKED_KEYWORDS -- no approval flow can override these.
     assert is_safe_to_recover("format c: /q") is False
     assert is_safe_to_recover("shutdown /s /t 0") is False
-    assert is_safe_to_recover("reg delete HKCU\\Software\\Test") is False
 
     # Shell metacharacters blocked by shell_execute's _SHELL_METACHARS.
     assert is_safe_to_recover("echo a & type secrets.txt") is False
@@ -71,6 +71,14 @@ def test_is_safe_to_recover_shares_shell_execute_blocklist():
 
     # A command with none of the above still passes.
     assert is_safe_to_recover("notepad test.txt") is True
+
+
+def test_is_safe_to_recover_allows_gated_keywords():
+    """"reg delete" moved from hard-blocked to gated (approve/decline) --
+    is_safe_to_recover only enforces the hard-block tier, so a gated keyword
+    now passes here. The recovery pipeline's own proposal/approval flow
+    (request_recovery_approval) still gates execution before it runs."""
+    assert is_safe_to_recover("reg delete HKCU\\Software\\Test") is True
 
 def test_strategies_can_handle():
     timeout_strategy = DeclassProcessStrategy()

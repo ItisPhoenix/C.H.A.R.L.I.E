@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 if __name__ != "__main__":
     from charlie.blackboard import Blackboard
@@ -93,7 +93,27 @@ class BaseAgent(ABC):
             )
             return f"Error: tool '{name}' is not permitted for agent '{self.name}'."
 
-        from charlie.tools import registry
+        from charlie.tools import get_path_gate_reason, is_shell_command_gated, registry
+
+        # Gated shell keywords / sensitive paths (see charlie.tools) normally
+        # go through an interactive approve/decline prompt -- see
+        # charlie.core.Brain.request_tool_approval. Swarm agents run
+        # unsupervised with no human turn to prompt, so for them a gate is
+        # a hard block instead.
+        gate_reason: Optional[str] = None
+        if name == "shell_execute":
+            gate_reason = is_shell_command_gated(arguments.get("command", ""))
+        elif name in ("file_read", "file_write"):
+            gate_reason = get_path_gate_reason(arguments.get("path", ""))
+        if gate_reason:
+            self.logger.warning(
+                "[%s] Rejected tool call '%s': requires approval (%s), no human in the loop for agents",
+                self.name, name, gate_reason,
+            )
+            return (
+                f"Error: tool '{name}' blocked -- requires approval ({gate_reason}), "
+                "not available to unsupervised agents."
+            )
 
         self.log(f"Calling tool: {name}({arguments})")
         result = await asyncio.get_running_loop().run_in_executor(

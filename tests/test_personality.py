@@ -1,6 +1,6 @@
 """Tests for charlie.personality — emotion detection and voice commands."""
 
-from charlie.personality import get_emotion_for_context, parse_voice_command
+from charlie.personality import get_emotion_for_context, parse_voice_command, parse_yes_no
 
 # ── get_emotion_for_context ────────────────────────────────────────────────
 
@@ -108,3 +108,34 @@ class TestParseVoiceCommand:
 
     def test_mixed_case_calm_down(self):
         assert parse_voice_command("CALM DOWN") == "calm"
+
+
+class TestParseYesNo:
+    """Voice answers to a pending tool approval (charlie.core.request_tool_approval)."""
+
+    def test_yes(self):
+        assert parse_yes_no("yes") is True
+
+    def test_go_ahead(self):
+        assert parse_yes_no("go ahead") is True
+
+    def test_confirm(self):
+        assert parse_yes_no("confirmed, do it") is True
+
+    def test_no(self):
+        assert parse_yes_no("no") is False
+
+    def test_cancel(self):
+        assert parse_yes_no("cancel that") is False
+
+    def test_negated_do_it_is_no_not_yes(self):
+        """"do it" alone means yes, but a leading "no" negates the whole
+        utterance -- must not match the "do it" yes-pattern instead."""
+        assert parse_yes_no("no, don't do it") is False
+
+    def test_unrelated_text_returns_none(self):
+        assert parse_yes_no("what's the weather") is None
+
+    def test_empty_returns_none(self):
+        assert parse_yes_no("") is None
+        assert parse_yes_no("   ") is None

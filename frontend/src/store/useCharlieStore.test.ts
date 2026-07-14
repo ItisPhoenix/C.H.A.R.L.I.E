@@ -194,4 +194,23 @@ describe("useCharlieStore", () => {
       expect(useCharlieStore.getState().activeProposal).toBeNull();
     });
   });
+
+  describe("tool approval requests", () => {
+    it("manages active tool approval state", () => {
+      const request = {
+        request_id: "tool_abc123",
+        tool_name: "shell_execute",
+        arguments: { command: "rm -rf build" },
+        reason: "risky keyword 'rm -rf'",
+        session_id: "session_A",
+      };
+
+      const s = useCharlieStore.getState();
+      expect(s.activeToolApproval).toBeNull();
+      s.setActiveToolApproval(request);
+      expect(useCharlieStore.getState().activeToolApproval).toEqual(request);
+      s.setActiveToolApproval(null);
+      expect(useCharlieStore.getState().activeToolApproval).toBeNull();
+    });
+  });
 });

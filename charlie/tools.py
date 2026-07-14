@@ -465,18 +465,27 @@ def _single_search(query: str) -> str:
 
 
 # --- Shell safety ---
-# Risky substring keywords blocked in every mode (voice and web UI alike).
-_BLOCKED_KEYWORDS = (
-    "rm -rf",
-    "rm -r -f",
-    "rd /s /q",
-    "del /f /s",
+# Keywords that are always refused outright, no approval can override them:
+# irreversible disk/OS-level destruction or a live system going down.
+_HARD_BLOCKED_KEYWORDS = (
     "mkfs",
     "dd if=",
     "format ",
     "shutdown",
     "reboot",
     "poweroff",
+    "diskpart",
+    "certutil",
+    "bitsadmin",
+)
+# Keywords that require explicit user approve/decline before running (see
+# charlie.core.request_tool_approval). These delete, kill, or reconfigure
+# something, but are recoverable/scoped -- unlike the hard-blocked set above.
+_GATED_KEYWORDS = (
+    "rm -rf",
+    "rm -r -f",
+    "rd /s /q",
+    "del /f /s",
     "pkill",
     "killall",
     "reg delete",
@@ -485,9 +494,7 @@ _BLOCKED_KEYWORDS = (
     "schtasks",
     "takeown",
     "icacls",
-    "certutil",
-    "bitsadmin",
-    "diskpart",
+    "taskkill",
 )
 # Shell metacharacters used for command chaining / substitution. Blocked in
 # every mode to prevent injection (e.g. "echo a & type secrets.txt").
@@ -497,9 +504,10 @@ _CONVERSATIONAL = ("stop", "start", "cancel", "wait", "halt")
 
 
 def is_shell_command_blocked(command: str) -> Optional[str]:
-    """Check `command` against the shell-execute safety guards (metacharacters
-    and risky keyword list). Returns a human-readable block reason, or None
-    if the command passes.
+    """Check `command` against the hard shell-execute safety guards
+    (metacharacters and the irreversible-keyword list). Returns a
+    human-readable block reason, or None if the command passes. No approval
+    flow can override a hard block.
 
     Shared with charlie.recovery so LLM-suggested and strategy-rewritten
     recovery commands go through the exact same guard as direct
@@ -509,9 +517,22 @@ def is_shell_command_blocked(command: str) -> Optional[str]:
     if any(ch in command for ch in _SHELL_METACHARS):
         return "Shell metacharacters (;, |, &, `, $, (, )) are not allowed."
     lowered = command.lower().strip()
-    for keyword in _BLOCKED_KEYWORDS:
+    for keyword in _HARD_BLOCKED_KEYWORDS:
         if keyword in lowered:
             return f"Command blocked -- risky keyword '{keyword}'"
+    return None
+
+
+def is_shell_command_gated(command: str) -> Optional[str]:
+    """Check `command` against the gated (approve/decline) keyword list.
+    Returns a human-readable reason the command needs user approval, or None
+    if it doesn't. Only meaningful once `is_shell_command_blocked` has
+    already passed -- gating never overrides a hard block.
+    """
+    lowered = command.lower().strip()
+    for keyword in _GATED_KEYWORDS:
+        if keyword in lowered:
+            return f"risky keyword '{keyword}'"
     return None
 
 
@@ -691,6 +712,22 @@ def system_diagnostics(check: str) -> str:
 
 _WORKSPACE_DIR = Path(__file__).parent.parent.resolve()
 
+# Sensitive path substrings that require explicit user approve/decline before
+# a file_read/file_write call touches them (see
+# charlie.core.request_tool_approval). Not a hard block -- unlike the shell
+# hard-blocked keywords, there's no path that's dangerous to even read once
+# approved, so everything here is gate-only.
+_GATED_PATH_SUBSTRINGS = (
+    ".env",
+    "sessions.db",
+    os.path.sep + "etc" + os.path.sep,
+    os.path.sep + "proc" + os.path.sep,
+    os.path.sep + "sys" + os.path.sep,
+    os.path.sep + "registry" + os.path.sep,
+    os.path.sep + ".ssh" + os.path.sep,
+    os.path.sep + ".aws" + os.path.sep,
+)
+
 
 def _resolve_safe_path(path_str: str) -> Path:
     target = Path(path_str)
@@ -698,26 +735,30 @@ def _resolve_safe_path(path_str: str) -> Path:
         resolved = target.resolve(strict=False)
     else:
         resolved = (_WORKSPACE_DIR / path_str).resolve(strict=False)
+    return resolved
+
+
+def get_path_gate_reason(path_str: str) -> Optional[str]:
+    """Pure pre-flight check: does this path need approve/decline before a
+    file_read/file_write call touches it? Returns a human-readable reason, or
+    None if the path is clear. Resolves the same way file_read/file_write do
+    (user-placeholder substitution + _resolve_safe_path) so the reason
+    reflects the actual path that will be opened, not the raw argument.
+    """
+    try:
+        resolved = _resolve_safe_path(_resolve_user_placeholders(path_str))
+    except Exception:
+        return None
 
     from charlie.config import config
-    system_root = config.system_root.lower()
     path_lower = str(resolved).lower()
-
-    _BLOCKED_PATHS = (
-        ".env",
-        "sessions.db",
-        system_root,
-        os.path.sep + "etc" + os.path.sep,
-        os.path.sep + "proc" + os.path.sep,
-        os.path.sep + "sys" + os.path.sep,
-        os.path.sep + "registry" + os.path.sep,
-        os.path.sep + ".ssh" + os.path.sep,
-        os.path.sep + ".aws" + os.path.sep,
-    )
-    for blocked in _BLOCKED_PATHS:
+    system_root = config.system_root.lower()
+    if system_root and system_root in path_lower:
+        return f"system root path '{config.system_root}'"
+    for blocked in _GATED_PATH_SUBSTRINGS:
         if blocked.lower() in path_lower:
-            raise ValueError(f"Access to '{blocked}' paths is blocked for safety.")
-    return resolved
+            return f"sensitive path '{blocked}'"
+    return None
 
 
 def _resolve_user_placeholders(path: str) -> str:

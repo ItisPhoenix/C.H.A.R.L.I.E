@@ -39,6 +39,14 @@ export interface RecoveryProposal {
   session_id: string;
 }
 
+export interface ToolApprovalRequest {
+  request_id: string;
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  reason: string;
+  session_id: string;
+}
+
 export interface Agent {
   name: string;
   role: string;
@@ -121,6 +129,8 @@ interface CharlieState {
   setAccentColor: (color: string) => void;
   activeProposal: RecoveryProposal | null;
   setActiveProposal: (p: RecoveryProposal | null) => void;
+  activeToolApproval: ToolApprovalRequest | null;
+  setActiveToolApproval: (r: ToolApprovalRequest | null) => void;
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
 }
@@ -186,6 +196,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   }),
   activeProposal: null,
   setActiveProposal: (activeProposal) => set({ activeProposal }),
+  activeToolApproval: null,
+  setActiveToolApproval: (activeToolApproval) => set({ activeToolApproval }),
   settingsOpen: false,
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
 }));
