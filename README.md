@@ -21,6 +21,7 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 - **Smart Activity Panel**: Live feed showing the assistant's intermediate thinking steps, active tool calls, and results.
 - **Persistent Voice Dock**: Animate-on-state SVG waveform reflecting VAD listening, thinking, and speaking phases.
 - **Deterministic Multi-App & Website Control**: High-speed fast-paths that bypass the LLM for opening/closing single or multiple local apps, popular websites, or arbitrary domain names.
+- **Agentic desktop control** (Windows, opt-in): Charlie can see and operate your desktop -- click, type, and send key chords through native UI Automation, with OCR and an optional local vision model as fallback tiers for windows with no accessible UI tree. Off by default; requires one-time approval before it touches your mouse or keyboard, with a global panic hotkey and auto-halt on repeated failures.
 - **Active Session Synchronization**: Real-time WebSocket syncing ensures background voice interactions are recorded directly in the active browser chat.
 - **Cross-Browser SQLite Datetime Parsing**: Normalizes UTC timestamps to ISO-8601, ensuring relative time tickers render flawlessly on all browsers (including Safari/WebKit).
 - **Emotional tone**: Adapts speech speed and energy based on your mood.
@@ -83,6 +84,9 @@ uv sync --locked
 ```
 
 (For the dashboard UI: `cd frontend && npm ci && npm run build`.)
+
+For agentic desktop control (optional, Windows only): `uv sync --extra desktop`, and install
+[Tesseract OCR](https://github.com/tesseract-ocr/tesseract) if you want the OCR fallback tier.
 
 ### 2. Configure
 
@@ -153,6 +157,10 @@ All settings are via environment variables (`.env` file). See `.env.example` for
 | `BIG_LLM_URL` | (empty) | Secondary LLM endpoint for automatic failover |
 | `BIG_LLM_API_KEY` | `no-key` | API key for the big LLM |
 | `BIG_LLM_MODEL` | (empty) | Model ID for the big LLM |
+| `DESKTOP_CONTROL_ENABLED` | `false` | Enable native click/type/invoke/key desktop control |
+| `DESKTOP_OCR_ENABLED` | `true` | OCR fallback tier (needs Tesseract installed) |
+| `VISION_ENABLED` | `false` | Local vision model tier for icon/canvas targets |
+| `VISION_LLM_URL` | (empty) | Vision model endpoint (separate from the text LLMs) |
 
 ---
 
@@ -165,6 +173,7 @@ Say these while Charlie is speaking to control behavior:
 | "stop" / "wait" / "cancel" | Interrupt and stop speaking |
 | "be energetic" / "speak faster" | Increase speech energy and speed |
 | "calm down" / "speak slower" | Slow down and speak calmly |
+| "stop controlling my desktop" | Revoke desktop-control approval for the rest of the session |
 
 Charlie also understands a couple of typed directives:
 
