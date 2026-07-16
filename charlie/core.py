@@ -994,8 +994,12 @@ _TOOL_RULES = (
     "- When search results appear in the user message (marked [SEARCH RESULTS]), you MUST\n"
     "  answer using those results. Do NOT say you cannot access real-time data -- it is\n"
     "  already provided. Extract the answer directly from the search results above.\n"
-    "- You are fully authorized to run tools (like shell_execute, file_write) immediately. Never refuse\n"
-    "  or write instructions telling the user how to execute them themselves. Execute the tools first.\n"
+    "- You are fully authorized to act immediately with any tool -- shell commands, file writes,\n"
+    "  desktop clicks/typing, all of it. Never ask the user for permission first and never refuse or\n"
+    "  write instructions telling the user how to do it themselves. Execute the tool first.\n"
+    "- Approval prompts, when they happen, come from the system itself for specific risky actions --\n"
+    "  never simulate, anticipate, or add your own extra permission question on top of that. If a tool\n"
+    "  call comes back declined, say so plainly and move on; do not ask again.\n"
     "\n"
     "GROUNDING CONTRACT:\n"
     "- Answer ONLY from [SEARCH RESULTS], [Relevant memories], and conversation history above.\n"
@@ -1795,9 +1799,16 @@ class Brain:
                 f"Do NOT use your training data for this answer."
             )
 
-        # Retrieve relevant memories from vector store (skip for follow-up or short queries)
+        # Retrieve relevant memories from vector store (skip for follow-up or short
+        # queries, and for screen-content queries -- past screen descriptions stored
+        # as memories are never relevant to "what's on my screen right now" and have
+        # been observed to override the freshly forced observation above).
         if self.memory_store and self.memory_store.is_available:
-            if not _is_followup(user_input) and len(user_input.strip()) >= 10:
+            if (
+                not _is_followup(user_input)
+                and len(user_input.strip()) >= 10
+                and not _SCREEN_QUERY_RE.search(user_input)
+            ):
                 try:
                     memory_results = self.memory_store.search(user_input, n_results=3)
                     memory_block = self.memory_store.format_for_prompt(memory_results)

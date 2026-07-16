@@ -6,7 +6,7 @@ import os
 import re
 import sys
 import time
-from typing import Callable, Tuple
+from typing import Callable, Dict, Tuple
 
 # Windows event-loop policy (must precede zmq/asyncio imports)
 from charlie.runtime import configure as _configure_platform
@@ -203,6 +203,13 @@ async def main():
     store = None
     speech_echo_cooldown = 0.0
     last_emotion = "neutral"
+    # VAD can over-segment one utterance (a mid-sentence pause, or the user
+    # repeating themselves unsure Charlie heard) into multiple speech segments
+    # that each transcribe to the same/near-identical text -- each reaching
+    # on_speech independently and spawning its own full turn. Track recently
+    # dispatched text to suppress duplicates within a short window.
+    recent_turn_texts: Dict[str, float] = {}
+    _DEDUPE_WINDOW_SEC = 5.0
     web_proc = None
 
     try:
@@ -377,6 +384,17 @@ async def main():
         nonlocal current_web_session_id
         text = _normalize_app_list(text)
         logger.info(f"Speech detected: {text}")
+
+        now = time.time()
+        normalized = text.strip().lower()
+        for stale in [k for k, t in recent_turn_texts.items() if now - t >= _DEDUPE_WINDOW_SEC]:
+            del recent_turn_texts[stale]
+        last_dispatch = recent_turn_texts.get(normalized)
+        if last_dispatch is not None and now - last_dispatch < _DEDUPE_WINDOW_SEC:
+            logger.info(f"Duplicate utterance suppressed ({now - last_dispatch:.1f}s ago): {text}")
+            return
+        recent_turn_texts[normalized] = now
+
         session_id = "default"
         if current_web_session_id not in (None, "default", ""):
             session_id = current_web_session_id
@@ -654,8 +672,13 @@ async def main():
                 event_bus.emit("response_done", {"session_id": session_id})
             )
 
-        # Learning loop: deferred to background -- doesn't block next turn
-        if full_reply_buffer.strip() and text.strip():
+        # Learning loop: deferred to background -- doesn't block next turn.
+        # Skipped for screen-content queries -- the reply is a description of
+        # whatever's on screen at that moment, never a genuine user preference,
+        # and storing it as one pollutes memory with stale screen snapshots that
+        # resurface on later "what's on my screen" queries.
+        from charlie.core import _SCREEN_QUERY_RE as _screen_query_re
+        if full_reply_buffer.strip() and text.strip() and not _screen_query_re.search(text):
 
             async def _background_learn(user_text: str, reply_text: str):
                 try:
@@ -1043,6 +1066,8 @@ async def main():
             import charlie.recovery
             charlie.recovery._event_bus = bus
             charlie.recovery.set_active_session_id(current_web_session_id)
+            import charlie.tools
+            charlie.tools.set_event_bus(bus, asyncio.get_running_loop())
 
             class ZmqLogHandler(logging.Handler):
                 def emit(self, record):

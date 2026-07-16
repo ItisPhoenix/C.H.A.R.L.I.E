@@ -217,6 +217,18 @@ class TestVoiceEngineInit:
         engine.stop_tts()
         assert engine.stop_tts_event.is_set()
 
+    def test_stop_tts_does_not_call_sd_directly(self):
+        """stop_tts() runs on the caller's thread (e.g. barge-in), while
+        _playback_worker's own thread concurrently drives sd.play/sd.stop/
+        sd.wait on the same sounddevice global stream. Calling sd.stop()
+        from stop_tts() too races that native call across threads -- a
+        suspected cause of the rapid-barge-in segfault. Only
+        _playback_worker may call sd.stop()."""
+        engine = self._make_engine()
+        with patch("charlie.voice.sd") as mock_sd:
+            engine.stop_tts()
+            mock_sd.stop.assert_not_called()
+
     def test_mute_toggle(self):
         engine = self._make_engine()
         engine.muted = True

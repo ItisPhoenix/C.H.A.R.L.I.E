@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ReactElement } from "react";
 import { useCharlieStore, rgba, lighten } from "../store/useCharlieStore";
 import type { Task } from "../store/useCharlieStore";
+import { DesktopView } from "./DesktopView";
 
 interface Agent {
   name: string;
@@ -51,13 +52,14 @@ interface McpTool {
   };
 }
 
-type Tab = "swarm" | "memory" | "mcp" | "tasks";
+type Tab = "swarm" | "memory" | "mcp" | "tasks" | "desktop";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "swarm", label: "Swarm" },
   { id: "memory", label: "Memory" },
   { id: "mcp", label: "MCP" },
   { id: "tasks", label: "Tasks" },
+  { id: "desktop", label: "Desktop" },
 ];
 
 export const AGENT_COLOR: Record<string, string> = {
@@ -251,6 +253,8 @@ export function InsightRail({
   const tasks = blackboard?.tasks ?? [];
   const agentList = Object.values(agents);
   const accentColor = useCharlieStore((s) => s.accentColor);
+  const desktopControlEnabled = useCharlieStore((s) => s.desktopControlEnabled);
+  const visibleTabs = TABS.filter((t) => t.id !== "desktop" || desktopControlEnabled);
 
   const accentDim = rgba(accentColor, 0.12);
   const accentBorder = rgba(accentColor, 0.25);
@@ -261,7 +265,7 @@ export function InsightRail({
       {/* Segmented tab control */}
       <div className="px-3 pt-3">
         <div className="flex gap-1 rounded-2xl bg-[var(--color-glass-bg-2)] p-1 border border-[var(--color-glass-border)]">
-          {TABS.map((t) => (
+          {visibleTabs.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
@@ -675,6 +679,8 @@ export function InsightRail({
             )}
           </div>
         )}
+
+        {tab === "desktop" && <DesktopView />}
       </div>
 
       {systemStatus && (

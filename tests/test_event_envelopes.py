@@ -20,6 +20,7 @@ session_id, which is the same guarantee the runtime path provides.
 
 import ast
 import os
+import time
 from typing import Any, Dict, List
 
 import pytest
@@ -196,3 +197,104 @@ def test_transcript_emit_gated_to_voice_platform():
     assert "voice" in guard_src, (
         f"'transcript' emit guard does not gate on platform == 'voice': {guard_src}"
     )
+
+
+def test_background_learn_skips_screen_content_queries():
+    """Regression test: _background_learn stores the reply as a candidate
+    "user preference" -- a screen description ("I see two tabs...") is never
+    that, and storing it pollutes memory with stale screen snapshots that
+    later resurface (via memory_store.search) on unrelated "what's on my
+    screen" queries, making the answer look frozen at an old state.
+
+    Structural (AST) check, matching this file's approach elsewhere: see
+    test_transcript_emit_gated_to_voice_platform above for why.
+    """
+    module_ast = ast.parse(_MAIN_SOURCE)
+    process_fn = None
+    for n in ast.walk(module_ast):
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_process":
+            process_fn = n
+            break
+    assert process_fn is not None, "_process() not found in main.py"
+
+    found_guard = None
+    for n in ast.walk(process_fn):
+        if isinstance(n, ast.If):
+            defines_background_learn = any(
+                isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and c.name == "_background_learn"
+                for c in ast.walk(n)
+            )
+            if defines_background_learn:
+                found_guard = n
+                break
+
+    assert found_guard is not None, (
+        "_background_learn definition/guard not found in _process()"
+    )
+    guard_src = ast.unparse(found_guard.test)
+    assert "screen" in guard_src.lower(), (
+        f"_background_learn guard does not exclude screen-content queries: {guard_src}"
+    )
+
+
+def test_on_speech_dedupes_identical_text_within_window():
+    """VAD can over-segment one utterance into multiple speech segments
+    (a mid-sentence pause, or the user repeating themselves unsure Charlie
+    heard) that each transcribe to the same/near-identical text -- each
+    independently reaching on_speech and spawning its own full turn, so
+    Charlie answers the same question multiple times in a row. A duplicate
+    arriving shortly after an identical one must be suppressed before a
+    second turn is dispatched.
+
+    Structural exec check, matching this file's approach elsewhere (see
+    _run_callback above): on_speech is a nested closure inside main()
+    capturing several other closures/nonlocals -- faking those out is what
+    this harness already does for the other nested-callback tests.
+    """
+    module_ast = ast.parse(_MAIN_SOURCE)
+    src = _extract_function_source(module_ast, "on_speech")
+
+    dispatched = []
+
+    class _NullLogger:
+        def info(self, *a, **k):
+            pass
+
+    namespace: Dict[str, Any] = {
+        "_normalize_app_list": lambda t: t,
+        "logger": _NullLogger(),
+        "time": time,
+        "ensure_session_ready": lambda sid: None,
+        "_schedule_process": lambda coro, loop: dispatched.append(coro),
+        "_process": lambda *a, **k: "coro-placeholder",
+        "brain": None,
+        "voice": None,
+        "loop": None,
+        "recent_turn_texts": {},
+        "_DEDUPE_WINDOW_SEC": 5.0,
+    }
+    # on_speech declares `nonlocal current_web_session_id`, which needs a real
+    # enclosing function scope (nonlocal is invalid at module level) -- wrap it
+    # in a synthetic outer function that owns that local, mirroring the real
+    # nesting inside main().
+    import textwrap
+    wrapper_src = (
+        "def _wrapper():\n"
+        "    current_web_session_id = 'default'\n"
+        + textwrap.indent(src, "    ")
+        + "\n    return on_speech\n"
+    )
+    exec(compile(wrapper_src, "<main.on_speech>", "exec"), namespace)
+    on_speech = namespace["_wrapper"]()
+
+    on_speech("What do you see on my screen?")
+    on_speech("What do you see on my screen?")  # duplicate, arrives moments later
+
+    assert len(dispatched) == 1, (
+        f"on_speech dispatched {len(dispatched)} turns for two identical "
+        "back-to-back utterances -- duplicate was not suppressed"
+    )
+
+    on_speech("Something completely different")
+    assert len(dispatched) == 2, "on_speech suppressed a genuinely new utterance"

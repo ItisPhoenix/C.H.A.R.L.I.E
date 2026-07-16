@@ -19,6 +19,11 @@ _DEFAULT_EMBEDDING_URL = ""
 _DEFAULT_RELEVANCE_THRESHOLD = 0.3
 _FACT_EXTRACT_MAX_CHARS = 2000
 _FACT_EXTRACT_MODEL = ""
+# Retries for the primary embedding service before falling back to a local
+# (different-dimension) model -- covers the common startup race where LM
+# Studio is still loading the embedding model when Charlie boots.
+_EMBEDDING_RETRY_ATTEMPTS = 3
+_EMBEDDING_RETRY_DELAY_SEC = 2.0
 
 
 class _RemoteEmbeddingFunction:
@@ -100,15 +105,23 @@ def _build_embedding_function(config: Any) -> Any:
     url = getattr(config, "memory_embedding_url", _DEFAULT_EMBEDDING_URL)
     model = getattr(config, "memory_embedding_model", _DEFAULT_EMBEDDING_MODEL)
 
-    # Try primary embedding service
-    try:
-        ef = _RemoteEmbeddingFunction(model=model, base_url=url)
-        # Quick smoke test
-        ef.embed_query(["test"])
-        logger.info("Using embedding service at %s (model=%s)", url, model)
-        return ef
-    except Exception as e:
-        logger.warning("Primary embedding service unavailable: %s", e)
+    # Try primary embedding service, retrying a few times first -- a cold-started
+    # LM Studio may still be loading the embedding model for the first second(s).
+    # Falling back immediately silently swaps in a different-dimension local
+    # model, which breaks every future query against the existing collection.
+    for attempt in range(1, _EMBEDDING_RETRY_ATTEMPTS + 1):
+        try:
+            ef = _RemoteEmbeddingFunction(model=model, base_url=url)
+            ef.embed_query(["test"])  # smoke test
+            logger.info("Using embedding service at %s (model=%s)", url, model)
+            return ef
+        except Exception as e:
+            logger.warning(
+                "Primary embedding service unavailable (attempt %d/%d): %s",
+                attempt, _EMBEDDING_RETRY_ATTEMPTS, e,
+            )
+            if attempt < _EMBEDDING_RETRY_ATTEMPTS:
+                time.sleep(_EMBEDDING_RETRY_DELAY_SEC)
 
     # Fallback to sentence-transformers
     try:

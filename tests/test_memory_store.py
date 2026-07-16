@@ -172,6 +172,19 @@ class TestMemoryStore:
 class TestMemoryStoreEdgeCases:
     """Edge cases: empty config fields, fact extraction configured, etc."""
 
+    def _make_store(self, monkeypatch):
+        """Build a MemoryStore whose _build_embedding_function returns a mock."""
+        mock_ef = MagicMock()
+        mock_ef.return_value.__call__ = MagicMock()
+        mock_ef.embed_documents = MagicMock(return_value=[[0.1] * 384])
+        mock_ef.embed_query = MagicMock(return_value=[[0.1] * 384])
+        monkeypatch.setattr(
+            "charlie.memory_store._build_embedding_function",
+            lambda _: mock_ef,
+        )
+        from charlie.memory_store import MemoryStore
+        return MemoryStore(FakeConfig())
+
     def test_config_missing_fields_default(self):
         """MemoryStore shouldn't crash when config lacks optional attrs."""
         import types
@@ -214,15 +227,80 @@ class TestMemoryStoreEdgeCases:
         assert n == 0  # "Hi" is only 2 chars, skips
         store._collection.add.assert_not_called()
 
-    def _make_store(self, monkeypatch):
-        """Build a MemoryStore whose _build_embedding_function returns a mock."""
-        mock_ef = MagicMock()
-        mock_ef.return_value.__call__ = MagicMock()
-        mock_ef.embed_documents = MagicMock(return_value=[[0.1] * 384])
-        mock_ef.embed_query = MagicMock(return_value=[[0.1] * 384])
-        monkeypatch.setattr(
-            "charlie.memory_store._build_embedding_function",
-            lambda _: mock_ef,
-        )
-        from charlie.memory_store import MemoryStore
-        return MemoryStore(FakeConfig())
+
+class TestBuildEmbeddingFunctionRetry:
+    """A transient startup race (LM Studio still loading the embedding model
+    when Charlie boots) must not immediately fall back to a different-
+    dimension local model -- that silently breaks every future memory search
+    against the existing (different-dimension) persisted collection."""
+
+    def test_retries_primary_before_falling_back(self, monkeypatch):
+        import charlie.memory_store as memory_store
+
+        attempts = []
+
+        class FlakyRemoteEmbeddingFunction:
+            def __init__(self, model, base_url):
+                pass
+
+            def embed_query(self, input):
+                attempts.append(1)
+                if len(attempts) < memory_store._EMBEDDING_RETRY_ATTEMPTS:
+                    raise ConnectionError("not ready yet")
+                return [[0.1, 0.2]]
+
+            def name(self):
+                return "remote-fake"
+
+        monkeypatch.setattr(memory_store, "_RemoteEmbeddingFunction", FlakyRemoteEmbeddingFunction)
+        monkeypatch.setattr(memory_store.time, "sleep", lambda s: None)
+
+        ef = memory_store._build_embedding_function(FakeConfig())
+
+        assert len(attempts) == memory_store._EMBEDDING_RETRY_ATTEMPTS
+        assert isinstance(ef, FlakyRemoteEmbeddingFunction)
+
+    def test_falls_back_after_exhausting_retries(self, monkeypatch):
+        import charlie.memory_store as memory_store
+
+        attempts = []
+
+        class AlwaysFailsRemoteEmbeddingFunction:
+            def __init__(self, model, base_url):
+                pass
+
+            def embed_query(self, input):
+                attempts.append(1)
+                raise ConnectionError("still down")
+
+        monkeypatch.setattr(memory_store, "_RemoteEmbeddingFunction", AlwaysFailsRemoteEmbeddingFunction)
+        monkeypatch.setattr(memory_store.time, "sleep", lambda s: None)
+
+        ef = memory_store._build_embedding_function(FakeConfig())
+
+        assert len(attempts) == memory_store._EMBEDDING_RETRY_ATTEMPTS
+        assert isinstance(ef, memory_store._SentenceTransformerEmbeddingFunction)
+
+    def test_succeeds_immediately_without_sleeping(self, monkeypatch):
+        """No retries needed -- must not sleep at all when the primary is up."""
+        import charlie.memory_store as memory_store
+
+        slept = []
+        monkeypatch.setattr(memory_store.time, "sleep", lambda s: slept.append(s))
+
+        class HealthyRemoteEmbeddingFunction:
+            def __init__(self, model, base_url):
+                pass
+
+            def embed_query(self, input):
+                return [[0.1, 0.2]]
+
+            def name(self):
+                return "remote-fake"
+
+        monkeypatch.setattr(memory_store, "_RemoteEmbeddingFunction", HealthyRemoteEmbeddingFunction)
+
+        ef = memory_store._build_embedding_function(FakeConfig())
+
+        assert slept == []
+        assert isinstance(ef, HealthyRemoteEmbeddingFunction)

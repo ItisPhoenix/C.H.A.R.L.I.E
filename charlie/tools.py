@@ -4,17 +4,21 @@ All tool definitions, execution logic, and provider integrations live here.
 No business logic -- just tool I/O.
 """
 
+import asyncio
+import base64
 import logging
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
+from charlie import recovery
 from charlie.agents import AGENT_REGISTRY
 from charlie.config import config
 from charlie.session_store import SessionStore
@@ -49,6 +53,10 @@ DDG_USER_AGENT = "Mozilla/5.0"
 
 # --- Shell ---
 SHELL_TIMEOUT = 10.0
+
+# --- Dashboard live view (desktop_frame event) ---
+_DESKTOP_FRAME_FPS = 2.0
+_DESKTOP_FRAME_MAX_EDGE = 960
 
 # --- SearXNG keyword detection ---
 _TIME_SENSITIVE_KEYWORDS = ("today", "new", "recent", "latest", "breaking")
@@ -616,18 +624,34 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
                 break
 
     try:
-        process = subprocess.run(
+        process = subprocess.Popen(
             command,
             shell=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=SHELL_TIMEOUT,
         )
+        try:
+            stdout, stderr = process.communicate(timeout=SHELL_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # A bare foreground-app launch (e.g. "notepad", not `start ""
+            # notepad`) keeps its parent shell alive until the app closes,
+            # so this fires even when the app opened successfully. Reporting
+            # it as "Error" made the caller retry and spawn a duplicate
+            # instance. Kill the now-idle wrapper shell but report this as
+            # still-running, not a failure.
+            process.kill()
+            process.communicate()
+            return (
+                f"Command is still running after {SHELL_TIMEOUT}s with no output "
+                "(left running -- if this opened an app or window, it launched "
+                "successfully)."
+            )
         parts = []
-        if process.stdout and process.stdout.strip():
-            parts.append(f"STDOUT:\n{process.stdout.strip()}")
-        if process.stderr and process.stderr.strip():
-            parts.append(f"STDERR:\n{process.stderr.strip()}")
+        if stdout and stdout.strip():
+            parts.append(f"STDOUT:\n{stdout.strip()}")
+        if stderr and stderr.strip():
+            parts.append(f"STDERR:\n{stderr.strip()}")
         if parts:
             return "\n".join(parts)
         # Many commands (start, taskkill, etc.) return empty on success
@@ -638,8 +662,6 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
         if not voice_mode:
             result = "WARNING: Shell commands are powerful. Be careful with destructive operations.\n\n" + result
         return result
-    except subprocess.TimeoutExpired:
-        return f"Error: Command timed out after {SHELL_TIMEOUT}s."
     except Exception as e:
         logger.exception("Shell command error: %s", command)
         return f"Error executing shell command: {e}"
@@ -1399,6 +1421,89 @@ def _desktop_ready() -> bool:
     return DESKTOP_AVAILABLE
 
 
+# --- Dashboard live-view event bus bridge (set via set_event_bus at init) ---
+_event_bus = None  # type: Optional[Any]
+_event_loop = None  # type: Optional[Any]
+_last_frame_emit_at = 0.0
+
+
+def set_event_bus(bus: Any, loop: Any) -> None:
+    """Wire the producer-side EventBus + its asyncio loop so desktop tool
+    functions (running on UIA_EXECUTOR, not the asyncio loop) can bridge a
+    desktop_frame event across threads. Called once from main.py at startup."""
+    global _event_bus, _event_loop
+    _event_bus = bus
+    _event_loop = loop
+
+
+def _downscale_png(png_bytes: bytes, max_edge: int = _DESKTOP_FRAME_MAX_EDGE) -> bytes:
+    """Resize `png_bytes` so its longer edge is `max_edge`, preserving aspect
+    ratio. Keeps the desktop_frame event payload small at the dashboard's
+    throttled frame rate."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    img = Image.open(BytesIO(png_bytes))
+    scale = max_edge / max(img.size)
+    if scale < 1:
+        img = img.resize(
+            (round(img.size[0] * scale), round(img.size[1] * scale)), Image.LANCZOS
+        )
+    out = BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
+def _emit_desktop_frame(png_bytes: bytes, elements: List[Any]) -> None:
+    """Best-effort, throttled, fire-and-forget: push a desktop_frame event to
+    the dashboard's "Watch It Drive" live view. Never raises -- a failure
+    here must not affect the calling tool's return value."""
+    global _last_frame_emit_at
+    if _event_bus is None or _event_loop is None:
+        return
+    now = time.time()
+    if now - _last_frame_emit_at < 1.0 / _DESKTOP_FRAME_FPS:
+        return
+    _last_frame_emit_at = now
+    try:
+        image_b64 = base64.b64encode(_downscale_png(png_bytes)).decode("ascii")
+        payload = {
+            "session_id": recovery.get_active_session_id(),
+            "image_b64": image_b64,
+            "marks": [
+                {"mark_id": e.mark_id, "name": e.name, "bounds": list(e.bounds)}
+                for e in elements
+            ],
+        }
+        asyncio.run_coroutine_threadsafe(
+            _event_bus.emit("desktop_frame", payload), _event_loop
+        )
+    except Exception:
+        logger.warning("desktop_frame emit failed", exc_info=True)
+
+
+def _capture_and_emit_frame(elements: List[Any]) -> None:
+    """Fire-and-forget: capture + annotate + downscale + emit a desktop_frame
+    for the dashboard live view, off the calling thread so it never adds
+    latency to desktop_observe/desktop_read_screen/desktop_screenshot's
+    return. No-ops silently if OCR/vision deps are missing."""
+    from charlie.desktop import ocr as desktop_ocr
+    from charlie.desktop import vision as desktop_vision
+    if not desktop_ocr.OCR_AVAILABLE or not desktop_vision.VISION_AVAILABLE:
+        return
+
+    def _work():
+        try:
+            png = desktop_ocr.capture()
+            annotated = desktop_vision.annotate_som(png, elements)
+            _emit_desktop_frame(annotated, elements)
+        except Exception:
+            logger.warning("desktop frame capture failed", exc_info=True)
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
 def _ocr_fallback_marks(uia_elements: List[Any]) -> List[Any]:
     """Merge an OCR pass into uia_elements.
 
@@ -1436,6 +1541,7 @@ def desktop_observe() -> str:
         return _DESKTOP_DISABLED_MSG
     from charlie.desktop.uia import serialize_marks, snapshot_tree
     elements = _ocr_fallback_marks(snapshot_tree(max_depth=8))
+    _capture_and_emit_frame(elements)
     if not elements:
         return "No UI elements found in the foreground window."
     return serialize_marks(elements)
@@ -1464,6 +1570,7 @@ def desktop_read_screen() -> str:
     except Exception:
         logger.warning("desktop_read_screen OCR pass failed", exc_info=True)
         return "Error: OCR pass failed."
+    _capture_and_emit_frame(elements)
     if not elements:
         return "No readable text found on screen."
     return serialize_marks(elements)
@@ -1563,6 +1670,7 @@ def desktop_screenshot() -> str:
     elements = _ocr_fallback_marks(snapshot_tree(max_depth=8))
     text_result = serialize_marks(elements) if elements else "No UI elements found in the foreground window."
     if not config.vision_enabled:
+        _capture_and_emit_frame(elements)
         return text_result
     from charlie.desktop import ocr as desktop_ocr
     from charlie.desktop import vision as desktop_vision
@@ -1572,6 +1680,7 @@ def desktop_screenshot() -> str:
         png = desktop_ocr.capture()
         annotated = desktop_vision.annotate_som(png, elements)
         set_pending_vision_image(desktop_vision.to_data_url(annotated))
+        _emit_desktop_frame(annotated, elements)
     except Exception:
         logger.warning("desktop_screenshot vision annotation failed", exc_info=True)
     return text_result

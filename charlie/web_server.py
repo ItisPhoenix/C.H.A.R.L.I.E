@@ -54,7 +54,7 @@ if config.mcp_enabled:
         logger.warning("Web MCP subsystem failed to initialize: %s", e)
         mcp_client = None
 # Events that carry a session_id and must only reach clients subscribed to it.
-_SESSION_SCOPED_EVENTS = ("token", "transcript")
+_SESSION_SCOPED_EVENTS = ("token", "transcript", "desktop_frame")
 event_bus: EventBus | None = None
 LAUNCH_ID: str = config.charlie_launch_id
 _store: SessionStore | None = None
@@ -293,6 +293,7 @@ async def status():
         "launch_id": LAUNCH_ID,
         "uptime_seconds": int(time.time() - _START_TIME),
         "pid": os.getpid(),
+        "desktop_control_enabled": config.desktop_control_enabled,
     }
 
 

@@ -49,6 +49,7 @@ export default function Page() {
   const accentColor = useCharlieStore((s) => s.accentColor);
   const activeProposal = useCharlieStore((s) => s.activeProposal);
   const setActiveProposal = useCharlieStore((s) => s.setActiveProposal);
+  const setDesktopControlEnabled = useCharlieStore((s) => s.setDesktopControlEnabled);
 
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -317,6 +318,16 @@ export default function Page() {
             store.addMessage({ role: "user", content: spoken });
           }
         }
+        else if (msg.type === "desktop_frame") {
+          const eventSession = sessionOf(msg);
+          if (eventSession && eventSession !== currentSessionIdRef.current) return;
+          store.setLatestDesktopFrame({
+            sessionId: eventSession || currentSessionIdRef.current,
+            imageB64: msg.payload?.image_b64 || "",
+            marks: msg.payload?.marks || [],
+            receivedAt: Date.now(),
+          });
+        }
         else if (msg.type === "recovery_proposal") {
           const eventSession = sessionOf(msg);
           if (eventSession && eventSession !== currentSessionIdRef.current) return;
@@ -526,6 +537,9 @@ export default function Page() {
       if (lid) {
         setLaunchId(lid);
       }
+      setDesktopControlEnabled(
+        Boolean((status as { desktop_control_enabled?: boolean } | null)?.desktop_control_enabled)
+      );
       // 2. Always default to This Launch scope.
       setSessionScope("this_launch");
 
@@ -567,7 +581,7 @@ export default function Page() {
       }
     };
     void init();
-  }, [fetchSessions, handleCreateSession, setAudio, setMic, fetchJson, setLaunchId, setSessionScope]);
+  }, [fetchSessions, handleCreateSession, setAudio, setMic, fetchJson, setLaunchId, setSessionScope, setDesktopControlEnabled]);
 
   // Sync messages when active session changes
   useEffect(() => {

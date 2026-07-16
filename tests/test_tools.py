@@ -87,6 +87,37 @@ def test_shell_execute_lists_env(monkeypatch):
     assert isinstance(env_output, str)
 
 
+def test_shell_execute_timeout_does_not_report_error(monkeypatch):
+    """A command that blocks past SHELL_TIMEOUT (e.g. a bare GUI app launch
+    like "notepad", which keeps its parent cmd.exe alive until closed) must
+    not be reported as an "Error", or the caller retries and double-spawns
+    the app that already opened successfully."""
+    import subprocess as subprocess_module
+
+    from charlie import tools as tools_module
+
+    class FakeProcess:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def communicate(self, input=None, timeout=None):
+            if timeout is not None:
+                raise subprocess_module.TimeoutExpired(cmd="notepad", timeout=timeout)
+            return ("", "")
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(
+        tools_module.subprocess, "Popen", lambda *a, **k: FakeProcess()
+    )
+    output = shell_execute("notepad")
+    assert "Error" not in output
+
+
 def test_shell_execute_blocks_metacharacters_and_keywords():
     """Locks the exact error text shell_execute returns via the shared
     is_shell_command_blocked() guard, now also reused by charlie.recovery."""
@@ -96,6 +127,202 @@ def test_shell_execute_blocks_metacharacters_and_keywords():
     assert shell_execute("format c: /q") == (
         "Error: Command blocked -- risky keyword 'format '"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 dashboard "desktop_frame" event -- downscale + throttle + emit bridge
+# ---------------------------------------------------------------------------
+
+def test_downscale_png_caps_long_edge_and_preserves_aspect():
+    import io
+
+    from PIL import Image
+
+    from charlie.tools import _downscale_png
+
+    src = Image.new("RGB", (2000, 1000), color=(10, 20, 30))
+    buf = io.BytesIO()
+    src.save(buf, format="PNG")
+
+    out_bytes = _downscale_png(buf.getvalue(), max_edge=960)
+    out = Image.open(io.BytesIO(out_bytes))
+
+    assert max(out.size) == 960
+    assert out.size[0] / out.size[1] == 2000 / 1000
+
+
+def _make_png_bytes() -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (40, 20), color=(1, 2, 3)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_set_event_bus_stores_bus_and_loop(monkeypatch):
+    from charlie import tools as tools_module
+
+    # monkeypatch.setattr snapshots the current value here and restores it
+    # after the test, even though set_event_bus() below mutates directly.
+    monkeypatch.setattr(tools_module, "_event_bus", None)
+    monkeypatch.setattr(tools_module, "_event_loop", None)
+
+    bus, loop = object(), object()
+    tools_module.set_event_bus(bus, loop)
+
+    assert tools_module._event_bus is bus
+    assert tools_module._event_loop is loop
+
+
+def test_emit_desktop_frame_bridges_to_event_bus_with_shaped_payload(monkeypatch):
+    import asyncio as asyncio_module
+
+    from charlie import tools as tools_module
+    from charlie.desktop.uia import Element
+
+    calls = []
+
+    class FakeBus:
+        async def emit(self, event_type, payload):
+            calls.append((event_type, payload))
+
+    monkeypatch.setattr(
+        tools_module.asyncio,
+        "run_coroutine_threadsafe",
+        lambda coro, loop: asyncio_module.new_event_loop().run_until_complete(coro),
+    )
+    monkeypatch.setattr(
+        tools_module.recovery, "get_active_session_id", lambda: "sess-123"
+    )
+    monkeypatch.setattr(tools_module, "_event_bus", FakeBus())
+    monkeypatch.setattr(tools_module, "_event_loop", object())
+    monkeypatch.setattr(tools_module, "_last_frame_emit_at", 0.0)  # past the throttle window
+
+    elements = [
+        Element(
+            mark_id=1, name="Save", control_type="Button",
+            bounds=(0, 0, 10, 10), is_password=False, is_offscreen=False,
+        )
+    ]
+    tools_module._emit_desktop_frame(_make_png_bytes(), elements)
+
+    assert len(calls) == 1
+    etype, payload = calls[0]
+    assert etype == "desktop_frame"
+    assert payload["session_id"] == "sess-123"
+    assert isinstance(payload["image_b64"], str) and payload["image_b64"]
+    assert payload["marks"] == [{"mark_id": 1, "name": "Save", "bounds": [0, 0, 10, 10]}]
+
+
+def test_emit_desktop_frame_throttled_within_window(monkeypatch):
+    import asyncio as asyncio_module
+    import time
+
+    from charlie import tools as tools_module
+
+    calls = []
+
+    class FakeBus:
+        async def emit(self, event_type, payload):
+            calls.append((event_type, payload))
+
+    monkeypatch.setattr(
+        tools_module.asyncio,
+        "run_coroutine_threadsafe",
+        lambda coro, loop: asyncio_module.new_event_loop().run_until_complete(coro),
+    )
+    monkeypatch.setattr(
+        tools_module.recovery, "get_active_session_id", lambda: "sess-123"
+    )
+    monkeypatch.setattr(tools_module, "_event_bus", FakeBus())
+    monkeypatch.setattr(tools_module, "_event_loop", object())
+    monkeypatch.setattr(tools_module, "_last_frame_emit_at", time.time())  # inside the throttle window
+
+    tools_module._emit_desktop_frame(_make_png_bytes(), [])
+
+    assert calls == []
+
+
+def test_capture_and_emit_frame_runs_capture_annotate_emit_off_thread(monkeypatch):
+    """desktop_observe/desktop_read_screen/desktop_screenshot must never wait
+    on frame capture -- it has to run off the calling thread so it can't add
+    latency to the tool's return value."""
+    import threading
+
+    import charlie.desktop.ocr  # noqa: F401 -- ensures the submodule attr exists to patch
+    import charlie.desktop.vision  # noqa: F401
+    from charlie import tools as tools_module
+
+    calls = []
+
+    class FakeOcr:
+        OCR_AVAILABLE = True
+
+        @staticmethod
+        def capture():
+            return _make_png_bytes()
+
+    class FakeVision:
+        VISION_AVAILABLE = True
+
+        @staticmethod
+        def annotate_som(png, elements):
+            calls.append(("annotate", elements))
+            return png
+
+    def fake_emit(png, elements):
+        calls.append(("emit", elements))
+
+    monkeypatch.setattr("charlie.desktop.ocr", FakeOcr)
+    monkeypatch.setattr("charlie.desktop.vision", FakeVision)
+    monkeypatch.setattr(tools_module, "_emit_desktop_frame", fake_emit)
+
+    started = []
+    real_thread_init = threading.Thread.__init__
+
+    def fake_thread_init(self, *a, target=None, daemon=None, **k):
+        started.append(target)
+        real_thread_init(self, target=target, daemon=daemon)
+
+    monkeypatch.setattr(threading.Thread, "__init__", fake_thread_init)
+    monkeypatch.setattr(threading.Thread, "start", lambda self: self._target())
+
+    tools_module._capture_and_emit_frame([])
+
+    assert started  # a background thread was spawned, not run inline
+    assert ("annotate", []) in calls
+    assert ("emit", []) in calls
+
+
+def test_desktop_observe_wires_up_capture_and_emit_frame(monkeypatch):
+    """desktop_observe must feed the dashboard live view on every call, not
+    just when the vision tier is on -- confirmed decision for this phase."""
+    from charlie import tools as tools_module
+    from charlie.desktop.uia import Element
+
+    elements = [
+        Element(
+            mark_id=1, name="Save", control_type="Button",
+            bounds=(0, 0, 10, 10), is_password=False, is_offscreen=False,
+        )
+    ]
+
+    monkeypatch.setattr(tools_module, "_desktop_ready", lambda: True)
+    monkeypatch.setattr(tools_module, "_ocr_fallback_marks", lambda uia_elements: elements)
+
+    import charlie.desktop.uia as uia_module
+    monkeypatch.setattr(uia_module, "snapshot_tree", lambda max_depth=8: [])
+
+    calls = []
+    monkeypatch.setattr(
+        tools_module, "_capture_and_emit_frame", lambda els: calls.append(els)
+    )
+
+    tools_module.desktop_observe()
+
+    assert calls == [elements]
 
 
 def test_system_diagnostics_unknown_check(monkeypatch):

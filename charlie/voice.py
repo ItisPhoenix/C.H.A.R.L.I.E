@@ -314,7 +314,14 @@ class VoiceEngine:
                 self.playback_queue.get_nowait()
             except queue.Empty:
                 break
-        sd.stop()
+        # Do NOT call sd.stop() here -- this runs on the caller's thread
+        # (e.g. the barge-in path), while _playback_worker's own thread
+        # concurrently drives sd.play()/sd.stop()/sd.wait() on the same
+        # sounddevice global stream. Two threads touching PortAudio's
+        # stream lifecycle unsynchronized is a native-crash hazard, worse
+        # under rapid repeated barge-in. _playback_worker already polls
+        # stop_tts_event every 10ms during playback and calls sd.stop()
+        # itself from its own thread -- that's the only safe caller.
 
     def set_audio_state(self, muted: Optional[bool] = None, volume: Optional[float] = None) -> dict:
         """Apply dashboard speaker controls. Returns the resulting state.

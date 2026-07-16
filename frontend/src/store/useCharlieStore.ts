@@ -88,6 +88,19 @@ export interface Alert {
   timestamp: string;
 }
 
+export interface DesktopFrameMark {
+  mark_id: number;
+  name: string;
+  bounds: number[];
+}
+
+export interface DesktopFrame {
+  sessionId: string;
+  imageB64: string;
+  marks: DesktopFrameMark[];
+  receivedAt: number;
+}
+
 interface CharlieState {
   connected: boolean;
   systemStatus: SystemStatus;
@@ -133,6 +146,10 @@ interface CharlieState {
   setActiveToolApproval: (r: ToolApprovalRequest | null) => void;
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
+  latestDesktopFrame: DesktopFrame | null;
+  setLatestDesktopFrame: (f: DesktopFrame | null) => void;
+  desktopControlEnabled: boolean;
+  setDesktopControlEnabled: (enabled: boolean) => void;
 }
 
 export const useCharlieStore = create<CharlieState>((set) => ({
@@ -200,6 +217,10 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setActiveToolApproval: (activeToolApproval) => set({ activeToolApproval }),
   settingsOpen: false,
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  latestDesktopFrame: null,
+  setLatestDesktopFrame: (latestDesktopFrame) => set({ latestDesktopFrame }),
+  desktopControlEnabled: false,
+  setDesktopControlEnabled: (desktopControlEnabled) => set({ desktopControlEnabled }),
 }));
 
 export function hexToRgb(hex: string) {
