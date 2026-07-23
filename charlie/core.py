@@ -1082,6 +1082,24 @@ def _detect_set_goal(query: str) -> Optional[str]:
     return m.group(1).strip().rstrip(".") if m else None
 
 
+# --- H.E.L.M. operator persona (Phase 4 desktop-control identity) ---
+_HELM_ADDRESS_RE = re.compile(r"^\s*helm\b[,:]?\s*", re.IGNORECASE)
+_HELM_PERSONA_TEXT = (
+    "[H.E.L.M. MODE] You are speaking as H.E.L.M. (Hands-on Executive Logic "
+    "Module), Charlie's desktop-control operator persona. Narrate each step "
+    "briefly before acting. Prefer desktop_observe, desktop_click, "
+    "desktop_type, desktop_invoke, desktop_key, desktop_read_screen, and "
+    "desktop_screenshot over other tools for this request. All existing "
+    "approval gates, the panic hotkey, and the credential hard-stop still "
+    "apply unchanged."
+)
+
+
+def _detect_operator_persona(query: str) -> bool:
+    """True if the user addressed the H.E.L.M. desktop-control persona by name."""
+    return bool(_HELM_ADDRESS_RE.match(query.strip()))
+
+
 _UNINFORMATIVE_PATTERNS = re.compile(
     r"^(?:Error|No results found|<html|404|500|empty|None|N/A)",
     re.IGNORECASE,
@@ -1106,6 +1124,7 @@ def _build_volatile_tier(
     has_user: bool = False, has_opinions: bool = False,
     verbosity_hint: Optional[str] = None,
     active_goal: Optional[str] = None,
+    operator_persona: bool = False,
 ) -> str:
     """Build the volatile tier: date/time, platform, budget, evidence blocks. Changes each turn."""
     output_rules = _PLATFORM_OUTPUT_RULES.get(platform, _DEFAULT_OUTPUT_RULES)
@@ -1131,6 +1150,8 @@ def _build_volatile_tier(
         parts.append(f"Answer style: {verbosity_hint}.")
     if active_goal:
         parts.append(f"Current goal: {active_goal}. Stay focused on this.")
+    if operator_persona:
+        parts.append(_HELM_PERSONA_TEXT)
     return "\n".join(parts)
 
 
@@ -1782,6 +1803,7 @@ class Brain:
             has_user=has_user, has_opinions=has_opinions,
             verbosity_hint=verbosity_hint,
             active_goal=self._active_goal,
+            operator_persona=_detect_operator_persona(user_input),
         )
         system_msg = _assemble_system_prompt(
             self._stable_tier, self._context_tier, volatile

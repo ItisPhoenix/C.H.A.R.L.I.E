@@ -8,6 +8,7 @@ from charlie.core import (
     _assess_tool_result_relevance,
     _build_volatile_tier,
     _detect_correction,
+    _detect_operator_persona,
     _detect_set_goal,
     _detect_verbosity_feedback,
     _is_followup,
@@ -285,3 +286,40 @@ class TestVolatilityTierGoal:
         )
         assert "Current goal: plan vacation" in tier
         assert "Stay focused" in tier
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: H.E.L.M. desktop-control operator persona
+# ---------------------------------------------------------------------------
+
+class TestOperatorPersonaDetection:
+    """Verify _detect_operator_persona catches H.E.L.M. address."""
+
+    def test_helm_with_comma(self):
+        assert _detect_operator_persona("Helm, open my email") is True
+
+    def test_helm_lowercase_no_punctuation(self):
+        assert _detect_operator_persona("helm open my email") is True
+
+    def test_helm_not_at_start(self):
+        assert _detect_operator_persona("ask helm to open my email") is False
+
+    def test_no_match(self):
+        assert _detect_operator_persona("what's the weather") is False
+
+
+class TestVolatileTierOperatorPersona:
+    """Verify _build_volatile_tier injects the H.E.L.M. persona block."""
+
+    def test_no_persona(self):
+        from datetime import datetime
+        tier = _build_volatile_tier("voice", datetime.now(), 5)
+        assert "H.E.L.M." not in tier
+
+    def test_with_persona(self):
+        from datetime import datetime
+        tier = _build_volatile_tier(
+            "voice", datetime.now(), 5, operator_persona=True
+        )
+        assert "H.E.L.M." in tier
+        assert "desktop_observe" in tier

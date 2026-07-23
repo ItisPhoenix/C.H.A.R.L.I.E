@@ -26,6 +26,7 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 |---|---|
 | **Deterministic app & website control** | Fast-paths that bypass the LLM for opening/closing local apps, popular sites, or arbitrary domains. |
 | **Agentic desktop control** *(Windows, opt-in)* | Sees and operates your desktop -- click, type, key chords via native UI Automation, with OCR and a local vision model as fallback tiers. Off by default; needs one-time approval, a global panic hotkey, and auto-halts on repeated failures. |
+| **H.E.L.M. operator persona** | Address desktop control by name ("Helm, open my email") for a narrated, step-by-step operator voice -- same approval gates and panic hotkey, just a distinct identity for the task. |
 
 ### 🧠 Memory & Intelligence
 | | |
