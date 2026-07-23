@@ -21,19 +21,19 @@ class JarvisAgent(BaseAgent):
     )
 
     async def _do_action(self, task_name: str, task=None) -> str:
-        """Orchestrate: break down request, spawn sub-tasks via Vision."""
+        """Orchestrate: break down request, spawn sub-tasks via Doctor Strange."""
         task_id = task.id if task else None
         self.log(f"Analyzing request: {task_name}")
 
-        # Spawn Vision for planning
+        # Spawn Doctor Strange for planning
         self.blackboard.add_task(
             name=f"Plan: {task_name}",
-            assigned_to="Vision",
+            assigned_to="Doctor Strange",
             parent_task_id=task_id,
         )
         self.blackboard.update_task(task_id, status="running")
 
-        # Poll (briefly) for Vision to create sub-tasks, capped at 30s.
+        # Poll (briefly) for Doctor Strange to create sub-tasks, capped at 30s.
         deadline = time.monotonic() + 30.0
 
         sub_tasks: List[Task] = []

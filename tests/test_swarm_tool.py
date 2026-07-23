@@ -73,7 +73,7 @@ def test_delegate_to_agent_task_added_to_blackboard():
     def run():
         r = tool_registry.execute_tool(
             "delegate_to_agent",
-            {"agent_name": "A.I.D.A.", "task_description": "research quantum"},
+            {"agent_name": "K.A.R.E.N.", "task_description": "research quantum"},
         )
         results.append(r)
 
@@ -88,7 +88,7 @@ def test_delegate_to_agent_task_added_to_blackboard():
     quantum_tasks = [t for t in tasks if "quantum" in t.name]
     assert len(quantum_tasks) >= 1
     task = quantum_tasks[0]
-    assert task.assigned_to == "A.I.D.A."
+    assert task.assigned_to == "K.A.R.E.N."
     assert task.status in ("pending", "running")
 
     # Complete the task so the polling loop exits
@@ -96,7 +96,7 @@ def test_delegate_to_agent_task_added_to_blackboard():
     t.join(timeout=5)
     assert len(results) == 1
     assert "quantum research complete" in results[0]
-    assert "A.I.D.A." in results[0]
+    assert "K.A.R.E.N." in results[0]
 
 
 def test_delegate_to_agent_handles_failure():
@@ -111,7 +111,7 @@ def test_delegate_to_agent_handles_failure():
     def run():
         r = tool_registry.execute_tool(
             "delegate_to_agent",
-            {"agent_name": "H.E.R.B.I.E.", "task_description": "failing task"},
+            {"agent_name": "Vision", "task_description": "failing task"},
         )
         results.append(r)
 

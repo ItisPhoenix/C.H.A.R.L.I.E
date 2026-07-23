@@ -1,22 +1,47 @@
-"""FRIDAY - Code generation and file operations specialist."""
+"""FRIDAY - System diagnostics and health monitoring specialist."""
 
 from charlie.agents.base import BaseAgent
+
+# Maps task-name keywords to the matching system_diagnostics check. Falls
+# back to "cpu" (a reasonable general-health signal) when nothing matches.
+_CHECK_KEYWORDS = {
+    "disk": ("disk", "storage", "space"),
+    "memory": ("memory", "ram"),
+    "processes": ("process",),
+    "network": ("network", "connection", "internet"),
+    "cpu": ("cpu", "processor", "load"),
+}
+
+
+def _select_check(task_name: str) -> str:
+    lower = task_name.lower()
+    for check, keywords in _CHECK_KEYWORDS.items():
+        if any(kw in lower for kw in keywords):
+            return check
+    return "cpu"
 
 
 class FRIDAY(BaseAgent):
     name = "F.R.I.D.A.Y."
-    description = "Writes code, manages files, and executes technical tasks."
-    _action_verb = "Coding"
-    _done_log = "Completed"
-    _fail_log = "Failed"
-    allowed_tools = ("file_read", "file_write")
+    description = "Runs system diagnostics, monitors health, and suggests fixes."
+    _action_verb = "Running diagnostics"
+    _done_log = "Diagnostics complete"
+    _fail_log = "Diagnostics failed"
+    allowed_tools = ("system_diagnostics",)
 
     async def _do_action(self, task_name: str, task=None) -> str:
-        prompt = f"""Write code for: {task_name}
+        check = _select_check(task_name)
+        diagnostic_output = await self._call_tool("system_diagnostics", {"check": check})
 
-Return ONLY the code, properly formatted and commented.
-Do not include markdown fences."""
-        return await self._code(prompt)
+        prompt = f"""Run diagnostics for: {task_name}
 
-    async def _code(self, prompt: str) -> str:
-        return await self._complete(prompt, max_tokens=3000)
+Diagnostic ({check}) output:
+{diagnostic_output}
+
+Using the diagnostic output above, check system health, identify issues, and
+recommend fixes. Return a structured diagnostic report."""
+        report = await self._diagnose(prompt)
+        return report
+
+    async def _diagnose(self, prompt: str) -> str:
+        return await self._complete(prompt, max_tokens=1000)

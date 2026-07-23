@@ -63,12 +63,12 @@ shared blackboard to handle complex, multi-step requests:
 | Agent | Focus |
 |---|---|
 | **J.A.R.V.I.S.** | Orchestrator -- analyzes requests, coordinates tasks, spawns planning |
-| **Vision** | Planner -- decomposes requests into sub-task graphs and dependencies |
-| **F.R.I.D.A.Y.** | Code generation and file operations specialist |
+| **Doctor Strange** | Planner -- decomposes requests into sub-task graphs and dependencies |
+| **Shuri** | Code generation and file operations specialist |
 | **E.D.I.T.H.** | Research specialist -- gathers intelligence via web search |
-| **A.I.D.A.** | Content creation specialist -- copy, emails, reports |
-| **K.A.R.E.N.** | System diagnostics and health monitoring specialist |
-| **H.E.R.B.I.E.** | Verification specialist -- checks deliverables against acceptance criteria |
+| **K.A.R.E.N.** | Content creation specialist -- copy, emails, reports |
+| **F.R.I.D.A.Y.** | System diagnostics and health monitoring specialist |
+| **Vision** | Verification specialist -- checks deliverables against acceptance criteria |
 
 The tools these agents (and the Brain) can call include:
 

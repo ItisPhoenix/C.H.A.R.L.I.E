@@ -103,13 +103,13 @@ class TestTerminateAgent:
     async def test_terminate_no_active_task_returns_false(self):
         blackboard = Blackboard()
         orch = SwarmOrchestrator(blackboard)
-        assert orch.terminate_agent("H.E.R.B.I.E.") is False
+        assert orch.terminate_agent("Vision") is False
 
     @pytest.mark.asyncio
     async def test_terminate_ignores_done_tasks(self):
         blackboard = Blackboard()
         orch = SwarmOrchestrator(blackboard)
-        task = blackboard.add_task(name="finished work", assigned_to="A.I.D.A.")
+        task = blackboard.add_task(name="finished work", assigned_to="K.A.R.E.N.")
 
         async def _immediate():
             return "done"
@@ -118,7 +118,7 @@ class TestTerminateAgent:
         await atask  # let it complete
         orch._active_tasks[task.id] = atask
 
-        assert orch.terminate_agent("A.I.D.A.") is False
+        assert orch.terminate_agent("K.A.R.E.N.") is False
 
 
 class TestHandleEscalation:
