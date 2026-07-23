@@ -34,6 +34,8 @@ _ECHO_MAX_WORDS = 4
 # been enqueued. Lets the playback worker distinguish "utterance fully spoken"
 # from momentary inter-chunk queue gaps.
 _TTS_RUN_END = object()
+# Tags a chime item in playback_queue so it skips TTS state bookkeeping.
+_CHIME_ITEM = object()
 _LONG_SENTENCE_CHARS = 250
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?,;])\s+")
 
@@ -658,6 +660,12 @@ class VoiceEngine:
 
                 samples, sample_rate, mouth_values = item
 
+                # Chime: gain already applied by caller, skip TTS state.
+                if mouth_values is _CHIME_ITEM:
+                    sd.play(samples, samplerate=sample_rate)
+                    sd.wait()
+                    continue
+
                 # Apply dashboard volume gain; a muted device still drives the
                 # speaking callbacks (so the UI reflects state) but emits silence.
                 gain = self._apply_gain()
@@ -924,23 +932,19 @@ class VoiceEngine:
 
                 samples, sr = sf.read(chime_path, dtype="float32")
                 samples = np.asarray(samples, dtype=np.float32) * gain
-                # Play in a thread so we don't block the audio loop
-                threading.Thread(
-                    target=sd.play, args=(samples, sr), daemon=True
-                ).start()
             else:
                 # Synthesize a short sine-wave chime (440Hz, 200ms)
                 sr = 16000
                 duration = 0.2
                 t = np.linspace(0, duration, int(sr * duration), dtype=np.float32)
-                chime = 0.3 * np.sin(2 * np.pi * 440 * t) * gain
+                samples = 0.3 * np.sin(2 * np.pi * 440 * t) * gain
                 # Quick fade-in/out to avoid clicks
-                fade = min(int(sr * 0.02), len(chime))
-                chime[:fade] *= np.linspace(0, 1, fade)
-                chime[-fade:] *= np.linspace(1, 0, fade)
-                threading.Thread(
-                    target=sd.play, args=(chime, sr), daemon=True
-                ).start()
+                fade = min(int(sr * 0.02), len(samples))
+                samples[:fade] *= np.linspace(0, 1, fade)
+                samples[-fade:] *= np.linspace(1, 0, fade)
+            # Route through playback_queue so sd.play only ever runs on
+            # _playback_worker's thread -- a raw thread here raced it.
+            self.playback_queue.put((samples, sr, _CHIME_ITEM))
         except Exception as e:
             logger.debug(f"Wake chime error: {e}")
 

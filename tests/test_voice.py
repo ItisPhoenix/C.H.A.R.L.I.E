@@ -9,6 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+import charlie.voice
 from charlie.voice import VoiceEngine
 
 
@@ -16,6 +17,7 @@ class FakeConfig:
     kokoro_model_dir = "/tmp/kokoro_models"
     wake_word_enabled = False
     wake_word_model_path = ""
+    wake_word_audio_chime_path = ""
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +230,18 @@ class TestVoiceEngineInit:
         with patch("charlie.voice.sd") as mock_sd:
             engine.stop_tts()
             mock_sd.stop.assert_not_called()
+
+    def test_play_wake_chime_does_not_spawn_thread(self):
+        """_play_wake_chime must route through playback_queue, not a raw
+        thread -- same bug class as test_stop_tts_does_not_call_sd_directly."""
+        engine = self._make_engine()
+        with patch("charlie.voice.sd"), \
+             patch("charlie.voice.threading.Thread") as mock_thread:
+            engine._play_wake_chime()
+            mock_thread.assert_not_called()
+        assert engine.playback_queue.qsize() == 1
+        samples, sr, tag = engine.playback_queue.get_nowait()
+        assert tag is charlie.voice._CHIME_ITEM
 
     def test_mute_toggle(self):
         engine = self._make_engine()
