@@ -85,6 +85,10 @@ class PluginManager:
         self._plugins: Dict[str, Plugin] = {}
         self._tool_to_plugin: Dict[str, str] = {}  # tool_name -> plugin_name
 
+    def get_plugin(self, name: str) -> Optional[Plugin]:
+        """Look up a registered plugin by name, or None."""
+        return self._plugins.get(name)
+
     def register(self, plugin: Plugin) -> None:
         """Register a plugin."""
         if plugin.name in self._plugins:

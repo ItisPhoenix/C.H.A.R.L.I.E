@@ -393,6 +393,24 @@ def test_tool_registry_unknown_tool_returns_error():
     )
 
 
+def test_unregister_tool_removes_it():
+    local_registry = ToolRegistry()
+    local_registry.register_tool(name="temp", description="d", schema={"type": "object", "properties": {}})(
+        lambda: "x"
+    )
+    assert "temp" in [d["function"]["name"] for d in local_registry.get_tool_definitions()]
+
+    assert local_registry.unregister_tool("temp") is True
+
+    assert "temp" not in [d["function"]["name"] for d in local_registry.get_tool_definitions()]
+    assert "not registered" in local_registry.execute_tool("temp", {})
+
+
+def test_unregister_tool_missing_returns_false():
+    local_registry = ToolRegistry()
+    assert local_registry.unregister_tool("never-existed") is False
+
+
 def test_web_search_returns_fallback_without_api_keys(monkeypatch):
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("EXA_API_KEY", raising=False)

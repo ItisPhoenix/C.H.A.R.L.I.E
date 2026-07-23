@@ -122,6 +122,11 @@ class ToolRegistry:
 
         return decorator
 
+    def unregister_tool(self, name: str) -> bool:
+        """Remove a tool so it no longer appears in get_tool_definitions()
+        or is callable via execute_tool(). Returns whether it existed."""
+        return self._tools.pop(name, None) is not None
+
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         return [
             {
@@ -1355,8 +1360,44 @@ def _build_plugin_manager(
     return manager
 
 
+def enable_plugin(reg: "ToolRegistry", manager: Any, plugin: Any) -> List[str]:
+    """Register one plugin's tools into the shared registry, adding it to
+    `manager` first if it isn't already there. Runtime equivalent of what
+    register_plugin_tools_into() does for every built-in plugin at boot --
+    lets a single plugin be turned on without restarting Charlie."""
+    if manager.get_plugin(plugin.name) is None:
+        manager.register(plugin)
+    registered: List[str] = []
+    for tool_def in plugin.get_tools():
+        action = tool_def["name"]
+        description = _PLUGIN_ACTION_DESCRIPTIONS.get(action, tool_def["description"])
+        reg.register_tool(
+            name=f"plugin_{action}",
+            description=description,
+            schema=tool_def["parameters"],
+        )(_make_plugin_runner(manager, action))
+        registered.append(f"plugin_{action}")
+    return registered
+
+
+def disable_plugin(reg: "ToolRegistry", manager: Any, plugin_name: str) -> List[str]:
+    """Remove a plugin's tools from the shared registry and unregister it
+    from `manager`. Returns the removed tool names; empty if it wasn't active."""
+    plugin = manager.get_plugin(plugin_name)
+    if plugin is None:
+        return []
+    removed: List[str] = []
+    for tool_def in plugin.get_tools():
+        full_name = f"plugin_{tool_def['name']}"
+        if reg.unregister_tool(full_name):
+            removed.append(full_name)
+    manager.unregister(plugin_name)
+    return removed
+
+
 def register_plugin_tools_into(reg: "ToolRegistry", cfg: Any) -> Optional[Any]:
-    """Register plugin actions into `reg` if `cfg.plugins_enabled` is true.
+    """Register every built-in plugin's actions into `reg` if
+    `cfg.plugins_enabled` is true.
 
     Returns the active PluginManager when plugins are enabled, otherwise None.
     The returned manager is the single source of truth used to execute the
@@ -1367,22 +1408,16 @@ def register_plugin_tools_into(reg: "ToolRegistry", cfg: Any) -> Optional[Any]:
         return None
 
     manager = _build_plugin_manager(getattr(cfg, "plugin_allow_dirs", []))
-
-    tool_defs = manager.get_all_tool_definitions()
-    for tool_def in tool_defs:
-        action = tool_def["name"]
-        description = _PLUGIN_ACTION_DESCRIPTIONS.get(action, tool_def["description"])
-        runner = _make_plugin_runner(manager, action)
-
-        reg.register_tool(
-            name=f"plugin_{action}",
-            description=description,
-            schema=tool_def["parameters"],
-        )(runner)
+    registered: List[str] = []
+    # _build_plugin_manager already called manager.register() for each
+    # built-in plugin, so enable_plugin() here only needs to bridge their
+    # already-registered tools into the shared registry.
+    for plugin in list(manager._plugins.values()):
+        registered.extend(enable_plugin(reg, manager, plugin))
 
     logger.info(
         "Plugin system enabled: registered %d plugin tools (plugin_*).",
-        len(tool_defs),
+        len(registered),
     )
     return manager
 

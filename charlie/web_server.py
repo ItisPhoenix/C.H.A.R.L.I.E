@@ -17,7 +17,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Set
+from typing import List, Set
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,6 +53,118 @@ if config.mcp_enabled:
     except Exception as e:
         logger.warning("Web MCP subsystem failed to initialize: %s", e)
         mcp_client = None
+
+# Same mirroring as mcp_client above: register_plugin_tools() previously ran
+# only in main.py's voice process, so the web process's registry never had
+# plugin_* tools even with PLUGINS_ENABLED=true -- /api/extensions needs a
+# live manager here to enable/disable individual plugins at runtime.
+plugin_manager = None
+if config.plugins_enabled:
+    try:
+        from charlie.tools import register_plugin_tools
+
+        plugin_manager = register_plugin_tools(config)
+    except Exception as e:
+        logger.warning("Web plugin subsystem failed to initialize: %s", e)
+        plugin_manager = None
+if plugin_manager is None:
+    # Always give /api/extensions a manager to enable individual plugins
+    # into, even when the blanket PLUGINS_ENABLED flag is off -- Phase 5's
+    # per-plugin control is meant to work independently of that flag.
+    from charlie.plugins import PluginManager
+
+    plugin_manager = PluginManager()
+
+# In-process registry of installed extensions (Phase 5) -- see
+# charlie/extensions/__init__.py's ExtensionManager docstring for the
+# propose()/confirm() gate this drives and the no-cross-restart-persistence
+# caveat.
+from charlie.extensions import ExtensionManager, InstalledExtension  # noqa: E402
+
+_extension_manager = ExtensionManager()
+_BUILTIN_PLUGIN_NAMES = ("filesystem", "browser", "calendar", "code_exec")
+
+
+def _builtin_plugin(name: str):
+    from charlie.plugins import BrowserPlugin, CalendarPlugin, CodeExecPlugin, FilesystemPlugin
+
+    factories = {
+        "filesystem": lambda: FilesystemPlugin(allowed_dirs=config.plugin_allow_dirs),
+        "browser": BrowserPlugin,
+        "calendar": CalendarPlugin,
+        "code_exec": CodeExecPlugin,
+    }
+    if name not in factories:
+        raise ValueError(
+            f"Unknown built-in plugin '{name}'. Valid: {', '.join(_BUILTIN_PLUGIN_NAMES)}"
+        )
+    return factories[name]()
+
+
+def _parsed_mcp_config(name: str, source: str, raw_text: str):
+    """Parse an MCP server spec and require its name to match the
+    extension's declared name, so `name` stays the single source of truth
+    across propose/confirm/enable/disable for every extension kind."""
+    from charlie.mcp_client import parse_server_spec
+
+    cfg = parse_server_spec(raw_text or source)
+    if cfg.name != name:
+        raise ValueError(f"MCP spec name '{cfg.name}' does not match extension name '{name}'")
+    return cfg
+
+
+def _declared_tools_for(kind: str, name: str, source: str, raw_text: str) -> List[str]:
+    """Parse (without registering) so propose() can show real declared
+    tools in the SkillCard before anything activates."""
+    if kind == "mcp":
+        _parsed_mcp_config(name, source, raw_text)
+        return []  # MCP tools aren't known until the server is actually started
+    if kind == "skill":
+        from charlie.extensions.skills import parse_skill_md
+
+        return parse_skill_md(raw_text).scripts
+    if kind == "openapi":
+        from charlie.extensions.openapi_import import parse_openapi_spec
+
+        return [op.operation_id for op in parse_openapi_spec(raw_text, base_url=source).operations]
+    if kind == "plugin":
+        return [t["name"] for t in _builtin_plugin(name).get_tools()]
+    raise ValueError(f"Unknown extension kind '{kind}'")
+
+
+def _install_extension(kind: str, name: str, source: str, raw_text: str) -> List[str]:
+    """Parse and register an approved extension into the shared registry.
+    Returns the registered tool names."""
+    from charlie.tools import registry
+
+    if kind == "mcp":
+        global mcp_client
+        from charlie.mcp_client import MCPClient
+
+        cfg = _parsed_mcp_config(name, source, raw_text)
+        if mcp_client is None:
+            mcp_client = MCPClient()
+        mcp_client.add_server(cfg)
+        return mcp_client.enable_server(registry, name)
+    if kind == "skill":
+        from charlie.extensions.skills import parse_skill_md, register_skill_scripts
+
+        manifest = parse_skill_md(raw_text)
+
+        def _runner(script_path: str, args: List[str]) -> str:
+            return f"Script execution not yet implemented: {script_path} {args}"
+
+        return register_skill_scripts(registry, manifest, _runner)
+    if kind == "openapi":
+        from charlie.extensions.openapi_import import parse_openapi_spec, register_openapi_operations
+
+        spec = parse_openapi_spec(raw_text, base_url=source)
+        return register_openapi_operations(registry, spec)
+    if kind == "plugin":
+        from charlie.tools import enable_plugin
+
+        return enable_plugin(registry, plugin_manager, _builtin_plugin(name))
+    raise ValueError(f"Unknown extension kind '{kind}'")
 # Events that carry a session_id and must only reach clients subscribed to it.
 _SESSION_SCOPED_EVENTS = ("token", "transcript", "desktop_frame")
 event_bus: EventBus | None = None
@@ -501,6 +613,158 @@ async def get_mcp_status():
     except Exception as e:
         logger.error(f"Error fetching MCP status: {e}")
     return {"enabled": False, "connected": False}
+
+
+@app.get("/api/extensions")
+async def list_extensions():
+    """List installed extensions across all four Phase 5 adapters."""
+    return {
+        "extensions": [
+            {
+                "name": e.name,
+                "kind": e.kind,
+                "source": e.source,
+                "enabled": e.enabled,
+                "tool_names": e.tool_names,
+                "warnings": e.card.warnings,
+                "content_hash": e.card.content_hash,
+            }
+            for e in _extension_manager.list()
+        ]
+    }
+
+
+@app.post("/api/extensions/propose")
+async def propose_extension(data: dict):
+    """Stage an extension install for approval. Parses the given kind's
+    manifest/spec, builds a provenance SkillCard (content hash + heuristic
+    scan), and returns it for the dashboard to show a confirm dialog --
+    nothing is registered yet."""
+    from charlie.extensions import build_skill_card
+
+    kind = data.get("kind", "")
+    name = data.get("name", "")
+    source = data.get("source", "")
+    raw_text = data.get("raw_text", "")
+    if not kind or not name:
+        return {"status": "error", "message": "kind and name are required"}
+
+    try:
+        declared_tools = _declared_tools_for(kind, name, source, raw_text)
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
+
+    card = build_skill_card(name, source or kind, declared_tools, raw_text or name)
+    pending_id = _extension_manager.propose(card)
+    return {
+        "status": "ok",
+        "pending_id": pending_id,
+        "skill_card": card.describe(),
+        "warnings": card.warnings,
+    }
+
+
+@app.post("/api/extensions/confirm")
+async def confirm_extension(data: dict):
+    """Approve (or decline) a proposed install. Only on approval does the
+    extension get parsed into live tools and registered -- the gate."""
+    pending_id = data.get("pending_id", "")
+    approved = bool(data.get("approved", False))
+    kind = data.get("kind", "")
+    source = data.get("source", "")
+    raw_text = data.get("raw_text", "")
+
+    card = _extension_manager.pop_pending(pending_id)
+    if card is None:
+        return {"status": "error", "message": "Unknown or already-resolved pending_id"}
+    if not approved:
+        return {"status": "ok", "installed": False}
+
+    try:
+        tool_names = _install_extension(kind, card.name, source, raw_text)
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
+
+    _extension_manager.record(
+        InstalledExtension(
+            name=card.name, kind=kind, source=source, card=card, tool_names=tool_names
+        )
+    )
+    return {"status": "ok", "installed": True, "tool_names": tool_names}
+
+
+@app.post("/api/extensions/{name}/enable")
+async def enable_extension(name: str):
+    """Re-activate a disabled extension's tools without reinstalling it."""
+    from charlie.tools import registry
+
+    ext = _extension_manager.get(name)
+    if ext is None:
+        return {"status": "error", "message": f"Unknown extension '{name}'"}
+
+    if ext.kind == "mcp" and mcp_client is not None:
+        tool_names = mcp_client.enable_server(registry, name)
+    elif ext.kind == "plugin":
+        from charlie.tools import enable_plugin
+
+        tool_names = enable_plugin(registry, plugin_manager, _builtin_plugin(name))
+    else:
+        # skill/openapi: disable_extension() doesn't drop these tools (see
+        # its comment), so re-enabling is a no-op restoring the same names.
+        tool_names = ext.tool_names
+
+    ext.enabled = True
+    ext.tool_names = tool_names
+    return {"status": "ok", "tool_names": tool_names}
+
+
+@app.post("/api/extensions/{name}/disable")
+async def disable_extension(name: str):
+    """Deactivate an extension's tools while keeping its install record, so
+    enable_extension() can bring it back without re-parsing the source."""
+    from charlie.tools import registry
+
+    ext = _extension_manager.get(name)
+    if ext is None:
+        return {"status": "error", "message": f"Unknown extension '{name}'"}
+
+    if ext.kind == "mcp" and mcp_client is not None:
+        mcp_client.disable_server(registry, name)
+    elif ext.kind == "plugin":
+        from charlie.tools import disable_plugin
+
+        disable_plugin(registry, plugin_manager, name)
+    # skill/openapi tools are left registered on disable -- they're stateless
+    # wrappers (no subprocess/connection to tear down like MCP or a plugin
+    # instance), so unregistering and immediately re-registering on the next
+    # enable_extension() would be pure overhead with no resource actually
+    # freed. Re-parsing would need raw_text persisted, which this pass
+    # doesn't do (see ExtensionManager's docstring).
+
+    ext.enabled = False
+    return {"status": "ok"}
+
+
+@app.delete("/api/extensions/{name}")
+async def uninstall_extension(name: str):
+    """Fully remove an extension: disable its tools, drop it from the
+    registry, and forget it (unlike disable, cannot be re-enabled)."""
+    from charlie.tools import registry
+
+    ext = _extension_manager.get(name)
+    if ext is None:
+        return {"status": "error", "message": f"Unknown extension '{name}'"}
+
+    if ext.enabled:
+        await disable_extension(name)
+    if ext.kind == "mcp" and mcp_client is not None:
+        mcp_client.remove_server(registry, name)
+    elif ext.kind in ("skill", "openapi"):
+        for tool_name in ext.tool_names:
+            registry.unregister_tool(tool_name)
+
+    _extension_manager.remove(name)
+    return {"status": "ok"}
 
 
 @app.post("/api/session/active")

@@ -5,6 +5,7 @@ Provides a lightweight MCP client that can:
 2. List available tools from a server
 3. Call tools on a server
 4. Manage multiple server connections
+5. Add/enable/disable a server at runtime without restarting Charlie
 
 This is a minimal MCP client implementation focused on local tool
 discovery and invocation. It does not implement the full MCP protocol
@@ -122,6 +123,9 @@ class MCPClient:
         self._tools: Dict[str, MCPTool] = {}  # "server_name:tool_name" -> tool
         self._tool_call_log: List[Dict[str, Any]] = []
         self._max_log: int = 100
+        # server_name -> full registered tool names, so a server's tools can
+        # be found again for unregistration without re-deriving the prefix.
+        self._registered_tools: Dict[str, List[str]] = {}
 
     def add_server(self, config: MCPServerConfig) -> None:
         """Register a server (does not start it)."""
@@ -242,18 +246,27 @@ class MCPClient:
             self._tool_call_log = self._tool_call_log[-self._max_log:]
 
     def register_tools_into(self, registry: Any, prefix: str = "mcp_") -> List[str]:
-        """Register every discovered tool into the shared ToolRegistry.
-
-        Each MCP tool becomes callable through the same ``execute_tool`` path
-        the built-in tools use, so the LLM invokes them transparently. Tool
-        names are prefixed (default ``mcp_``) to avoid colliding with built-ins.
-
-        Returns the list of registered tool names.
-        """
+        """Register every discovered tool (across all servers) into the
+        shared ToolRegistry. Returns the list of registered tool names."""
         registered: List[str] = []
-        for tool in self.list_tools():
+        for name in self._servers:
+            registered.extend(self._register_server_tools(registry, name, prefix))
+        logger.info("Registered %d MCP tools into the shared registry", len(registered))
+        return registered
+
+    def _register_server_tools(
+        self, registry: Any, server_name: str, prefix: str = "mcp_"
+    ) -> List[str]:
+        """Register one server's already-discovered tools into the shared
+        ToolRegistry. Each MCP tool becomes callable through the same
+        ``execute_tool`` path the built-in tools use, so the LLM invokes them
+        transparently. Tool names are prefixed (default ``mcp_``) to avoid
+        colliding with built-ins."""
+        registered: List[str] = []
+        for tool in self._tools.values():
+            if tool.server_name != server_name:
+                continue
             full_name = f"{prefix}{tool.server_name}_{tool.name}"
-            server_name = tool.server_name
             tool_name = tool.name
 
             def _invoke(server_name=server_name, tool_name=tool_name, **kwargs: Any) -> str:
@@ -268,8 +281,61 @@ class MCPClient:
                 schema=tool.input_schema or {"type": "object", "properties": {}},
             )(_invoke)
             registered.append(full_name)
-        logger.info("Registered %d MCP tools into the shared registry", len(registered))
+        self._registered_tools.setdefault(server_name, []).extend(registered)
         return registered
+
+    def unregister_server_tools(self, registry: Any, name: str) -> List[str]:
+        """Remove a server's previously-registered tools from a ToolRegistry.
+        Returns the tool names that were removed."""
+        names = self._registered_tools.pop(name, [])
+        for tool_name in names:
+            registry.unregister_tool(tool_name)
+        return names
+
+    def disable_server(self, registry: Any, name: str) -> bool:
+        """Stop a server's subprocess and unregister its tools, keeping the
+        server config so it can be re-enabled later via enable_server()
+        without re-adding it. Returns whether the server existed."""
+        server = self._servers.get(name)
+        if server is None:
+            return False
+        self.unregister_server_tools(registry, name)
+        self._tools = {k: t for k, t in self._tools.items() if t.server_name != name}
+        try:
+            server.stop()
+        except Exception:
+            logger.debug("Error stopping server '%s'", name, exc_info=True)
+        return True
+
+    def enable_server(self, registry: Any, name: str) -> List[str]:
+        """(Re)start a registered server and register its freshly-discovered
+        tools into a ToolRegistry. Works for a server added via add_server()
+        that hasn't been started yet, or one previously disabled. Returns the
+        registered tool names."""
+        server = self._servers.get(name)
+        if server is None:
+            raise KeyError(f"No MCP server registered under '{name}'")
+        if not server.is_running():
+            server.start()
+        for tool in server.list_tools():
+            tool.server_name = name
+            self._tools[f"{name}:{tool.name}"] = tool
+        return self._register_server_tools(registry, name)
+
+    def remove_server(self, registry: Any, name: str) -> bool:
+        """Unregister a server's tools, stop its subprocess, and drop its
+        config entirely -- unlike disable_server(), it cannot be re-enabled
+        without add_server() first. Returns whether the server existed."""
+        if name not in self._servers:
+            return False
+        self.unregister_server_tools(registry, name)
+        self._tools = {k: t for k, t in self._tools.items() if t.server_name != name}
+        server = self._servers.pop(name)
+        try:
+            server.stop()
+        except Exception:
+            logger.debug("Error stopping server '%s' during removal", name, exc_info=True)
+        return True
 
 
 # ---------------------------------------------------------------------------

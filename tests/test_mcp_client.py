@@ -150,17 +150,22 @@ class _FakeRegistry:
 
         return decorator
 
+    def unregister_tool(self, name: str) -> bool:
+        return self._tools.pop(name, None) is not None
+
 
 class _FakeServer:
     """Stand-in for MCPServerProcess; no real subprocess is spawned."""
 
     def __init__(self, server_config: MCPServerConfig) -> None:
         self.config = server_config
-        self._process = MagicMock()
-        self._process.poll.return_value = None
+        # Matches real _ManagedServer.__init__: no process until start() runs.
+        self._process = None
         self._tools: List[MCPTool] = []
 
     def start(self) -> None:
+        self._process = MagicMock()
+        self._process.poll.return_value = None
         self._tools = [
             MCPTool(name="read", description="Read a file", server_name=self.config.name),
             MCPTool(name="write", description="Write a file", server_name=self.config.name),
@@ -174,6 +179,84 @@ class _FakeServer:
 
     def stop(self) -> None:
         self._process = None
+
+
+class TestMCPRuntimeControl:
+    """Phase 5 adapter #1: add/enable/disable/unregister without restart."""
+
+    def _client_with_server(self, monkeypatch, name: str = "s1") -> MCPClient:
+        import charlie.mcp_client as mcp_mod
+
+        monkeypatch.setattr(mcp_mod, "_ManagedServer", _FakeServer)
+        client = MCPClient()
+        client.add_server(MCPServerConfig(name=name, command="echo"))
+        return client
+
+    def test_enable_server_starts_and_registers_tools(self, monkeypatch):
+        client = self._client_with_server(monkeypatch)
+        registry = _FakeRegistry()
+
+        registered = client.enable_server(registry, "s1")
+
+        assert set(registered) == {"mcp_s1_read", "mcp_s1_write"}
+        assert "mcp_s1_read" in registry._tools
+        assert client._servers["s1"].is_running()
+
+    def test_enable_server_unknown_raises(self, monkeypatch):
+        import pytest
+
+        client = self._client_with_server(monkeypatch)
+        with pytest.raises(KeyError):
+            client.enable_server(_FakeRegistry(), "nope")
+
+    def test_disable_server_unregisters_tools_and_stops(self, monkeypatch):
+        client = self._client_with_server(monkeypatch)
+        registry = _FakeRegistry()
+        client.enable_server(registry, "s1")
+
+        result = client.disable_server(registry, "s1")
+
+        assert result is True
+        assert registry._tools == {}
+        assert not client._servers["s1"].is_running()
+        assert "s1" in client._servers  # config kept for re-enable
+
+    def test_disable_server_missing_returns_false(self, monkeypatch):
+        client = self._client_with_server(monkeypatch)
+        assert client.disable_server(_FakeRegistry(), "nope") is False
+
+    def test_remove_server_drops_config_entirely(self, monkeypatch):
+        client = self._client_with_server(monkeypatch)
+        registry = _FakeRegistry()
+        client.enable_server(registry, "s1")
+
+        result = client.remove_server(registry, "s1")
+
+        assert result is True
+        assert registry._tools == {}
+        assert "s1" not in client._servers
+
+    def test_disable_then_enable_round_trip(self, monkeypatch):
+        client = self._client_with_server(monkeypatch)
+        registry = _FakeRegistry()
+        client.enable_server(registry, "s1")
+        client.disable_server(registry, "s1")
+
+        registered = client.enable_server(registry, "s1")
+
+        assert set(registered) == {"mcp_s1_read", "mcp_s1_write"}
+        assert client._servers["s1"].is_running()
+
+    def test_unregister_server_tools_without_stopping(self, monkeypatch):
+        client = self._client_with_server(monkeypatch)
+        registry = _FakeRegistry()
+        client.enable_server(registry, "s1")
+
+        removed = client.unregister_server_tools(registry, "s1")
+
+        assert set(removed) == {"mcp_s1_read", "mcp_s1_write"}
+        assert registry._tools == {}
+        assert client._servers["s1"].is_running()  # unaffected by this call
 
 
 def test_parse_server_spec():

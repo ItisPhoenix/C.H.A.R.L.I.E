@@ -329,5 +329,91 @@ class TestPluginToolBridge:
         assert "plugin bridge works" in result
 
 
+# ---------------------------------------------------------------------------
+# Phase 5 adapter #4: per-plugin runtime enable/disable
+# ---------------------------------------------------------------------------
+
+class TestPluginRuntimeControl:
+    def test_enable_plugin_registers_its_tools_only(self):
+        from charlie.tools import ToolRegistry, enable_plugin
+
+        reg = ToolRegistry()
+        manager = PluginManager()
+
+        registered = enable_plugin(reg, manager, CalendarPlugin())
+
+        assert registered == ["plugin_cal_list_events"]
+        names = {t["function"]["name"] for t in reg.get_tool_definitions()}
+        assert names == {"plugin_cal_list_events"}
+
+    def test_enable_plugin_is_reachable_via_manager(self):
+        from charlie.tools import ToolRegistry, enable_plugin
+
+        reg = ToolRegistry()
+        manager = PluginManager()
+        enable_plugin(reg, manager, CodeExecPlugin())
+
+        assert manager.get_plugin("code_exec") is not None
+
+    def test_disable_plugin_removes_its_tools(self):
+        from charlie.tools import ToolRegistry, disable_plugin, enable_plugin
+
+        reg = ToolRegistry()
+        manager = PluginManager()
+        enable_plugin(reg, manager, CalendarPlugin())
+
+        removed = disable_plugin(reg, manager, "calendar")
+
+        assert removed == ["plugin_cal_list_events"]
+        assert reg.get_tool_definitions() == []
+        assert manager.get_plugin("calendar") is None
+
+    def test_disable_unknown_plugin_returns_empty(self):
+        from charlie.tools import ToolRegistry, disable_plugin
+
+        reg = ToolRegistry()
+        manager = PluginManager()
+
+        assert disable_plugin(reg, manager, "nope") == []
+
+    def test_disable_then_enable_round_trip(self):
+        from charlie.tools import ToolRegistry, disable_plugin, enable_plugin
+
+        reg = ToolRegistry()
+        manager = PluginManager()
+        enable_plugin(reg, manager, CalendarPlugin())
+        disable_plugin(reg, manager, "calendar")
+
+        registered = enable_plugin(reg, manager, CalendarPlugin())
+
+        assert registered == ["plugin_cal_list_events"]
+        names = {t["function"]["name"] for t in reg.get_tool_definitions()}
+        assert names == {"plugin_cal_list_events"}
+
+    def test_enabling_two_plugins_keeps_both(self):
+        from charlie.tools import ToolRegistry, enable_plugin
+
+        reg = ToolRegistry()
+        manager = PluginManager()
+        enable_plugin(reg, manager, CalendarPlugin())
+        enable_plugin(reg, manager, CodeExecPlugin())
+
+        names = {t["function"]["name"] for t in reg.get_tool_definitions()}
+        assert names == {"plugin_cal_list_events", "plugin_code_exec_python"}
+
+    def test_disabling_one_plugin_leaves_the_other(self):
+        from charlie.tools import ToolRegistry, disable_plugin, enable_plugin
+
+        reg = ToolRegistry()
+        manager = PluginManager()
+        enable_plugin(reg, manager, CalendarPlugin())
+        enable_plugin(reg, manager, CodeExecPlugin())
+
+        disable_plugin(reg, manager, "calendar")
+
+        names = {t["function"]["name"] for t in reg.get_tool_definitions()}
+        assert names == {"plugin_code_exec_python"}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -5,6 +5,7 @@ import type { ReactElement } from "react";
 import { useCharlieStore, rgba, lighten } from "../store/useCharlieStore";
 import type { Task } from "../store/useCharlieStore";
 import { DesktopView } from "./DesktopView";
+import catalogData from "../data/extensionCatalog.json";
 
 interface Agent {
   name: string;
@@ -51,25 +52,56 @@ interface McpTool {
     };
   };
 }
+interface ExtensionEntry {
+  name: string;
+  kind: string;
+  source: string;
+  enabled: boolean;
+  tool_names: string[];
+  warnings: string[];
+  content_hash: string;
+}
+interface PendingProposal {
+  pending_id: string;
+  skill_card: string;
+  warnings: string[];
+}
 
-type Tab = "swarm" | "memory" | "mcp" | "tasks" | "desktop";
+type ExtensionKind = "mcp" | "skill" | "openapi" | "plugin";
+const EXTENSION_KINDS: { id: ExtensionKind; label: string }[] = [
+  { id: "plugin", label: "Built-in plugin" },
+  { id: "mcp", label: "MCP server" },
+  { id: "skill", label: "SKILL.md" },
+  { id: "openapi", label: "OpenAPI spec" },
+];
+
+interface CatalogEntry {
+  name: string;
+  kind: ExtensionKind;
+  description: string;
+  source: string;
+  rawText: string;
+}
+const CATALOG: CatalogEntry[] = catalogData.entries as CatalogEntry[];
+
+type Tab = "swarm" | "memory" | "extensions" | "tasks" | "desktop";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "swarm", label: "Swarm" },
   { id: "memory", label: "Memory" },
-  { id: "mcp", label: "MCP" },
+  { id: "extensions", label: "Extensions" },
   { id: "tasks", label: "Tasks" },
   { id: "desktop", label: "Desktop" },
 ];
 
 export const AGENT_COLOR: Record<string, string> = {
   "J.A.R.V.I.S.": "#3b82f6",
-  "F.R.I.D.A.Y.": "#06b6d4",
-  "Vision": "#8b5cf6",
+  "Doctor Strange": "#8b5cf6",
+  "Shuri": "#06b6d4",
   "E.D.I.T.H.": "#10b981",
-  "A.I.D.A.": "#f59e0b",
-  "Karen": "#ec4899",
-  "H.E.R.B.I.E.": "#f97316",
+  "K.A.R.E.N.": "#ec4899",
+  "F.R.I.D.A.Y.": "#f59e0b",
+  "Vision": "#f97316",
 };
 
 function statusColor(status: string): string {
@@ -201,10 +233,22 @@ export function InsightRail({
   const [mcpSearch, setMcpSearch] = useState("");
   const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
 
+  const [extensions, setExtensions] = useState<ExtensionEntry[]>([]);
+  const [loadingExtensions, setLoadingExtensions] = useState(false);
+  const [showInstallForm, setShowInstallForm] = useState(false);
+  const [showCatalog, setShowCatalog] = useState(false);
+  const [installKind, setInstallKind] = useState<ExtensionKind>("plugin");
+  const [installName, setInstallName] = useState("");
+  const [installSource, setInstallSource] = useState("");
+  const [installRawText, setInstallRawText] = useState("");
+  const [pendingProposal, setPendingProposal] = useState<PendingProposal | null>(null);
+  const [installBusy, setInstallBusy] = useState(false);
+  const [installError, setInstallError] = useState<string | null>(null);
+
   const loadJson = useCallback(
     async (
       url: string,
-      onData: (data: { facts?: Fact[]; tools?: McpTool[] }) => void,
+      onData: (data: { facts?: Fact[]; tools?: McpTool[]; extensions?: ExtensionEntry[] }) => void,
       setLoading: (v: boolean) => void,
       setLoaded: (v: boolean) => void
     ) => {
@@ -241,13 +285,115 @@ export function InsightRail({
     );
   }, [loadJson]);
 
+  const loadExtensions = useCallback(async () => {
+    await loadJson(
+      "/api/extensions",
+      (d) => setExtensions(d.extensions ?? []),
+      setLoadingExtensions,
+      () => {}
+    );
+  }, [loadJson]);
+
   useEffect(() => {
     if (tab === "memory") {
       void loadFacts();
-    } else if (tab === "mcp") {
+    } else if (tab === "extensions") {
       void loadTools();
+      void loadExtensions();
     }
-  }, [tab, loadFacts, loadTools]);
+  }, [tab, loadFacts, loadTools, loadExtensions]);
+
+  const handlePropose = useCallback(async () => {
+    setInstallError(null);
+    setInstallBusy(true);
+    try {
+      const r = await fetch("/api/extensions/propose", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: installKind,
+          name: installName,
+          source: installSource,
+          raw_text: installRawText,
+        }),
+      });
+      const d = await r.json();
+      if (d.status !== "ok") {
+        setInstallError(d.message ?? "Propose failed");
+        return;
+      }
+      setPendingProposal({ pending_id: d.pending_id, skill_card: d.skill_card, warnings: d.warnings ?? [] });
+    } catch {
+      setInstallError("Network error while proposing install");
+    } finally {
+      setInstallBusy(false);
+    }
+  }, [installKind, installName, installSource, installRawText]);
+
+  const handleConfirm = useCallback(
+    async (approved: boolean) => {
+      if (!pendingProposal) return;
+      setInstallBusy(true);
+      try {
+        const r = await fetch("/api/extensions/confirm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            pending_id: pendingProposal.pending_id,
+            approved,
+            kind: installKind,
+            source: installSource,
+            raw_text: installRawText,
+          }),
+        });
+        const d = await r.json();
+        if (d.status !== "ok") {
+          setInstallError(d.message ?? "Confirm failed");
+          return;
+        }
+        setPendingProposal(null);
+        if (approved) {
+          setInstallName("");
+          setInstallSource("");
+          setInstallRawText("");
+          setShowInstallForm(false);
+        }
+        void loadExtensions();
+      } catch {
+        setInstallError("Network error while confirming install");
+      } finally {
+        setInstallBusy(false);
+      }
+    },
+    [pendingProposal, installKind, installSource, installRawText, loadExtensions]
+  );
+
+  const handleToggleExtension = useCallback(
+    async (name: string, enabled: boolean) => {
+      await fetch(`/api/extensions/${encodeURIComponent(name)}/${enabled ? "disable" : "enable"}`, {
+        method: "POST",
+      });
+      void loadExtensions();
+    },
+    [loadExtensions]
+  );
+
+  const handleUseCatalogEntry = useCallback((entry: CatalogEntry) => {
+    setInstallKind(entry.kind);
+    setInstallName(entry.name);
+    setInstallSource(entry.source);
+    setInstallRawText(entry.rawText);
+    setShowCatalog(false);
+    setShowInstallForm(true);
+  }, []);
+
+  const handleUninstallExtension = useCallback(
+    async (name: string) => {
+      await fetch(`/api/extensions/${encodeURIComponent(name)}`, { method: "DELETE" });
+      void loadExtensions();
+    },
+    [loadExtensions]
+  );
 
   const agents = blackboard?.agents ?? {};
   const tasks = blackboard?.tasks ?? [];
@@ -284,14 +430,21 @@ export function InsightRail({
       </div>
 
       {/* Refresh trigger row */}
-      {(tab === "memory" || tab === "mcp") && (
+      {(tab === "memory" || tab === "extensions") && (
         <div className="px-4 pt-2 flex justify-end shrink-0 select-none">
           <button
-            onClick={() => (tab === "memory" ? void loadFacts() : void loadTools())}
+            onClick={() => {
+              if (tab === "memory") {
+                void loadFacts();
+              } else {
+                void loadTools();
+                void loadExtensions();
+              }
+            }}
             className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] hover:text-white transition cursor-pointer"
-            disabled={loadingFacts || loadingTools}
+            disabled={loadingFacts || loadingTools || loadingExtensions}
           >
-            <svg viewBox="0 0 24 24" className={`w-3 h-3 ${loadingFacts || loadingTools ? "animate-spin" : ""}`} fill="none" stroke="currentColor" strokeWidth="2.5">
+            <svg viewBox="0 0 24 24" className={`w-3 h-3 ${loadingFacts || loadingTools || loadingExtensions ? "animate-spin" : ""}`} fill="none" stroke="currentColor" strokeWidth="2.5">
               <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
             </svg>
             <span>Refresh</span>
@@ -446,8 +599,206 @@ export function InsightRail({
           </div>
         )}
  
-        {tab === "mcp" && (
+        {tab === "extensions" && (
           <div className="space-y-4">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs uppercase tracking-widest text-[var(--color-text-muted)]">
+                  Installed
+                </p>
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => {
+                      setShowCatalog((v) => !v);
+                      setShowInstallForm(false);
+                    }}
+                    className="text-[10px] uppercase tracking-wider px-2 py-1 rounded-lg border border-[var(--color-glass-border)] text-[var(--color-text-secondary)] hover:text-white hover:border-[var(--color-glass-border-hover)] transition cursor-pointer"
+                  >
+                    {showCatalog ? "Hide catalog" : "Catalog"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowInstallForm((v) => !v);
+                      setShowCatalog(false);
+                    }}
+                    className="text-[10px] uppercase tracking-wider px-2 py-1 rounded-lg border border-[var(--color-glass-border)] text-[var(--color-text-secondary)] hover:text-white hover:border-[var(--color-glass-border-hover)] transition cursor-pointer"
+                  >
+                    {showInstallForm ? "Cancel" : "+ Install"}
+                  </button>
+                </div>
+              </div>
+
+              {showCatalog && (
+                <div className="rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] p-2 space-y-1.5 mb-3 max-h-[220px] overflow-y-auto scrollbar">
+                  {CATALOG.map((entry) => (
+                    <button
+                      key={entry.name}
+                      onClick={() => handleUseCatalogEntry(entry)}
+                      className="w-full text-left rounded-lg px-2 py-1.5 hover:bg-white/5 transition cursor-pointer"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs font-semibold text-[var(--color-text-primary)]">{entry.name}</p>
+                        <span className="text-[8px] font-semibold uppercase tracking-wider px-1 bg-purple-500/10 text-purple-400 border border-purple-500/20 rounded shrink-0">
+                          {entry.kind}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">{entry.description}</p>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {showInstallForm && !pendingProposal && (
+                <div className="rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] p-3 space-y-2 mb-3">
+                  <div className="flex gap-1">
+                    {EXTENSION_KINDS.map((k) => (
+                      <button
+                        key={k.id}
+                        onClick={() => setInstallKind(k.id)}
+                        className={`flex-1 text-[10px] py-1.5 rounded-lg border transition cursor-pointer ${
+                          installKind === k.id
+                            ? "border-[var(--color-accent-teal)] text-[var(--color-accent-teal)] bg-[var(--color-accent-teal)]/10"
+                            : "border-[var(--color-glass-border)] text-[var(--color-text-muted)] hover:text-white"
+                        }`}
+                      >
+                        {k.label}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    type="text"
+                    value={installName}
+                    onChange={(e) => setInstallName(e.target.value)}
+                    placeholder={installKind === "plugin" ? "filesystem | browser | calendar | code_exec" : "Extension name"}
+                    className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none"
+                  />
+                  {installKind !== "plugin" && (
+                    <input
+                      type="text"
+                      value={installSource}
+                      onChange={(e) => setInstallSource(e.target.value)}
+                      placeholder={installKind === "mcp" ? "Unused for MCP (name comes from spec)" : "Source URL (optional)"}
+                      className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none"
+                    />
+                  )}
+                  {installKind !== "plugin" && (
+                    <textarea
+                      value={installRawText}
+                      onChange={(e) => setInstallRawText(e.target.value)}
+                      placeholder={
+                        installKind === "mcp"
+                          ? "name|command|arg1,arg2"
+                          : installKind === "skill"
+                            ? "Paste SKILL.md contents..."
+                            : "Paste OpenAPI spec (JSON or YAML)..."
+                      }
+                      rows={4}
+                      className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none font-mono resize-none"
+                    />
+                  )}
+                  {installError && <p className="text-[10px] text-red-400">{installError}</p>}
+                  <button
+                    onClick={() => void handlePropose()}
+                    disabled={installBusy || !installName}
+                    className="w-full py-1.5 rounded-lg bg-[var(--color-accent-teal)] hover:opacity-90 text-black text-[10px] font-semibold uppercase tracking-wider transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {installBusy ? "Checking..." : "Review install"}
+                  </button>
+                </div>
+              )}
+
+              {pendingProposal && (
+                <div className="rounded-xl bg-[var(--color-glass-bg-2)] border border-amber-500/30 p-3 space-y-2 mb-3">
+                  <p className="text-[10px] uppercase tracking-widest text-amber-400">
+                    Approve this install?
+                  </p>
+                  <pre className="text-[10px] font-mono text-gray-300 whitespace-pre-wrap break-all bg-black/20 rounded-lg p-2 border border-white/5">
+                    {pendingProposal.skill_card}
+                  </pre>
+                  {installError && <p className="text-[10px] text-red-400">{installError}</p>}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => void handleConfirm(false)}
+                      disabled={installBusy}
+                      className="flex-1 py-1.5 rounded-lg border border-red-500/30 hover:border-red-500 text-red-400 hover:bg-red-500/10 text-[10px] font-semibold uppercase tracking-wider transition cursor-pointer"
+                    >
+                      Decline
+                    </button>
+                    <button
+                      onClick={() => void handleConfirm(true)}
+                      disabled={installBusy}
+                      className="flex-1 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-[10px] font-semibold uppercase tracking-wider transition cursor-pointer"
+                    >
+                      Approve
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {loadingExtensions ? (
+                <p className="text-xs text-[var(--color-text-muted)]">Loading extensions...</p>
+              ) : extensions.length === 0 ? (
+                <p className="text-xs text-[var(--color-text-muted)]">No extensions installed yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {extensions.map((ext) => (
+                    <div
+                      key={ext.name}
+                      className="rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className={`w-2 h-2 rounded-full shrink-0 ${ext.enabled ? "bg-emerald-400" : "bg-gray-500"}`}
+                            aria-hidden="true"
+                          />
+                          <p className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
+                            {ext.name}
+                          </p>
+                          <span className="text-[8px] font-semibold uppercase tracking-wider px-1 bg-purple-500/10 text-purple-400 border border-purple-500/20 rounded shrink-0">
+                            {ext.kind}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            onClick={() => void handleToggleExtension(ext.name, ext.enabled)}
+                            className="text-[9px] uppercase px-1.5 py-1 rounded-md border border-[var(--color-glass-border)] text-[var(--color-text-secondary)] hover:text-white transition cursor-pointer"
+                          >
+                            {ext.enabled ? "Disable" : "Enable"}
+                          </button>
+                          <button
+                            onClick={() => void handleUninstallExtension(ext.name)}
+                            title="Uninstall"
+                            className="text-red-400 hover:text-red-300 transition cursor-pointer"
+                          >
+                            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                      {ext.tool_names.length > 0 && (
+                        <p className="text-[10px] text-[var(--color-text-muted)] mt-1 font-mono truncate">
+                          {ext.tool_names.join(", ")}
+                        </p>
+                      )}
+                      {ext.warnings.length > 0 && (
+                        <p className="text-[10px] text-amber-400 mt-1">
+                          {ext.warnings.length} warning{ext.warnings.length > 1 ? "s" : ""} from install scan
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="border-t border-[var(--color-glass-border)] pt-3">
+              <p className="text-xs uppercase tracking-widest text-[var(--color-text-muted)] mb-2">
+                Registered tools
+              </p>
+            </div>
+
             <input
               type="text"
               value={mcpSearch}
