@@ -47,6 +47,7 @@ _TOOL_TIMEOUT_SEC = 15.0
 _DESKTOP_CONTROL_TOOLS = frozenset({
     "desktop_click", "desktop_type", "desktop_invoke", "desktop_key",
     "desktop_click_at", "desktop_move", "desktop_drag", "desktop_scroll",
+    "desktop_focus", "desktop_window", "desktop_move_window",
 })
 # All tools that touch the UIA/comtypes COM apartment -- perception too, not
 # just the gated effectors -- must run on the single dedicated COM thread.
@@ -82,6 +83,10 @@ _TOOL_TIMEOUTS = {
     "desktop_move": 15.0,
     "desktop_drag": 15.0,
     "desktop_scroll": 15.0,
+    "desktop_windows": 15.0,
+    "desktop_focus": 15.0,
+    "desktop_window": 15.0,
+    "desktop_move_window": 15.0,
 }
 _TOOL_RESULT_MAX_CHARS = 2000
 # How long a gated tool call waits for an approve/decline before it's treated
