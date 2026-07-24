@@ -1,6 +1,12 @@
 import { create } from "zustand";
 
 export type VoiceState = "idle" | "listening" | "thinking" | "speaking";
+// What triggered the current "listening" state -- the backend emits vad_start
+// and wake_word as distinct events, but both used to collapse into the same
+// UI state with no way to tell them apart. Kept separate from VoiceState
+// itself so existing voiceState consumers (VoiceDock, etc.) don't need a new
+// case; read this only where the distinction actually matters.
+export type ListeningTrigger = "vad" | "wake_word" | null;
 
 export interface Session {
   id: string;
@@ -112,6 +118,7 @@ interface CharlieState {
   logs: string[];
   blackboard: BlackboardState;
   voiceState: VoiceState;
+  listeningTrigger: ListeningTrigger;
   audio: AudioState;
   mic: MicState;
   audioLevel: number;
@@ -132,6 +139,7 @@ interface CharlieState {
   addLog: (l: string) => void;
   setBlackboard: (b: BlackboardState) => void;
   setVoiceState: (s: VoiceState) => void;
+  setListeningTrigger: (t: ListeningTrigger) => void;
   setAudio: (a: AudioState) => void;
   setMic: (m: MicState) => void;
   setAudioLevel: (level: number) => void;
@@ -144,8 +152,6 @@ interface CharlieState {
   setActiveProposal: (p: RecoveryProposal | null) => void;
   activeToolApproval: ToolApprovalRequest | null;
   setActiveToolApproval: (r: ToolApprovalRequest | null) => void;
-  settingsOpen: boolean;
-  setSettingsOpen: (open: boolean) => void;
   latestDesktopFrame: DesktopFrame | null;
   setLatestDesktopFrame: (f: DesktopFrame | null) => void;
   desktopControlEnabled: boolean;
@@ -163,6 +169,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   logs: [],
   blackboard: { tasks: [], agents: {} },
   voiceState: "idle",
+  listeningTrigger: null,
   audio: { muted: false, volume: 1.0 },
   mic: { mic_muted: false },
   audioLevel: 0,
@@ -198,6 +205,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   addLog: (log) => set((state) => ({ logs: [log, ...state.logs].slice(0, 500) })),
   setBlackboard: (blackboard) => set({ blackboard }),
   setVoiceState: (voiceState: VoiceState) => set({ voiceState }),
+  setListeningTrigger: (listeningTrigger: ListeningTrigger) => set({ listeningTrigger }),
   setAudio: (audio) => set({ audio }),
   setMic: (mic) => set({ mic }),
   setAudioLevel: (audioLevel) => set({ audioLevel }),
@@ -215,8 +223,6 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setActiveProposal: (activeProposal) => set({ activeProposal }),
   activeToolApproval: null,
   setActiveToolApproval: (activeToolApproval) => set({ activeToolApproval }),
-  settingsOpen: false,
-  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   latestDesktopFrame: null,
   setLatestDesktopFrame: (latestDesktopFrame) => set({ latestDesktopFrame }),
   desktopControlEnabled: false,

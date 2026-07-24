@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { ReactElement } from "react";
+import Link from "next/link";
 import { useCharlieStore, rgba, lighten } from "@/store/useCharlieStore";
 
 interface SessionItem {
@@ -178,10 +179,12 @@ export function SessionRail({
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search chats..."
               aria-label="Search chats"
-              className="w-full rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent-teal)]/40 transition"
+              className="w-full rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none transition"
               style={{
                 borderColor: query ? accentBorder : undefined,
               }}
+              onFocus={(e) => { e.currentTarget.style.borderColor = accentBorder; }}
+              onBlur={(e) => { e.currentTarget.style.borderColor = query ? accentBorder : ""; }}
             />
           </div>
 
@@ -236,15 +239,9 @@ export function SessionRail({
                     background: active ? rgba(accentColor, 0.13) : "transparent",
                     borderColor: active ? accentBorder : "transparent",
                   }}
-                  className={`group relative flex items-center gap-2 rounded-xl px-3 py-2.5 cursor-pointer transition border`}
+                  className={`group flex items-center gap-2 rounded-xl px-3 py-2.5 cursor-pointer transition border`}
                 >
-                  {active && (
-                    <span
-                      style={{ backgroundColor: accentSoft }}
-                      className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-4 rounded-full"
-                    />
-                  )}
-                  <div className="min-w-0 flex-1 pl-1">
+                  <div className="min-w-0 flex-1">
                     {editingId === s.id ? (
                       <input
                         autoFocus
@@ -309,16 +306,16 @@ export function SessionRail({
 
           {/* Settings & Accent Color Pickers */}
           <div className="px-5 py-3 border-t border-[var(--color-glass-border)] flex items-center justify-between shrink-0">
-            <button
-              onClick={() => useCharlieStore.getState().setSettingsOpen(true)}
+            <Link
+              href="/settings"
               className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)] hover:text-white transition cursor-pointer"
             >
-              <svg viewBox="0 0 24 24" className="w-4 h-4 animate-[spin_10s_linear_infinite]" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="3" />
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
               <span>Settings</span>
-            </button>
+            </Link>
             <div className="flex gap-1.5">
               {["#a855f7", "#3b82f6", "#ef4444", "#f59e0b", "#06b6d4"].map((color) => (
                 <button

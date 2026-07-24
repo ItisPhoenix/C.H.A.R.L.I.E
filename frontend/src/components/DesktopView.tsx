@@ -44,12 +44,12 @@ export function DesktopView(): ReactElement {
               .map((e, i) => (
                 <div
                   key={i}
-                  className="text-[11px] font-mono px-2 py-1.5 rounded-lg bg-black/20 border border-white/5 text-gray-300 break-all"
+                  className="text-[11px] font-mono px-2 py-1.5 rounded-lg bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] text-[var(--color-text-secondary)] break-all"
                 >
-                  <span className="text-purple-400">{e.name}</span>{" "}
-                  <span className="text-gray-500">{e.kind}</span>
+                  <span className="text-[var(--color-accent-teal)]">{e.name}</span>{" "}
+                  <span className="text-[var(--color-text-muted)]">{e.kind}</span>
                   {e.text && (
-                    <span className="block text-gray-400 mt-0.5">{e.text}</span>
+                    <span className="block text-[var(--color-text-muted)] mt-0.5">{e.text}</span>
                   )}
                 </div>
               ))}

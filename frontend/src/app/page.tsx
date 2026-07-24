@@ -11,7 +11,6 @@ import { ErrorBoundary } from "../components/ErrorBoundary";
 import { MicMeter } from "../components/MicMeter";
 import { RecoveryDialog } from "../components/RecoveryDialog";
 import { ToolApprovalDialog } from "../components/ToolApprovalDialog";
-import SettingsDialog from "../components/SettingsDialog";
 
 export default function Page() {
   const connected = useCharlieStore((s) => s.connected);
@@ -241,12 +240,16 @@ export default function Page() {
           store.setBlackboard(msg.payload);
         } else if (msg.type === "vad_start" || msg.type === "wake_word") {
           store.setVoiceState("listening");
+          store.setListeningTrigger(msg.type === "wake_word" ? "wake_word" : "vad");
         } else if (msg.type === "thinking") {
           store.setVoiceState("thinking");
+          store.setListeningTrigger(null);
         } else if (msg.type === "speaking_start") {
           store.setVoiceState("speaking");
+          store.setListeningTrigger(null);
         } else if (msg.type === "speaking_stop" || msg.type === "response_done") {
           store.setVoiceState("idle");
+          store.setListeningTrigger(null);
           // A reply turn has finished: drop this session from the streaming set
           // so the HTTP fallback can run again, and reset per-reply tool rows.
           if (msg.type === "response_done") {
@@ -371,13 +374,16 @@ export default function Page() {
     if (!(wsRef.current && wsRef.current.readyState === WebSocket.OPEN) && !wsStreamingRef.current.has(sid)) {
       // HTTP POST fallback if socket is down
       try {
-        await fetch(`/api/sessions/${sid}/chat`, {
+        const res = await fetch(`/api/sessions/${sid}/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text }),
         });
+        if (!res.ok) {
+          addMessage({ role: "assistant", content: "Message failed to send (connection issue). Please try again." });
+        }
       } catch {
-        // Socket is the primary path; ignore HTTP fallback failure.
+        addMessage({ role: "assistant", content: "Message failed to send (connection issue). Please try again." });
       }
     }
   };
@@ -393,11 +399,11 @@ export default function Page() {
   };
 
   const handleApproveTask = (taskId: string) => {
-    sendWS({ type: "hitl_approve", payload: { task_id: taskId, decision: "approve" } });
+    sendWS({ type: "hitl_approve", payload: { task_id: taskId } });
   };
 
   const handleRejectTask = (taskId: string, reason: string = "Rejected by user") => {
-    sendWS({ type: "hitl_approve", payload: { task_id: taskId, decision: "reject", reason } });
+    sendWS({ type: "hitl_reject", payload: { task_id: taskId, reason } });
   };
 
   const handleApproveRecovery = (proposalId: string) => {
@@ -549,11 +555,13 @@ export default function Page() {
       //    reuses that session instead of throwing away the active
       //    conversation. A genuinely new launch_id (real Charlie restart)
       //    still gets a brand-new blank thread.
-      const bootKey = lid ? `charlie_boot_session::${lid}` : "";
+      //    Falls back to a fixed key when there's no launch_id (e.g.
+      //    `run.py --web-only`, which never sets one) -- previously an empty
+      //    `lid` made this whole reuse check a no-op, so a plain page
+      //    refresh created a brand-new blank "New Chat" session every time.
+      const bootKey = `charlie_boot_session::${lid || "no-launch"}`;
       const storedBootSid =
-        bootKey && typeof window !== "undefined"
-          ? window.sessionStorage.getItem(bootKey)
-          : null;
+        typeof window !== "undefined" ? window.sessionStorage.getItem(bootKey) : null;
       const existingSessions = await fetchSessions();
       const bootSessionStillValid = Boolean(
         storedBootSid && existingSessions.some((s) => s.id === storedBootSid)
@@ -562,7 +570,7 @@ export default function Page() {
         setCurrentSessionId(storedBootSid);
       } else {
         await handleCreateSession("New Chat"); // also refreshes the session list
-        if (bootKey && typeof window !== "undefined") {
+        if (typeof window !== "undefined") {
           const created = useCharlieStore.getState().currentSessionId;
           if (created) window.sessionStorage.setItem(bootKey, created);
         }
@@ -591,12 +599,24 @@ export default function Page() {
       // Sync WebSocket focus
       sendWS({ type: "session_active", payload: { session_id: currentSessionId } });
 
-      // HTTP POST active session update fallback
-      fetch("/api/session/active", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: currentSessionId }),
-      }).catch(() => {});
+      // HTTP fallback only when the socket is actually down -- mirrors the
+      // same WS-first, HTTP-fallback pattern handleSendMessage uses, instead
+      // of always double-sending this on every session switch.
+      if (!(wsRef.current && wsRef.current.readyState === WebSocket.OPEN)) {
+        fetch("/api/session/active", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: currentSessionId }),
+        })
+          .then((res) => {
+            if (!res.ok) {
+              console.warn("Failed to sync active session over HTTP fallback:", res.status);
+            }
+          })
+          .catch(() => {
+            console.warn("Failed to sync active session over HTTP fallback (network error)");
+          });
+      }
     }
   }, [currentSessionId, fetchMessages]);
 
@@ -732,7 +752,6 @@ export default function Page() {
           onApprove={handleApproveToolCall}
           onReject={handleRejectToolCall}
         />
-        <SettingsDialog />
       </div>
     </ErrorBoundary>
   );

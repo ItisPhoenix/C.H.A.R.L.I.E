@@ -40,6 +40,7 @@ export function VoiceDock({
   const toggleMic = () => onMicControl({ mic_muted: !mic.mic_muted });
   const accentColor = useCharlieStore((s) => s.accentColor);
   const audioLevel = useCharlieStore((s) => s.audioLevel);
+  const listeningTrigger = useCharlieStore((s) => s.listeningTrigger);
 
   const bars = useMemo(
     () => Array.from({ length: BAR_COUNT }).map((_, i) => i),
@@ -54,24 +55,28 @@ export function VoiceDock({
   }[state] || "#4b5563";
 
   const effectiveVolume = audio.muted ? 0 : audio.volume;
+  // Wake-word-triggered listening is the notable case worth calling out;
+  // plain VAD-triggered listening keeps the default label.
+  const stateLabel =
+    state === "listening" && listeningTrigger === "wake_word" ? "Wake Word" : STATE_LABELS[state];
 
-  const voiceDockBorder = !connected 
-    ? "rgba(239, 68, 68, 0.4)" 
-    : mic.mic_muted 
-    ? "rgba(75, 85, 99, 0.4)" 
-    : audio.muted 
-    ? "rgba(239, 68, 68, 0.35)" 
-    : "rgba(255, 255, 255, 0.07)";
+  const voiceDockBorder = !connected
+    ? "rgba(239, 68, 68, 0.4)"
+    : mic.mic_muted
+    ? "rgba(75, 85, 99, 0.4)"
+    : audio.muted
+    ? "rgba(239, 68, 68, 0.35)"
+    : "var(--color-glass-border)";
 
   return (
     <div
       data-state={state}
       role="status"
-      aria-label={`Voice pipeline: ${!connected ? "offline" : STATE_LABELS[state]}`}
+      aria-label={`Voice pipeline: ${!connected ? "offline" : stateLabel}`}
       style={{
-        border: `1px solid ${voiceDockBorder}`,
+        borderColor: voiceDockBorder,
       }}
-      className="mx-4 mb-4 p-3 rounded-2xl flex items-center justify-between gap-6 bg-black/60 backdrop-blur-[20px] z-20 select-none transition-all duration-200"
+      className="glass mx-4 mb-4 p-3 flex items-center justify-between gap-6 z-20 select-none"
     >
       <div className="flex-1 flex items-center justify-center gap-[3px] h-[26px]">
         {!connected ? (
@@ -108,12 +113,12 @@ export function VoiceDock({
 
       <span
         style={{
-          color: !connected ? "#ef4444" : stateColor,
+          color: !connected ? "var(--color-status-error)" : stateColor,
         }}
         className={`text-[11px] font-bold uppercase tracking-[0.18em] min-w-[88px] text-center font-mono`}
         aria-live="polite"
       >
-        {!connected ? "Offline" : STATE_LABELS[state]}
+        {!connected ? "Offline" : stateLabel}
       </span>
 
       <div
@@ -136,7 +141,7 @@ export function VoiceDock({
             aria-pressed={audio.muted}
             className={`rounded-xl w-[34px] h-[34px] grid place-items-center cursor-pointer transition ${
               audio.muted
-                ? "bg-[#ef4444]/16 text-[#ef4444]"
+                ? "bg-[var(--color-status-error-dim)] text-[var(--color-status-error)]"
                 : "text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
             }`}
           >
@@ -172,9 +177,9 @@ export function VoiceDock({
             }}
             className={`rounded-xl w-[34px] h-[34px] grid place-items-center cursor-pointer transition ${
               !connected
-                ? "bg-[#ef4444]/16 text-[#ef4444] animate-pulse"
+                ? "bg-[var(--color-status-error-dim)] text-[var(--color-status-error)] animate-pulse"
                 : mic.mic_muted
-                ? "bg-[rgba(75,85,99,0.2)] text-[#6b7280]"
+                ? "bg-[rgba(75,85,99,0.2)] text-[var(--color-text-muted)]"
                 : "text-[var(--color-accent-teal)] hover:text-[var(--color-text-primary)]"
             }`}
           >
@@ -186,7 +191,11 @@ export function VoiceDock({
             </span>
             <span
               style={{
-                color: !connected ? "#ef4444" : mic.mic_muted ? "#6b7280" : "var(--color-accent-teal)",
+                color: !connected
+                  ? "var(--color-status-error)"
+                  : mic.mic_muted
+                  ? "var(--color-text-muted)"
+                  : "var(--color-accent-teal)",
               }}
               className={`text-xs font-bold uppercase`}
             >

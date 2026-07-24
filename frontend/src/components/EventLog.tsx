@@ -11,6 +11,7 @@ const SEVERITY_COLOR: Record<string, string> = {
 
 export function EventLog(): ReactElement {
   const [open, setOpen] = useState(false);
+  const [seenCount, setSeenCount] = useState(0);
   const logs = useCharlieStore((s) => s.logs);
   const alerts = useCharlieStore((s) => s.alerts);
   const accentColor = useCharlieStore((s) => s.accentColor);
@@ -24,12 +25,21 @@ export function EventLog(): ReactElement {
     ),
     ...logs,
   ].slice(-40);
-  const unread = alerts.length + logs.length;
+  const totalCount = alerts.length + logs.length;
+  const unread = open ? 0 : Math.max(0, totalCount - seenCount);
+
+  const toggle = () => {
+    setOpen((v) => {
+      const next = !v;
+      if (next) setSeenCount(totalCount);
+      return next;
+    });
+  };
 
   return (
     <div className="glass rounded-2xl overflow-hidden">
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggle}
         aria-expanded={open}
         className="w-full flex items-center justify-between px-4 py-2 text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] cursor-pointer transition"
       >

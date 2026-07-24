@@ -15,6 +15,7 @@
 
   --color-glass-bg: rgba(0, 0, 0, 0.6);
   --color-glass-bg-2: rgba(0, 0, 0, 0.55);
+  --color-glass-bg-modal: rgba(0, 0, 0, 0.88);
   --color-glass-border: rgba(255, 255, 255, 0.07);
   --color-glass-border-hover: rgba(255, 255, 255, 0.14);
   --color-surface-hover: rgba(255, 255, 255, 0.03);
@@ -28,7 +29,11 @@
   --color-status-thinking: #a855f7;
   --color-status-speaking: #10b981;
   --color-status-error: #ef4444;
+  --color-status-error-dim: rgba(239, 68, 68, 0.12);
   --color-status-warning: #f59e0b;
+  --color-status-warning-dim: rgba(245, 158, 11, 0.12);
+  --color-status-success: #10b981;
+  --color-status-success-dim: rgba(16, 185, 129, 0.12);
 
   --animate-pulse: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
   --animate-rise: rise 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;

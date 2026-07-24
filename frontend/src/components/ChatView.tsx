@@ -175,13 +175,20 @@ export function ChatView({
             {toolActivity.length} tool {toolActivity.length === 1 ? "action" : "actions"}
           </summary>
           <ul className="mt-1 space-y-1">
-            {toolActivity.map((t, i) => (
-              <li key={i} className="font-mono">
-                {t.kind === "tool_call" ? "🔧 Ran" : t.kind === "tool_result" ? "↩" : "💭"}{" "}
-                {t.name}
-                {t.text ? ` → ${t.text}` : ""}
-              </li>
-            ))}
+            {toolActivity.map((t, i) => {
+              const tag = t.kind === "tool_call" ? "call" : t.kind === "tool_result" ? "result" : "thinking";
+              return (
+                <li key={i} className="font-mono flex items-baseline gap-1.5">
+                  <span className="text-[9px] uppercase tracking-wider text-[var(--color-text-muted)] shrink-0">
+                    {tag}
+                  </span>
+                  <span>
+                    {t.name}
+                    {t.text ? ` → ${t.text}` : ""}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         </details>
       )}

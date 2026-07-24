@@ -104,17 +104,17 @@ export const AGENT_COLOR: Record<string, string> = {
   "Vision": "#f97316",
 };
 
-function statusColor(status: string): string {
+function statusDotColor(status: string): string {
   switch (status) {
     case "running":
     case "working":
-      return "bg-[var(--color-accent-teal)] animate-pulse";
+      return "var(--color-accent-teal)";
     case "done":
-      return "bg-[#9ca3af]";
+      return "#9ca3af";
     case "failed":
-      return "bg-[#ef4444]";
+      return "var(--color-status-error)";
     default:
-      return "bg-[#4b5563]";
+      return "var(--color-status-idle)";
   }
 }
 
@@ -473,7 +473,7 @@ export function InsightRail({
                 );
               })}
             </div>
- 
+
             <div>
               <p className="text-xs uppercase tracking-widest text-[var(--color-text-muted)] mb-2">
                 Active Agents
@@ -492,8 +492,8 @@ export function InsightRail({
                     >
                       <span
                         style={{
-                          backgroundColor: AGENT_COLOR[a.name] || "#4b5563",
-                          boxShadow: a.status === "running" ? `0 0 10px ${AGENT_COLOR[a.name] || "#4b5563"}` : "none",
+                          backgroundColor: AGENT_COLOR[a.name] || statusDotColor(a.status),
+                          boxShadow: a.status === "running" ? `0 0 10px ${AGENT_COLOR[a.name] || statusDotColor(a.status)}` : "none",
                         }}
                         className={`w-2 h-2 rounded-full shrink-0 ${a.status === "running" ? "animate-pulse" : ""}`}
                         aria-hidden="true"
@@ -503,13 +503,12 @@ export function InsightRail({
                           {a.name}
                         </p>
                         {a.status === "running" && (
-                          <div className="flex items-center gap-1 mt-0.5">
-                            <span className="flex h-1.5 w-1.5 relative">
-                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75"></span>
-                              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-purple-500"></span>
-                            </span>
-                            <span className="text-[10px] text-purple-400 font-mono animate-pulse">Thinking...</span>
-                          </div>
+                          <p
+                            className="text-[10px] font-mono mt-0.5"
+                            style={{ color: AGENT_COLOR[a.name] || "var(--color-accent-teal)" }}
+                          >
+                            Working&hellip;
+                          </p>
                         )}
                         {a.current_task && (
                           <p className="text-xs text-[var(--color-text-muted)] truncate mt-0.5">
@@ -524,7 +523,7 @@ export function InsightRail({
             </div>
           </div>
         )}
- 
+
         {tab === "memory" && (
           <div className="space-y-4">
             {loadingFacts ? (
@@ -532,20 +531,20 @@ export function InsightRail({
             ) : (
               <>
                 <MemoryGraph facts={facts} />
-                
+
                 <input
                   type="text"
                   value={factSearch}
                   onChange={(e) => setFactSearch(e.target.value)}
                   placeholder="Search facts..."
-                  className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none"
+                  className="w-full bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] rounded-lg px-2.5 py-1.5 text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-glass-border-hover)]"
                 />
 
                 {facts.length === 0 ? (
                   <EmptyState text="No facts consolidated yet. Charlie builds its knowledge graph as you chat." />
                 ) : (
                   (() => {
-                    const filtered = facts.filter(f => 
+                    const filtered = facts.filter(f =>
                       f.subject.toLowerCase().includes(factSearch.toLowerCase()) ||
                       f.predicate.toLowerCase().includes(factSearch.toLowerCase()) ||
                       f.object.toLowerCase().includes(factSearch.toLowerCase())
@@ -554,17 +553,17 @@ export function InsightRail({
                     return (
                       <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1 scrollbar">
                         {filtered.length === 0 ? (
-                          <p className="text-xs text-gray-500 font-mono py-4 text-center">No matching facts found.</p>
+                          <p className="text-xs text-[var(--color-text-muted)] font-mono py-4 text-center">No matching facts found.</p>
                         ) : (
                           filtered.map((f, i) => (
                             <div
                               key={i}
-                              className="p-2 rounded-xl bg-white/5 border border-white/5 flex items-center justify-between text-[11px] hover:bg-white/10 group transition"
+                              className="p-2 rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] flex items-center justify-between text-[11px] hover:bg-[var(--color-surface-hover)] group transition"
                             >
                               <div className="flex flex-wrap items-center gap-1.5 min-w-0 pr-2">
-                                <span className="text-gray-300 font-semibold truncate max-w-[70px]" title={f.subject}>{f.subject}</span>
-                                <span className="text-purple-400 text-[9px] font-mono px-1 bg-purple-500/10 rounded border border-purple-500/10">{f.predicate}</span>
-                                <span className="text-gray-300 truncate max-w-[70px]" title={f.object}>{f.object}</span>
+                                <span className="text-[var(--color-text-secondary)] font-semibold truncate max-w-[70px]" title={f.subject}>{f.subject}</span>
+                                <span className="text-[var(--color-accent-teal)] text-[9px] font-mono px-1 bg-[var(--color-glass-bg-2)] rounded border border-[var(--color-glass-border)]">{f.predicate}</span>
+                                <span className="text-[var(--color-text-secondary)] truncate max-w-[70px]" title={f.object}>{f.object}</span>
                               </div>
                               <button
                                 onClick={async (e) => {
@@ -576,7 +575,7 @@ export function InsightRail({
                                     void loadFacts();
                                   }
                                 }}
-                                className="text-gray-400 hover:text-red-400 opacity-0 group-hover:opacity-100 transition cursor-pointer"
+                                className="text-[var(--color-text-muted)] hover:text-[var(--color-status-error)] opacity-0 group-hover:opacity-100 transition cursor-pointer"
                                 title="Delete fact"
                               >
                                 <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
@@ -598,7 +597,7 @@ export function InsightRail({
             )}
           </div>
         )}
- 
+
         {tab === "extensions" && (
           <div className="space-y-4">
             <div>
@@ -634,11 +633,11 @@ export function InsightRail({
                     <button
                       key={entry.name}
                       onClick={() => handleUseCatalogEntry(entry)}
-                      className="w-full text-left rounded-lg px-2 py-1.5 hover:bg-white/5 transition cursor-pointer"
+                      className="w-full text-left rounded-lg px-2 py-1.5 hover:bg-[var(--color-surface-hover)] transition cursor-pointer"
                     >
                       <div className="flex items-center justify-between gap-2">
                         <p className="text-xs font-semibold text-[var(--color-text-primary)]">{entry.name}</p>
-                        <span className="text-[8px] font-semibold uppercase tracking-wider px-1 bg-purple-500/10 text-purple-400 border border-purple-500/20 rounded shrink-0">
+                        <span className="text-[8px] font-semibold uppercase tracking-wider px-1 bg-[var(--color-glass-bg-2)] text-[var(--color-text-muted)] border border-[var(--color-glass-border)] rounded shrink-0">
                           {entry.kind}
                         </span>
                       </div>
@@ -670,7 +669,7 @@ export function InsightRail({
                     value={installName}
                     onChange={(e) => setInstallName(e.target.value)}
                     placeholder={installKind === "plugin" ? "filesystem | browser | calendar | code_exec" : "Extension name"}
-                    className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none"
+                    className="w-full bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] rounded-lg px-2.5 py-1.5 text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-glass-border-hover)]"
                   />
                   {installKind !== "plugin" && (
                     <input
@@ -678,7 +677,7 @@ export function InsightRail({
                       value={installSource}
                       onChange={(e) => setInstallSource(e.target.value)}
                       placeholder={installKind === "mcp" ? "Unused for MCP (name comes from spec)" : "Source URL (optional)"}
-                      className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none"
+                      className="w-full bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] rounded-lg px-2.5 py-1.5 text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-glass-border-hover)]"
                     />
                   )}
                   {installKind !== "plugin" && (
@@ -693,10 +692,10 @@ export function InsightRail({
                             : "Paste OpenAPI spec (JSON or YAML)..."
                       }
                       rows={4}
-                      className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none font-mono resize-none"
+                      className="w-full bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] rounded-lg px-2.5 py-1.5 text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-glass-border-hover)] font-mono resize-none"
                     />
                   )}
-                  {installError && <p className="text-[10px] text-red-400">{installError}</p>}
+                  {installError && <p className="text-[10px] text-[var(--color-status-error)]">{installError}</p>}
                   <button
                     onClick={() => void handlePropose()}
                     disabled={installBusy || !installName}
@@ -708,26 +707,26 @@ export function InsightRail({
               )}
 
               {pendingProposal && (
-                <div className="rounded-xl bg-[var(--color-glass-bg-2)] border border-amber-500/30 p-3 space-y-2 mb-3">
-                  <p className="text-[10px] uppercase tracking-widest text-amber-400">
+                <div className="rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-status-warning)]/30 p-3 space-y-2 mb-3">
+                  <p className="text-[10px] uppercase tracking-widest text-[var(--color-status-warning)]">
                     Approve this install?
                   </p>
-                  <pre className="text-[10px] font-mono text-gray-300 whitespace-pre-wrap break-all bg-black/20 rounded-lg p-2 border border-white/5">
+                  <pre className="text-[10px] font-mono text-[var(--color-text-secondary)] whitespace-pre-wrap break-all bg-[var(--color-glass-bg-2)] rounded-lg p-2 border border-[var(--color-glass-border)]">
                     {pendingProposal.skill_card}
                   </pre>
-                  {installError && <p className="text-[10px] text-red-400">{installError}</p>}
+                  {installError && <p className="text-[10px] text-[var(--color-status-error)]">{installError}</p>}
                   <div className="flex gap-2">
                     <button
                       onClick={() => void handleConfirm(false)}
                       disabled={installBusy}
-                      className="flex-1 py-1.5 rounded-lg border border-red-500/30 hover:border-red-500 text-red-400 hover:bg-red-500/10 text-[10px] font-semibold uppercase tracking-wider transition cursor-pointer"
+                      className="flex-1 py-1.5 rounded-lg border border-[var(--color-status-error)]/30 hover:border-[var(--color-status-error)] text-[var(--color-status-error)] hover:bg-[var(--color-status-error-dim)] text-[10px] font-semibold uppercase tracking-wider transition cursor-pointer"
                     >
                       Decline
                     </button>
                     <button
                       onClick={() => void handleConfirm(true)}
                       disabled={installBusy}
-                      className="flex-1 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-[10px] font-semibold uppercase tracking-wider transition cursor-pointer"
+                      className="flex-1 py-1.5 rounded-lg bg-[var(--color-status-success)] hover:brightness-110 text-white text-[10px] font-semibold uppercase tracking-wider transition cursor-pointer"
                     >
                       Approve
                     </button>
@@ -749,13 +748,13 @@ export function InsightRail({
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0">
                           <span
-                            className={`w-2 h-2 rounded-full shrink-0 ${ext.enabled ? "bg-emerald-400" : "bg-gray-500"}`}
+                            className={`w-2 h-2 rounded-full shrink-0 ${ext.enabled ? "bg-[var(--color-status-success)]" : "bg-[var(--color-status-idle)]"}`}
                             aria-hidden="true"
                           />
                           <p className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
                             {ext.name}
                           </p>
-                          <span className="text-[8px] font-semibold uppercase tracking-wider px-1 bg-purple-500/10 text-purple-400 border border-purple-500/20 rounded shrink-0">
+                          <span className="text-[8px] font-semibold uppercase tracking-wider px-1 bg-[var(--color-glass-bg-2)] text-[var(--color-text-muted)] border border-[var(--color-glass-border)] rounded shrink-0">
                             {ext.kind}
                           </span>
                         </div>
@@ -769,7 +768,7 @@ export function InsightRail({
                           <button
                             onClick={() => void handleUninstallExtension(ext.name)}
                             title="Uninstall"
-                            className="text-red-400 hover:text-red-300 transition cursor-pointer"
+                            className="text-[var(--color-status-error)] hover:opacity-80 transition cursor-pointer"
                           >
                             <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
                               <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
@@ -783,7 +782,7 @@ export function InsightRail({
                         </p>
                       )}
                       {ext.warnings.length > 0 && (
-                        <p className="text-[10px] text-amber-400 mt-1">
+                        <p className="text-[10px] text-[var(--color-status-warning)] mt-1">
                           {ext.warnings.length} warning{ext.warnings.length > 1 ? "s" : ""} from install scan
                         </p>
                       )}
@@ -804,7 +803,7 @@ export function InsightRail({
               value={mcpSearch}
               onChange={(e) => setMcpSearch(e.target.value)}
               placeholder="Search tools..."
-              className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none"
+              className="w-full bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] rounded-lg px-2.5 py-1.5 text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-glass-border-hover)]"
             />
 
             {loadingTools ? (
@@ -825,28 +824,28 @@ export function InsightRail({
                 return (
                   <div className="space-y-2 max-h-[350px] overflow-y-auto pr-1 scrollbar">
                     {filtered.length === 0 ? (
-                      <p className="text-xs text-gray-500 font-mono py-4 text-center">No matching tools found.</p>
+                      <p className="text-xs text-[var(--color-text-muted)] font-mono py-4 text-center">No matching tools found.</p>
                     ) : (
                       filtered.map((t, i) => {
                         const name = t.function?.name ?? t.type;
                         const isExpanded = expandedTools[name];
                         const serverName = name.startsWith("mcp_") ? name.split("_")[1] : "server";
-                        
+
                         return (
                           <div
                             key={i}
                             onClick={() => setExpandedTools({ ...expandedTools, [name]: !isExpanded })}
-                            className="rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2 cursor-pointer hover:bg-white/[0.02] transition flex flex-col"
+                            className="rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2 cursor-pointer hover:bg-[var(--color-surface-hover)] transition flex flex-col"
                           >
                             <div className="flex items-center justify-between gap-2">
                               <p className="text-xs font-semibold text-[var(--color-text-primary)] font-mono truncate">
                                 {name.replace(`mcp_${serverName}_`, "")}
                               </p>
-                              <span className="text-[8px] font-semibold uppercase tracking-wider px-1 bg-purple-500/10 text-purple-400 border border-purple-500/20 rounded shrink-0">
+                              <span className="text-[8px] font-semibold uppercase tracking-wider px-1 bg-[var(--color-glass-bg-2)] text-[var(--color-text-muted)] border border-[var(--color-glass-border)] rounded shrink-0">
                                 {serverName}
                               </span>
                             </div>
-                            
+
                             {t.function?.description && (
                               <p className="text-xs text-[var(--color-text-muted)] mt-0.5 line-clamp-2">
                                 {t.function.description}
@@ -856,26 +855,26 @@ export function InsightRail({
                             {isExpanded && t.function?.parameters?.properties && (
                               <div
                                 onClick={(e) => e.stopPropagation()}
-                                className="mt-2 pt-2 border-t border-white/5 space-y-1.5 text-[10px] font-mono text-gray-400"
+                                className="mt-2 pt-2 border-t border-[var(--color-glass-border)] space-y-1.5 text-[10px] font-mono text-[var(--color-text-muted)]"
                               >
-                                <p className="font-semibold text-gray-300">Parameters:</p>
+                                <p className="font-semibold text-[var(--color-text-secondary)]">Parameters:</p>
                                 {Object.entries(t.function.parameters.properties).map(([pName, pInfo]: [string, any]) => {
                                   const isRequired = t.function?.parameters?.required?.includes(pName);
                                   return (
-                                    <div key={pName} className="flex flex-col bg-black/20 p-1.5 rounded border border-white/5">
+                                    <div key={pName} className="flex flex-col bg-[var(--color-glass-bg-2)] p-1.5 rounded border border-[var(--color-glass-border)]">
                                       <div className="flex items-center justify-between">
-                                        <span className="text-purple-300 font-bold">{pName}</span>
+                                        <span className="text-[var(--color-accent-teal)] font-bold">{pName}</span>
                                         <div className="flex gap-1.5">
-                                          <span className="text-gray-500">[{pInfo.type}]</span>
+                                          <span className="text-[var(--color-text-muted)]">[{pInfo.type}]</span>
                                           {isRequired && (
-                                            <span className="text-red-400 text-[8px] bg-red-500/10 px-1 border border-red-500/20 rounded">
+                                            <span className="text-[var(--color-status-error)] text-[8px] bg-[var(--color-status-error-dim)] px-1 border border-[var(--color-status-error)]/20 rounded">
                                               Required
                                             </span>
                                           )}
                                         </div>
                                       </div>
                                       {pInfo.description && (
-                                        <p className="text-[9px] text-gray-500 mt-0.5 leading-normal">
+                                        <p className="text-[9px] text-[var(--color-text-muted)] mt-0.5 leading-normal">
                                           {pInfo.description}
                                         </p>
                                       )}
@@ -903,25 +902,28 @@ export function InsightRail({
               (() => {
                 const doneTaskIds = new Set(tasks.filter((t) => t.status === "done").map((t) => t.id));
                 return tasks.map((t) => {
-                  const dotBg = t.assigned_to && AGENT_COLOR[t.assigned_to] 
-                    ? AGENT_COLOR[t.assigned_to] 
-                    : (t.status === "running" ? "var(--color-accent-teal)" : t.status === "done" ? "#10b981" : t.status === "failed" ? "#ef4444" : "#4b5563");
-                  
+                  const dotBg = (t.assigned_to && AGENT_COLOR[t.assigned_to]) || statusDotColor(t.status);
+
                   const depsCount = t.dependencies ? t.dependencies.length : 0;
                   const depsReady = !t.dependencies || t.dependencies.every((depId) => doneTaskIds.has(depId));
-                  
+
+                  // Only the ends of the priority range earn a color; "Normal"/"Low" stay neutral
+                  // so color reads as "needs attention," not decoration (product register: semantic
+                  // color for state, not a full rainbow of equally-weighted categories).
                   const priorities = ["Critical", "High", "Normal", "Low"];
                   const priorityVal = t.priority ?? 2;
                   const priorityLabel = priorities[priorityVal] || "Normal";
-                  const priorityColor = priorityVal === 0 ? "text-red-400 bg-red-500/10 border-red-500/20" :
-                                        priorityVal === 1 ? "text-orange-400 bg-orange-500/10 border-orange-500/20" :
-                                        priorityVal === 2 ? "text-blue-400 bg-blue-500/10 border-blue-500/20" :
-                                        "text-gray-400 bg-gray-500/10 border-gray-500/20";
+                  const priorityColor =
+                    priorityVal === 0
+                      ? "text-[var(--color-status-error)] bg-[var(--color-status-error-dim)] border-[var(--color-status-error)]/20"
+                      : priorityVal === 1
+                      ? "text-[var(--color-status-warning)] bg-[var(--color-status-warning-dim)] border-[var(--color-status-warning)]/20"
+                      : "text-[var(--color-text-muted)] bg-[var(--color-glass-bg-2)] border-[var(--color-glass-border)]";
 
                   return (
                     <div
                       key={t.id}
-                      className="rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] p-3 flex flex-col gap-2 transition hover:bg-[var(--color-glass-bg-3)]"
+                      className="rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] p-3 flex flex-col gap-2 transition hover:bg-[var(--color-surface-hover)]"
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0">
@@ -942,31 +944,31 @@ export function InsightRail({
                       <div className="grid grid-cols-2 gap-1 text-[11px] text-[var(--color-text-muted)] border-t border-[var(--color-glass-border)] pt-2">
                         {t.assigned_to ? (
                           <div className="truncate">
-                            <span className="text-[10px] text-gray-500">Agent:</span> <strong style={{ color: AGENT_COLOR[t.assigned_to] || "inherit" }}>{t.assigned_to}</strong>
+                            <span className="text-[10px] text-[var(--color-text-muted)]">Agent:</span> <strong style={{ color: AGENT_COLOR[t.assigned_to] || "inherit" }}>{t.assigned_to}</strong>
                           </div>
                         ) : (
                           <div>
-                            <span className="text-[10px] text-gray-500">Agent:</span> None
+                            <span className="text-[10px] text-[var(--color-text-muted)]">Agent:</span> None
                           </div>
                         )}
                         <div className="truncate text-right">
-                          <span className="text-[10px] text-gray-500">Deps:</span>{" "}
+                          <span className="text-[10px] text-[var(--color-text-muted)]">Deps:</span>{" "}
                           {depsCount === 0 ? (
-                            <span className="text-emerald-400">None</span>
+                            <span className="text-[var(--color-status-success)]">None</span>
                           ) : depsReady ? (
-                            <span className="text-emerald-400">Ready</span>
+                            <span className="text-[var(--color-status-success)]">Ready</span>
                           ) : (
-                            <span className="text-amber-400">Blocked</span>
+                            <span className="text-[var(--color-status-warning)]">Blocked</span>
                           )}
                         </div>
                         <div>
-                          <span className="text-[10px] text-gray-500">Retries:</span> {t.retry_count ?? 0}
+                          <span className="text-[10px] text-[var(--color-text-muted)]">Retries:</span> {t.retry_count ?? 0}
                         </div>
                         <div className="truncate text-right">
-                          <span className="text-[10px] text-gray-500">Approval:</span>{" "}
+                          <span className="text-[10px] text-[var(--color-text-muted)]">Approval:</span>{" "}
                           <span className={
-                            (t.approval_status ?? "approved") === "approved" ? "text-emerald-400" :
-                            (t.approval_status ?? "approved") === "rejected" ? "text-red-400" : "text-amber-400"
+                            (t.approval_status ?? "approved") === "approved" ? "text-[var(--color-status-success)]" :
+                            (t.approval_status ?? "approved") === "rejected" ? "text-[var(--color-status-error)]" : "text-[var(--color-status-warning)]"
                           }>
                             {t.approval_status === "pending_approval" ? "Pending" : (t.approval_status ?? "approved")}
                           </span>
@@ -974,7 +976,7 @@ export function InsightRail({
                       </div>
 
                       {t.result && (
-                        <div className="text-[11px] px-2 py-1 rounded bg-black/20 border border-white/5 font-mono break-all max-h-16 overflow-y-auto text-gray-300">
+                        <div className="text-[11px] px-2 py-1 rounded bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] font-mono break-all max-h-16 overflow-y-auto text-[var(--color-text-secondary)]">
                           {t.result}
                         </div>
                       )}
@@ -984,13 +986,13 @@ export function InsightRail({
                           <>
                             <button
                               onClick={() => onRejectTask(t.id, "Rejected by user")}
-                              className="px-2 py-1 text-[10px] font-medium rounded-lg border border-red-500/30 hover:border-red-500 text-red-400 hover:bg-red-500/10 transition cursor-pointer"
+                              className="px-2 py-1 text-[10px] font-medium rounded-lg border border-[var(--color-status-error)]/30 hover:border-[var(--color-status-error)] text-[var(--color-status-error)] hover:bg-[var(--color-status-error-dim)] transition cursor-pointer"
                             >
                               Reject
                             </button>
                             <button
                               onClick={() => onApproveTask(t.id)}
-                              className="px-2 py-1 text-[10px] font-medium rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white transition cursor-pointer"
+                              className="px-2 py-1 text-[10px] font-medium rounded-lg bg-[var(--color-status-success)] hover:brightness-110 text-white transition cursor-pointer"
                             >
                               Approve
                             </button>
@@ -1014,7 +1016,7 @@ export function InsightRail({
                           <button
                             onClick={() => onCancelTask(t.id)}
                             title="Cancel task"
-                            className="px-2 py-1 text-[10px] font-medium rounded-lg border border-red-500/30 hover:border-red-500 text-red-400 hover:bg-red-500/10 transition cursor-pointer flex items-center gap-1"
+                            className="px-2 py-1 text-[10px] font-medium rounded-lg border border-[var(--color-status-error)]/30 hover:border-[var(--color-status-error)] text-[var(--color-status-error)] hover:bg-[var(--color-status-error-dim)] transition cursor-pointer flex items-center gap-1"
                           >
                             <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
                               <path d="M18 6L6 18M6 6l12 12" />
@@ -1048,13 +1050,13 @@ export function InsightRail({
       {selectedAgent && (
         <div className="absolute inset-0 z-30 flex justify-end">
           <div
-            className="absolute inset-0 bg-black/45"
+            className="absolute inset-0 bg-black/60"
             onClick={() => setSelectedAgent(null)}
             aria-hidden="true"
           />
-          <div className="relative w-[280px] h-full bg-black/88 backdrop-blur-[20px] border-l border-[var(--color-glass-border)] p-5 flex flex-col gap-4 anim-right">
+          <div className="relative w-[280px] h-full bg-[var(--color-glass-bg-modal)] backdrop-blur-[20px] border-l border-[var(--color-glass-border)] p-5 flex flex-col gap-4 anim-right">
             <div className="flex items-center justify-between">
-              <h3 
+              <h3
                 style={{ color: AGENT_COLOR[selectedAgent.name] || "var(--color-text-primary)" }}
                 className="font-display text-base font-semibold"
               >
