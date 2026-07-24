@@ -117,23 +117,6 @@ def resolve_tool_approval(request_id: str, approved: bool) -> bool:
         _active_voice_approval_id = None
     return True
 
-# --- Tool param name map (text-based extraction) ---
-_TOOL_PARAM_NAMES: Dict[str, str] = {
-    "web_search": "query",
-    "shell_execute": "command",
-    "file_read": "path",
-    "file_write": "path",
-    "memory": "action",
-    "session_search": "query",
-}
-_TOOL_PARAM_LISTS: Dict[str, List[str]] = {
-    "web_search": ["query"],
-    "shell_execute": ["command"],
-    "file_read": ["path"],
-    "file_write": ["path", "content"],
-    "memory": ["action", "target", "content", "old_text"],
-    "session_search": ["query"],
-}
 # --- Fast-path: time/date queries answered from system clock (zero LLM) ---
 _TIME_DATE_RE = re.compile(
     r"(?:what(?:'s|\s+is|\s+s)?\s+(?:the\s+)?(?:current\s+)?(?:time|date|day|today))"
@@ -1039,13 +1022,18 @@ def _build_stable_tier(soul_text: str) -> str:
 
 
 def _build_context_tier(
-    memory_content: str, user_content: str, opinions_content: str = ""
+    memory_content: str, user_content: str, opinions_content: str = "",
+    installed_skill_blocks: Optional[Dict[str, str]] = None,
 ) -> str:
-    """Build the context tier: session memory, user preferences, and opinions.
-    Frozen at session init for cache stability."""
+    """Build the context tier: session memory, user preferences, opinions,
+    and any runtime-installed SKILL.md blocks. Frozen at session init for
+    cache stability; rebuilt on demand via reload_context()/
+    add_installed_skill_block()/remove_installed_skill_block()."""
     parts = [f"[MEMORY]\n{memory_content}", f"[USER]\n{user_content}"]
     if opinions_content:
         parts.append(f"[OPINIONS]\n{opinions_content}")
+    if installed_skill_blocks:
+        parts.extend(installed_skill_blocks.values())
     return "\n\n".join(parts)
 
 # --- Verbosity preference detection ---
@@ -1125,6 +1113,7 @@ def _build_volatile_tier(
     verbosity_hint: Optional[str] = None,
     active_goal: Optional[str] = None,
     operator_persona: bool = False,
+    tool_catalog: str = "",
 ) -> str:
     """Build the volatile tier: date/time, platform, budget, evidence blocks. Changes each turn."""
     output_rules = _PLATFORM_OUTPUT_RULES.get(platform, _DEFAULT_OUTPUT_RULES)
@@ -1152,6 +1141,17 @@ def _build_volatile_tier(
         parts.append(f"Current goal: {active_goal}. Stay focused on this.")
     if operator_persona:
         parts.append(_HELM_PERSONA_TEXT)
+    if tool_catalog:
+        # Rebuilt fresh every turn from the live registry (see
+        # ToolRegistry.build_tool_prompt), so MCP/plugin/extension tools and
+        # anything installed at runtime via the Extensions tab show up
+        # immediately -- and this list is authoritative over any capability
+        # claim elsewhere (including SOUL.md), which can go stale the moment
+        # a config flag or runtime install changes what's actually available.
+        parts.append(
+            "AVAILABLE TOOLS (authoritative -- call using the TOOL: name(...) "
+            "syntax above; use exactly these names and parameters):\n" + tool_catalog
+        )
     return "\n".join(parts)
 
 
@@ -1261,12 +1261,17 @@ class Brain:
         self._stable_tier: str = _build_stable_tier(soul_text)
 
         # --- Frozen context tier (read once, reloaded only on explicit request) ---
+        # Populated by add_installed_skill_block() when the web dashboard's
+        # Extensions flow installs a "skill" kind extension -- that flow lives
+        # entirely in the web-server subprocess, so main.py mirrors installs
+        # here over the EventBus (see main.py's "extension_installed" command).
+        self._installed_skill_blocks: Dict[str, str] = {}
         max_chars = config.prompt_memory_max // 2
         memory_content = self._read_file_safe(config.memory_file, max_chars)
         user_content = self._read_file_safe(config.user_file, max_chars)
         opinions_content = self._read_file_safe(config.opinions_file, max_chars)
         self._context_tier: str = _build_context_tier(
-            memory_content, user_content, opinions_content
+            memory_content, user_content, opinions_content, self._installed_skill_blocks
         )
 
         # --- Fallback LLM client for provider failover ---
@@ -1325,8 +1330,24 @@ class Brain:
         user_content = self._read_file_safe(self.config.user_file, max_chars)
         opinions_content = self._read_file_safe(self.config.opinions_file, max_chars)
         self._context_tier = _build_context_tier(
-            memory_content, user_content, opinions_content
+            memory_content, user_content, opinions_content, self._installed_skill_blocks
         )
+
+    def add_installed_skill_block(self, name: str, block: str) -> None:
+        """Add a runtime-installed SKILL.md's instructions to the context
+        tier and rebuild it immediately. Called from main.py when the web
+        dashboard mirrors an "extension_installed" (kind="skill") command
+        over the EventBus -- ExtensionManager itself only lives in the web
+        server's process, so this is how its instructions ever reach the
+        actual chat Brain."""
+        self._installed_skill_blocks[name] = block
+        self.reload_context()
+
+    def remove_installed_skill_block(self, name: str) -> None:
+        """Drop a previously-installed skill's context block (mirrors
+        /api/extensions/{name} DELETE) and rebuild the context tier."""
+        if self._installed_skill_blocks.pop(name, None) is not None:
+            self.reload_context()
 
     async def _check_memory_capacity(self) -> None:
         """Review memory files and consolidate when near capacity."""
@@ -1804,6 +1825,7 @@ class Brain:
             verbosity_hint=verbosity_hint,
             active_goal=self._active_goal,
             operator_persona=_detect_operator_persona(user_input),
+            tool_catalog="" if self._use_native_tools else tool_registry.build_tool_prompt(),
         )
         system_msg = _assemble_system_prompt(
             self._stable_tier, self._context_tier, volatile
@@ -2279,6 +2301,33 @@ class Brain:
 
         except Exception as e:
             logger.debug("Reflection failed: %s", e, exc_info=True)
+    @staticmethod
+    def _resolve_tool_arguments(tool_name: str, raw_args: str) -> Dict[str, Any]:
+        """Map a text-mode TOOL: call's raw argument string onto `tool_name`'s
+        real parameter names, read live from the registry (see
+        ToolRegistry.get_tool_param_names) instead of a hand-maintained dict.
+        That dict previously covered only 6 of the 19+ registered tools --
+        every other tool (all desktop_* tools, delegate_to_agent, the graph/
+        vector-memory tools, any MCP/plugin/extension tool) fell through to a
+        generic `query` kwarg and crashed with a TypeError at call time."""
+        params_list = tool_registry.get_tool_param_names(tool_name)
+        if not params_list:
+            # Unknown tool name, or a registered tool that takes no
+            # arguments (e.g. graph_consolidate) -- nothing to map onto.
+            if params_list is None and raw_args:
+                return {"query": raw_args.strip("'\"")}
+            return {}
+        if not raw_args:
+            return {params_list[0]: raw_args.strip("'\"")}
+        quoted = re.findall(r'["\']([^"\']*)["\']', raw_args)
+        if len(quoted) == 1:
+            return {params_list[0]: quoted[0]}
+        if len(quoted) > 1:
+            return {
+                params_list[i]: val for i, val in enumerate(quoted) if i < len(params_list)
+            }
+        return {params_list[0]: raw_args}
+
     def _extract_tool_calls(self, text: str) -> List[Dict[str, Any]]:
         """Extract tool calls from both JSON and text-based TOOL: format."""
         calls = []
@@ -2317,61 +2366,31 @@ class Brain:
         for match in tool_pattern.finditer(text):
             tool_name = match.group(1)
             raw_args = match.group(2).strip()
-            expected_params = _TOOL_PARAM_NAMES.get(tool_name)
-            if expected_params and raw_args:
-                quoted = re.findall(r'["\']([^"\']*)["\']', raw_args)
-                if len(quoted) == 1:
-                    arguments = {expected_params: quoted[0]}
-                elif len(quoted) > 1:
-                    params_list = _TOOL_PARAM_LISTS.get(tool_name, ["query"])
-                    arguments = {}
-                    for i, val in enumerate(quoted):
-                        if i < len(params_list):
-                            arguments[params_list[i]] = val
-                else:
-                    arguments = {expected_params: raw_args}
-            else:
-                param_name = expected_params or "query"
-                arguments = {param_name: raw_args.strip("'\"")}
             calls.append(
                 {
                     "id": None,
                     "name": tool_name,
-                    "arguments": arguments,
+                    "arguments": self._resolve_tool_arguments(tool_name, raw_args),
                 }
             )
         # Fallback: match bare tool calls without TOOL: prefix (text-mode only).
         # Native-tool providers parse structured tool_calls directly;
         # bare-pattern matching on prose causes false tool invocations.
         if not self._use_native_tools:
-            known_names = "|".join(_TOOL_PARAM_NAMES.keys())
-            bare_pattern = re.compile(r"\b(" + known_names + r")\s*\(([^)]*)\)")
+            known_names = "|".join(re.escape(n) for n in tool_registry.get_tool_names())
             seen_signatures = {
                 (c["name"], json.dumps(c["arguments"], sort_keys=True)) for c in calls
             }
-            for match in bare_pattern.finditer(text):
-                tname = match.group(1)
-                raw = match.group(2).strip()
-                expected = _TOOL_PARAM_NAMES.get(tname)
-                if expected and raw:
-                    quoted = re.findall(r'["\']([^"\']*)["\']', raw)
-                    if len(quoted) == 1:
-                        args = {expected: quoted[0]}
-                    elif len(quoted) > 1:
-                        params_list = _TOOL_PARAM_LISTS.get(tname, ["query"])
-                        args = {}
-                        for i, val in enumerate(quoted):
-                            if i < len(params_list):
-                                args[params_list[i]] = val
-                    else:
-                        args = {expected: raw}
-                else:
-                    param = expected or "query"
-                    args = {param: raw.strip("'\"")}
-                sig = (tname, json.dumps(args, sort_keys=True))
-                if sig not in seen_signatures:
-                    seen_signatures.add(sig)
-                    calls.append({"id": None, "name": tname, "arguments": args})
+            if known_names:
+                bare_pattern = re.compile(r"\b(" + known_names + r")\s*\(([^)]*)\)")
+                for match in bare_pattern.finditer(text):
+                    tname = match.group(1)
+                    raw = match.group(2).strip()
+                    args = self._resolve_tool_arguments(tname, raw)
+                    sig = (tname, json.dumps(args, sort_keys=True))
+                    if sig not in seen_signatures:
+                        seen_signatures.add(sig)
+                        calls.append({"id": None, "name": tname, "arguments": args})
         return calls
 
 

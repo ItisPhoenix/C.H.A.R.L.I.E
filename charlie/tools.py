@@ -143,6 +143,22 @@ class ToolRegistry:
     def is_interactive(self, name: str) -> bool:
         return self._tools.get(name, {}).get("is_interactive", False)
 
+    def get_tool_names(self) -> List[str]:
+        """All currently registered tool names (built-in + MCP + plugin +
+        extension) -- used by charlie.core's text-based tool-call parser so
+        it recognizes every live tool instead of a hand-maintained subset."""
+        return list(self._tools.keys())
+
+    def get_tool_param_names(self, name: str) -> Optional[List[str]]:
+        """Ordered parameter names for `name`, read from its live JSON
+        schema. None if `name` isn't registered, [] if it takes no
+        arguments. Lets charlie.core map text-mode TOOL: call arguments
+        onto real parameter names without a second, driftable list."""
+        info = self._tools.get(name)
+        if info is None:
+            return None
+        return list(info["schema"].get("properties", {}).keys())
+
     def build_tool_prompt(self) -> str:
         """Build a plain-text tool description for the system prompt."""
         lines = []
@@ -519,6 +535,30 @@ _SHELL_NAMES = ("cmd", "cmd.exe", "powershell", "powershell.exe")
 _CONVERSATIONAL = ("stop", "start", "cancel", "wait", "halt")
 
 
+def is_command_keyword_blocked(command: str) -> Optional[str]:
+    """Keyword-only half of is_shell_command_blocked, without the shell-
+    metacharacter check -- for callers that exec argv directly (no
+    shell=True, so metacharacters are inert literal characters, not command
+    chaining/injection vectors). Used by
+    charlie.extensions.install.run_skill_script, whose script paths may
+    legitimately contain parentheses etc. from the filesystem."""
+    lowered = command.lower().strip()
+    for keyword in _HARD_BLOCKED_KEYWORDS:
+        if keyword in lowered:
+            return f"Command blocked -- risky keyword '{keyword}'"
+    return None
+
+
+def is_command_keyword_gated(command: str) -> Optional[str]:
+    """Keyword-only half of is_shell_command_gated. See
+    is_command_keyword_blocked for why this is split out."""
+    lowered = command.lower().strip()
+    for keyword in _GATED_KEYWORDS:
+        if keyword in lowered:
+            return f"risky keyword '{keyword}'"
+    return None
+
+
 def is_shell_command_blocked(command: str) -> Optional[str]:
     """Check `command` against the hard shell-execute safety guards
     (metacharacters and the irreversible-keyword list). Returns a
@@ -532,11 +572,7 @@ def is_shell_command_blocked(command: str) -> Optional[str]:
     """
     if any(ch in command for ch in _SHELL_METACHARS):
         return "Shell metacharacters (;, |, &, `, $, (, )) are not allowed."
-    lowered = command.lower().strip()
-    for keyword in _HARD_BLOCKED_KEYWORDS:
-        if keyword in lowered:
-            return f"Command blocked -- risky keyword '{keyword}'"
-    return None
+    return is_command_keyword_blocked(command)
 
 
 def is_shell_command_gated(command: str) -> Optional[str]:
@@ -545,11 +581,7 @@ def is_shell_command_gated(command: str) -> Optional[str]:
     if it doesn't. Only meaningful once `is_shell_command_blocked` has
     already passed -- gating never overrides a hard block.
     """
-    lowered = command.lower().strip()
-    for keyword in _GATED_KEYWORDS:
-        if keyword in lowered:
-            return f"risky keyword '{keyword}'"
-    return None
+    return is_command_keyword_gated(command)
 
 
 @registry.register_tool(
@@ -1212,6 +1244,12 @@ def graph_consolidate() -> str:
 _VALID_AGENTS = tuple(AGENT_REGISTRY.keys())
 _POLL_INTERVAL_S = 0.5
 _POLL_TIMEOUT_S = 60.0
+# Each agent's own `description` class attribute, surfaced here so the model
+# actually learns what each agent specializes in instead of just its name --
+# previously only the bare enum reached the prompt.
+_AGENT_NAME_DESCRIPTIONS = "; ".join(
+    f"{name} ({cls.description})" for name, cls in AGENT_REGISTRY.items()
+)
 
 
 @registry.register_tool(
@@ -1227,7 +1265,7 @@ _POLL_TIMEOUT_S = 60.0
             "agent_name": {
                 "type": "string",
                 "enum": list(_VALID_AGENTS),
-                "description": "Which MARVEL agent to assign the task to",
+                "description": f"Which MARVEL agent to assign the task to: {_AGENT_NAME_DESCRIPTIONS}",
             },
             "task_description": {
                 "type": "string",

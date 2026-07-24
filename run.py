@@ -97,11 +97,12 @@ def run_web_only():
 
     import uvicorn
 
+    from charlie.config import config
     from charlie.web_server import app
 
     print("=" * 50)
     print("  Charlie Web Dashboard (web-only mode)")
-    print("  - Web Dashboard: Active (http://localhost:8000)")
+    print(f"  - Web Dashboard: Active (http://{config.charlie_host}:{config.charlie_port})")
     print("=" * 50)
 
     # Force-exit safety net: if graceful shutdown hangs >5s, kill immediately.
@@ -133,14 +134,18 @@ def run_web_only():
     signal.signal(signal.SIGINT, _sigint_handler)
 
     try:
-        config = uvicorn.Config(
+        # loop="asyncio" hardcodes ProactorEventLoop on win32 regardless of the
+        # process-wide policy, which breaks pyzmq (needs add_reader, Proactor doesn't
+        # have it -- see charlie/web_server.py:start_server for the same fix).
+        # "none" defers loop creation to _configure_platform()'s WindowsSelectorEventLoopPolicy.
+        server_config = uvicorn.Config(
             app,
-            host="127.0.0.1",
-            port=8000,
+            host=config.charlie_host,
+            port=config.charlie_port,
             log_level="info",
-            loop="asyncio",
+            loop="none",
         )
-        server = uvicorn.Server(config)
+        server = uvicorn.Server(server_config)
         _server_ref.append(server)
         server.run()
     finally:

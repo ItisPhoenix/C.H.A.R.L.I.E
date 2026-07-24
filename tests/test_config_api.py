@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import charlie.web_server as web_server
+from charlie.config import config
 from charlie.memory_graph import MemoryGraph
 
 
@@ -20,10 +21,20 @@ def _remove_db(db_path: str) -> None:
 @pytest.mark.asyncio
 async def test_get_dashboard_config():
     res = await web_server.get_dashboard_config()
-    assert "GPU_DEVICE" in res
-    assert "KOKORO_LANG" in res
-    assert "WHISPER_MODEL" in res
-    assert "MCP_SERVERS" in res
+    keys = {f["key"] for f in res["fields"]}
+    assert {"GPU_DEVICE", "KOKORO_LANG", "WHISPER_MODEL", "MCP_SERVERS"} <= keys
+    # a good chunk of the full Config surface should be exposed, not a hand-picked few
+    assert len(res["fields"]) > 50
+
+
+@pytest.mark.asyncio
+async def test_get_dashboard_config_masks_secrets():
+    res = await web_server.get_dashboard_config()
+    by_key = {f["key"]: f for f in res["fields"]}
+    secret_field = by_key["SMALL_LLM_API_KEY"]
+    assert secret_field["secret"] is True
+    assert secret_field["value"] is None
+    assert isinstance(secret_field["is_set"], bool)
 
 
 @pytest.mark.asyncio
@@ -33,6 +44,7 @@ async def test_update_dashboard_config(monkeypatch):
     def mock_update(updates):
         called.append(updates)
     monkeypatch.setattr(web_server, "_update_env_file", mock_update)
+    monkeypatch.setattr(web_server, "event_bus", None)
 
     test_payload = {
         "GPU_DEVICE": "cpu",
@@ -42,11 +54,58 @@ async def test_update_dashboard_config(monkeypatch):
 
     res = await web_server.update_dashboard_config(test_payload)
     assert res["status"] == "ok"
-    assert res["config"]["GPU_DEVICE"] == "cpu"
-    assert res["config"]["KOKORO_LANG"] == "en-gb"
-    assert res["config"]["WAKE_WORD_ENABLED"] is True
+    assert res["touched"] == ["voice"]  # GPU_DEVICE/WAKE_WORD_ENABLED are voice-tier; KOKORO_LANG is live
+    assert config.gpu_device == "cpu"
+    assert config.kokoro_lang == "en-gb"
+    assert config.wake_word_enabled is True
     assert len(called) == 1
     assert called[0]["GPU_DEVICE"] == "cpu"
+
+
+@pytest.mark.asyncio
+async def test_update_dashboard_config_ignores_unknown_keys(monkeypatch):
+    monkeypatch.setattr(web_server, "_update_env_file", lambda updates: None)
+    monkeypatch.setattr(web_server, "event_bus", None)
+
+    res = await web_server.update_dashboard_config({"NOT_A_REAL_SETTING": "x"})
+    assert res["status"] == "error"
+
+
+class _FakeEventBus:
+    def __init__(self):
+        self.sent = []
+
+    async def send_command(self, cmd):
+        self.sent.append(cmd)
+
+
+@pytest.mark.asyncio
+async def test_update_dashboard_config_never_pushes_to_live_engine(monkeypatch):
+    """Save (POST /api/config) must only persist -- Reload is the only path that applies live."""
+    bus = _FakeEventBus()
+    monkeypatch.setattr(web_server, "_update_env_file", lambda updates: None)
+    monkeypatch.setattr(web_server, "event_bus", bus)
+
+    res = await web_server.update_dashboard_config({"GPU_DEVICE": "cpu"})
+    assert res["status"] == "ok"
+    assert bus.sent == []
+
+
+@pytest.mark.asyncio
+async def test_reload_engine_config_sends_system_restart(monkeypatch):
+    bus = _FakeEventBus()
+    monkeypatch.setattr(web_server, "event_bus", bus)
+
+    res = await web_server.reload_engine_config()
+    assert res["status"] == "ok"
+    assert bus.sent == [{"type": "system_restart"}]
+
+
+@pytest.mark.asyncio
+async def test_reload_engine_config_without_voice_process(monkeypatch):
+    monkeypatch.setattr(web_server, "event_bus", None)
+    res = await web_server.reload_engine_config()
+    assert res["status"] == "error"
 
 
 @pytest.mark.asyncio

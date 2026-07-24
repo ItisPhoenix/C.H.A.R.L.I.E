@@ -38,6 +38,7 @@ def _make_brain(use_native_tools: bool) -> Brain:
     brain._turns_since_nudge = 0
     brain._stable_tier = ""
     brain._context_tier = ""
+    brain._installed_skill_blocks = {}
     brain._big_client = None
     brain.on_thought_callback = None
     brain.session_store = None
@@ -98,6 +99,41 @@ class TestBarePatternGating:
         assert "web_search" in names
         assert "shell_execute" in names
 
+    def test_desktop_tool_param_names_no_longer_drift(self):
+        """Previously _TOOL_PARAM_NAMES only covered 6 of 19+ tools -- any
+        desktop_* call parsed in text mode got a bogus `query` kwarg and
+        crashed with a TypeError. Params are now read live from the
+        registry, so a previously-uncovered tool like desktop_click parses
+        onto its real `mark_id` parameter."""
+        brain = _make_brain(use_native_tools=False)
+        calls = brain._extract_tool_calls('TOOL: desktop_click("3")')
+        assert calls[0]["name"] == "desktop_click"
+        assert calls[0]["arguments"] == {"mark_id": "3"}
+
+    def test_delegate_to_agent_multi_param_no_longer_drift(self):
+        brain = _make_brain(use_native_tools=False)
+        calls = brain._extract_tool_calls(
+            'TOOL: delegate_to_agent("E.D.I.T.H.", "research quantum computing")'
+        )
+        assert calls[0]["name"] == "delegate_to_agent"
+        assert calls[0]["arguments"] == {
+            "agent_name": "E.D.I.T.H.",
+            "task_description": "research quantum computing",
+        }
+
+    def test_zero_arg_tool_gets_empty_arguments(self):
+        """graph_consolidate takes no parameters -- an empty-parens call must
+        not synthesize a bogus `query` kwarg that would crash the call."""
+        brain = _make_brain(use_native_tools=False)
+        calls = brain._extract_tool_calls("TOOL: graph_consolidate()")
+        assert calls[0]["name"] == "graph_consolidate"
+        assert calls[0]["arguments"] == {}
+
+    def test_unknown_tool_name_falls_back_to_query(self):
+        brain = _make_brain(use_native_tools=False)
+        calls = brain._extract_tool_calls('TOOL: totally_made_up_tool("something")')
+        assert calls[0]["arguments"] == {"query": "something"}
+
 class TestGroundingRules:
     """Grounding rules must be present in the system prompt stable tier."""
 
@@ -148,6 +184,57 @@ class TestGroundingRules:
         now = datetime(2026, 1, 15, 10, 30)
         tier = _build_volatile_tier("voice", now, 10)
         assert "none" in tier
+
+    def test_volatile_tier_omits_tool_catalog_by_default(self):
+        from datetime import datetime
+
+        from charlie.core import _build_volatile_tier
+        now = datetime(2026, 1, 15, 10, 30)
+        tier = _build_volatile_tier("voice", now, 10)
+        assert "AVAILABLE TOOLS" not in tier
+
+    def test_volatile_tier_includes_tool_catalog_when_provided(self):
+        """Text-mode (local model) turns pass the live registry's tool
+        catalog here every turn -- this is what makes Charlie aware of
+        desktop control, memory/graph tools, MCP, and plugins in text mode,
+        instead of only the 3 tools _TEXT_TOOL_INSTRUCTIONS shows examples
+        for."""
+        from datetime import datetime
+
+        from charlie.core import _build_volatile_tier
+        from charlie.tools import registry as tool_registry
+        now = datetime(2026, 1, 15, 10, 30)
+        tier = _build_volatile_tier(
+            "voice", now, 10, tool_catalog=tool_registry.build_tool_prompt()
+        )
+        assert "AVAILABLE TOOLS" in tier
+        assert "desktop_click" in tier
+        assert "delegate_to_agent" in tier
+
+
+class TestInstalledSkillBlocks:
+    """A "skill" kind extension installed via the web dashboard is mirrored
+    into the voice process over the EventBus (see main.py's
+    "extension_installed" handler) -- add_installed_skill_block() is how its
+    instructions actually reach the context tier the chat loop uses."""
+
+    def test_add_installed_skill_block_appears_in_context_tier(self):
+        brain = _make_brain(use_native_tools=True)
+        brain.add_installed_skill_block("demo-skill", "[SKILL: demo-skill]\nDo the thing.")
+        assert "[SKILL: demo-skill]" in brain._context_tier
+        assert "Do the thing." in brain._context_tier
+
+    def test_remove_installed_skill_block_drops_it(self):
+        brain = _make_brain(use_native_tools=True)
+        brain.add_installed_skill_block("demo-skill", "[SKILL: demo-skill]\nDo the thing.")
+        brain.remove_installed_skill_block("demo-skill")
+        assert "[SKILL: demo-skill]" not in brain._context_tier
+
+    def test_remove_unknown_skill_block_is_a_no_op(self):
+        brain = _make_brain(use_native_tools=True)
+        before = brain._context_tier
+        brain.remove_installed_skill_block("never-installed")
+        assert brain._context_tier == before
 
 
 class TestCancelGeneration:

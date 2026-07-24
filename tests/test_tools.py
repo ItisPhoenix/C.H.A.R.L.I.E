@@ -55,6 +55,37 @@ def test_registry_registration_and_schema():
     )
 
 
+def test_get_tool_param_names_covers_every_registered_tool():
+    """Drift-proofing: charlie.core's text-mode tool-call parser reads param
+    names live via get_tool_param_names(). Every tool the registry actually
+    knows about must resolve to a (possibly empty) param list, and that list
+    must match the tool's own JSON schema -- so a newly-added tool can never
+    silently fall through to the generic `query` fallback again."""
+    for definition in registry.get_tool_definitions():
+        name = definition["function"]["name"]
+        expected = list(definition["function"]["parameters"].get("properties", {}).keys())
+        assert registry.get_tool_param_names(name) == expected
+
+
+def test_get_tool_param_names_unknown_tool_returns_none():
+    assert registry.get_tool_param_names("not_a_real_tool") is None
+
+
+def test_get_tool_names_matches_definitions():
+    assert set(registry.get_tool_names()) == {
+        d["function"]["name"] for d in registry.get_tool_definitions()
+    }
+
+
+def test_delegate_to_agent_schema_describes_each_agent():
+    """Previously the agent_name enum listed only bare agent names -- the
+    model never learned what each one specializes in."""
+    definitions = {d["function"]["name"]: d["function"] for d in registry.get_tool_definitions()}
+    agent_desc = definitions["delegate_to_agent"]["parameters"]["properties"]["agent_name"]["description"]
+    assert "E.D.I.T.H." in agent_desc
+    assert "Research" in agent_desc or "research" in agent_desc
+
+
 def test_file_write_and_file_read(tmp_path):
     target = tmp_path / "notes.txt"
     message = file_write(str(target), "hello tools")

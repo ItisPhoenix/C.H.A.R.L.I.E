@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from charlie.config import config
+from charlie.config import Config, config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
 from charlie.memory_graph import MemoryGraph
 from charlie.session_store import SessionStore
@@ -82,89 +82,64 @@ if plugin_manager is None:
 from charlie.extensions import ExtensionManager, InstalledExtension  # noqa: E402
 
 _extension_manager = ExtensionManager()
-_BUILTIN_PLUGIN_NAMES = ("filesystem", "browser", "calendar", "code_exec")
 
 
 def _builtin_plugin(name: str):
-    from charlie.plugins import BrowserPlugin, CalendarPlugin, CodeExecPlugin, FilesystemPlugin
+    from charlie.extensions.install import builtin_plugin
 
-    factories = {
-        "filesystem": lambda: FilesystemPlugin(allowed_dirs=config.plugin_allow_dirs),
-        "browser": BrowserPlugin,
-        "calendar": CalendarPlugin,
-        "code_exec": CodeExecPlugin,
-    }
-    if name not in factories:
-        raise ValueError(
-            f"Unknown built-in plugin '{name}'. Valid: {', '.join(_BUILTIN_PLUGIN_NAMES)}"
-        )
-    return factories[name]()
-
-
-def _parsed_mcp_config(name: str, source: str, raw_text: str):
-    """Parse an MCP server spec and require its name to match the
-    extension's declared name, so `name` stays the single source of truth
-    across propose/confirm/enable/disable for every extension kind."""
-    from charlie.mcp_client import parse_server_spec
-
-    cfg = parse_server_spec(raw_text or source)
-    if cfg.name != name:
-        raise ValueError(f"MCP spec name '{cfg.name}' does not match extension name '{name}'")
-    return cfg
+    return builtin_plugin(name, config.plugin_allow_dirs)
 
 
 def _declared_tools_for(kind: str, name: str, source: str, raw_text: str) -> List[str]:
     """Parse (without registering) so propose() can show real declared
     tools in the SkillCard before anything activates."""
-    if kind == "mcp":
-        _parsed_mcp_config(name, source, raw_text)
-        return []  # MCP tools aren't known until the server is actually started
-    if kind == "skill":
-        from charlie.extensions.skills import parse_skill_md
+    from charlie.extensions.install import declared_tools_for
 
-        return parse_skill_md(raw_text).scripts
-    if kind == "openapi":
-        from charlie.extensions.openapi_import import parse_openapi_spec
-
-        return [op.operation_id for op in parse_openapi_spec(raw_text, base_url=source).operations]
-    if kind == "plugin":
-        return [t["name"] for t in _builtin_plugin(name).get_tools()]
-    raise ValueError(f"Unknown extension kind '{kind}'")
+    return declared_tools_for(kind, name, source, raw_text, config.plugin_allow_dirs)
 
 
 def _install_extension(kind: str, name: str, source: str, raw_text: str) -> List[str]:
-    """Parse and register an approved extension into the shared registry.
-    Returns the registered tool names."""
+    """Parse and register an approved extension into this process's shared
+    registry. Returns the registered tool names.
+
+    This only ever touches the web-server process's own ToolRegistry --
+    callers (confirm/enable/disable/uninstall handlers below) are
+    responsible for also forwarding the same install/enable/disable/
+    uninstall over the EventBus (see _forward_to_voice) so the voice
+    process's Brain -- where the real chat tool-calling loop runs -- picks
+    it up too. Without that forward, an extension installed here would only
+    ever be visible to /api/extensions' introspection endpoints, never
+    actually usable in a real conversation.
+    """
+    global mcp_client
+    from charlie.extensions.install import install_extension
     from charlie.tools import registry
 
-    if kind == "mcp":
-        global mcp_client
-        from charlie.mcp_client import MCPClient
+    tool_names, mcp_client = install_extension(
+        kind, name, source, raw_text,
+        registry=registry, plugin_manager=plugin_manager, mcp_client=mcp_client,
+        plugin_allow_dirs=config.plugin_allow_dirs,
+    )
+    return tool_names
 
-        cfg = _parsed_mcp_config(name, source, raw_text)
-        if mcp_client is None:
-            mcp_client = MCPClient()
-        mcp_client.add_server(cfg)
-        return mcp_client.enable_server(registry, name)
-    if kind == "skill":
-        from charlie.extensions.skills import parse_skill_md, register_skill_scripts
 
-        manifest = parse_skill_md(raw_text)
+async def _forward_to_voice(command_type: str, payload: dict) -> None:
+    """Best-effort mirror of an extension install/enable/disable/uninstall
+    into the voice process, so Charlie's actual chat Brain -- which runs in
+    that separate process and never shares memory with this one -- learns
+    about it too. Never raises: a voice process that isn't up yet (or a
+    dropped socket) shouldn't fail the dashboard's REST response, since the
+    extension is still correctly installed here for introspection either way.
+    """
+    if not event_bus:
+        logger.debug("No event_bus -- skipping voice-process mirror of %s", command_type)
+        return
+    try:
+        await event_bus.send_command({"type": command_type, "payload": payload})
+    except Exception:
+        logger.warning("Failed to mirror %s to voice process", command_type, exc_info=True)
 
-        def _runner(script_path: str, args: List[str]) -> str:
-            return f"Script execution not yet implemented: {script_path} {args}"
 
-        return register_skill_scripts(registry, manifest, _runner)
-    if kind == "openapi":
-        from charlie.extensions.openapi_import import parse_openapi_spec, register_openapi_operations
-
-        spec = parse_openapi_spec(raw_text, base_url=source)
-        return register_openapi_operations(registry, spec)
-    if kind == "plugin":
-        from charlie.tools import enable_plugin
-
-        return enable_plugin(registry, plugin_manager, _builtin_plugin(name))
-    raise ValueError(f"Unknown extension kind '{kind}'")
 # Events that carry a session_id and must only reach clients subscribed to it.
 _SESSION_SCOPED_EVENTS = ("token", "transcript", "desktop_frame")
 event_bus: EventBus | None = None
@@ -690,6 +665,10 @@ async def confirm_extension(data: dict):
             name=card.name, kind=kind, source=source, card=card, tool_names=tool_names
         )
     )
+    await _forward_to_voice(
+        "extension_installed",
+        {"kind": kind, "name": card.name, "source": source, "raw_text": raw_text},
+    )
     return {"status": "ok", "installed": True, "tool_names": tool_names}
 
 
@@ -715,6 +694,7 @@ async def enable_extension(name: str):
 
     ext.enabled = True
     ext.tool_names = tool_names
+    await _forward_to_voice("extension_enabled", {"kind": ext.kind, "name": name})
     return {"status": "ok", "tool_names": tool_names}
 
 
@@ -742,6 +722,7 @@ async def disable_extension(name: str):
     # doesn't do (see ExtensionManager's docstring).
 
     ext.enabled = False
+    await _forward_to_voice("extension_disabled", {"kind": ext.kind, "name": name})
     return {"status": "ok"}
 
 
@@ -764,6 +745,9 @@ async def uninstall_extension(name: str):
             registry.unregister_tool(tool_name)
 
     _extension_manager.remove(name)
+    await _forward_to_voice(
+        "extension_uninstalled", {"kind": ext.kind, "name": name, "tool_names": ext.tool_names}
+    )
     return {"status": "ok"}
 
 
@@ -829,64 +813,72 @@ def _update_env_file(updates: dict):
 
 @app.get("/api/config")
 async def get_dashboard_config():
-    """Expose standard dashboard configurations."""
-    return {
-        "GPU_DEVICE": config.gpu_device,
-        "KOKORO_LANG": config.kokoro_lang,
-        "KOKORO_VOICE": config.kokoro_voice,
-        "WHISPER_MODEL": config.whisper_model,
-        "WAKE_WORD_ENABLED": config.wake_word_enabled,
-        "BLACKBOARD_ENABLED": config.blackboard_enabled,
-        "MCP_ENABLED": config.mcp_enabled,
-        "PLUGINS_ENABLED": config.plugins_enabled,
-        "MCP_SERVERS": config.mcp_servers,
-        "PLUGIN_ALLOW_DIRS": config.plugin_allow_dirs,
-    }
+    """Describe every .env-backed setting for the settings page.
+
+    Driven entirely by Config.editable_field_specs() (charlie/config.py) --
+    adding a new Config field there is enough for it to appear here with no
+    other file needing to know its name. Secret fields never echo their
+    value, only whether one is set.
+    """
+    out = []
+    for spec in Config.editable_field_specs():
+        value = getattr(config, spec["field"])
+        out.append(
+            {
+                "key": spec["key"],
+                "group": spec["group"],
+                "label": spec["label"],
+                "type": spec["type"],
+                "secret": spec["secret"],
+                "restart": spec["restart"],
+                "value": None if spec["secret"] else value,
+                "is_set": bool(value) if spec["secret"] else None,
+            }
+        )
+    return {"fields": out}
 
 
 @app.post("/api/config")
 async def update_dashboard_config(data: dict):
-    """Update configurations both in-memory and in .env on disk."""
+    """Persist one or more .env-backed settings -- on disk and in this process.
+
+    `data` is {ENV_VAR_NAME: value}; unknown keys are ignored so this can't be
+    used to inject arbitrary env vars. This only writes .env and updates the
+    web-server process's own config copy (so GET /api/config echoes back the
+    new value immediately) -- it does NOT push the change to the running
+    voice process. The settings page's Save button calls this; its separate
+    Reload button (POST /api/config/reload) is what actually applies saved
+    settings to the live engine. Keeping those two steps distinct means
+    nothing ever reloads a subsystem as a side effect of typing.
+    """
+    known_keys = {spec["key"] for spec in Config.editable_field_specs()}
+    updates = {k: v for k, v in data.items() if k in known_keys}
+    if not updates:
+        return {"status": "error", "message": "no recognized settings in request"}
+
     try:
-        env_updates = {}
-        if "GPU_DEVICE" in data:
-            config.gpu_device = str(data["GPU_DEVICE"])
-            env_updates["GPU_DEVICE"] = config.gpu_device
-        if "KOKORO_LANG" in data:
-            config.kokoro_lang = str(data["KOKORO_LANG"])
-            env_updates["KOKORO_LANG"] = config.kokoro_lang
-        if "KOKORO_VOICE" in data:
-            config.kokoro_voice = str(data["KOKORO_VOICE"])
-            env_updates["KOKORO_VOICE"] = config.kokoro_voice
-        if "WHISPER_MODEL" in data:
-            config.whisper_model = str(data["WHISPER_MODEL"])
-            env_updates["WHISPER_MODEL"] = config.whisper_model
-        if "WAKE_WORD_ENABLED" in data:
-            config.wake_word_enabled = bool(data["WAKE_WORD_ENABLED"])
-            env_updates["WAKE_WORD_ENABLED"] = config.wake_word_enabled
-        if "BLACKBOARD_ENABLED" in data:
-            config.blackboard_enabled = bool(data["BLACKBOARD_ENABLED"])
-            env_updates["BLACKBOARD_ENABLED"] = config.blackboard_enabled
-        if "MCP_ENABLED" in data:
-            config.mcp_enabled = bool(data["MCP_ENABLED"])
-            env_updates["MCP_ENABLED"] = config.mcp_enabled
-        if "PLUGINS_ENABLED" in data:
-            config.plugins_enabled = bool(data["PLUGINS_ENABLED"])
-            env_updates["PLUGINS_ENABLED"] = config.plugins_enabled
-        if "MCP_SERVERS" in data:
-            config.mcp_servers = list(data["MCP_SERVERS"])
-            env_updates["MCP_SERVERS"] = config.mcp_servers
-        if "PLUGIN_ALLOW_DIRS" in data:
-            config.plugin_allow_dirs = list(data["PLUGIN_ALLOW_DIRS"])
-            env_updates["PLUGIN_ALLOW_DIRS"] = config.plugin_allow_dirs
-
-        if env_updates:
-            _update_env_file(env_updates)
-
-        return {"status": "ok", "config": await get_dashboard_config()}
+        touched = config.apply_env_updates(updates)
+        _update_env_file(updates)
+        return {"status": "ok", "touched": sorted(touched)}
     except Exception as e:
         logger.error(f"Error updating config: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/config/reload")
+async def reload_engine_config():
+    """Apply the current .env to the running voice process: on demand only.
+
+    Re-reads every editable setting from .env into the voice process's config
+    singleton and reloads whichever of the voice engine / MCP client / plugin
+    tools that process needs to pick the new values up (see main.py's
+    "system_restart" command handler). This is the only path that ever
+    touches the live engine -- POST /api/config (Save) deliberately doesn't.
+    """
+    if not event_bus:
+        return {"status": "error", "message": "voice process not connected"}
+    await event_bus.send_command({"type": "system_restart"})
+    return {"status": "ok"}
 
 
 @app.delete("/api/memory/facts")
@@ -937,18 +929,21 @@ if os.path.exists(_FRONTEND_DIR):
 
         # Path traversal containment: resolve the candidate and verify its
         # realpath stays inside the frontend directory before serving it.
+        # Next.js static export writes nested routes as <path>.html or
+        # <path>/index.html, so a hard refresh on e.g. /settings needs both
+        # tried before falling back to the SPA shell.
         real_frontend_dir = os.path.realpath(_FRONTEND_DIR)
-        candidate = os.path.realpath(os.path.join(real_frontend_dir, rest_of_path))
-        contained = (
-            rest_of_path
-            and os.path.isfile(candidate)
-            and (
+        rel_candidates = [rest_of_path]
+        if rest_of_path and not rest_of_path.endswith(".html"):
+            rel_candidates += [f"{rest_of_path}.html", f"{rest_of_path}/index.html"]
+        for rel in rel_candidates:
+            candidate = os.path.realpath(os.path.join(real_frontend_dir, rel))
+            contained = os.path.isfile(candidate) and (
                 candidate == real_frontend_dir
                 or candidate.startswith(real_frontend_dir + os.sep)
             )
-        )
-        if contained:
-            return FileResponse(candidate)
+            if contained:
+                return FileResponse(candidate)
 
         return FileResponse(
             os.path.join(_FRONTEND_DIR, "index.html"),

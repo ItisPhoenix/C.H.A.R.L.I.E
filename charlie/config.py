@@ -1,101 +1,269 @@
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Optional, Set
 
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
+# Restart tiers for editable-field metadata (see FieldMeta below):
+#   None      -- read fresh on every use; applying an update is instant, no reload.
+#   "voice"   -- baked into VoiceEngine/ASR-worker construction; needs a voice-engine respawn.
+#   "mcp"     -- needs the MCP client subprocess stopped/restarted.
+#   "plugins" -- needs plugin tools re-registered.
+#   "process" -- read once at process boot (e.g. into a DB connection or OS hotkey hook);
+#                only takes effect on a full app restart.
+
+
+def _meta(
+    env: str,
+    group: str,
+    secret: bool = False,
+    restart: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build the dataclasses.field metadata for one user-editable .env-backed setting.
+
+    This is the single place that declares which Config fields are exposed to the
+    settings UI (charlie/web_server.py:/api/config) and how each one applies --
+    editable_field_specs()/apply_env_updates() below read it back out. Fields with
+    no _meta() (system_root, charlie_launch_id, soul, ...) are OS-derived or
+    file-loaded, not user-editable .env values, and are simply skipped.
+    """
+    return {"env": env, "group": group, "secret": secret, "restart": restart}
+
 
 @dataclass
 class Config:
-    small_llm_url: str = os.getenv("SMALL_LLM_URL", "")
-    small_llm_key: str = os.getenv("SMALL_LLM_API_KEY", "no-key")
-    small_llm_model: str = os.getenv("SMALL_LLM_MODEL", "")
+    small_llm_url: str = field(default=os.getenv("SMALL_LLM_URL", ""), metadata=_meta("SMALL_LLM_URL", "LLM"))
+    small_llm_key: str = field(
+        default=os.getenv("SMALL_LLM_API_KEY", "no-key"),
+        metadata=_meta("SMALL_LLM_API_KEY", "LLM", secret=True),
+    )
+    small_llm_model: str = field(default=os.getenv("SMALL_LLM_MODEL", ""), metadata=_meta("SMALL_LLM_MODEL", "LLM"))
     # Big LLM provider (used when small LLM fails)
-    big_llm_url: str = os.getenv("BIG_LLM_URL", "")
-    big_llm_key: str = os.getenv("BIG_LLM_API_KEY", "no-key")
-    big_llm_model: str = os.getenv("BIG_LLM_MODEL", "")
+    big_llm_url: str = field(default=os.getenv("BIG_LLM_URL", ""), metadata=_meta("BIG_LLM_URL", "LLM"))
+    big_llm_key: str = field(
+        default=os.getenv("BIG_LLM_API_KEY", "no-key"),
+        metadata=_meta("BIG_LLM_API_KEY", "LLM", secret=True),
+    )
+    big_llm_model: str = field(default=os.getenv("BIG_LLM_MODEL", ""), metadata=_meta("BIG_LLM_MODEL", "LLM"))
 
     # -1 = system default input device; >=0 = specific device index
-    mic_index: int = int(os.getenv("MIC_INDEX", "-1"))
+    mic_index: int = field(
+        default=int(os.getenv("MIC_INDEX", "-1")),
+        metadata=_meta("MIC_INDEX", "Voice & Speech", restart="voice"),
+    )
 
     # Speech / ASR / TTS
-    whisper_model: str = os.getenv("WHISPER_MODEL", "large-v3")
-    phrase_min_duration: float = float(os.getenv("PHRASE_MIN_DURATION", "0.35"))
-    phrase_max_duration: float = float(os.getenv("PHRASE_MAX_DURATION", "45.0"))
-    kokoro_voice: str = os.getenv("KOKORO_VOICE", "af_heart")
-    kokoro_model_dir: str = os.getenv("KOKORO_MODEL_DIR", "models")
-    gpu_device: str = os.getenv("GPU_DEVICE", "cuda")
-    kokoro_lang: str = os.getenv("KOKORO_LANG", "en-us")
-    default_language: str = os.getenv("DEFAULT_LANGUAGE", "en")
+    whisper_model: str = field(
+        default=os.getenv("WHISPER_MODEL", "large-v3"),
+        metadata=_meta("WHISPER_MODEL", "Voice & Speech", restart="voice"),
+    )
+    phrase_min_duration: float = field(
+        default=float(os.getenv("PHRASE_MIN_DURATION", "0.35")),
+        metadata=_meta("PHRASE_MIN_DURATION", "VAD & ASR Tuning", restart="voice"),
+    )
+    phrase_max_duration: float = field(
+        default=float(os.getenv("PHRASE_MAX_DURATION", "45.0")),
+        metadata=_meta("PHRASE_MAX_DURATION", "VAD & ASR Tuning", restart="voice"),
+    )
+    kokoro_voice: str = field(
+        default=os.getenv("KOKORO_VOICE", "af_heart"),
+        metadata=_meta("KOKORO_VOICE", "Voice & Speech"),
+    )
+    kokoro_model_dir: str = field(
+        default=os.getenv("KOKORO_MODEL_DIR", "models"),
+        metadata=_meta("KOKORO_MODEL_DIR", "Voice & Speech", restart="voice"),
+    )
+    gpu_device: str = field(
+        default=os.getenv("GPU_DEVICE", "cuda"),
+        metadata=_meta("GPU_DEVICE", "Voice & Speech", restart="voice"),
+    )
+    kokoro_lang: str = field(default=os.getenv("KOKORO_LANG", "en-us"), metadata=_meta("KOKORO_LANG", "Voice & Speech"))
+    default_language: str = field(
+        default=os.getenv("DEFAULT_LANGUAGE", "en"),
+        metadata=_meta("DEFAULT_LANGUAGE", "Voice & Speech", restart="voice"),
+    )
 
     # Runtime-tunable env override read by onnxruntime at import time.
     # onnxruntime reads ORT_LOG_LEVEL from the process environment, so we
     # propagate the configured value here (the single sanctioned env-write
     # site) before any module imports onnxruntime.
-    ort_log_level: str = os.getenv("ORT_LOG_LEVEL", "3")
+    ort_log_level: str = field(
+        default=os.getenv("ORT_LOG_LEVEL", "3"),
+        metadata=_meta("ORT_LOG_LEVEL", "Server", restart="process"),
+    )
 
-    # VAD / ASR tuning
-    vad_threshold: float = float(os.getenv("VAD_THRESHOLD", "0.25"))
-    vad_silence_timeout: float = float(os.getenv("VAD_SILENCE_TIMEOUT", "1.5"))
-    vad_min_speech_duration_ms: int = int(os.getenv("VAD_MIN_SPEECH_DURATION_MS", "120"))
-    vad_max_speech_duration_s: int = int(os.getenv("VAD_MAX_SPEECH_DURATION_S", "60"))
-    vad_min_silence_duration_ms: int = int(os.getenv("VAD_MIN_SILENCE_DURATION_MS", "1000"))
-    vad_speech_pad_ms: int = int(os.getenv("VAD_SPEECH_PAD_MS", "320"))
-    asr_beam_size: int = int(os.getenv("ASR_BEAM_SIZE", "6"))
-    asr_best_of: int = int(os.getenv("ASR_BEST_OF", "6"))
-    asr_repetition_penalty: float = float(os.getenv("ASR_REPETITION_PENALTY", "1.15"))
+    # VAD / ASR tuning -- all baked into the ASR worker subprocess at spawn time.
+    vad_threshold: float = field(
+        default=float(os.getenv("VAD_THRESHOLD", "0.25")),
+        metadata=_meta("VAD_THRESHOLD", "VAD & ASR Tuning", restart="voice"),
+    )
+    vad_silence_timeout: float = field(
+        default=float(os.getenv("VAD_SILENCE_TIMEOUT", "1.5")),
+        metadata=_meta("VAD_SILENCE_TIMEOUT", "VAD & ASR Tuning", restart="voice"),
+    )
+    vad_min_speech_duration_ms: int = field(
+        default=int(os.getenv("VAD_MIN_SPEECH_DURATION_MS", "120")),
+        metadata=_meta("VAD_MIN_SPEECH_DURATION_MS", "VAD & ASR Tuning", restart="voice"),
+    )
+    vad_max_speech_duration_s: int = field(
+        default=int(os.getenv("VAD_MAX_SPEECH_DURATION_S", "60")),
+        metadata=_meta("VAD_MAX_SPEECH_DURATION_S", "VAD & ASR Tuning", restart="voice"),
+    )
+    vad_min_silence_duration_ms: int = field(
+        default=int(os.getenv("VAD_MIN_SILENCE_DURATION_MS", "1000")),
+        metadata=_meta("VAD_MIN_SILENCE_DURATION_MS", "VAD & ASR Tuning", restart="voice"),
+    )
+    vad_speech_pad_ms: int = field(
+        default=int(os.getenv("VAD_SPEECH_PAD_MS", "320")),
+        metadata=_meta("VAD_SPEECH_PAD_MS", "VAD & ASR Tuning", restart="voice"),
+    )
+    asr_beam_size: int = field(
+        default=int(os.getenv("ASR_BEAM_SIZE", "6")),
+        metadata=_meta("ASR_BEAM_SIZE", "VAD & ASR Tuning", restart="voice"),
+    )
+    asr_best_of: int = field(
+        default=int(os.getenv("ASR_BEST_OF", "6")),
+        metadata=_meta("ASR_BEST_OF", "VAD & ASR Tuning", restart="voice"),
+    )
+    asr_repetition_penalty: float = field(
+        default=float(os.getenv("ASR_REPETITION_PENALTY", "1.15")),
+        metadata=_meta("ASR_REPETITION_PENALTY", "VAD & ASR Tuning", restart="voice"),
+    )
 
     # Barge-in Configuration
-    enable_barge_in: bool = os.getenv("ENABLE_BARGE_IN", "true").lower() == "true"
+    enable_barge_in: bool = field(
+        default=os.getenv("ENABLE_BARGE_IN", "true").lower() == "true",
+        metadata=_meta("ENABLE_BARGE_IN", "Chat Behavior"),
+    )
 
-    llm_disable_reasoning: bool = (
-        os.getenv("SMALL_LLM_DISABLE_REASONING", "true").lower() == "true"
+    llm_disable_reasoning: bool = field(
+        default=os.getenv("SMALL_LLM_DISABLE_REASONING", "true").lower() == "true",
+        metadata=_meta("SMALL_LLM_DISABLE_REASONING", "Chat Behavior"),
     )
     # Enable native JSON tool calling for compatible remote APIs (OpenAI, Anthropic).
     # When False, falls back to text-based TOOL: parsing for local models.
-    native_tool_calling: bool = (
-        os.getenv("NATIVE_TOOL_CALLING", "true").lower() == "true"
+    native_tool_calling: bool = field(
+        default=os.getenv("NATIVE_TOOL_CALLING", "true").lower() == "true",
+        metadata=_meta("NATIVE_TOOL_CALLING", "Chat Behavior"),
     )
 
     # Iteration Budget & Context Compression
-    iteration_budget_max: int = int(os.getenv("ITERATION_BUDGET_MAX", "12"))
-    context_window: int = int(os.getenv("CONTEXT_WINDOW", "8192"))
-    compression_threshold: float = float(os.getenv("COMPRESSION_THRESHOLD", "0.8"))
-    history_keep_recent: int = int(os.getenv("HISTORY_KEEP_RECENT", "6"))
-    history_summary_max_chars: int = int(os.getenv("HISTORY_SUMMARY_MAX_CHARS", "400"))
-    memory_file: str = os.getenv("MEMORY_FILE", "MEMORY.md")
-    user_file: str = os.getenv("USER_FILE", "USER.md")
-    opinions_file: str = os.getenv("OPINIONS_FILE", "OPINIONS.md")
-    prompt_memory_max: int = int(os.getenv("PROMPT_MEMORY_MAX", "2200"))
-    session_db_path: str = os.getenv("SESSION_DB_PATH", "sessions.db")
+    iteration_budget_max: int = field(
+        default=int(os.getenv("ITERATION_BUDGET_MAX", "12")),
+        metadata=_meta("ITERATION_BUDGET_MAX", "Chat Behavior"),
+    )
+    context_window: int = field(
+        default=int(os.getenv("CONTEXT_WINDOW", "8192")),
+        metadata=_meta("CONTEXT_WINDOW", "Chat Behavior"),
+    )
+    compression_threshold: float = field(
+        default=float(os.getenv("COMPRESSION_THRESHOLD", "0.8")),
+        metadata=_meta("COMPRESSION_THRESHOLD", "Chat Behavior"),
+    )
+    history_keep_recent: int = field(
+        default=int(os.getenv("HISTORY_KEEP_RECENT", "6")),
+        metadata=_meta("HISTORY_KEEP_RECENT", "Chat Behavior"),
+    )
+    history_summary_max_chars: int = field(
+        default=int(os.getenv("HISTORY_SUMMARY_MAX_CHARS", "400")),
+        metadata=_meta("HISTORY_SUMMARY_MAX_CHARS", "Chat Behavior"),
+    )
+    memory_file: str = field(
+        default=os.getenv("MEMORY_FILE", "MEMORY.md"),
+        metadata=_meta("MEMORY_FILE", "Memory Files"),
+    )
+    user_file: str = field(default=os.getenv("USER_FILE", "USER.md"), metadata=_meta("USER_FILE", "Memory Files"))
+    opinions_file: str = field(
+        default=os.getenv("OPINIONS_FILE", "OPINIONS.md"),
+        metadata=_meta("OPINIONS_FILE", "Memory Files"),
+    )
+    prompt_memory_max: int = field(
+        default=int(os.getenv("PROMPT_MEMORY_MAX", "2200")),
+        metadata=_meta("PROMPT_MEMORY_MAX", "Memory Files"),
+    )
+    session_db_path: str = field(
+        default=os.getenv("SESSION_DB_PATH", "sessions.db"),
+        metadata=_meta("SESSION_DB_PATH", "Server", restart="process"),
+    )
     # Search provider (SearXNG self-hosted)
-    searxng_url: str = os.getenv("SEARXNG_URL", "")
-    exa_api_key: str = os.getenv("EXA_API_KEY", "")
-    tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
+    searxng_url: str = field(default=os.getenv("SEARXNG_URL", ""), metadata=_meta("SEARXNG_URL", "Search Providers"))
+    exa_api_key: str = field(
+        default=os.getenv("EXA_API_KEY", ""),
+        metadata=_meta("EXA_API_KEY", "Search Providers", secret=True),
+    )
+    tavily_api_key: str = field(
+        default=os.getenv("TAVILY_API_KEY", ""),
+        metadata=_meta("TAVILY_API_KEY", "Search Providers", secret=True),
+    )
 
-    # Wake Word Configuration
-    wake_word_enabled: bool = os.getenv("WAKE_WORD_ENABLED", "false").lower() == "true"
-    wake_word_model_path: str = os.getenv("WAKE_WORD_MODEL_PATH", "charlie/charlie.onnx")
-    wake_word_threshold: float = float(os.getenv("WAKE_WORD_THRESHOLD", "0.6"))
-    wake_word_activity_timeout_seconds: int = int(os.getenv("WAKE_WORD_ACTIVITY_TIMEOUT", "600"))
-    wake_word_audio_chime_path: str = os.getenv("WAKE_WORD_CHIME_PATH", "assets/wake_word_chime.wav")
+    # Wake Word Configuration -- classifier is loaded once when VoiceEngine starts.
+    wake_word_enabled: bool = field(
+        default=os.getenv("WAKE_WORD_ENABLED", "false").lower() == "true",
+        metadata=_meta("WAKE_WORD_ENABLED", "Wake Word", restart="voice"),
+    )
+    wake_word_model_path: str = field(
+        default=os.getenv("WAKE_WORD_MODEL_PATH", "charlie/charlie.onnx"),
+        metadata=_meta("WAKE_WORD_MODEL_PATH", "Wake Word", restart="voice"),
+    )
+    wake_word_threshold: float = field(
+        default=float(os.getenv("WAKE_WORD_THRESHOLD", "0.6")),
+        metadata=_meta("WAKE_WORD_THRESHOLD", "Wake Word", restart="voice"),
+    )
+    wake_word_activity_timeout_seconds: int = field(
+        default=int(os.getenv("WAKE_WORD_ACTIVITY_TIMEOUT", "600")),
+        metadata=_meta("WAKE_WORD_ACTIVITY_TIMEOUT", "Wake Word", restart="voice"),
+    )
+    wake_word_audio_chime_path: str = field(
+        default=os.getenv("WAKE_WORD_CHIME_PATH", "assets/wake_word_chime.wav"),
+        metadata=_meta("WAKE_WORD_CHIME_PATH", "Wake Word", restart="voice"),
+    )
     # --- Vector Memory Configuration ---
-    memory_db_path: str = os.getenv("MEMORY_DB_PATH", "charlie_memory_db")
-    memory_relevance_threshold: float = float(os.getenv("MEMORY_RELEVANCE_THRESHOLD", "0.3"))
-    memory_embedding_model: str = os.getenv("MEMORY_EMBEDDING_MODEL", "text-embedding-nomic-embed-text-v1.5")
-    memory_embedding_url: str = os.getenv("MEMORY_EMBEDDING_URL", "")
-    memory_auto_extract: bool = os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true"
+    memory_db_path: str = field(
+        default=os.getenv("MEMORY_DB_PATH", "charlie_memory_db"),
+        metadata=_meta("MEMORY_DB_PATH", "Vector Memory", restart="process"),
+    )
+    memory_relevance_threshold: float = field(
+        default=float(os.getenv("MEMORY_RELEVANCE_THRESHOLD", "0.3")),
+        metadata=_meta("MEMORY_RELEVANCE_THRESHOLD", "Vector Memory"),
+    )
+    memory_embedding_model: str = field(
+        default=os.getenv("MEMORY_EMBEDDING_MODEL", "text-embedding-nomic-embed-text-v1.5"),
+        metadata=_meta("MEMORY_EMBEDDING_MODEL", "Vector Memory"),
+    )
+    memory_embedding_url: str = field(
+        default=os.getenv("MEMORY_EMBEDDING_URL", ""),
+        metadata=_meta("MEMORY_EMBEDDING_URL", "Vector Memory"),
+    )
+    memory_auto_extract: bool = field(
+        default=os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true",
+        metadata=_meta("MEMORY_AUTO_EXTRACT", "Vector Memory"),
+    )
     # Memory capacity management
-    memory_nudge_interval: int = int(os.getenv("MEMORY_NUDGE_INTERVAL", "5"))
-    memory_capacity_threshold: float = float(os.getenv("MEMORY_CAPACITY_THRESHOLD", "0.8"))
+    memory_nudge_interval: int = field(
+        default=int(os.getenv("MEMORY_NUDGE_INTERVAL", "5")),
+        metadata=_meta("MEMORY_NUDGE_INTERVAL", "Vector Memory"),
+    )
+    memory_capacity_threshold: float = field(
+        default=float(os.getenv("MEMORY_CAPACITY_THRESHOLD", "0.8")),
+        metadata=_meta("MEMORY_CAPACITY_THRESHOLD", "Vector Memory"),
+    )
     # Knowledge graph (SQLite)
-    memory_graph_db: str = os.getenv("MEMORY_GRAPH_DB", "charlie_memory_graph.db")
+    memory_graph_db: str = field(
+        default=os.getenv("MEMORY_GRAPH_DB", "charlie_memory_graph.db"),
+        metadata=_meta("MEMORY_GRAPH_DB", "Vector Memory", restart="process"),
+    )
     # --- Agentic OS Toggles ---
-    blackboard_enabled: bool = os.getenv("BLACKBOARD_ENABLED", "true").lower() == "true"
-    mcp_enabled: bool = os.getenv("MCP_ENABLED", "false").lower() == "true"
+    blackboard_enabled: bool = field(
+        default=os.getenv("BLACKBOARD_ENABLED", "true").lower() == "true",
+        metadata=_meta("BLACKBOARD_ENABLED", "Agentic OS"),
+    )
+    mcp_enabled: bool = field(
+        default=os.getenv("MCP_ENABLED", "false").lower() == "true",
+        metadata=_meta("MCP_ENABLED", "Agentic OS", restart="mcp"),
+    )
     # Comma-separated MCP server specs; each is "name|command|arg1,arg2,...".
     # Empty means no servers are started even when mcp_enabled is true.
     mcp_servers: List[str] = field(
@@ -103,24 +271,56 @@ class Config:
             s.strip()
             for s in os.getenv("MCP_SERVERS", "").split(",")
             if s.strip()
-        ]
+        ],
+        metadata=_meta("MCP_SERVERS", "Agentic OS", restart="mcp"),
     )
     # Optional standard "mcpServers" JSON config file (Claude Desktop / Cursor /
     # VS Code format) -- an alternative to MCP_SERVERS for hand-editing servers.
     # Both sources are merged; missing file is not an error.
-    mcp_config_path: str = os.getenv("MCP_CONFIG_PATH", "mcp_config.json")
+    mcp_config_path: str = field(
+        default=os.getenv("MCP_CONFIG_PATH", "mcp_config.json"),
+        metadata=_meta("MCP_CONFIG_PATH", "Agentic OS", restart="mcp"),
+    )
     # --- Desktop control (UI Automation) ---
-    desktop_control_enabled: bool = os.getenv("DESKTOP_CONTROL_ENABLED", "false").lower() == "true"
-    desktop_panic_hotkey: str = os.getenv("DESKTOP_PANIC_HOTKEY", "ctrl+alt+q")
-    desktop_max_actions: int = int(os.getenv("DESKTOP_MAX_ACTIONS", "40"))
-    desktop_ocr_enabled: bool = os.getenv("DESKTOP_OCR_ENABLED", "true").lower() == "true"
-    tesseract_cmd: str = os.getenv("TESSERACT_CMD", "")
+    desktop_control_enabled: bool = field(
+        default=os.getenv("DESKTOP_CONTROL_ENABLED", "false").lower() == "true",
+        metadata=_meta("DESKTOP_CONTROL_ENABLED", "Desktop Control"),
+    )
+    # Read once into a pynput GlobalHotKeys listener at Brain construction -- needs a full restart to re-arm.
+    desktop_panic_hotkey: str = field(
+        default=os.getenv("DESKTOP_PANIC_HOTKEY", "ctrl+alt+q"),
+        metadata=_meta("DESKTOP_PANIC_HOTKEY", "Desktop Control", restart="process"),
+    )
+    desktop_max_actions: int = field(
+        default=int(os.getenv("DESKTOP_MAX_ACTIONS", "40")),
+        metadata=_meta("DESKTOP_MAX_ACTIONS", "Desktop Control"),
+    )
+    desktop_ocr_enabled: bool = field(
+        default=os.getenv("DESKTOP_OCR_ENABLED", "true").lower() == "true",
+        metadata=_meta("DESKTOP_OCR_ENABLED", "Desktop Control"),
+    )
+    tesseract_cmd: str = field(
+        default=os.getenv("TESSERACT_CMD", ""),
+        metadata=_meta("TESSERACT_CMD", "Desktop Control"),
+    )
     # Separate, independently-configured vision endpoint -- small/big LLMs stay text-only.
-    vision_enabled: bool = os.getenv("VISION_ENABLED", "false").lower() == "true"
-    vision_llm_url: str = os.getenv("VISION_LLM_URL", "")
-    vision_llm_key: str = os.getenv("VISION_LLM_KEY", "no-key")
-    vision_llm_model: str = os.getenv("VISION_LLM_MODEL", "")
-    plugins_enabled: bool = os.getenv("PLUGINS_ENABLED", "false").lower() == "true"
+    vision_enabled: bool = field(
+        default=os.getenv("VISION_ENABLED", "false").lower() == "true",
+        metadata=_meta("VISION_ENABLED", "Vision"),
+    )
+    vision_llm_url: str = field(default=os.getenv("VISION_LLM_URL", ""), metadata=_meta("VISION_LLM_URL", "Vision"))
+    vision_llm_key: str = field(
+        default=os.getenv("VISION_LLM_KEY", "no-key"),
+        metadata=_meta("VISION_LLM_KEY", "Vision", secret=True),
+    )
+    vision_llm_model: str = field(
+        default=os.getenv("VISION_LLM_MODEL", ""),
+        metadata=_meta("VISION_LLM_MODEL", "Vision"),
+    )
+    plugins_enabled: bool = field(
+        default=os.getenv("PLUGINS_ENABLED", "false").lower() == "true",
+        metadata=_meta("PLUGINS_ENABLED", "Plugins", restart="plugins"),
+    )
     # Restrict plugin filesystem access to these directories (comma-separated).
     # Empty means the plugins default to the current working directory only.
     plugin_allow_dirs: List[str] = field(
@@ -128,12 +328,19 @@ class Config:
             d.strip()
             for d in os.getenv("PLUGIN_ALLOW_DIRS", "").split(",")
             if d.strip()
-        ]
+        ],
+        metadata=_meta("PLUGIN_ALLOW_DIRS", "Plugins", restart="plugins"),
     )
 
-
-    charlie_host: str = os.getenv("CHARLIE_HOST", "127.0.0.1")
-    charlie_port: int = int(os.getenv("CHARLIE_PORT", "8000"))
+    charlie_host: str = field(
+        default=os.getenv("CHARLIE_HOST", "127.0.0.1"),
+        metadata=_meta("CHARLIE_HOST", "Server", restart="process"),
+    )
+    charlie_port: int = field(
+        default=int(os.getenv("CHARLIE_PORT", "8000")),
+        metadata=_meta("CHARLIE_PORT", "Server", restart="process"),
+    )
+    # Not user-editable .env values -- process identity / OS-derived / file-loaded, so no _meta().
     charlie_launch_id: str = os.getenv("CHARLIE_LAUNCH_ID", "")
     system_root: str = os.getenv("SystemRoot", r"C:\Windows").lower()
     program_files: str = os.getenv("ProgramFiles", r"C:\Program Files")
@@ -144,6 +351,86 @@ class Config:
     def __post_init__(self) -> None:
         if self.kokoro_lang == "en":
             self.kokoro_lang = "en-us"
+
+    @classmethod
+    def editable_field_specs(cls) -> List[Dict[str, Any]]:
+        """Describe every .env-backed field for the settings UI (charlie/web_server.py).
+
+        Derived entirely from the metadata declared above -- adding a new Config
+        field with a _meta(...) call is enough for it to show up in /api/config
+        and the settings page with no other file needing to know its name.
+        """
+        specs = []
+        for f in fields(cls):
+            env = f.metadata.get("env")
+            if not env:
+                continue
+            if f.type is bool:
+                kind = "bool"
+            elif f.type is int:
+                kind = "int"
+            elif f.type is float:
+                kind = "float"
+            elif f.type == List[str]:
+                kind = "list"
+            else:
+                kind = "str"
+            specs.append(
+                {
+                    "key": env,
+                    "field": f.name,
+                    "group": f.metadata.get("group", "Other"),
+                    "secret": bool(f.metadata.get("secret", False)),
+                    "restart": f.metadata.get("restart"),
+                    "type": kind,
+                    "label": _humanize_label(f.name),
+                }
+            )
+        return specs
+
+    def apply_env_updates(self, updates: Dict[str, Any]) -> Set[str]:
+        """Apply {ENV_VAR_NAME: value} to this instance's live attributes.
+
+        `value` may already be natively typed (bool/int/float/list, e.g. straight
+        from a JSON request body) or a raw string (e.g. reloaded from os.environ).
+        Returns the set of restart tiers touched (see module docstring above) so
+        the caller knows which subsystem, if any, needs reloading.
+        """
+        by_env = {f.metadata.get("env"): f for f in fields(self) if f.metadata.get("env")}
+        touched: Set[str] = set()
+        for env_key, raw_value in updates.items():
+            f = by_env.get(env_key)
+            if f is None:
+                continue
+            setattr(self, f.name, _coerce(raw_value, f.type))
+            restart = f.metadata.get("restart")
+            if restart:
+                touched.add(restart)
+        return touched
+
+
+_LABEL_ACRONYMS = {
+    "llm", "url", "asr", "tts", "vad", "mcp", "gpu", "ocr", "id",
+}
+
+
+def _humanize_label(field_name: str) -> str:
+    words = [w.upper() if w in _LABEL_ACRONYMS else w.capitalize() for w in field_name.split("_")]
+    return " ".join(words)
+
+
+def _coerce(raw: Any, ftype: Any) -> Any:
+    if ftype is bool:
+        return raw if isinstance(raw, bool) else str(raw).strip().lower() == "true"
+    if ftype is int:
+        return int(raw)
+    if ftype is float:
+        return float(raw)
+    if ftype == List[str]:
+        if isinstance(raw, list):
+            return [str(v).strip() for v in raw if str(v).strip()]
+        return [s.strip() for s in str(raw).split(",") if s.strip()]
+    return str(raw)
 
 
 config = Config()

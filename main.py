@@ -88,7 +88,7 @@ root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
 
 # 3. NOW IMPORT CHARLIE MODULES
-from charlie.config import config
+from charlie.config import Config, config
 from charlie.core import Brain
 from charlie.ipc import EventBus
 from charlie.memory_store import MemoryStore
@@ -301,6 +301,15 @@ async def main():
     except Exception as e:
         logger.warning(f"Plugin system failed to initialize: {e}")
         plugin_manager = None
+    if plugin_manager is None:
+        # Always keep a manager available so a mirrored "extension_enabled"/
+        # "extension_disabled" command (see consume_web_commands below) can
+        # enable/disable one built-in plugin even when the blanket
+        # PLUGINS_ENABLED flag is off -- matches charlie/web_server.py's
+        # identical fallback, needed for the same per-plugin-control reason.
+        from charlie.plugins import PluginManager
+
+        plugin_manager = PluginManager()
 
     # Wire the MCP subsystem into the SAME shared tool registry (no-op unless enabled).
     mcp_client = None
@@ -724,6 +733,62 @@ async def main():
             # Fire-and-forget: learning runs in background, doesn't block user
             asyncio.create_task(_background_learn(text, full_reply_buffer))
 
+    async def _reload_voice_engine():
+        """Stop and respawn VoiceEngine so mic/VAD/ASR/TTS-model/wake-word settings take effect.
+
+        These are all baked into VoiceEngine.__init__ or the ASR worker subprocess it
+        spawns (see charlie/config.py's "voice" restart tier), so a live attribute
+        change alone never reaches them -- only recreating the engine does.
+        """
+        nonlocal voice
+        try:
+            voice.stop()
+        except Exception as ex:
+            logger.warning(f"Error stopping voice engine on reload: {ex}")
+        try:
+            voice = VoiceEngine(
+                config,
+                on_speech=on_speech,
+                on_tts_start=on_tts_start,
+                on_tts_stop=on_tts_stop,
+            )
+            voice.start()
+            voice.set_wake_word_callback(on_wake_word)
+            logger.info("VoiceEngine reloaded.")
+        except Exception as ex:
+            logger.error(f"Error reloading VoiceEngine: {ex}", exc_info=True)
+
+    async def _reload_mcp_client():
+        """Stop the MCP subprocess client and restart it if still enabled."""
+        nonlocal mcp_client
+        if mcp_client is not None:
+            try:
+                mcp_client.stop()
+            except Exception as ex:
+                logger.warning(f"Error stopping MCP client on reload: {ex}")
+            mcp_client = None
+        from charlie.tools import registry
+        for k in [k for k in registry._tools if k.startswith("mcp_")]:
+            registry._tools.pop(k, None)
+        if config.mcp_enabled:
+            try:
+                from charlie.mcp_client import start_mcp
+                mcp_client = start_mcp(config)
+            except Exception as ex:
+                logger.warning(f"Error starting MCP client on reload: {ex}")
+
+    def _reload_plugin_tools():
+        """Re-register plugin tools to match the current enabled flag / allow-dirs."""
+        from charlie.tools import registry
+        for k in [k for k in registry._tools if k.startswith("plugin_")]:
+            registry._tools.pop(k, None)
+        if config.plugins_enabled:
+            try:
+                from charlie.tools import register_plugin_tools
+                register_plugin_tools(config)
+            except Exception as ex:
+                logger.warning(f"Error registering plugins on reload: {ex}")
+
     async def consume_web_commands(event_bus, brain):
         """Read commands from the web UI and dispatch them."""
         nonlocal current_web_session_id, voice, mcp_client
@@ -783,21 +848,22 @@ async def main():
                         from charlie.core import resolve_tool_approval
                         resolve_tool_approval(request_id, False)
                 elif cmd_type == "hitl_approve":
-                    # Single approval entry point. Payload: {task_id, decision:
-                    # "approve"|"reject", reason?}. "approve" flips
-                    # approval_status so get_pending_tasks() picks the task up
-                    # and runs it through the normal pending->running->done
-                    # lifecycle -- it does NOT fake completion by setting
-                    # status="done" directly (the previous version of this
-                    # handler did, skipping the task ever actually running).
+                    # Flips approval_status so get_pending_tasks() picks the
+                    # task up and runs it through the normal
+                    # pending->running->done lifecycle -- does NOT fake
+                    # completion by setting status="done" directly (the
+                    # previous version of this handler did, skipping the
+                    # task ever actually running).
                     payload = cmd.get("payload", {})
                     task_id = payload.get("task_id")
-                    decision = payload.get("decision")
-                    reason = payload.get("reason", "Rejected by user")
-                    if task_id and decision == "approve":
+                    if task_id:
                         blackboard.update_task(task_id, approval_status="approved")
                         await event_bus.emit("blackboard_update", blackboard.snapshot())
-                    elif task_id and decision == "reject":
+                elif cmd_type == "hitl_reject":
+                    payload = cmd.get("payload", {})
+                    task_id = payload.get("task_id")
+                    reason = payload.get("reason", "Rejected by user")
+                    if task_id:
                         blackboard.update_task(
                             task_id,
                             approval_status="rejected",
@@ -852,77 +918,104 @@ async def main():
                     payload = cmd.get("payload", {})
                     mic_state = voice.set_mic_state(bool(payload.get("mic_muted", True)))
                     await event_bus.emit("mic_state", mic_state)
+                elif cmd_type == "extension_installed":
+                    # Mirrors charlie/web_server.py's confirm_extension(): the
+                    # dashboard's Extensions tab only registers tools into that
+                    # process's own registry, which the actual chat loop here
+                    # never sees. Re-run the same install against this
+                    # process's registry/mcp_client/plugin_manager so Charlie
+                    # can actually call the extension in a real conversation.
+                    payload = cmd.get("payload", {})
+                    try:
+                        from charlie.extensions.install import install_extension
+                        from charlie.tools import registry as _ext_registry
+
+                        tool_names, mcp_client = install_extension(
+                            payload.get("kind", ""),
+                            payload.get("name", ""),
+                            payload.get("source", ""),
+                            payload.get("raw_text", ""),
+                            registry=_ext_registry,
+                            plugin_manager=plugin_manager,
+                            mcp_client=mcp_client,
+                            plugin_allow_dirs=config.plugin_allow_dirs,
+                        )
+                        if payload.get("kind") == "skill":
+                            from charlie.extensions.skills import format_skill_block, parse_skill_md
+                            manifest = parse_skill_md(payload.get("raw_text", ""))
+                            brain.add_installed_skill_block(payload.get("name", ""), format_skill_block(manifest))
+                        logger.info(
+                            "Mirrored extension install '%s' (%s) into voice process: %s",
+                            payload.get("name"), payload.get("kind"), tool_names,
+                        )
+                    except Exception as ex:
+                        logger.warning(
+                            f"Failed to mirror extension install '{payload.get('name')}': {ex}",
+                            exc_info=True,
+                        )
+                elif cmd_type == "extension_enabled":
+                    payload = cmd.get("payload", {})
+                    kind = payload.get("kind", "")
+                    ext_name = payload.get("name", "")
+                    try:
+                        from charlie.tools import registry as _ext_registry
+                        if kind == "mcp" and mcp_client is not None:
+                            mcp_client.enable_server(_ext_registry, ext_name)
+                        elif kind == "plugin":
+                            from charlie.extensions.install import builtin_plugin
+                            from charlie.tools import enable_plugin
+                            enable_plugin(
+                                _ext_registry, plugin_manager,
+                                builtin_plugin(ext_name, config.plugin_allow_dirs),
+                            )
+                        # skill/openapi: nothing to do, disable_extension() never
+                        # unregisters those tools (see web_server.py's comment).
+                    except Exception as ex:
+                        logger.warning(f"Failed to mirror extension enable '{ext_name}': {ex}", exc_info=True)
+                elif cmd_type == "extension_disabled":
+                    payload = cmd.get("payload", {})
+                    kind = payload.get("kind", "")
+                    ext_name = payload.get("name", "")
+                    try:
+                        from charlie.tools import registry as _ext_registry
+                        if kind == "mcp" and mcp_client is not None:
+                            mcp_client.disable_server(_ext_registry, ext_name)
+                        elif kind == "plugin":
+                            from charlie.tools import disable_plugin
+                            disable_plugin(_ext_registry, plugin_manager, ext_name)
+                    except Exception as ex:
+                        logger.warning(f"Failed to mirror extension disable '{ext_name}': {ex}", exc_info=True)
+                elif cmd_type == "extension_uninstalled":
+                    payload = cmd.get("payload", {})
+                    kind = payload.get("kind", "")
+                    ext_name = payload.get("name", "")
+                    try:
+                        from charlie.tools import registry as _ext_registry
+                        if kind == "mcp" and mcp_client is not None:
+                            mcp_client.remove_server(_ext_registry, ext_name)
+                        elif kind in ("skill", "openapi"):
+                            for tool_name in payload.get("tool_names", []):
+                                _ext_registry.unregister_tool(tool_name)
+                        if kind == "skill":
+                            brain.remove_installed_skill_block(ext_name)
+                    except Exception as ex:
+                        logger.warning(f"Failed to mirror extension uninstall '{ext_name}': {ex}", exc_info=True)
                 elif cmd_type == "system_restart":
                     logger.info("System restart command received. Reloading configuration and engine...")
-
-                    try:
-                        voice.stop()
-                    except Exception as ex:
-                        logger.warning(f"Error stopping voice engine on hot reload: {ex}")
-
-                    if mcp_client is not None:
-                        try:
-                            mcp_client.stop()
-                        except Exception as ex:
-                            logger.warning(f"Error stopping MCP client on hot reload: {ex}")
-                        mcp_client = None
 
                     from dotenv import load_dotenv
                     load_dotenv(override=True)
 
-                    from charlie.config import config
-                    config.gpu_device = os.getenv("GPU_DEVICE", config.gpu_device)
-                    config.kokoro_lang = os.getenv("KOKORO_LANG", config.kokoro_lang)
-                    config.kokoro_voice = os.getenv("KOKORO_VOICE", config.kokoro_voice)
-                    config.whisper_model = os.getenv("WHISPER_MODEL", config.whisper_model)
-                    config.wake_word_enabled = os.getenv("WAKE_WORD_ENABLED", "false").lower() == "true"
-                    config.blackboard_enabled = os.getenv("BLACKBOARD_ENABLED", "true").lower() == "true"
-                    config.mcp_enabled = os.getenv("MCP_ENABLED", "false").lower() == "true"
-                    config.plugins_enabled = os.getenv("PLUGINS_ENABLED", "false").lower() == "true"
-                    config.mcp_servers = [s.strip() for s in os.getenv("MCP_SERVERS", "").split(",") if s.strip()]
-                    config.plugin_allow_dirs = [
-                        d.strip()
-                        for d in os.getenv("PLUGIN_ALLOW_DIRS", "").split(",")
-                        if d.strip()
-                    ]
+                    env_values = {
+                        spec["key"]: os.getenv(spec["key"])
+                        for spec in Config.editable_field_specs()
+                        if os.getenv(spec["key"]) is not None
+                    }
+                    config.apply_env_updates(env_values)
 
-                    # Update ORT log level if needed
-                    config.ort_log_level = os.getenv("ORT_LOG_LEVEL", config.ort_log_level)
-
-                    from charlie.tools import registry
-                    keys_to_remove = [
-                        k for k in registry._tools.keys()
-                        if k.startswith("plugin_") or k.startswith("mcp_")
-                    ]
-                    for k in keys_to_remove:
-                        registry._tools.pop(k, None)
-
-                    if config.mcp_enabled:
-                        try:
-                            from charlie.mcp_client import start_mcp
-                            mcp_client = start_mcp(config)
-                        except Exception as ex:
-                            logger.warning(f"Error starting MCP client on hot reload: {ex}")
-
-                    if config.plugins_enabled:
-                        try:
-                            from charlie.tools import register_plugin_tools
-                            register_plugin_tools(config)
-                        except Exception as ex:
-                            logger.warning(f"Error starting plugins on hot reload: {ex}")
-
-                    try:
-                        voice = VoiceEngine(
-                            config,
-                            on_speech=on_speech,
-                            on_tts_start=on_tts_start,
-                            on_tts_stop=on_tts_stop,
-                        )
-                        voice.start()
-                        voice.set_wake_word_callback(on_wake_word)
-                        logger.info("VoiceEngine successfully restarted and initialized.")
-                    except Exception as ex:
-                        logger.error(f"Error restarting VoiceEngine: {ex}", exc_info=True)
+                    await _reload_mcp_client()
+                    _reload_plugin_tools()
+                    await _reload_voice_engine()
 
                     await event_bus.emit("alert", {
                         "severity": "success",

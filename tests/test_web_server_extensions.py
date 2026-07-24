@@ -139,13 +139,17 @@ class TestConfirmExtension:
         assert second["status"] == "error"
 
 
+async def _install_calendar_extension():
+    proposal = await web_server.propose_extension({"kind": "plugin", "name": "calendar"})
+    await web_server.confirm_extension(
+        {"pending_id": proposal["pending_id"], "approved": True, "kind": "plugin"}
+    )
+
+
 @pytest.mark.asyncio
 class TestEnableDisableUninstall:
     async def _install_calendar(self):
-        proposal = await web_server.propose_extension({"kind": "plugin", "name": "calendar"})
-        await web_server.confirm_extension(
-            {"pending_id": proposal["pending_id"], "approved": True, "kind": "plugin"}
-        )
+        await _install_calendar_extension()
 
     async def test_disable_then_reflected_in_list(self):
         await self._install_calendar()
@@ -194,3 +198,87 @@ class TestEnableDisableUninstall:
         assert "plugin_cal_list_events" not in {
             d["function"]["name"] for d in registry.get_tool_definitions()
         }
+
+
+class _FakeEventBus:
+    def __init__(self):
+        self.sent = []
+
+    async def send_command(self, cmd):
+        self.sent.append(cmd)
+
+
+@pytest.mark.asyncio
+class TestVoiceProcessMirroring:
+    """The dashboard's install/enable/disable/uninstall flow only ever
+    touches this process's own registry -- these commands are what let the
+    voice process (where the real chat Brain runs) mirror the same change
+    into its own registry. See charlie/extensions/install.py and main.py's
+    "extension_installed"/"extension_enabled"/"extension_disabled"/
+    "extension_uninstalled" command handlers."""
+
+    async def test_confirm_forwards_extension_installed(self, monkeypatch):
+        bus = _FakeEventBus()
+        monkeypatch.setattr(web_server, "event_bus", bus)
+
+        proposal = await web_server.propose_extension({"kind": "plugin", "name": "calendar"})
+        await web_server.confirm_extension(
+            {"pending_id": proposal["pending_id"], "approved": True, "kind": "plugin", "source": ""}
+        )
+
+        assert bus.sent == [
+            {
+                "type": "extension_installed",
+                "payload": {"kind": "plugin", "name": "calendar", "source": "", "raw_text": ""},
+            }
+        ]
+
+    async def test_enable_forwards_extension_enabled(self, monkeypatch):
+        bus = _FakeEventBus()
+        monkeypatch.setattr(web_server, "event_bus", bus)
+
+        await self._install_calendar()
+        await web_server.disable_extension("calendar")
+        bus.sent.clear()
+        await web_server.enable_extension("calendar")
+
+        assert bus.sent == [{"type": "extension_enabled", "payload": {"kind": "plugin", "name": "calendar"}}]
+
+    async def test_disable_forwards_extension_disabled(self, monkeypatch):
+        bus = _FakeEventBus()
+        monkeypatch.setattr(web_server, "event_bus", bus)
+
+        await self._install_calendar()
+        bus.sent.clear()
+        await web_server.disable_extension("calendar")
+
+        assert bus.sent == [{"type": "extension_disabled", "payload": {"kind": "plugin", "name": "calendar"}}]
+
+    async def test_uninstall_forwards_extension_uninstalled(self, monkeypatch):
+        bus = _FakeEventBus()
+        monkeypatch.setattr(web_server, "event_bus", bus)
+
+        await self._install_calendar()
+        bus.sent.clear()
+        await web_server.uninstall_extension("calendar")
+
+        uninstall_msgs = [c for c in bus.sent if c["type"] == "extension_uninstalled"]
+        assert uninstall_msgs == [
+            {
+                "type": "extension_uninstalled",
+                "payload": {"kind": "plugin", "name": "calendar", "tool_names": ["plugin_cal_list_events"]},
+            }
+        ]
+
+    async def test_no_event_bus_does_not_raise(self):
+        """event_bus defaults to None until the app's lifespan sets it up
+        (e.g. in tests) -- installing an extension must still succeed
+        locally even when there's no voice process to mirror to."""
+        proposal = await web_server.propose_extension({"kind": "plugin", "name": "calendar"})
+        result = await web_server.confirm_extension(
+            {"pending_id": proposal["pending_id"], "approved": True, "kind": "plugin"}
+        )
+        assert result["status"] == "ok"
+
+    async def _install_calendar(self):
+        await _install_calendar_extension()
