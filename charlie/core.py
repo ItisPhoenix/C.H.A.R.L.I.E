@@ -44,7 +44,10 @@ if TYPE_CHECKING:
 # --- LLM tuning ---
 _LLM_TEMPERATURE = 0.3
 _TOOL_TIMEOUT_SEC = 15.0
-_DESKTOP_CONTROL_TOOLS = frozenset({"desktop_click", "desktop_type", "desktop_invoke", "desktop_key"})
+_DESKTOP_CONTROL_TOOLS = frozenset({
+    "desktop_click", "desktop_type", "desktop_invoke", "desktop_key",
+    "desktop_click_at", "desktop_move", "desktop_drag", "desktop_scroll",
+})
 # All tools that touch the UIA/comtypes COM apartment -- perception too, not
 # just the gated effectors -- must run on the single dedicated COM thread.
 _DESKTOP_COM_TOOLS = _DESKTOP_CONTROL_TOOLS | frozenset(
@@ -75,6 +78,10 @@ _TOOL_TIMEOUTS = {
     "desktop_type": 15.0,
     "desktop_invoke": 15.0,
     "desktop_key": 15.0,
+    "desktop_click_at": 15.0,
+    "desktop_move": 15.0,
+    "desktop_drag": 15.0,
+    "desktop_scroll": 15.0,
 }
 _TOOL_RESULT_MAX_CHARS = 2000
 # How long a gated tool call waits for an approve/decline before it's treated
