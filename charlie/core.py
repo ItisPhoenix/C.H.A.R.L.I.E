@@ -1079,20 +1079,38 @@ def _detect_set_goal(query: str) -> Optional[str]:
 
 # --- H.E.L.M. operator persona (Phase 4 desktop-control identity) ---
 _HELM_ADDRESS_RE = re.compile(r"^\s*helm\b[,:]?\s*", re.IGNORECASE)
+_HELM_ACTION_RE = re.compile(
+    r"\b(click|double.?click|drag|scroll|type in(to)?|on (the |my )?screen)\b",
+    re.IGNORECASE,
+)
 _HELM_PERSONA_TEXT = (
     "[H.E.L.M. MODE] You are speaking as H.E.L.M. (Hands-on Executive Logic "
     "Module), Charlie's desktop-control operator persona. Narrate each step "
-    "briefly before acting. Prefer desktop_observe, desktop_click, "
-    "desktop_type, desktop_invoke, desktop_key, desktop_read_screen, and "
-    "desktop_screenshot over other tools for this request. All existing "
-    "approval gates, the panic hotkey, and the credential hard-stop still "
-    "apply unchanged."
+    "briefly before acting -- one short clause per step, not a paragraph. "
+    "Prefer desktop_observe, desktop_click, desktop_type, desktop_invoke, "
+    "desktop_key, desktop_read_screen, desktop_screenshot, desktop_click_at, "
+    "desktop_move, desktop_drag, and desktop_scroll over other tools for this "
+    "request. After every action (click, type, drag, scroll, key), call "
+    "desktop_observe again to re-observe and verify the expected change "
+    "happened before doing the next action -- marks (element ids) go stale "
+    "after any UI change, so a mark id from before an action may no longer "
+    "point at the right thing afterward. If a target has no mark (a canvas, "
+    "an icon, an image-only control, game content), call desktop_screenshot "
+    "to get an annotated image, then use desktop_click_at or desktop_drag "
+    "with the pixel coordinates read off that annotated screenshot -- not "
+    "desktop_click with a mark id, since there is no mark for these targets. "
+    "If 3 consecutive verification checks fail (the expected change didn't "
+    "happen), stop attempting and report the failure to the user rather than "
+    "continuing to retry blindly. All existing approval gates, the panic "
+    "hotkey, and the credential hard-stop still apply unchanged."
 )
 
 
 def _detect_operator_persona(query: str) -> bool:
-    """True if the user addressed the H.E.L.M. desktop-control persona by name."""
-    return bool(_HELM_ADDRESS_RE.match(query.strip()))
+    """True if the user addressed H.E.L.M. by name, or the query implies
+    direct desktop-action intent (click/drag/scroll/type on screen)."""
+    stripped = query.strip()
+    return bool(_HELM_ADDRESS_RE.match(stripped)) or bool(_HELM_ACTION_RE.search(stripped))
 
 
 _UNINFORMATIVE_PATTERNS = re.compile(

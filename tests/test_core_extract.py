@@ -257,3 +257,18 @@ class TestCancelGeneration:
         generation_at_loop_top = brain._chat_generation
         brain.cancel_chat()
         assert brain._chat_generation != generation_at_loop_top
+
+
+class TestHelmPersona:
+    """H.E.L.M. persona text and auto-detect (Task A4 see-act-verify hardening)."""
+
+    def test_helm_persona_mentions_verify_and_raw_input(self):
+        from charlie.core import _HELM_PERSONA_TEXT
+        for phrase in ("desktop_click_at", "re-observe", "verify"):
+            assert phrase in _HELM_PERSONA_TEXT
+
+    def test_operator_persona_auto_activates_on_desktop_intent(self):
+        from charlie.core import _detect_operator_persona
+        assert _detect_operator_persona("helm, open my editor")
+        assert _detect_operator_persona("click the save button on screen")
+        assert not _detect_operator_persona("what's the weather")
