@@ -4,7 +4,7 @@ Native-tool providers must NOT match bare tool names in prose.
 Text-mode (local models) must still match bare patterns.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from charlie.core import Brain
 
@@ -322,3 +322,40 @@ class TestCapabilitiesBlock:
         from charlie.core import _build_stable_tier
         stable = _build_stable_tier("Test soul text.")
         assert "Test soul text." in stable
+
+    def test_capabilities_block_omits_desktop_control_when_unavailable(self):
+        """desktop_control_enabled=True alone isn't enough -- must also check
+        the real _DESKTOP_AVAILABLE import-success flag, mirroring tools.py's
+        _desktop_ready() double-check, or the prompt claims a capability that
+        actual tool execution will refuse."""
+        import charlie.core as core_module
+        from charlie.config import Config
+        cfg = Config()
+        cfg.desktop_control_enabled = True
+        with patch.object(core_module, "_DESKTOP_AVAILABLE", False):
+            block = core_module._build_capabilities_block(cfg)
+        assert "Desktop control" not in block
+
+
+class TestRebuildStableTier:
+    """Task A4b fix 2: the dashboard's system_restart reload flow mutates
+    config in place but only rebuilt _context_tier -- capability claims baked
+    into _stable_tier kept describing the OLD config until process restart."""
+
+    def test_rebuild_stable_tier_reflects_new_config(self):
+        import charlie.core as core_module
+        brain = _make_brain(use_native_tools=True)
+        brain.config.desktop_control_enabled = False
+        brain.config.mcp_enabled = False
+        brain.config.plugins_enabled = False
+        brain.rebuild_stable_tier()
+        before = brain._stable_tier
+        assert "Desktop control" not in before
+
+        brain.config.desktop_control_enabled = True
+        with patch.object(core_module, "_DESKTOP_AVAILABLE", True):
+            brain.rebuild_stable_tier()
+        after = brain._stable_tier
+
+        assert after != before
+        assert "Desktop control" in after

@@ -1039,7 +1039,7 @@ def _build_capabilities_block(config: "Config") -> str:
         "use it instead of refusing or explaining how the user could do it "
         "themselves.",
     ]
-    if config.desktop_control_enabled:
+    if config.desktop_control_enabled and _DESKTOP_AVAILABLE:
         lines.append(
             "- Desktop control: you can see and operate this Windows machine "
             "directly -- observe the screen, click, type, drag, scroll, press "
@@ -1411,6 +1411,13 @@ class Brain:
         self._context_tier = _build_context_tier(
             memory_content, user_content, opinions_content, self._installed_skill_blocks
         )
+
+    def rebuild_stable_tier(self) -> None:
+        """Rebuild the stable tier after a live config change (e.g. the
+        dashboard's system_restart reload flow) so capability claims reflect
+        the new config instead of what was true at process start."""
+        soul_text = self.config.soul or "You are Charlie. Be concise and warm."
+        self._stable_tier = _build_stable_tier(soul_text, _build_capabilities_block(self.config))
 
     def add_installed_skill_block(self, name: str, block: str) -> None:
         """Add a runtime-installed SKILL.md's instructions to the context

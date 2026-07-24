@@ -1016,6 +1016,7 @@ async def main():
                     await _reload_mcp_client()
                     _reload_plugin_tools()
                     await _reload_voice_engine()
+                    brain.rebuild_stable_tier()
 
                     await event_bus.emit("alert", {
                         "severity": "success",
