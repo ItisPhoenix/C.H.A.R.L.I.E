@@ -47,6 +47,26 @@ class Element:
 _controls: Dict[int, Any] = {}
 _lock = threading.Lock()
 
+# Screen rect of the most recent ocr.capture() grab, for image-to-screen coord mapping.
+_LAST_CAPTURE_BOUNDS: Optional[Tuple[int, int, int, int]] = None
+
+
+def set_last_capture_bounds(bounds: Optional[Tuple[int, int, int, int]]) -> None:
+    global _LAST_CAPTURE_BOUNDS
+    _LAST_CAPTURE_BOUNDS = bounds
+
+
+def get_last_capture_bounds() -> Optional[Tuple[int, int, int, int]]:
+    return _LAST_CAPTURE_BOUNDS
+
+
+def image_to_screen(x: int, y: int) -> Optional[Tuple[int, int]]:
+    """Translate captured-image pixel coords to absolute screen coords."""
+    if _LAST_CAPTURE_BOUNDS is None:
+        return None
+    left, top, _right, _bottom = _LAST_CAPTURE_BOUNDS
+    return left + x, top + y
+
 
 def _walk(control: Any, marks: List[Element], controls: Dict[int, Any], depth: int, max_depth: int) -> None:
     if control is None or depth > max_depth:

@@ -11,7 +11,7 @@ import logging
 from typing import List, Optional, Tuple
 
 from charlie.config import config
-from charlie.desktop.uia import Element
+from charlie.desktop.uia import Element, set_last_capture_bounds
 
 logger = logging.getLogger("charlie.desktop.ocr")
 
@@ -42,6 +42,13 @@ def capture(region: Optional[Tuple[int, int, int, int]] = None) -> bytes:
                 "height": region[3] - region[1],
             }
         )
+        if region is not None:
+            bounds = region
+        else:
+            right = monitor["left"] + monitor["width"]
+            bottom = monitor["top"] + monitor["height"]
+            bounds = (monitor["left"], monitor["top"], right, bottom)
+        set_last_capture_bounds(bounds)
         shot = sct.grab(monitor)
         img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
         buf = io.BytesIO()
