@@ -51,3 +51,72 @@ def test_capture_region_records_bounds_exactly():
     with patch.object(ocr, "OCR_AVAILABLE", True), patch("mss.mss", return_value=sct):
         ocr.capture(region=region)
     assert uia.get_last_capture_bounds() == (10, 20, 500, 600)
+
+
+def _make_mock_sct_multi(monitors):
+    """monitors: list where index N is mss.monitors[N] (index 0 = virtual screen)."""
+    sct = MagicMock()
+    sct.monitors = monitors
+
+    def _grab(target):
+        shot = MagicMock()
+        shot.size = (target["width"], target["height"])
+        shot.bgra = b"\x00" * (target["width"] * target["height"] * 4)
+        return shot
+
+    sct.grab.side_effect = _grab
+    sct.__enter__.return_value = sct
+    sct.__exit__.return_value = False
+    return sct
+
+
+def test_capture_specific_monitor_records_its_bounds():
+    from charlie.desktop import ocr
+
+    monitors = [
+        {"left": 0, "top": 0, "width": 3840, "height": 1080},
+        {"left": 0, "top": 0, "width": 1920, "height": 1080},
+        {"left": 1920, "top": 0, "width": 1920, "height": 1080},
+    ]
+    sct = _make_mock_sct_multi(monitors)
+    with patch.object(ocr, "OCR_AVAILABLE", True), patch("mss.mss", return_value=sct):
+        ocr.capture(monitor=2)
+    assert uia.get_last_capture_bounds() == (1920, 0, 3840, 1080)
+
+
+def test_capture_region_ignores_monitor_arg():
+    from charlie.desktop import ocr
+
+    monitors = [
+        {"left": 0, "top": 0, "width": 3840, "height": 1080},
+        {"left": 0, "top": 0, "width": 1920, "height": 1080},
+        {"left": 1920, "top": 0, "width": 1920, "height": 1080},
+    ]
+    sct = _make_mock_sct_multi(monitors)
+    region = (10, 20, 500, 600)
+    with patch.object(ocr, "OCR_AVAILABLE", True), patch("mss.mss", return_value=sct):
+        ocr.capture(region=region, monitor=2)
+    assert uia.get_last_capture_bounds() == (10, 20, 500, 600)
+
+
+def test_control_from_hwnd_returns_none_without_uia(monkeypatch):
+    monkeypatch.setattr(uia, "_HAS_UIA", False)
+    assert uia.control_from_hwnd(12345) is None
+
+
+def test_control_from_hwnd_calls_uia_controlfromhandle(monkeypatch):
+    mock_uia = MagicMock()
+    mock_uia.ControlFromHandle.return_value = "fake-control"
+    monkeypatch.setattr(uia, "_HAS_UIA", True)
+    monkeypatch.setattr(uia, "_uia", mock_uia)
+    result = uia.control_from_hwnd(12345)
+    mock_uia.ControlFromHandle.assert_called_once_with(12345)
+    assert result == "fake-control"
+
+
+def test_control_from_hwnd_swallows_exception(monkeypatch):
+    mock_uia = MagicMock()
+    mock_uia.ControlFromHandle.side_effect = RuntimeError("boom")
+    monkeypatch.setattr(uia, "_HAS_UIA", True)
+    monkeypatch.setattr(uia, "_uia", mock_uia)
+    assert uia.control_from_hwnd(12345) is None
