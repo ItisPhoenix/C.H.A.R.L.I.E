@@ -26,6 +26,9 @@ from typing import Optional
 _lock = threading.Lock()
 _owner: Optional[str] = None
 
+_kernel32 = ctypes.windll.kernel32
+_kernel32.GetTickCount.restype = ctypes.c_uint
+
 
 class _LASTINPUTINFO(ctypes.Structure):
     _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
@@ -39,7 +42,7 @@ def _last_input_tick_ms() -> int:
 
 
 def _now_tick_ms() -> int:
-    return ctypes.windll.kernel32.GetTickCount()
+    return _kernel32.GetTickCount()
 
 
 def user_idle_seconds() -> float:
@@ -63,4 +66,5 @@ def release_desktop(owner_id: str) -> None:
 
 
 def current_owner() -> Optional[str]:
-    return _owner
+    with _lock:
+        return _owner
