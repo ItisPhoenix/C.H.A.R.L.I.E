@@ -68,6 +68,18 @@ _SCREEN_QUERY_RE = re.compile(
     r"|\b(read|look at|check) (my |the )?screen\b",
     re.IGNORECASE,
 )
+# Narrower sibling of _SCREEN_QUERY_RE: phrasing that implies the user wants
+# graphical/visual understanding (an icon, photo, game frame) that OCR/UIA
+# marks can't describe. When this matches and a vision model is configured,
+# desktop_screenshot is pre-called so the vision-routed follow-up (see
+# _select_followup_route) has a real image queued -- see
+# _should_queue_visual_screenshot below and its call site in chat_stream.
+_VISUAL_CONTENT_QUERY_RE = re.compile(
+    r"\bwhat am i looking at\b"
+    r"|\bdescribe (this|the) (image|photo|picture|screen|window|page)\b"
+    r"|\bwhat does this look like\b",
+    re.IGNORECASE,
+)
 _TOOL_TIMEOUTS = {
     "web_search": 15.0,
     "file_read": 10.0,
@@ -1183,6 +1195,17 @@ def _assess_tool_result_relevance(tool_name: str, tool_result: str) -> bool:
     return True
 
 
+def _should_queue_visual_screenshot(user_input: str, config: "Config") -> bool:
+    """True if this turn should pre-call desktop_screenshot to queue a vision
+    image for the follow-up (see _VISUAL_CONTENT_QUERY_RE). Requires both a
+    configured vision model and desktop control -- otherwise a no-op."""
+    return bool(
+        _VISUAL_CONTENT_QUERY_RE.search(user_input)
+        and config.vision_enabled
+        and config.desktop_control_enabled
+    )
+
+
 
 
 def _build_volatile_tier(
@@ -1880,6 +1903,22 @@ class Brain:
                 logger.info("Forced fresh screen observation for screen-content query")
             except Exception:
                 logger.warning("Forced screen observation failed", exc_info=True)
+
+        # --- Pre-queue a vision screenshot for ambiguous visual-content queries ---
+        # Separate mechanism from the desktop_observe block above: this queues an
+        # IMAGE (via desktop_screenshot's own set_pending_vision_image call) for the
+        # vision-routed follow-up, it does not add text to search_results. No-ops
+        # (just logs) when vision or desktop control isn't configured.
+        if _should_queue_visual_screenshot(user_input, self.config):
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    _UIA_EXECUTOR, tool_registry.execute_tool, "desktop_screenshot", {}
+                )
+                logger.info("Pre-queued vision screenshot for visual-content query")
+            except Exception:
+                logger.warning("Pre-queuing vision screenshot failed", exc_info=True)
+        elif _VISUAL_CONTENT_QUERY_RE.search(user_input):
+            logger.debug("Visual-content query detected but vision/desktop control unavailable")
 
         # --- Assemble system prompt from frozen tiers + volatile tier ---
         now = datetime.now()

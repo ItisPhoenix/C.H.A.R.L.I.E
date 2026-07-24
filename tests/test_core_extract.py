@@ -359,3 +359,52 @@ class TestRebuildStableTier:
 
         assert after != before
         assert "Desktop control" in after
+
+
+class TestVisualContentQueryFastPath:
+    """Task D1: ambient "what am I looking at" fast-path queues a vision
+    screenshot for graphical content OCR/UIA marks can't describe, without
+    duplicating _SCREEN_QUERY_RE's existing text-based fast-path."""
+
+    def test_visual_content_query_regex_matches_expected_phrases(self):
+        from charlie.core import _VISUAL_CONTENT_QUERY_RE
+        assert _VISUAL_CONTENT_QUERY_RE.search("what am I looking at")
+        assert _VISUAL_CONTENT_QUERY_RE.search("describe this image")
+        assert _VISUAL_CONTENT_QUERY_RE.search("describe the picture")
+        assert _VISUAL_CONTENT_QUERY_RE.search("what does this look like")
+        assert not _VISUAL_CONTENT_QUERY_RE.search("what time is it")
+
+    def test_visual_content_query_regex_does_not_duplicate_screen_query_re(self):
+        """"read my screen" is already covered by _SCREEN_QUERY_RE; the new
+        regex should not re-match it (kept out to avoid a redundant alternative)."""
+        from charlie.core import _SCREEN_QUERY_RE, _VISUAL_CONTENT_QUERY_RE
+        assert _SCREEN_QUERY_RE.search("read my screen")
+        assert not _VISUAL_CONTENT_QUERY_RE.search("read my screen")
+
+    def test_should_queue_visual_screenshot_true_when_fully_enabled(self):
+        from charlie.core import _should_queue_visual_screenshot
+        cfg = MagicMock()
+        cfg.vision_enabled = True
+        cfg.desktop_control_enabled = True
+        assert _should_queue_visual_screenshot("what am I looking at", cfg)
+
+    def test_should_queue_visual_screenshot_false_without_vision_enabled(self):
+        from charlie.core import _should_queue_visual_screenshot
+        cfg = MagicMock()
+        cfg.vision_enabled = False
+        cfg.desktop_control_enabled = True
+        assert not _should_queue_visual_screenshot("what am I looking at", cfg)
+
+    def test_should_queue_visual_screenshot_false_without_desktop_control(self):
+        from charlie.core import _should_queue_visual_screenshot
+        cfg = MagicMock()
+        cfg.vision_enabled = True
+        cfg.desktop_control_enabled = False
+        assert not _should_queue_visual_screenshot("what am I looking at", cfg)
+
+    def test_should_queue_visual_screenshot_false_when_phrase_does_not_match(self):
+        from charlie.core import _should_queue_visual_screenshot
+        cfg = MagicMock()
+        cfg.vision_enabled = True
+        cfg.desktop_control_enabled = True
+        assert not _should_queue_visual_screenshot("what time is it", cfg)
