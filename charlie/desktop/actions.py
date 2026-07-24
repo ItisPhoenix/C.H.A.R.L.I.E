@@ -9,7 +9,7 @@ charlie.core) stops motion within one action, never mid-action.
 import logging
 import re
 import threading
-from typing import Tuple
+from typing import Optional, Tuple
 
 logger = logging.getLogger("charlie.desktop.actions")
 
@@ -146,3 +146,79 @@ def key_press(keys: str) -> str:
     except Exception as e:
         logger.warning("desktop_key failed for '%s'", keys, exc_info=True)
         return f"Error sending key chord '{keys}': {e}"
+
+
+_SCROLL_UNIT = 120  # one wheel notch on Windows
+_DRAG_DURATION_S = 0.4  # instant drags get ignored by many apps
+
+
+def _to_screen(x: int, y: int) -> Optional[Tuple[int, int]]:
+    from charlie.desktop.uia import image_to_screen
+    return image_to_screen(x, y)
+
+
+def click_at(x: int, y: int, button: str = "left", double: bool = False) -> str:
+    _check_halt()
+    if not _HAS_PYAUTOGUI:
+        return "Error: pyautogui is not installed -- desktop control unavailable."
+    pt = _to_screen(x, y)
+    if pt is None:
+        return "Error: no capture bounds -- call desktop_observe or desktop_screenshot first."
+    try:
+        pyautogui.click(pt[0], pt[1], button=button, clicks=2 if double else 1)
+        return f"Clicked at image ({x},{y}) -> screen {pt}."
+    except DesktopHalted:
+        raise
+    except Exception as e:
+        logger.warning("click_at failed", exc_info=True)
+        return f"Error clicking at ({x},{y}): {e}"
+
+
+def move_to(x: int, y: int) -> str:
+    _check_halt()
+    if not _HAS_PYAUTOGUI:
+        return "Error: pyautogui is not installed -- desktop control unavailable."
+    pt = _to_screen(x, y)
+    if pt is None:
+        return "Error: no capture bounds -- call desktop_observe or desktop_screenshot first."
+    try:
+        pyautogui.moveTo(pt[0], pt[1])
+        return f"Moved cursor to image ({x},{y})."
+    except DesktopHalted:
+        raise
+    except Exception as e:
+        logger.warning("move_to failed", exc_info=True)
+        return f"Error moving to ({x},{y}): {e}"
+
+
+def drag(x1: int, y1: int, x2: int, y2: int) -> str:
+    _check_halt()
+    if not _HAS_PYAUTOGUI:
+        return "Error: pyautogui is not installed -- desktop control unavailable."
+    p1 = _to_screen(x1, y1)
+    p2 = _to_screen(x2, y2)
+    if p1 is None or p2 is None:
+        return "Error: no capture bounds -- call desktop_observe or desktop_screenshot first."
+    try:
+        pyautogui.moveTo(p1[0], p1[1])
+        pyautogui.dragTo(p2[0], p2[1], duration=_DRAG_DURATION_S, button="left")
+        return f"Dragged ({x1},{y1}) -> ({x2},{y2})."
+    except DesktopHalted:
+        raise
+    except Exception as e:
+        logger.warning("drag failed", exc_info=True)
+        return f"Error dragging ({x1},{y1}) -> ({x2},{y2}): {e}"
+
+
+def scroll(notches: int) -> str:
+    _check_halt()
+    if not _HAS_PYAUTOGUI:
+        return "Error: pyautogui is not installed -- desktop control unavailable."
+    try:
+        pyautogui.scroll(notches * _SCROLL_UNIT)
+        return f"Scrolled {notches} notches."
+    except DesktopHalted:
+        raise
+    except Exception as e:
+        logger.warning("scroll failed", exc_info=True)
+        return f"Error scrolling {notches} notches: {e}"
