@@ -1727,6 +1727,112 @@ def desktop_key(keys: str) -> str:
 
 
 @registry.register_tool(
+    name="desktop_click_at",
+    description=(
+        "Click a raw pixel coordinate from the most recent desktop_observe or "
+        "desktop_screenshot capture. Prefer desktop_click with a mark id when "
+        "one exists -- use this only for targets with no accessible mark "
+        "(icons, canvases, images, game content). Coordinates are image "
+        "pixels from that capture, not physical screen pixels; passing "
+        "coordinates from stale or hallucinated positions will click the "
+        "wrong place, so always re-observe or re-screenshot immediately "
+        "before using this."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "x": {"type": "integer", "description": "X pixel coordinate from the latest capture."},
+            "y": {"type": "integer", "description": "Y pixel coordinate from the latest capture."},
+            "button": {"type": "string", "enum": ["left", "right"], "description": "Mouse button. Defaults to left."},
+            "double": {"type": "boolean", "description": "Double-click instead of single-click. Defaults to false."},
+        },
+        "required": ["x", "y"],
+    },
+    is_interactive=True,
+)
+def desktop_click_at(x: int, y: int, button: str = "left", double: bool = False) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import click_at
+    return click_at(x, y, button=button, double=double)
+
+
+@registry.register_tool(
+    name="desktop_move",
+    description=(
+        "Move the mouse cursor to a raw pixel coordinate from the most recent "
+        "desktop_observe or desktop_screenshot capture, without clicking. "
+        "Coordinates are image pixels from that capture, not physical screen pixels."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "x": {"type": "integer", "description": "X pixel coordinate from the latest capture."},
+            "y": {"type": "integer", "description": "Y pixel coordinate from the latest capture."},
+        },
+        "required": ["x", "y"],
+    },
+    is_interactive=True,
+)
+def desktop_move(x: int, y: int) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import move_to
+    return move_to(x, y)
+
+
+@registry.register_tool(
+    name="desktop_drag",
+    description=(
+        "Drag the mouse from one raw pixel coordinate to another, from the "
+        "most recent desktop_observe or desktop_screenshot capture. Use for "
+        "sliders, canvases, drawing, or drag-and-drop where no mark id "
+        "applies. Coordinates are image pixels from that capture, not "
+        "physical screen pixels."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "x1": {"type": "integer", "description": "Start X pixel coordinate."},
+            "y1": {"type": "integer", "description": "Start Y pixel coordinate."},
+            "x2": {"type": "integer", "description": "End X pixel coordinate."},
+            "y2": {"type": "integer", "description": "End Y pixel coordinate."},
+        },
+        "required": ["x1", "y1", "x2", "y2"],
+    },
+    is_interactive=True,
+)
+def desktop_drag(x1: int, y1: int, x2: int, y2: int) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import drag
+    return drag(x1, y1, x2, y2)
+
+
+@registry.register_tool(
+    name="desktop_scroll",
+    description=(
+        "Scroll the foreground window at the current cursor position. "
+        "Positive notches scroll up, negative scroll down. Roughly 3 notches "
+        "moves one screen section."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "notches": {"type": "integer", "description": "Scroll amount; positive=up, negative=down."},
+        },
+        "required": ["notches"],
+    },
+    is_interactive=True,
+)
+def desktop_scroll(notches: int) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import scroll
+    return scroll(notches)
+
+
+@registry.register_tool(
     name="desktop_screenshot",
     description=(
         "Capture the foreground window as an annotated screenshot for the vision model, "

@@ -49,6 +49,10 @@ def test_registry_registration_and_schema():
         "desktop_type",
         "desktop_invoke",
         "desktop_key",
+        "desktop_click_at",
+        "desktop_move",
+        "desktop_drag",
+        "desktop_scroll",
     }
     assert any(
         d["function"]["parameters"]["required"] == ["query"] for d in definitions
@@ -75,6 +79,12 @@ def test_get_tool_names_matches_definitions():
     assert set(registry.get_tool_names()) == {
         d["function"]["name"] for d in registry.get_tool_definitions()
     }
+
+
+def test_raw_desktop_tools_registered():
+    names = registry.get_tool_names()
+    for tool in ("desktop_click_at", "desktop_drag", "desktop_scroll", "desktop_move"):
+        assert tool in names
 
 
 def test_delegate_to_agent_schema_describes_each_agent():
