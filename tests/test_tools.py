@@ -53,6 +53,10 @@ def test_registry_registration_and_schema():
         "desktop_move",
         "desktop_drag",
         "desktop_scroll",
+        "desktop_windows",
+        "desktop_focus",
+        "desktop_window",
+        "desktop_move_window",
     }
     assert any(
         d["function"]["parameters"]["required"] == ["query"] for d in definitions
@@ -84,6 +88,12 @@ def test_get_tool_names_matches_definitions():
 def test_raw_desktop_tools_registered():
     names = registry.get_tool_names()
     for tool in ("desktop_click_at", "desktop_drag", "desktop_scroll", "desktop_move"):
+        assert tool in names
+
+
+def test_window_management_tools_registered():
+    names = registry.get_tool_names()
+    for tool in ("desktop_windows", "desktop_focus", "desktop_window", "desktop_move_window"):
         assert tool in names
 
 

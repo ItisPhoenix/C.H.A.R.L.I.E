@@ -1865,6 +1865,89 @@ def desktop_screenshot() -> str:
     return text_result
 
 
+@registry.register_tool(
+    name="desktop_windows",
+    description=(
+        "List all visible top-level windows by title, for switching between "
+        "apps or finding a window to focus/move."
+    ),
+    schema={"type": "object", "properties": {}, "required": []},
+)
+def desktop_windows() -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.windows import list_windows
+    windows = list_windows()
+    if not windows:
+        return "No visible windows found."
+    return "\n".join(w["title"] for w in windows)
+
+
+@registry.register_tool(
+    name="desktop_focus",
+    description=(
+        "Bring a window to the foreground by title substring "
+        "(case-insensitive). Use desktop_windows first to see available titles."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "window": {"type": "string", "description": "Title substring to match, e.g. 'Notepad' or 'Chrome'."},
+        },
+        "required": ["window"],
+    },
+    is_interactive=True,
+)
+def desktop_focus(window: str) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.windows import focus_window
+    return focus_window(window)
+
+
+@registry.register_tool(
+    name="desktop_window",
+    description="Minimize, maximize, restore, or close a window by title substring.",
+    schema={
+        "type": "object",
+        "properties": {
+            "window": {"type": "string", "description": "Title substring to match."},
+            "action": {"type": "string", "enum": ["minimize", "maximize", "restore", "close"]},
+        },
+        "required": ["window", "action"],
+    },
+    is_interactive=True,
+)
+def desktop_window(window: str, action: str) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.windows import manage_window
+    return manage_window(window, action)
+
+
+@registry.register_tool(
+    name="desktop_move_window",
+    description="Move and resize a window by title substring, e.g. to arrange two windows side by side.",
+    schema={
+        "type": "object",
+        "properties": {
+            "window": {"type": "string", "description": "Title substring to match."},
+            "x": {"type": "integer", "description": "New left position in screen pixels."},
+            "y": {"type": "integer", "description": "New top position in screen pixels."},
+            "width": {"type": "integer", "description": "New width in pixels."},
+            "height": {"type": "integer", "description": "New height in pixels."},
+        },
+        "required": ["window", "x", "y", "width", "height"],
+    },
+    is_interactive=True,
+)
+def desktop_move_window(window: str, x: int, y: int, width: int, height: int) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.windows import move_resize_window
+    return move_resize_window(window, x, y, width, height)
+
+
 def set_pending_vision_image(url: Optional[str]) -> None:
     """Queue an image data URL for the very next outgoing LLM payload."""
     global _pending_vision_image

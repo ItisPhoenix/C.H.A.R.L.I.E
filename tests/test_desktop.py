@@ -46,6 +46,7 @@ def test_desktop_control_tools_frozenset():
     assert _DESKTOP_CONTROL_TOOLS == {
         "desktop_click", "desktop_type", "desktop_invoke", "desktop_key",
         "desktop_click_at", "desktop_move", "desktop_drag", "desktop_scroll",
+        "desktop_focus", "desktop_window", "desktop_move_window",
     }
 
 
