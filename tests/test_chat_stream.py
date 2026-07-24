@@ -435,6 +435,80 @@ async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
     assert not called_stream
 
 @pytest.mark.asyncio
+async def test_visual_screenshot_queued_after_initial_payload_not_before(monkeypatch):
+    """Regression test for the ordering bug: a visual-content query used to
+    call desktop_screenshot (which queues a pending vision image) BEFORE the
+    initial payload was built. _build_payload unconditionally pops the
+    pending image whenever vision is enabled, so the image was consumed by
+    the initial (non-vision-routed) request and never reached the follow-up.
+
+    The fix instead records intent and injects a synthetic desktop_screenshot
+    tool call once the model's own (empty) tool_calls are known, so it flows
+    through the same tool-execution-loop + follow-up path as a real
+    model-initiated call. This test proves: (1) the initial _build_payload
+    call happens before desktop_screenshot ever executes, and (2) a
+    follow-up _build_payload call is still reached even though the model
+    itself returned zero tool calls (i.e. the early-return branch is
+    correctly bypassed).
+    """
+    from charlie.config import Config
+    from charlie.core import Brain
+
+    cfg = Config(
+        small_llm_url="https://example.com/v1",
+        small_llm_key="test-key",
+        small_llm_model="dummy",
+        iteration_budget_max=3,
+        native_tool_calling=True,
+        vision_enabled=True,
+        desktop_control_enabled=True,
+    )
+
+    events = []
+
+    def mock_execute(name, args):
+        events.append(("execute_tool", name))
+        return "Screenshot captured for vision analysis of the current desktop state."
+
+    monkeypatch.setattr("charlie.tools.registry.execute_tool", mock_execute)
+
+    async def mock_stream_completion(*args, **kwargs):
+        # Model returns no content and no tool calls at all this turn.
+        return ("", [], False)
+
+    brain = Brain(cfg)
+    monkeypatch.setattr(brain, "_stream_completion", mock_stream_completion)
+
+    orig_build_payload = brain._build_payload
+
+    def spy_build_payload(messages, skip_tools=False):
+        events.append(("build_payload",))
+        return orig_build_payload(messages, skip_tools=skip_tools)
+
+    monkeypatch.setattr(brain, "_build_payload", spy_build_payload)
+
+    async def mock_stream_followup_once(*args, **kwargs):
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(brain, "_stream_followup_once", mock_stream_followup_once)
+
+    async for _ in brain.chat_stream("what am I looking at", skip_pre_search=True):
+        pass
+
+    # The initial payload must be built before desktop_screenshot ever runs --
+    # this is exactly the ordering the bug got backwards.
+    assert events[0] == ("build_payload",)
+    execute_idx = events.index(("execute_tool", "desktop_screenshot"))
+    assert execute_idx > 0
+
+    # Both the initial and the follow-up payload builds must have happened --
+    # proves the synthetic call bypassed the "if not tool_calls: return" early
+    # exit, even though the model itself returned zero real tool calls.
+    assert events.count(("build_payload",)) == 2
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_skip_tools(monkeypatch, brain_config):
     from charlie.core import Brain
 

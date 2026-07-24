@@ -413,3 +413,44 @@ class TestVisualContentQueryFastPath:
         cfg.vision_enabled = True
         cfg.desktop_control_enabled = True
         assert not _should_queue_visual_screenshot("what time is it", cfg)
+
+
+class TestMaybeInjectVisualScreenshotCall:
+    """Regression coverage for the ordering bug: desktop_screenshot must be
+    queued via a synthetic tool call injected AFTER the initial completion's
+    tool_calls are known, not via an eager pre-call before the initial
+    payload is built (which let _build_payload's pop_pending_vision_image()
+    consume the image before any vision-routed follow-up ever ran)."""
+
+    def test_no_injection_when_not_queuing(self):
+        from charlie.core import _maybe_inject_visual_screenshot_call
+        calls = [{"id": "1", "name": "web_search", "arguments": {}}]
+        assert _maybe_inject_visual_screenshot_call(calls, False) is calls
+
+    def test_injects_synthetic_call_when_queuing_and_empty(self):
+        from charlie.core import _maybe_inject_visual_screenshot_call
+        result = _maybe_inject_visual_screenshot_call([], True)
+        assert len(result) == 1
+        call = result[0]
+        assert call["name"] == "desktop_screenshot"
+        assert call["arguments"] == {}
+        # Downstream code (_exec_one, tool_call_id formatting) reads call["id"]
+        # via .get("id") to decide native vs text-based tool-call formatting --
+        # it must be present and non-None so a synthetic-only turn is treated
+        # the same as a native model-issued call.
+        assert call.get("id") is not None
+
+    def test_injects_alongside_existing_real_calls(self):
+        from charlie.core import _maybe_inject_visual_screenshot_call
+        real_calls = [{"id": "abc", "name": "web_search", "arguments": {"query": "x"}}]
+        result = _maybe_inject_visual_screenshot_call(real_calls, True)
+        assert len(result) == 2
+        assert result[0] == real_calls[0]
+        assert result[1]["name"] == "desktop_screenshot"
+
+    def test_no_duplicate_when_model_already_called_desktop_screenshot(self):
+        from charlie.core import _maybe_inject_visual_screenshot_call
+        real_calls = [{"id": "abc", "name": "desktop_screenshot", "arguments": {}}]
+        result = _maybe_inject_visual_screenshot_call(real_calls, True)
+        assert result == real_calls
+        assert len(result) == 1

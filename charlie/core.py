@@ -1216,6 +1216,22 @@ def _should_queue_visual_screenshot(user_input: str, config: "Config") -> bool:
     )
 
 
+def _maybe_inject_visual_screenshot_call(
+    tool_calls: List[Dict[str, Any]], queue_visual_screenshot: bool
+) -> List[Dict[str, Any]]:
+    """Append a synthetic desktop_screenshot call when queue_visual_screenshot
+    is True and the model's own tool_calls don't already include one. This is
+    what makes a queued visual-content query flow through the same
+    tool-execution loop (_exec_one) and follow-up routing (_select_followup_route)
+    as a model-initiated desktop_screenshot call, instead of queuing the image
+    before the initial payload -- see the chat_stream call site."""
+    if not queue_visual_screenshot:
+        return tool_calls
+    if any(c.get("name") == "desktop_screenshot" for c in tool_calls):
+        return tool_calls
+    return tool_calls + [{"id": make_id(), "name": "desktop_screenshot", "arguments": {}}]
+
+
 
 
 def _build_volatile_tier(
@@ -1914,19 +1930,18 @@ class Brain:
             except Exception:
                 logger.warning("Forced screen observation failed", exc_info=True)
 
-        # --- Pre-queue a vision screenshot for ambiguous visual-content queries ---
-        # Separate mechanism from the desktop_observe block above: this queues an
-        # IMAGE (via desktop_screenshot's own set_pending_vision_image call) for the
-        # vision-routed follow-up, it does not add text to search_results. No-ops
-        # (just logs) when vision or desktop control isn't configured.
-        if _should_queue_visual_screenshot(user_input, self.config):
-            try:
-                await asyncio.get_running_loop().run_in_executor(
-                    _UIA_EXECUTOR, tool_registry.execute_tool, "desktop_screenshot", {}
-                )
-                logger.info("Pre-queued vision screenshot for visual-content query")
-            except Exception:
-                logger.warning("Pre-queuing vision screenshot failed", exc_info=True)
+        # --- Flag ambiguous visual-content queries for a queued screenshot ---
+        # Separate mechanism from the desktop_observe block above: this later
+        # injects a synthetic desktop_screenshot tool call (see
+        # _maybe_inject_visual_screenshot_call below) so the image is queued
+        # by the SAME tool-execution-loop machinery that handles a model-
+        # initiated desktop_screenshot call -- queuing it here, before the
+        # initial payload is built, would have _build_payload's
+        # pop_pending_vision_image() immediately consume it into the
+        # non-vision-routed initial request instead of the follow-up.
+        queue_visual_screenshot = _should_queue_visual_screenshot(user_input, self.config)
+        if queue_visual_screenshot:
+            logger.info("Visual-content query detected -- will queue desktop_screenshot for follow-up")
         elif _VISUAL_CONTENT_QUERY_RE.search(user_input):
             logger.debug("Visual-content query detected but vision/desktop control unavailable")
 
@@ -2020,6 +2035,10 @@ class Brain:
 
         if skip_tools:
             tool_calls = []
+
+        tool_calls = _maybe_inject_visual_screenshot_call(
+            tool_calls, queue_visual_screenshot and not skip_tools
+        )
 
         if not tool_calls:
             if accumulated:
