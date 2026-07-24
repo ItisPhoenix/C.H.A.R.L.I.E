@@ -222,3 +222,30 @@ def scroll(notches: int) -> str:
     except Exception as e:
         logger.warning("scroll failed", exc_info=True)
         return f"Error scrolling {notches} notches: {e}"
+
+
+_SYSTEM_ACTIONS = {
+    "volume_up": "volumeup",
+    "volume_down": "volumedown",
+    "mute": "volumemute",
+    "play_pause": "playpause",
+    "next_track": "nexttrack",
+    "prev_track": "prevtrack",
+}
+
+
+def system_control(action: str) -> str:
+    _check_halt()
+    if not _HAS_PYAUTOGUI:
+        return "Error: pyautogui is not installed -- desktop control unavailable."
+    key = _SYSTEM_ACTIONS.get(action)
+    if key is None:
+        return f"Error: unknown action '{action}'. Valid: {', '.join(sorted(_SYSTEM_ACTIONS))}."
+    try:
+        pyautogui.press(key)
+        return f"Done: {action}."
+    except DesktopHalted:
+        raise
+    except Exception as e:
+        logger.warning("system_control failed for '%s'", action, exc_info=True)
+        return f"Error sending system control '{action}': {e}"
