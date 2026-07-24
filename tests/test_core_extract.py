@@ -267,6 +267,11 @@ class TestHelmPersona:
         for phrase in ("desktop_click_at", "re-observe", "verify"):
             assert phrase in _HELM_PERSONA_TEXT
 
+    def test_helm_persona_mentions_window_management(self):
+        from charlie.core import _HELM_PERSONA_TEXT
+        for phrase in ("desktop_windows", "desktop_focus"):
+            assert phrase in _HELM_PERSONA_TEXT
+
     def test_operator_persona_auto_activates_on_desktop_intent(self):
         from charlie.core import _detect_operator_persona
         assert _detect_operator_persona("helm, open my editor")
