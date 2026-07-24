@@ -272,3 +272,15 @@ class TestHelmPersona:
         assert _detect_operator_persona("helm, open my editor")
         assert _detect_operator_persona("click the save button on screen")
         assert not _detect_operator_persona("what's the weather")
+
+    def test_operator_persona_avoids_drag_idiom_false_positives(self):
+        from charlie.core import _detect_operator_persona
+        assert not _detect_operator_persona("what's a good drag queen show")
+        assert not _detect_operator_persona("drag racing is fun")
+        assert not _detect_operator_persona("the meeting will drag on forever")
+
+    def test_operator_persona_still_detects_real_drag_intent(self):
+        from charlie.core import _detect_operator_persona
+        assert _detect_operator_persona("drag the file to the trash")
+        assert _detect_operator_persona("drag this to the folder")
+        assert _detect_operator_persona("drag and drop this icon")

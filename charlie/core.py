@@ -1080,7 +1080,7 @@ def _detect_set_goal(query: str) -> Optional[str]:
 # --- H.E.L.M. operator persona (Phase 4 desktop-control identity) ---
 _HELM_ADDRESS_RE = re.compile(r"^\s*helm\b[,:]?\s*", re.IGNORECASE)
 _HELM_ACTION_RE = re.compile(
-    r"\b(click|double.?click|drag|scroll|type in(to)?|on (the |my )?screen)\b",
+    r"\b(click|double.?click|drag(?!\s+(queen|racing|race|on\b))|scroll|type in(to)?|on (the |my )?screen)\b",
     re.IGNORECASE,
 )
 _HELM_PERSONA_TEXT = (
