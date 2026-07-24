@@ -47,7 +47,15 @@ def test_desktop_control_tools_frozenset():
         "desktop_click", "desktop_type", "desktop_invoke", "desktop_key",
         "desktop_click_at", "desktop_move", "desktop_drag", "desktop_scroll",
         "desktop_focus", "desktop_window", "desktop_move_window",
+        "system_control",
     }
+
+
+def test_system_control_is_gated():
+    """Media-key presses mutate real system volume/playback state, same as
+    desktop_key sending a chord -- it must go through the same consent-arm/
+    panic-halt/rate-limit/idempotency-exclusion gate as every other effector."""
+    assert "system_control" in _DESKTOP_CONTROL_TOOLS
 
 
 def test_desktop_tools_disabled_by_default():

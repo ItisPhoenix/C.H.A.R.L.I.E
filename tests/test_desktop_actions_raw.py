@@ -89,3 +89,22 @@ def test_halted_scroll_raises(fake_pyautogui):
     with pytest.raises(actions.DesktopHalted):
         actions.scroll(1)
     actions.clear_halt()
+
+
+def test_system_control_volume_up(fake_pyautogui):
+    result = actions.system_control("volume_up")
+    fake_pyautogui.press.assert_called_once_with("volumeup")
+    assert "Done" in result
+
+
+def test_system_control_unknown_action_errors(fake_pyautogui):
+    result = actions.system_control("teleport")
+    assert "Error" in result
+    assert "teleport" in result
+
+
+def test_system_control_halted_raises(fake_pyautogui):
+    actions.halt()
+    with pytest.raises(actions.DesktopHalted):
+        actions.system_control("mute")
+    actions.clear_halt()

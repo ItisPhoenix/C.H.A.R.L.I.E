@@ -1948,6 +1948,31 @@ def desktop_move_window(window: str, x: int, y: int, width: int, height: int) ->
     return move_resize_window(window, x, y, width, height)
 
 
+@registry.register_tool(
+    name="system_control",
+    description=(
+        "Control system volume and media playback via keyboard media keys: "
+        "volume_up, volume_down, mute, play_pause, next_track, prev_track."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["volume_up", "volume_down", "mute", "play_pause", "next_track", "prev_track"],
+            },
+        },
+        "required": ["action"],
+    },
+    is_interactive=True,
+)
+def system_control(action: str) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import system_control as _system_control
+    return _system_control(action)
+
+
 def set_pending_vision_image(url: Optional[str]) -> None:
     """Queue an image data URL for the very next outgoing LLM payload."""
     global _pending_vision_image

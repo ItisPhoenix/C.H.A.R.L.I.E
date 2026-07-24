@@ -57,6 +57,7 @@ def test_registry_registration_and_schema():
         "desktop_focus",
         "desktop_window",
         "desktop_move_window",
+        "system_control",
     }
     assert any(
         d["function"]["parameters"]["required"] == ["query"] for d in definitions
@@ -95,6 +96,10 @@ def test_window_management_tools_registered():
     names = registry.get_tool_names()
     for tool in ("desktop_windows", "desktop_focus", "desktop_window", "desktop_move_window"):
         assert tool in names
+
+
+def test_system_control_tool_registered():
+    assert "system_control" in registry.get_tool_names()
 
 
 def test_delegate_to_agent_schema_describes_each_agent():
