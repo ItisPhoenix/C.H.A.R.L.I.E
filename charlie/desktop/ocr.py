@@ -27,29 +27,39 @@ except ImportError:
 _MIN_CONF_DEFAULT = 60
 
 
-def capture(region: Optional[Tuple[int, int, int, int]] = None) -> bytes:
-    """Screenshot (or region) as PNG bytes via mss."""
+def capture(
+    region: Optional[Tuple[int, int, int, int]] = None,
+    monitor: Optional[int] = None,
+) -> bytes:
+    """Screenshot as PNG bytes via mss.
+
+    region: explicit (left, top, right, bottom) pixels to grab.
+    monitor: 1-indexed physical monitor (mss.monitors[1], [2], ...) to grab
+        in full, ignored if region is given. Neither given: full virtual
+        screen (mss.monitors[0]), the existing default behavior.
+    """
     if not OCR_AVAILABLE:
         raise RuntimeError("mss/pytesseract/Pillow not installed -- OCR unavailable.")
     with mss.mss() as sct:
-        monitor = (
-            sct.monitors[0]
-            if region is None
-            else {
+        if region is not None:
+            grab_target = {
                 "left": region[0],
                 "top": region[1],
                 "width": region[2] - region[0],
                 "height": region[3] - region[1],
             }
-        )
+        elif monitor is not None:
+            grab_target = sct.monitors[monitor]
+        else:
+            grab_target = sct.monitors[0]
         if region is not None:
             bounds = region
         else:
-            right = monitor["left"] + monitor["width"]
-            bottom = monitor["top"] + monitor["height"]
-            bounds = (monitor["left"], monitor["top"], right, bottom)
+            right = grab_target["left"] + grab_target["width"]
+            bottom = grab_target["top"] + grab_target["height"]
+            bounds = (grab_target["left"], grab_target["top"], right, bottom)
         set_last_capture_bounds(bounds)
-        shot = sct.grab(monitor)
+        shot = sct.grab(grab_target)
         img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
         buf = io.BytesIO()
         img.save(buf, format="PNG")

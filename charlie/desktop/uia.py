@@ -17,6 +17,7 @@ try:
     import uiautomation as _uia
     _HAS_UIA = True
 except ImportError:
+    _uia = None
     _HAS_UIA = False
 
 _MAX_DEPTH_DEFAULT = 8
@@ -98,6 +99,17 @@ def _walk(control: Any, marks: List[Element], controls: Dict[int, Any], depth: i
         return
     for child in children:
         _walk(child, marks, controls, depth + 1, max_depth)
+
+
+def control_from_hwnd(hwnd: int) -> Optional[Any]:
+    """Build a UIA control handle for a specific window hwnd, for snapshot_tree(root=...)."""
+    if not _HAS_UIA:
+        return None
+    try:
+        return _uia.ControlFromHandle(hwnd)
+    except Exception:
+        logger.warning("ControlFromHandle failed for hwnd %s", hwnd, exc_info=True)
+        return None
 
 
 def snapshot_tree(max_depth: int = _MAX_DEPTH_DEFAULT, root: Optional[Any] = None) -> List[Element]:
