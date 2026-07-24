@@ -284,3 +284,41 @@ class TestHelmPersona:
         assert _detect_operator_persona("drag the file to the trash")
         assert _detect_operator_persona("drag this to the folder")
         assert _detect_operator_persona("drag and drop this icon")
+
+
+class TestCapabilitiesBlock:
+    """Stable-tier capability roster (Task A4b): stop Charlie from falsely
+    refusing when a tool/agent for the request already exists, and make a
+    live capability roster override any stale claim (e.g. in SOUL.md)."""
+
+    def test_capabilities_block_mentions_agents_and_overrides_stale_claims(self):
+        from charlie.config import Config
+        from charlie.core import _build_capabilities_block
+        cfg = Config()
+        block = _build_capabilities_block(cfg)
+        assert "delegate_to_agent" in block
+        assert "J.A.R.V.I.S." in block
+        assert "overrides any conflicting claim" in block
+
+    def test_stable_tier_includes_capabilities_block(self):
+        from charlie.config import Config
+        from charlie.core import _build_capabilities_block, _build_stable_tier
+        cfg = Config()
+        block = _build_capabilities_block(cfg)
+        stable = _build_stable_tier("Test soul text.", block)
+        assert "delegate_to_agent" in stable
+        assert "Test soul text." in stable
+
+    def test_capabilities_block_omits_desktop_control_when_disabled(self):
+        from charlie.config import Config
+        from charlie.core import _build_capabilities_block
+        cfg = Config()
+        cfg.desktop_control_enabled = False
+        block = _build_capabilities_block(cfg)
+        assert "Desktop control" not in block
+
+    def test_stable_tier_default_second_arg_matches_old_single_arg_call(self):
+        """Existing callers passing only soul_text must still work unchanged."""
+        from charlie.core import _build_stable_tier
+        stable = _build_stable_tier("Test soul text.")
+        assert "Test soul text." in stable

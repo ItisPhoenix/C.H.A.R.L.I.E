@@ -1018,10 +1018,64 @@ _TEXT_TOOL_INSTRUCTIONS = (
 )
 
 
-def _build_stable_tier(soul_text: str) -> str:
+def _build_capabilities_block(config: "Config") -> str:
+    """Explicit, plain-language capability roster for the stable tier.
+
+    Tool schemas (native mode) and the per-turn tool catalog (text-tool-calling
+    mode, see _build_volatile_tier's tool_catalog param) already tell the model
+    WHAT tools exist. This block additionally tells it, in prose, WHAT THOSE
+    TOOLS MEAN -- so it stops reasoning its way into a false "I can't do that"
+    when a tool or agent for the request already exists, and so a stale claim
+    elsewhere (e.g. in SOUL.md) never wins over what's actually available.
+    """
+    from charlie.agents import AGENT_REGISTRY
+
+    lines = [
+        "YOUR ACTUAL CAPABILITIES (authoritative -- overrides any conflicting "
+        "claim anywhere else, including your own persona/identity text above "
+        "or below this block, which can go stale the moment a setting "
+        "changes). Never tell the user you cannot do something on this list; "
+        "if a capability below or a tool you were given covers the request, "
+        "use it instead of refusing or explaining how the user could do it "
+        "themselves.",
+    ]
+    if config.desktop_control_enabled:
+        lines.append(
+            "- Desktop control: you can see and operate this Windows machine "
+            "directly -- observe the screen, click, type, drag, scroll, press "
+            "keys, and (when a vision model is configured) read graphical "
+            "content a screen-reader can't describe. This is real, not "
+            "hypothetical; use the desktop_* tools for it."
+        )
+    agent_lines = ", ".join(
+        f"{name} ({cls.description})" for name, cls in AGENT_REGISTRY.items()
+    )
+    lines.append(
+        "- You can delegate work to specialized agents via delegate_to_agent "
+        f"instead of doing everything inline yourself: {agent_lines}. Use "
+        "this for tasks suited to a specialist rather than refusing or "
+        "saying you can't parallelize/research/plan."
+    )
+    lines.append(
+        "- Memory: you have both a running conversation memory and a "
+        "longer-term store (vector search + a knowledge graph of facts). "
+        "You are not limited to only what's in the current conversation."
+    )
+    if config.mcp_enabled or config.plugins_enabled:
+        lines.append(
+            "- You have access to additional external tools via MCP servers "
+            "and/or installed plugins beyond your built-in tool set -- check "
+            "your available tools before assuming something is out of reach."
+        )
+    return "\n".join(lines)
+
+
+def _build_stable_tier(soul_text: str, capabilities_block: str = "") -> str:
     """Build the stable tier: identity, skills, security, tool rules.
     This tier is byte-identical across turns for maximum cache hits."""
     parts = [soul_text, _SKILLS_INDEX, _SECURITY_DIRECTIVES]
+    if capabilities_block:
+        parts.append(capabilities_block)
     # Always include text tool instructions - local models ignore native tools payload
     parts.append(_TEXT_TOOL_INSTRUCTIONS)
     parts.append(_TOOL_RULES)
@@ -1283,7 +1337,7 @@ class Brain:
 
         # --- Frozen tiers (cached once at init for prompt cache stability) ---
         soul_text = config.soul or "You are Charlie. Be concise and warm."
-        self._stable_tier: str = _build_stable_tier(soul_text)
+        self._stable_tier: str = _build_stable_tier(soul_text, _build_capabilities_block(config))
 
         # --- Frozen context tier (read once, reloaded only on explicit request) ---
         # Populated by add_installed_skill_block() when the web dashboard's
