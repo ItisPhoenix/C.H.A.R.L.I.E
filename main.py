@@ -97,6 +97,7 @@ from charlie.session_store import SessionStore
 from charlie.voice import VoiceEngine
 from charlie.blackboard import Blackboard
 from charlie.swarm import SwarmOrchestrator
+from charlie.monitors import start_monitor_thread
 
 logger = logging.getLogger("charlie.main")
 # Unique launch identity -- every main() invocation gets one so the sidebar can
@@ -1162,6 +1163,36 @@ async def main():
             charlie.recovery.set_active_session_id(current_web_session_id)
             import charlie.tools
             charlie.tools.set_event_bus(bus, asyncio.get_running_loop())
+
+            def _read_cpu_ram_percent() -> Tuple[float, float]:
+                import psutil
+                return psutil.cpu_percent(), psutil.virtual_memory().percent
+
+            _monitor_loop = asyncio.get_running_loop()
+
+            def _on_resource_alert(message: str) -> None:
+                logger.warning(f"Resource alert: {message}")
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        bus.emit("alert", {"severity": "warning", "message": message}),
+                        _monitor_loop,
+                    )
+                except Exception:
+                    logger.warning("Failed to emit resource alert event", exc_info=True)
+                try:
+                    voice.speak(message, "neutral")
+                except Exception:
+                    logger.warning("Failed to speak resource alert", exc_info=True)
+
+            try:
+                start_monitor_thread(
+                    get_cpu_ram=_read_cpu_ram_percent,
+                    on_alert=_on_resource_alert,
+                    cpu_threshold_pct=config.alert_cpu_pct,
+                    ram_threshold_pct=config.alert_ram_pct,
+                )
+            except Exception:
+                logger.error("Failed to start resource monitor thread", exc_info=True)
 
             class ZmqLogHandler(logging.Handler):
                 def emit(self, record):

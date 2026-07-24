@@ -331,6 +331,16 @@ class Config:
         ],
         metadata=_meta("PLUGIN_ALLOW_DIRS", "Plugins", restart="plugins"),
     )
+    # --- Proactive resource monitoring ---
+    # CPU/RAM percent thresholds for proactive alerts (sustained 3 samples before alerting)
+    alert_cpu_pct: float = field(
+        default=float(os.getenv("ALERT_CPU_PCT", "95")),
+        metadata=_meta("ALERT_CPU_PCT", "Monitoring"),
+    )
+    alert_ram_pct: float = field(
+        default=float(os.getenv("ALERT_RAM_PCT", "92")),
+        metadata=_meta("ALERT_RAM_PCT", "Monitoring"),
+    )
 
     charlie_host: str = field(
         default=os.getenv("CHARLIE_HOST", "127.0.0.1"),
