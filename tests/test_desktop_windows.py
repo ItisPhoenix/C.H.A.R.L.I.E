@@ -78,3 +78,33 @@ def test_focus_window_success_does_not_use_alt_fallback(monkeypatch):
     mock_user32.ShowWindow.assert_called_once_with(5, windows._SW_RESTORE)
     mock_press.assert_not_called()
     assert "Test" in result
+
+
+def test_focus_window_fallback_fires_when_setforeground_fails(monkeypatch):
+    # Mock pyautogui at the windows-module level (not the real package) so
+    # this passes whether or not pyautogui is actually installed.
+    monkeypatch.setattr(windows, "find_window", lambda _: {"hwnd": 5, "title": "Test"})
+    mock_user32 = MagicMock()
+    mock_user32.SetForegroundWindow.side_effect = [0, 1]
+    monkeypatch.setattr(windows, "_user32", mock_user32)
+    monkeypatch.setattr(windows, "_HAS_PYAUTOGUI", True)
+    mock_pyautogui = MagicMock()
+    monkeypatch.setattr(windows, "pyautogui", mock_pyautogui, raising=False)
+    result = windows.focus_window("test")
+    mock_pyautogui.press.assert_called_once_with("alt")
+    assert mock_user32.SetForegroundWindow.call_count == 2
+    assert "Focused window: Test" in result
+
+
+def test_focus_window_fallback_degrades_gracefully_without_pyautogui(monkeypatch):
+    monkeypatch.setattr(windows, "find_window", lambda _: {"hwnd": 5, "title": "Test"})
+    mock_user32 = MagicMock()
+    mock_user32.SetForegroundWindow.return_value = 0
+    monkeypatch.setattr(windows, "_user32", mock_user32)
+    monkeypatch.setattr(windows, "_HAS_PYAUTOGUI", False)
+    mock_pyautogui = MagicMock()
+    monkeypatch.setattr(windows, "pyautogui", mock_pyautogui, raising=False)
+    result = windows.focus_window("test")
+    mock_pyautogui.press.assert_not_called()
+    mock_user32.SetForegroundWindow.assert_called_once()
+    assert "Focused window: Test" in result

@@ -19,6 +19,12 @@ logger = logging.getLogger("charlie.desktop.windows")
 # there, mirroring charlie/desktop/__init__.py's DESKTOP_AVAILABLE pattern.
 _user32 = ctypes.windll.user32 if sys.platform == "win32" else None
 
+try:
+    import pyautogui
+    _HAS_PYAUTOGUI = True
+except ImportError:
+    _HAS_PYAUTOGUI = False
+
 _SW_MINIMIZE, _SW_MAXIMIZE, _SW_RESTORE = 6, 3, 9
 _WM_CLOSE = 0x0010
 
@@ -59,9 +65,11 @@ def focus_window(title_substr: str) -> str:
     if not _user32.SetForegroundWindow(w["hwnd"]):
         # Windows blocks cross-process focus steals unless the caller owns
         # the foreground; the alt-key tap is the documented workaround.
-        import pyautogui
-        pyautogui.press("alt")
-        _user32.SetForegroundWindow(w["hwnd"])
+        if _HAS_PYAUTOGUI:
+            pyautogui.press("alt")
+            _user32.SetForegroundWindow(w["hwnd"])
+        else:
+            logger.warning("Focus-steal fallback skipped: pyautogui not installed")
     return f"Focused window: {w['title']}"
 
 
