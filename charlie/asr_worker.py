@@ -11,6 +11,55 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("charlie.asr_worker")
 
 
+def _build_transcribe_kwargs(
+    is_warmup: bool, flags: dict, default_language: str, asr_config: dict | None
+) -> dict:
+    """Build faster-whisper transcribe() kwargs.
+
+    initial_prompt is only set for the one-time warm-up call. Passing it on
+    every real transcription anchors Whisper onto that fixed text, and on
+    weak/ambiguous audio it echoes the prompt back verbatim instead of
+    transcribing what was actually said.
+    """
+    kwargs = dict(
+        language=default_language,
+        word_timestamps=False,
+    )
+    if is_warmup:
+        kwargs.update(
+            initial_prompt=flags.get(
+                "warmup_context",
+                "This is Charlie, a voice assistant. Short conversational English with real words.",
+            ),
+            condition_on_previous_text=False,
+            beam_size=1,
+            best_of=1,
+            vad_filter=False,
+        )
+    else:
+        _ac = asr_config or {}
+        kwargs.update(
+            condition_on_previous_text=True,
+            beam_size=_ac.get("beam_size", 6),
+            best_of=_ac.get("best_of", 6),
+            vad_filter=True,
+            vad_parameters=dict(
+                threshold=_ac.get("vad_threshold", 0.45),
+                min_speech_duration_ms=_ac.get("min_speech_duration_ms", 120),
+                max_speech_duration_s=_ac.get("max_speech_duration_s", 60),
+                min_silence_duration_ms=_ac.get("min_silence_duration_ms", 480),
+                speech_pad_ms=_ac.get("speech_pad_ms", 320),
+            ),
+            repetition_penalty=_ac.get("repetition_penalty", 1.15),
+            no_repeat_ngram_size=3,
+            hotwords=(
+                "Charlie open close start stop search weather time date "
+                "notepad chrome calculator python code youtube"
+            ),
+        )
+    return kwargs
+
+
 def asr_worker_process(
     input_queue: mp.Queue,
     output_queue: mp.Queue,
@@ -85,43 +134,9 @@ def asr_worker_process(
 
             start_time = time.time()
 
-            # Fast-path for warm-up: beam=1, best_of=1, no VAD filter
-            transcribe_kwargs = dict(
-                language=default_language,
-                initial_prompt=flags.get(
-                    "warmup_context",
-                    "This is Charlie, a voice assistant. Short conversational English with real words.",
-                ),
-                word_timestamps=False,
-                condition_on_previous_text=False,
+            transcribe_kwargs = _build_transcribe_kwargs(
+                is_warmup, flags, default_language, asr_config
             )
-            if is_warmup:
-                transcribe_kwargs.update(
-                    beam_size=1,
-                    best_of=1,
-                    vad_filter=False,
-                )
-            else:
-                _ac = asr_config or {}
-                transcribe_kwargs.update(
-                    beam_size=_ac.get("beam_size", 6),
-                    best_of=_ac.get("best_of", 6),
-                    vad_filter=True,
-                    vad_parameters=dict(
-                        threshold=_ac.get("vad_threshold", 0.45),
-                        min_speech_duration_ms=_ac.get("min_speech_duration_ms", 120),
-                        max_speech_duration_s=_ac.get("max_speech_duration_s", 60),
-                        min_silence_duration_ms=_ac.get("min_silence_duration_ms", 480),
-                        speech_pad_ms=_ac.get("speech_pad_ms", 320),
-                    ),
-                    condition_on_previous_text=True,
-                    repetition_penalty=_ac.get("repetition_penalty", 1.15),
-                    no_repeat_ngram_size=3,
-                    hotwords=(
-                        "Charlie open close start stop search weather time date "
-                        "notepad chrome calculator python code youtube"
-                    ),
-                )
 
             segments, info = whisper.transcribe(audio_data, **transcribe_kwargs)
 
