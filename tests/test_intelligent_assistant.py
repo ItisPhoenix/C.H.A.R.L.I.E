@@ -309,17 +309,27 @@ class TestOperatorPersonaDetection:
 
 
 class TestVolatileTierOperatorPersona:
-    """Verify _build_volatile_tier injects the H.E.L.M. persona block."""
+    """Verify _build_volatile_tier injects the H.E.L.M. persona block.
+
+    A bare "H.E.L.M." mention is no longer sufficient to prove the (token-
+    heavy) narration persona is active -- Task C4 added a separate, always-on
+    one-line reminder to delegate background desktop work to H.E.L.M. by
+    name, unrelated to whether the narration persona itself is on. These
+    tests check for the persona block's own marker ("[H.E.L.M. MODE]")
+    instead of the bare name.
+    """
 
     def test_no_persona(self):
         from datetime import datetime
         tier = _build_volatile_tier("voice", datetime.now(), 5)
-        assert "H.E.L.M." not in tier
+        assert "[H.E.L.M. MODE]" not in tier
+        assert "delegate_to_agent" in tier  # always-on background-delegation reminder
 
     def test_with_persona(self):
         from datetime import datetime
         tier = _build_volatile_tier(
             "voice", datetime.now(), 5, operator_persona=True
         )
-        assert "H.E.L.M." in tier
+        assert "[H.E.L.M. MODE]" in tier
+        assert "desktop_observe" in tier
         assert "desktop_observe" in tier

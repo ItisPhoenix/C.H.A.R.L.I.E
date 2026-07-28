@@ -1353,6 +1353,12 @@ def _build_volatile_tier(
         parts.append(f"Answer style: {verbosity_hint}.")
     if active_goal:
         parts.append(f"Current goal: {active_goal}. Stay focused on this.")
+    parts.append(
+        "For background desktop work (the user asks for something to run "
+        "unattended, e.g. 'in the background' or 'while I'm away'), call "
+        "delegate_to_agent with agent_name=\"H.E.L.M.\" instead of acting on "
+        "desktop_* tools inline yourself."
+    )
     if operator_persona:
         parts.append(_HELM_PERSONA_TEXT)
     if tool_catalog:

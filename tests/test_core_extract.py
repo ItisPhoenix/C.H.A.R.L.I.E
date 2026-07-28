@@ -211,6 +211,20 @@ class TestGroundingRules:
         assert "desktop_click" in tier
         assert "delegate_to_agent" in tier
 
+    def test_volatile_tier_mentions_helm_delegation_for_background_work(self):
+        """Background desktop work should route through delegate_to_agent to
+        H.E.L.M. instead of the foreground turn acting on desktop_* tools
+        inline -- this is always present (not gated on operator_persona),
+        since the user doesn't have to address H.E.L.M. by name to ask for
+        something to run unattended (see Task C6: "in the background, ...")."""
+        from datetime import datetime
+
+        from charlie.core import _build_volatile_tier
+        now = datetime(2026, 1, 15, 10, 30)
+        tier = _build_volatile_tier("voice", now, 10)
+        assert "delegate_to_agent" in tier
+        assert "H.E.L.M." in tier
+
 
 class TestInstalledSkillBlocks:
     """A "skill" kind extension installed via the web dashboard is mirrored
