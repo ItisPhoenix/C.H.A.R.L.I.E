@@ -27,7 +27,7 @@ class Task:
     id: str
     name: str
     assigned_to: str = ""
-    status: str = "pending"  # pending | running | done | failed
+    status: str = "pending"  # pending | running | paused | done | failed
     column: str = "backlog"  # backlog | todo | in_progress | done
     priority: int = 2  # 0=critical, 1=high, 2=normal, 3=low
     dependencies: List[str] = field(default_factory=list)

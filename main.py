@@ -277,6 +277,14 @@ async def main():
             store.close()
         return
 
+    # Background swarm agents have no Brain instance to speak through (see
+    # charlie/agents/base.py module boundary) -- wire the same speak
+    # callback into core's module-level slot so a paused-task approval
+    # prompt can still be announced when no dashboard is connected.
+    from charlie.core import set_agent_notify_callback
+
+    set_agent_notify_callback(speaking_callback)
+
     # Wire vector memory store into tool registry
     from charlie.tools import registry as tool_registry
     if memory_store is not None:

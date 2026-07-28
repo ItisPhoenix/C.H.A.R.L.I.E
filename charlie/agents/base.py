@@ -30,6 +30,11 @@ class BaseAgent(ABC):
         self.llm_client = llm_client
         self.logger = logging.getLogger(f"charlie.agents.{self.name}")
         self.blackboard.register_agent(self.name)
+        # Set by execute() so _call_tool's gated-tool pause (see
+        # charlie.core.request_agent_tool_approval) knows which blackboard
+        # task to mark paused/resumed. Empty when _call_tool is invoked
+        # directly (e.g. unit tests) -- update_task("", ...) is then a no-op.
+        self._task_id: str = ""
 
     async def execute(self, task_id: str) -> Dict[str, Any]:
         """Template method: fetches task, runs _do_action, handles status/error."""
@@ -37,6 +42,7 @@ class BaseAgent(ABC):
         if not task:
             return {"status": "failed", "result": "Task not found"}
 
+        self._task_id = task_id
         self._update_status("working", task_id)
         self.log(f"{self._action_verb}: {task.name}")
 
@@ -98,22 +104,29 @@ class BaseAgent(ABC):
         # Gated shell keywords / sensitive paths (see charlie.tools) normally
         # go through an interactive approve/decline prompt -- see
         # charlie.core.Brain.request_tool_approval. Swarm agents run
-        # unsupervised with no human turn to prompt, so for them a gate is
-        # a hard block instead.
+        # unsupervised with no human turn to prompt mid-conversation, so
+        # instead of a hard block they pause the owning task and wait on
+        # the same approval channel (charlie.core.request_agent_tool_approval).
         gate_reason: Optional[str] = None
         if name == "shell_execute":
             gate_reason = is_shell_command_gated(arguments.get("command", ""))
         elif name in ("file_read", "file_write"):
             gate_reason = get_path_gate_reason(arguments.get("path", ""))
         if gate_reason:
-            self.logger.warning(
-                "[%s] Rejected tool call '%s': requires approval (%s), no human in the loop for agents",
-                self.name, name, gate_reason,
+            from charlie.core import request_agent_tool_approval
+
+            approved = await request_agent_tool_approval(
+                self.blackboard, self._task_id, self.name, name, arguments, gate_reason
             )
-            return (
-                f"Error: tool '{name}' blocked -- requires approval ({gate_reason}), "
-                "not available to unsupervised agents."
-            )
+            if not approved:
+                self.logger.warning(
+                    "[%s] Gated tool call '%s' blocked (%s)", self.name, name, gate_reason,
+                )
+                return (
+                    f"Error: tool '{name}' blocked -- requires approval ({gate_reason}). "
+                    "Blocked by user decision."
+                )
+            self.logger.info("[%s] Gated tool call '%s' approved, proceeding", self.name, name)
 
         self.log(f"Calling tool: {name}({arguments})")
         result = await asyncio.get_running_loop().run_in_executor(

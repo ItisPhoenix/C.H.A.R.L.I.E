@@ -10,7 +10,7 @@ import logging
 import os
 import re
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 import httpx
@@ -141,6 +141,91 @@ def resolve_tool_approval(request_id: str, approved: bool) -> bool:
     if _active_voice_approval_id == request_id:
         _active_voice_approval_id = None
     return True
+
+
+# Background agents have no Brain instance to speak through (see
+# charlie/agents/base.py module boundary), so main.py wires the same
+# on_thought_callback it gives Brain into this module-level slot instead.
+_agent_notify_callback: Optional[Callable[[str], None]] = None
+
+# Background tasks have no foreground turn forcing a quick answer, so they
+# get a much longer approval window than the interactive _TOOL_APPROVAL_TIMEOUT_SEC.
+_AGENT_APPROVAL_WAIT_MAX_S = 6 * 3600.0
+
+
+def set_agent_notify_callback(cb: Optional[Callable[[str], None]]) -> None:
+    global _agent_notify_callback
+    _agent_notify_callback = cb
+
+
+async def request_agent_tool_approval(
+    blackboard: Any,
+    task_id: str,
+    agent_name: str,
+    tool_name: str,
+    arguments: Dict[str, Any],
+    reason: str,
+) -> bool:
+    """Pause a background agent's task and ask the user to approve/decline a
+    gated tool call, instead of the old hard block. Reuses the exact same
+    pending_tool_approvals/resolve_tool_approval machinery and
+    "tool_approval_request"/"tool_approve"/"tool_reject" channel
+    Brain.request_tool_approval uses for the foreground chat turn, so the
+    existing dashboard dialog and main.py WS command handlers need no changes.
+    """
+    global _active_voice_approval_id
+    from charlie import recovery
+
+    request_id = f"tool_{make_id(6)}"
+    describe = arguments.get("command") or arguments.get("path") or str(arguments)
+    prompt = (
+        f"A background task ({agent_name}) needs your permission to {reason}: "
+        f"{describe}. Approve on the dashboard or say yes or no."
+    )
+
+    blackboard.update_task(task_id, status="paused", approval_status="pending_approval")
+    loop = asyncio.get_running_loop()
+    fut: "asyncio.Future[bool]" = loop.create_future()
+    pending_tool_approvals[request_id] = fut
+    approved = False
+
+    try:
+        if recovery.get_active_ws_count() > 0 and recovery._event_bus:
+            await recovery._event_bus.emit(
+                "tool_approval_request",
+                {
+                    "request_id": request_id,
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                    "reason": reason,
+                    "agent_name": agent_name,
+                    "task_id": task_id,
+                    "session_id": recovery.get_active_session_id(),
+                },
+            )
+        elif _agent_notify_callback is not None:
+            _active_voice_approval_id = request_id
+            _agent_notify_callback(prompt)
+        else:
+            logger.warning(
+                "Gated agent tool call with no approval channel available -- declining safely."
+            )
+            return False
+
+        try:
+            approved = await asyncio.wait_for(fut, timeout=_AGENT_APPROVAL_WAIT_MAX_S)
+        except asyncio.TimeoutError:
+            logger.warning("Agent tool approval %s timed out, declining", request_id)
+            approved = False
+        return approved
+    finally:
+        pending_tool_approvals.pop(request_id, None)
+        if _active_voice_approval_id == request_id:
+            _active_voice_approval_id = None
+        blackboard.update_task(
+            task_id, status="running",
+            approval_status="approved" if approved else "rejected",
+        )
 
 # --- Fast-path: time/date queries answered from system clock (zero LLM) ---
 _TIME_DATE_RE = re.compile(
