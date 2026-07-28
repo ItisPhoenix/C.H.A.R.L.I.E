@@ -295,6 +295,12 @@ class Config:
         default=int(os.getenv("DESKTOP_MAX_ACTIONS", "40")),
         metadata=_meta("DESKTOP_MAX_ACTIONS", "Desktop Control"),
     )
+    # Seconds of no real user input required before H.E.L.M. may start/continue
+    # an unattended background desktop task (charlie.desktop.session.user_idle_seconds).
+    desktop_idle_threshold_s: float = field(
+        default=float(os.getenv("DESKTOP_IDLE_THRESHOLD_S", "120.0")),
+        metadata=_meta("DESKTOP_IDLE_THRESHOLD_S", "Desktop Control"),
+    )
     desktop_ocr_enabled: bool = field(
         default=os.getenv("DESKTOP_OCR_ENABLED", "true").lower() == "true",
         metadata=_meta("DESKTOP_OCR_ENABLED", "Desktop Control"),

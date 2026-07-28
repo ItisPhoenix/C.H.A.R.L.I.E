@@ -22,9 +22,15 @@ def _remove_db(db_path: str) -> None:
 async def test_get_dashboard_config():
     res = await web_server.get_dashboard_config()
     keys = {f["key"] for f in res["fields"]}
-    assert {"GPU_DEVICE", "KOKORO_LANG", "WHISPER_MODEL", "MCP_SERVERS"} <= keys
+    assert {"GPU_DEVICE", "KOKORO_LANG", "WHISPER_MODEL", "MCP_SERVERS", "DESKTOP_IDLE_THRESHOLD_S"} <= keys
     # a good chunk of the full Config surface should be exposed, not a hand-picked few
     assert len(res["fields"]) > 50
+
+
+def test_desktop_idle_threshold_default():
+    from charlie.config import Config
+
+    assert Config().desktop_idle_threshold_s == 120.0
 
 
 @pytest.mark.asyncio
