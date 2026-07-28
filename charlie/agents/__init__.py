@@ -7,6 +7,7 @@ J.A.R.V.I.S. orchestrates; the others are workers.
 from charlie.agents.base import BaseAgent
 from charlie.agents.edith import EDITH
 from charlie.agents.friday import FRIDAY
+from charlie.agents.helm import HELM
 from charlie.agents.jarvis import JarvisAgent
 from charlie.agents.karen import KAREN
 from charlie.agents.shuri import SHURI
@@ -21,6 +22,7 @@ AGENT_REGISTRY = {
     "E.D.I.T.H.": EDITH,
     "K.A.R.E.N.": KAREN,
     "Vision": VisionAgent,
+    "H.E.L.M.": HELM,
 }
 
 __all__ = [
@@ -32,5 +34,6 @@ __all__ = [
     "EDITH",
     "KAREN",
     "VisionAgent",
+    "HELM",
     "AGENT_REGISTRY",
 ]
