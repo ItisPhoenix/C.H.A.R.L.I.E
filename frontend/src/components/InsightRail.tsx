@@ -111,6 +111,8 @@ function statusDotColor(status: string): string {
       return "var(--color-accent-teal)";
     case "done":
       return "#9ca3af";
+    case "paused":
+      return "var(--color-status-warning)";
     case "failed":
       return "var(--color-status-error)";
     default:
@@ -936,6 +938,14 @@ export function InsightRail({
                             {t.name}
                           </p>
                         </div>
+                        {t.status === "paused" && (
+                          <span
+                            title="Waiting for your approval"
+                            className="text-[10px] px-1.5 py-0.5 rounded-full border shrink-0 text-[var(--color-status-warning)] bg-[var(--color-status-warning-dim)] border-[var(--color-status-warning)]/20"
+                          >
+                            Paused
+                          </span>
+                        )}
                         <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${priorityColor} shrink-0`}>
                           {priorityLabel}
                         </span>
@@ -982,7 +992,8 @@ export function InsightRail({
                       )}
 
                       <div className="flex items-center justify-end gap-1.5 border-t border-[var(--color-glass-border)] pt-2 mt-1">
-                        {t.approval_status === "pending_approval" && onApproveTask && onRejectTask && (
+                        {/* "paused" tasks resolve via the ToolApprovalDialog modal instead -- these buttons are for the separate pre-start kickoff gate only. */}
+                        {t.approval_status === "pending_approval" && t.status !== "paused" && onApproveTask && onRejectTask && (
                           <>
                             <button
                               onClick={() => onRejectTask(t.id, "Rejected by user")}

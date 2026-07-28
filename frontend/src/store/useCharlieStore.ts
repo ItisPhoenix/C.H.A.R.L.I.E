@@ -23,7 +23,7 @@ export interface Message {
 export interface Task {
   id: string;
   name: string;
-  status: "pending" | "running" | "done" | "failed" | "cancelled";
+  status: "pending" | "running" | "paused" | "done" | "failed" | "cancelled";
   assigned_to?: string;
   column?: "backlog" | "todo" | "in_progress" | "done";
   priority?: number;
