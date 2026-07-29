@@ -1484,6 +1484,35 @@ def _ocr_fallback_marks(uia_elements: List[Any]) -> List[Any]:
     return merge_ocr_elements(uia_elements, ocr_elements) if ocr_elements else uia_elements
 
 
+# Below this many merged UIA+OCR elements, the window is probably a
+# non-UIA surface (Electron/canvas content OCR can't read either) rather
+# than just a sparse toolbar -- worth the vision-LLM round trip.
+_GROUNDING_FALLBACK_THRESHOLD = 3
+
+
+def _grounding_marks(elements: List[Any]) -> List[Any]:
+    """Vision-LLM fallback for surfaces UIA+OCR can't see into.
+
+    Unlike _ocr_fallback_marks this is a real vision-LLM round trip (not
+    free), so it only runs when the merged pass came back too sparse to be
+    useful, not on every observe/screenshot call.
+    """
+    if len(elements) >= _GROUNDING_FALLBACK_THRESHOLD or not config.vision_enabled:
+        return elements
+    from charlie.desktop import ocr as desktop_ocr
+    if not desktop_ocr.OCR_AVAILABLE:
+        return elements
+    from charlie.desktop import grounding as desktop_grounding
+    from charlie.desktop.uia import merge_ocr_elements
+    try:
+        png = desktop_ocr.capture()
+        grounded = desktop_grounding.detect(png, config)
+    except Exception:
+        logger.warning("Grounding fallback pass failed", exc_info=True)
+        return elements
+    return merge_ocr_elements(elements, grounded) if grounded else elements
+
+
 @registry.register_tool(
     name="desktop_observe",
     description=(
@@ -1498,7 +1527,7 @@ def desktop_observe() -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
     from charlie.desktop.uia import serialize_marks, snapshot_tree
-    elements = _ocr_fallback_marks(snapshot_tree(max_depth=8))
+    elements = _grounding_marks(_ocr_fallback_marks(snapshot_tree(max_depth=8)))
     _capture_and_emit_frame(elements)
     if not elements:
         return "No UI elements found in the foreground window."
@@ -1731,7 +1760,7 @@ def desktop_screenshot() -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
     from charlie.desktop.uia import serialize_marks, snapshot_tree
-    elements = _ocr_fallback_marks(snapshot_tree(max_depth=8))
+    elements = _grounding_marks(_ocr_fallback_marks(snapshot_tree(max_depth=8)))
     text_result = serialize_marks(elements) if elements else "No UI elements found in the foreground window."
     if not config.vision_enabled:
         _capture_and_emit_frame(elements)
