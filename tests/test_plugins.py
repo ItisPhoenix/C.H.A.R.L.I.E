@@ -175,6 +175,26 @@ class TestFilesystemPlugin:
         with pytest.raises(ValueError, match="Unknown tool"):
             plugin.call_tool("nonexistent", {})
 
+    def test_wildcard_allowed_dirs_grants_full_disk_access(self):
+        """PLUGIN_ALLOW_DIRS=* (opt-in, user-requested) lifts the sandbox --
+        any absolute path is allowed, not just the configured directories."""
+        import os
+        import tempfile
+
+        plugin = FilesystemPlugin(allowed_dirs=["*"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outside_path = os.path.join(tmpdir, "anywhere.txt")
+            # Would raise PermissionError under the default (cwd-only) sandbox.
+            result = plugin.call_tool("fs_write_file", {"path": outside_path, "content": "x"})
+            assert "bytes_written" in result
+
+    def test_non_wildcard_allowed_dirs_still_sandboxed(self):
+        """A plain allowed_dirs list (no "*") keeps the existing sandbox --
+        the wildcard opt-in must not weaken the default/explicit-dir case."""
+        plugin = FilesystemPlugin(allowed_dirs=["/tmp"])
+        with pytest.raises(PermissionError):
+            plugin.call_tool("fs_read_file", {"path": "/etc/passwd"})
+
 
 class TestBrowserPlugin:
     def test_name_and_description(self):

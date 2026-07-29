@@ -24,20 +24,34 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 
+def _frontend_build_is_stale(frontend_dir: Path, dist_dir: Path) -> bool:
+    """True if any frontend source file is newer than the last build output."""
+    index_html = dist_dir / "index.html"
+    if not index_html.exists():
+        return True
+    build_time = index_html.stat().st_mtime
+    src_root = frontend_dir / "src"
+    if not src_root.exists():
+        return False
+    return any(
+        f.stat().st_mtime > build_time for f in src_root.rglob("*") if f.is_file()
+    )
+
+
 def check_and_build_frontend():
-    """Ensure the frontend is built, compiling it if necessary."""
+    """Ensure the frontend is built, compiling it if the build is missing or stale."""
     root = Path(__file__).parent
     frontend_dir = root / "frontend"
     dist_dir = frontend_dir / "out"
-
-    if dist_dir.exists() and (dist_dir / "index.html").exists():
-        return
 
     if not frontend_dir.exists():
         print("Warning: frontend directory not found. Web UI cannot be built.")
         return
 
-    print("Frontend build not found. Compiling frontend...")
+    if not _frontend_build_is_stale(frontend_dir, dist_dir):
+        return
+
+    print("Frontend build missing or stale. Compiling frontend...")
     import shutil
     import subprocess
 
@@ -47,14 +61,15 @@ def check_and_build_frontend():
         return
 
     try:
-        print("Running 'npm install' in frontend...")
-        subprocess.run(
-            [npm_path, "install"],
-            cwd=str(frontend_dir),
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        if not (frontend_dir / "node_modules").exists():
+            print("Running 'npm install' in frontend...")
+            subprocess.run(
+                [npm_path, "install"],
+                cwd=str(frontend_dir),
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         print("Running 'npm run build' in frontend...")
         subprocess.run(
             [npm_path, "run", "build"],

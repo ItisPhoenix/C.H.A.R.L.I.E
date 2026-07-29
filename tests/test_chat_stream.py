@@ -326,9 +326,6 @@ def test_detect_open_app(monkeypatch):
     assert res is None
 
 
-
-
-
 def test_detect_open_app_partial_failure(monkeypatch):
     """Partial launch failures must not crash and must format correctly."""
     import os
@@ -533,3 +530,40 @@ async def test_chat_stream_skip_tools(monkeypatch, brain_config):
     assert "Hello world" in "".join(results)
     assert "TOOL: file_write" not in "".join(results)
     assert not called_tool
+
+
+def test_build_native_tool_results_truncates_oversized_content():
+    """A tool result (e.g. a raw image blob from an MCP screenshot tool) must
+    be capped before entering the native tool-calling follow-up payload --
+    only the older text-based path truncated via _format_text_tool_summary,
+    so an oversized/unbounded native tool result reached the API as-is and
+    400'd (observed with mcp_windows-mcp_Screenshot's result)."""
+    from charlie.core import _TOOL_RESULT_MAX_CHARS, _build_native_tool_results
+
+    tool_calls = [{"id": "call_1", "name": "mcp_windows-mcp_Screenshot", "arguments": {}}]
+    huge_result = "x" * (_TOOL_RESULT_MAX_CHARS * 5)
+
+    messages = _build_native_tool_results(tool_calls, [huge_result])
+
+    assert len(messages) == 1
+    assert messages[0]["tool_call_id"] == "call_1"
+    assert messages[0]["role"] == "tool"
+    assert messages[0]["name"] == "mcp_windows-mcp_Screenshot"
+    assert len(messages[0]["content"]) == _TOOL_RESULT_MAX_CHARS
+
+
+def test_build_native_tool_results_keeps_short_content_unchanged():
+    from charlie.core import _build_native_tool_results
+
+    tool_calls = [{"id": "call_2", "name": "web_search", "arguments": {}}]
+    messages = _build_native_tool_results(tool_calls, ["short result"])
+
+    assert messages[0]["content"] == "short result"
+
+
+def test_plugin_fs_search_has_extended_timeout():
+    """A recursive filesystem search (esp. full-disk with PLUGIN_ALLOW_DIRS=*)
+    needs much more than the 15s default tool-call timeout."""
+    from charlie.core import _TOOL_TIMEOUT_SEC, _TOOL_TIMEOUTS
+
+    assert _TOOL_TIMEOUTS["plugin_fs_search"] > _TOOL_TIMEOUT_SEC

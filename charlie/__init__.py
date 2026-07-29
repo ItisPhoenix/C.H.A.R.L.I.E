@@ -16,14 +16,6 @@ def __getattr__(name: str):
         from .session_store import SessionStore
 
         return SessionStore
-    if name == "Blackboard":
-        from .blackboard import Blackboard
-
-        return Blackboard
-    if name == "SwarmOrchestrator":
-        from .swarm import SwarmOrchestrator
-
-        return SwarmOrchestrator
     if name == "MemoryGraph":
         from .memory_graph import MemoryGraph
 
@@ -36,8 +28,6 @@ __all__ = [
     "Brain",
     "VoiceEngine",
     "SessionStore",
-    "Blackboard",
-    "SwarmOrchestrator",
     "MemoryGraph",
     "registry",
 ]

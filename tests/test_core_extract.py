@@ -110,15 +110,16 @@ class TestBarePatternGating:
         assert calls[0]["name"] == "desktop_click"
         assert calls[0]["arguments"] == {"mark_id": "3"}
 
-    def test_delegate_to_agent_multi_param_no_longer_drift(self):
+    def test_graph_add_fact_multi_param_no_longer_drift(self):
         brain = _make_brain(use_native_tools=False)
         calls = brain._extract_tool_calls(
-            'TOOL: delegate_to_agent("E.D.I.T.H.", "research quantum computing")'
+            'TOOL: graph_add_fact("user", "prefers", "dark mode")'
         )
-        assert calls[0]["name"] == "delegate_to_agent"
+        assert calls[0]["name"] == "graph_add_fact"
         assert calls[0]["arguments"] == {
-            "agent_name": "E.D.I.T.H.",
-            "task_description": "research quantum computing",
+            "subject": "user",
+            "predicate": "prefers",
+            "object": "dark mode",
         }
 
     def test_zero_arg_tool_gets_empty_arguments(self):
@@ -209,21 +210,7 @@ class TestGroundingRules:
         )
         assert "AVAILABLE TOOLS" in tier
         assert "desktop_click" in tier
-        assert "delegate_to_agent" in tier
-
-    def test_volatile_tier_mentions_helm_delegation_for_background_work(self):
-        """Background desktop work should route through delegate_to_agent to
-        H.E.L.M. instead of the foreground turn acting on desktop_* tools
-        inline -- this is always present (not gated on operator_persona),
-        since the user doesn't have to address H.E.L.M. by name to ask for
-        something to run unattended (see Task C6: "in the background, ...")."""
-        from datetime import datetime
-
-        from charlie.core import _build_volatile_tier
-        now = datetime(2026, 1, 15, 10, 30)
-        tier = _build_volatile_tier("voice", now, 10)
-        assert "delegate_to_agent" in tier
-        assert "H.E.L.M." in tier
+        assert "graph_add_fact" in tier
 
 
 class TestInstalledSkillBlocks:
@@ -274,7 +261,7 @@ class TestCancelGeneration:
 
 
 class TestHelmPersona:
-    """H.E.L.M. persona text and auto-detect (Task A4 see-act-verify hardening)."""
+    """Helm persona text and auto-detect (Task A4 see-act-verify hardening)."""
 
     def test_helm_persona_mentions_verify_and_raw_input(self):
         from charlie.core import _HELM_PERSONA_TEXT
@@ -310,13 +297,12 @@ class TestCapabilitiesBlock:
     refusing when a tool/agent for the request already exists, and make a
     live capability roster override any stale claim (e.g. in SOUL.md)."""
 
-    def test_capabilities_block_mentions_agents_and_overrides_stale_claims(self):
+    def test_capabilities_block_overrides_stale_claims(self):
         from charlie.config import Config
         from charlie.core import _build_capabilities_block
         cfg = Config()
         block = _build_capabilities_block(cfg)
-        assert "delegate_to_agent" in block
-        assert "J.A.R.V.I.S." in block
+        assert "conversation memory" in block
         assert "overrides any conflicting claim" in block
 
     def test_stable_tier_includes_capabilities_block(self):
@@ -325,7 +311,7 @@ class TestCapabilitiesBlock:
         cfg = Config()
         block = _build_capabilities_block(cfg)
         stable = _build_stable_tier("Test soul text.", block)
-        assert "delegate_to_agent" in stable
+        assert "conversation memory" in stable
         assert "Test soul text." in stable
 
     def test_capabilities_block_omits_desktop_control_when_disabled(self):
@@ -392,6 +378,24 @@ class TestVisualContentQueryFastPath:
         assert _VISUAL_CONTENT_QUERY_RE.search("describe the picture")
         assert _VISUAL_CONTENT_QUERY_RE.search("what does this look like")
         assert not _VISUAL_CONTENT_QUERY_RE.search("what time is it")
+
+    def test_visual_content_query_regex_matches_what_do_you_see(self):
+        """Previously only OCR-only _SCREEN_QUERY_RE matched; no real screenshot was ever queued for vision."""
+        from charlie.core import _VISUAL_CONTENT_QUERY_RE
+        assert _VISUAL_CONTENT_QUERY_RE.search("what do you see on my screen right now")
+        assert _VISUAL_CONTENT_QUERY_RE.search("what can you see")
+
+    def test_visual_content_query_regex_matches_who_is_this_phrasing(self):
+        """"who is this person" previously fell through both regexes: no real
+        screenshot ever got queued for the vision model, so Charlie only had
+        OCR/UIA text to work with and (correctly, given what she actually saw)
+        said she couldn't see a face -- she never saw an image at all."""
+        from charlie.core import _VISUAL_CONTENT_QUERY_RE
+        assert _VISUAL_CONTENT_QUERY_RE.search("who is this person")
+        assert _VISUAL_CONTENT_QUERY_RE.search("who is this")
+        assert _VISUAL_CONTENT_QUERY_RE.search("who is that guy")
+        assert _VISUAL_CONTENT_QUERY_RE.search("who is he")
+        assert _VISUAL_CONTENT_QUERY_RE.search("who is she")
 
     def test_visual_content_query_regex_does_not_duplicate_screen_query_re(self):
         """"read my screen" is already covered by _SCREEN_QUERY_RE; the new

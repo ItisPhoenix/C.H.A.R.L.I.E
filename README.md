@@ -26,14 +26,14 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 |---|---|
 | **Deterministic app & website control** | Fast-paths that bypass the LLM for opening/closing local apps, popular sites, or arbitrary domains. |
 | **Agentic desktop control** *(Windows, opt-in)* | Sees and operates your desktop -- click, type, key chords via native UI Automation, with OCR and a local vision model as fallback tiers. Off by default; needs one-time approval, a global panic hotkey, and auto-halts on repeated failures. |
-| **H.E.L.M. operator persona** | Address desktop control by name ("Helm, open my email") for a narrated, step-by-step operator voice -- same approval gates and panic hotkey, just a distinct identity for the task. |
+| **Helm operator persona** | Address desktop control by name ("Helm, open my email") for a narrated, step-by-step operator voice -- same approval gates and panic hotkey, just a distinct identity for the task. |
 
 ### 🧠 Memory & Intelligence
 | | |
 |---|---|
 | **Persistent memory** | Remembers facts across sessions via `MEMORY.md` and `USER.md`. |
-| **Agentic OS foundation** | Blackboard-coordinated agent swarm, episodic + semantic memory (session history, vector store, knowledge graph). |
-| **Reflection engine** | Periodic self-reflection consolidates memory, updates the knowledge graph, and tunes agent performance. |
+| **Episodic + semantic memory** | Session history, vector store, and a knowledge graph of facts. |
+| **Reflection engine** | Periodic self-reflection consolidates memory and updates the knowledge graph. |
 | **Tool calling** | Web search, shell commands, file I/O, persistent memory, session history search. |
 
 ### 🪟 Dashboard
@@ -56,22 +56,9 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 
 ---
 
-## Agents & Tools
+## Tools
 
-Charlie is more than a chat loop. A **swarm of specialist agents** coordinates on a
-shared blackboard to handle complex, multi-step requests:
-
-| Agent | Focus |
-|---|---|
-| **J.A.R.V.I.S.** | Orchestrator -- analyzes requests, coordinates tasks, spawns planning |
-| **Doctor Strange** | Planner -- decomposes requests into sub-task graphs and dependencies |
-| **Shuri** | Code generation and file operations specialist |
-| **E.D.I.T.H.** | Research specialist -- gathers intelligence via web search |
-| **K.A.R.E.N.** | Content creation specialist -- copy, emails, reports |
-| **F.R.I.D.A.Y.** | System diagnostics and health monitoring specialist |
-| **Vision** | Verification specialist -- checks deliverables against acceptance criteria |
-
-The tools these agents (and the Brain) can call include:
+The tools the Brain can call include:
 
 - **Web search** — self-hosted SearXNG plus Exa / Tavily / DuckDuckGo fallbacks.
 - **Shell execution** — sandboxed command runs with a protective blocklist.

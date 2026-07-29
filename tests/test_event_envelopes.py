@@ -268,11 +268,12 @@ def test_on_speech_dedupes_identical_text_within_window():
         "ensure_session_ready": lambda sid: None,
         "_schedule_process": lambda coro, loop: dispatched.append(coro),
         "_process": lambda *a, **k: "coro-placeholder",
+        "_dispatch_or_queue": lambda *a, **k: "coro-placeholder",
         "brain": None,
         "voice": None,
         "loop": None,
         "recent_turn_texts": {},
-        "_DEDUPE_WINDOW_SEC": 5.0,
+        "_DEDUPE_WINDOW_SEC": 20.0,
     }
     # on_speech declares `nonlocal current_web_session_id`, which needs a real
     # enclosing function scope (nonlocal is invalid at module level) -- wrap it
@@ -281,7 +282,8 @@ def test_on_speech_dedupes_identical_text_within_window():
     import textwrap
     wrapper_src = (
         "def _wrapper():\n"
-        "    current_web_session_id = 'default'\n"
+        "    _voice_fallback_session_id = 'voice_test-launch'\n"
+        "    current_web_session_id = _voice_fallback_session_id\n"
         + textwrap.indent(src, "    ")
         + "\n    return on_speech\n"
     )

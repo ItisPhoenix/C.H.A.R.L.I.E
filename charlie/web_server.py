@@ -273,10 +273,7 @@ async def _event_bridge():
             pipeline_state = "listening"
 
         # Keep web server cached state in sync
-        if etype == "blackboard_update":
-            global _blackboard_state
-            _blackboard_state = event.get("payload", {})
-        elif etype == "system_status":
+        if etype == "system_status":
             global _system_status
             _system_status = event.get("payload", {})
         elif etype == "audio_state":
@@ -325,7 +322,6 @@ async def websocket_endpoint(ws: WebSocket):
 
     # Send initial cached state immediately to prevent empty UI states on connection
     try:
-        await ws.send_text(json.dumps({"type": "blackboard_update", "payload": _blackboard_state}))
         await ws.send_text(json.dumps({"type": "system_status", "payload": _system_status}))
         await ws.send_text(json.dumps({"type": "audio_state", "payload": _audio_state}))
         await ws.send_text(json.dumps({"type": "mic_state", "payload": _mic_state}))
@@ -490,18 +486,10 @@ async def session_chat(session_id: str, data: dict):
         )
     return {"status": "ok"}
 # ---------------------------------------------------------------------------
-# Blackboard API (for Tauri dashboard)
-# ---------------------------------------------------------------------------
-# In-memory blackboard state (synced from main process via ZMQ)
-_blackboard_state: dict = {
-    "tasks": [],
-    "agents": {},
-}
 _system_status: dict = {
     "cpu": 0.0,
     "ram": 0.0,
     "gpu": 0.0,
-    "active_agents": [],
 }
 _active_frontend_session: str | None = None
 _audio_state: dict = {

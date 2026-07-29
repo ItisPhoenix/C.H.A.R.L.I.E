@@ -30,7 +30,6 @@ def test_registry_registration_and_schema():
     definitions = registry.get_tool_definitions()
     names = {d["function"]["name"] for d in definitions}
     assert names == {
-        "delegate_to_agent",
         "web_search",
         "shell_execute",
         "system_diagnostics",
@@ -102,15 +101,6 @@ def test_system_control_tool_registered():
     assert "system_control" in registry.get_tool_names()
 
 
-def test_delegate_to_agent_schema_describes_each_agent():
-    """Previously the agent_name enum listed only bare agent names -- the
-    model never learned what each one specializes in."""
-    definitions = {d["function"]["name"]: d["function"] for d in registry.get_tool_definitions()}
-    agent_desc = definitions["delegate_to_agent"]["parameters"]["properties"]["agent_name"]["description"]
-    assert "E.D.I.T.H." in agent_desc
-    assert "Research" in agent_desc or "research" in agent_desc
-
-
 def test_file_write_and_file_read(tmp_path):
     target = tmp_path / "notes.txt"
     message = file_write(str(target), "hello tools")
@@ -172,6 +162,45 @@ def test_shell_execute_timeout_does_not_report_error(monkeypatch):
     )
     output = shell_execute("notepad")
     assert "Error" not in output
+
+
+def test_shell_execute_recovery_communicate_is_bounded(monkeypatch):
+    """The post-kill communicate() call (draining the pipe after a timeout)
+    must pass an explicit timeout. On Windows a detached grandchild (e.g.
+    "start notepad") can keep the stdout/stderr pipe open long after the
+    killed cmd.exe parent exits, so an unbounded second call blocks forever
+    even though its return value is never used -- this was firing the
+    outer 30s tool-call timeout instead of shell_execute's own graceful
+    "still running" response."""
+    import subprocess as subprocess_module
+
+    from charlie import tools as tools_module
+
+    calls = []
+
+    class FakeProcess:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def communicate(self, input=None, timeout=None):
+            calls.append(timeout)
+            raise subprocess_module.TimeoutExpired(cmd="start notepad", timeout=timeout or 0)
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(
+        tools_module.subprocess, "Popen", lambda *a, **k: FakeProcess()
+    )
+
+    output = shell_execute("start notepad")
+
+    assert "Error" not in output
+    assert "still running" in output
+    assert all(t is not None for t in calls)
 
 
 def test_shell_execute_blocks_metacharacters_and_keywords():

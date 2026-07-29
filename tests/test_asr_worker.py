@@ -8,7 +8,17 @@ Whisper anchored onto that prompt and echoed it back verbatim as a
 "transcription" on weak/ambiguous audio instead of transcribing real speech.
 """
 
-from charlie.asr_worker import _build_transcribe_kwargs
+from dataclasses import dataclass
+
+from charlie.asr_worker import _build_transcribe_kwargs, _filter_hallucinated_segments
+
+
+@dataclass
+class _FakeSegment:
+    text: str
+    no_speech_prob: float
+    compression_ratio: float
+    avg_logprob: float = -0.3  # confident by default; tests override to probe the threshold
 
 
 def test_warmup_uses_default_initial_prompt():
@@ -57,3 +67,40 @@ def test_warmup_disables_vad_filter():
     )
     assert kwargs["vad_filter"] is False
     assert kwargs["beam_size"] == 1
+
+
+def test_filter_keeps_real_speech_segment():
+    real = _FakeSegment(text=" hello there", no_speech_prob=0.1, compression_ratio=1.2)
+    assert _filter_hallucinated_segments([real]) == [real]
+
+
+def test_filter_drops_high_no_speech_prob_segment():
+    """Whisper itself is confident this segment isn't speech -- must be dropped."""
+    silence = _FakeSegment(text=" thank you for watching", no_speech_prob=0.9, compression_ratio=1.1)
+    assert _filter_hallucinated_segments([silence]) == []
+
+
+def test_filter_drops_repetitive_hallucination_segment():
+    """High compression_ratio flags repetitive decoding loops (e.g. 'stop stop stop...')."""
+    loop = _FakeSegment(text=" stop stop stop stop stop stop", no_speech_prob=0.2, compression_ratio=3.0)
+    assert _filter_hallucinated_segments([loop]) == []
+
+
+def test_filter_mixed_segments_keeps_only_valid_ones():
+    real = _FakeSegment(text=" open notepad", no_speech_prob=0.1, compression_ratio=1.3)
+    hallucinated = _FakeSegment(text=" subscribe now", no_speech_prob=0.95, compression_ratio=1.0)
+    assert _filter_hallucinated_segments([real, hallucinated]) == [real]
+
+
+def test_filter_drops_low_confidence_segment():
+    """Confident-sounding-but-wrong text (e.g. echoing the hotwords list on
+    weak audio) isn't silence and isn't repetitive, so no_speech_prob and
+    compression_ratio both miss it -- avg_logprob catches low-confidence
+    decodes that neither of those signals do."""
+    low_confidence = _FakeSegment(
+        text=" close start stop search weather time date notepad",
+        no_speech_prob=0.3,
+        compression_ratio=1.5,
+        avg_logprob=-1.4,
+    )
+    assert _filter_hallucinated_segments([low_confidence]) == []

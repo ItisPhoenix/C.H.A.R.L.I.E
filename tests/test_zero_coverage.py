@@ -89,16 +89,16 @@ class TestIterationBudget:
 
     def test_try_spend_cost_accumulates(self):
         from charlie.budget import IterationBudget
-        b = IterationBudget(max_turns=5)
-        assert b.try_spend("delegate_to_agent") is True  # cost=3
+        b = IterationBudget(max_turns=5, turn_cost={"expensive_tool": 3, "web_search": 1})
+        assert b.try_spend("expensive_tool") is True  # cost=3
         assert b.turns_used == 3
         assert b.try_spend("web_search") is True  # cost=1
         assert b.turns_used == 4
 
     def test_try_spend_exhausted_returns_false(self):
         from charlie.budget import IterationBudget
-        b = IterationBudget(max_turns=3)
-        assert b.try_spend("delegate_to_agent") is True  # cost=3
+        b = IterationBudget(max_turns=3, turn_cost={"expensive_tool": 3, "web_search": 1})
+        assert b.try_spend("expensive_tool") is True  # cost=3
         assert b.is_exhausted() is True
         assert b.try_spend("web_search") is False
 

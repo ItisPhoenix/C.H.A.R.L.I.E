@@ -27,8 +27,6 @@ export default function Page() {
   const setMessagesLoading = useCharlieStore((s) => s.setMessagesLoading);
   const addLog = useCharlieStore((s) => s.addLog);
   const addAlert = useCharlieStore((s) => s.addAlert);
-  const blackboard = useCharlieStore((s) => s.blackboard);
-  const setBlackboard = useCharlieStore((s) => s.setBlackboard);
   const voiceState = useCharlieStore((s) => s.voiceState);
   const setVoiceState = useCharlieStore((s) => s.setVoiceState);
   const audio = useCharlieStore((s) => s.audio);
@@ -236,8 +234,6 @@ export default function Page() {
         // Handle telemetry and status updates
         if (msg.type === "system_status") {
           store.setSystemStatus(msg.payload);
-        } else if (msg.type === "blackboard_update") {
-          store.setBlackboard(msg.payload);
         } else if (msg.type === "vad_start" || msg.type === "wake_word") {
           store.setVoiceState("listening");
           store.setListeningTrigger(msg.type === "wake_word" ? "wake_word" : "vad");
@@ -394,18 +390,6 @@ export default function Page() {
     sendWS({ type: "stop" });
   };
 
-  const handleTerminateAgent = (agentName: string) => {
-    sendWS({ type: "agent_kill", payload: { name: agentName } });
-  };
-
-  const handleApproveTask = (taskId: string) => {
-    sendWS({ type: "hitl_approve", payload: { task_id: taskId } });
-  };
-
-  const handleRejectTask = (taskId: string, reason: string = "Rejected by user") => {
-    sendWS({ type: "hitl_reject", payload: { task_id: taskId, reason } });
-  };
-
   const handleApproveRecovery = (proposalId: string) => {
     sendWS({ type: "recovery_approve", payload: { proposal_id: proposalId } });
   };
@@ -420,14 +404,6 @@ export default function Page() {
 
   const handleRejectToolCall = (requestId: string) => {
     sendWS({ type: "tool_reject", payload: { request_id: requestId } });
-  };
-
-  const handleCancelTask = (taskId: string) => {
-    sendWS({ type: "task_cancel", payload: { task_id: taskId } });
-  };
-
-  const handleRetryTask = (taskId: string) => {
-    sendWS({ type: "task_retry", payload: { task_id: taskId } });
   };
 
   // Export full chat history (real backend data)
@@ -717,17 +693,9 @@ export default function Page() {
             />
           </main>
 
-          {/* Right: insight rail (Swarm / Memory / MCP / Tasks) */}
+          {/* Right: insight rail (Memory / Extensions / Desktop) */}
           <div className="hidden xl:flex h-full">
-            <InsightRail
-              blackboard={blackboard}
-              systemStatus={systemStatus}
-              onTerminateAgent={handleTerminateAgent}
-              onApproveTask={handleApproveTask}
-              onRejectTask={handleRejectTask}
-              onCancelTask={handleCancelTask}
-              onRetryTask={handleRetryTask}
-            />
+            <InsightRail systemStatus={systemStatus} />
           </div>
         </div>
 

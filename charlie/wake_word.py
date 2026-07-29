@@ -104,6 +104,7 @@ class WakeWordDetector:
 
         try:
             score = self._run_pipeline(audio_chunk)
+            logger.debug(f"wake_word_score | score={score:.4f} threshold={self.threshold}")
             return score >= self.threshold
         except Exception as e:
             logger.debug(f"Wake word inference error: {e}")

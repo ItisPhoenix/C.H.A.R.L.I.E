@@ -23,7 +23,7 @@ src/
     WaveformBar.tsx     # Audio waveform visualization
     ErrorBoundary.tsx   # Production error boundary with fallback UI
   store/
-    useCharlieStore.ts  # Zustand store (sessions, messages, blackboard, voice)
+    useCharlieStore.ts  # Zustand store (sessions, messages, voice)
 ```
 
 ## Development
@@ -48,7 +48,6 @@ npm test
 - **Three-column layout**: Sidebar (sessions), Main (chat), Smart Panel (activity)
 - **Voice dock** with waveform visualization and voice state display
 - **Session management**: Create, switch, rename, delete sessions
-- **Blackboard HUD**: Live view of swarm agents, tasks, and findings
 - **Activity feed**: Real-time tool calls and thinking updates
 - **Glassmorphism design**: Frosted glass panels with electric blue accent (#0066ff)
 
@@ -59,7 +58,6 @@ The frontend listens for these events from `web_server.py`:
 | Event | Purpose |
 |-------|---------|
 | `chat_response` | LLM streaming tokens |
-| `blackboard_update` | Swarm state sync |
 | `thinking_update` | Agent thinking updates |
 | `system_status` | Health and diagnostics |
 | `session_active` | Active session sync (frontend -> backend) |

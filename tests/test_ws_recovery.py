@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from charlie import web_server
-from charlie.blackboard import Blackboard
 from charlie.recovery import (
     pending_proposals,
     recover_tool,
@@ -134,29 +133,3 @@ async def test_recovery_approval_gate():
     assert res is not None
     assert "rejected by user" in res.lower()
     assert "dir c:\\" in res
-
-@pytest.mark.asyncio
-async def test_task_approval_scheduling_gate():
-    """Assert the blackboard scheduler only selects approved pending tasks."""
-    board = Blackboard()
-
-    # 1. Swarm created task (pending_approval)
-    t1 = board.add_task("Jarvis Task", assigned_to="J.A.R.V.I.S.", approval_status="pending_approval")
-
-    # get_pending_tasks should be empty since t1 is not approved
-    assert len(board.get_pending_tasks()) == 0
-
-    # 2. User approves task
-    board.update_task(t1.id, approval_status="approved")
-
-    # Now it is ready for execution
-    pending = board.get_pending_tasks()
-    assert len(pending) == 1
-    assert pending[0].id == t1.id
-
-    # 3. User rejects a task
-    t2 = board.add_task("Friday Task", assigned_to="F.R.I.D.A.Y.", approval_status="pending_approval")
-    board.update_task(t2.id, approval_status="rejected", status="failed", result="Rejection: Not needed")
-
-    assert len(board.get_pending_tasks()) == 1  # Only t1 is pending/approved
-    assert board.get_task(t2.id).status == "failed"

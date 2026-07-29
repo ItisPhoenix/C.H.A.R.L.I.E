@@ -11,6 +11,31 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("charlie.asr_worker")
 
 
+# Match openai/whisper CLI's own hallucination-suppression defaults
+# (no_speech_threshold=0.6, compression_ratio_threshold=2.4, logprob_threshold=-1.0)
+# -- faster-whisper computes all three per segment but never acts on them,
+# unlike the CLI. avg_logprob catches confident-sounding-but-wrong text (e.g.
+# echoing the hotwords list) that no_speech_prob/compression_ratio miss,
+# since that failure mode is neither silence nor a repetition loop.
+_NO_SPEECH_PROB_THRESHOLD = 0.6
+_COMPRESSION_RATIO_THRESHOLD = 2.4
+_AVG_LOGPROB_THRESHOLD = -1.0
+
+
+def _filter_hallucinated_segments(segments) -> list:
+    """Drop segments Whisper itself flags as likely non-speech, a repetition
+    loop, or low-confidence -- silence/noise can otherwise decode into a
+    plausible-looking sentence (e.g. "thank you for watching", "stop stop
+    stop...", or echoing the hotwords list) instead of being dropped."""
+    return [
+        s
+        for s in segments
+        if s.no_speech_prob < _NO_SPEECH_PROB_THRESHOLD
+        and s.compression_ratio < _COMPRESSION_RATIO_THRESHOLD
+        and s.avg_logprob > _AVG_LOGPROB_THRESHOLD
+    ]
+
+
 def _build_transcribe_kwargs(
     is_warmup: bool, flags: dict, default_language: str, asr_config: dict | None
 ) -> dict:
@@ -139,6 +164,7 @@ def asr_worker_process(
             )
 
             segments, info = whisper.transcribe(audio_data, **transcribe_kwargs)
+            segments = _filter_hallucinated_segments(list(segments))
 
             text = "".join([s.text for s in segments]).strip()
             confidence = info.language_probability

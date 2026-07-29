@@ -10,7 +10,7 @@ import logging
 import os
 import re
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 import httpx
@@ -78,7 +78,9 @@ _SCREEN_QUERY_RE = re.compile(
 _VISUAL_CONTENT_QUERY_RE = re.compile(
     r"\bwhat am i looking at\b"
     r"|\bdescribe (this|the) (image|photo|picture|screen|window|page)\b"
-    r"|\bwhat does this look like\b",
+    r"|\bwhat does this look like\b"
+    r"|\bwho('?s| is) (this|that|he|she)\b"
+    r"|\bwhat (do|can) you see\b",
     re.IGNORECASE,
 )
 _TOOL_TIMEOUTS = {
@@ -100,6 +102,10 @@ _TOOL_TIMEOUTS = {
     "desktop_window": 15.0,
     "desktop_move_window": 15.0,
     "system_control": 15.0,
+    # Recursive filesystem search (esp. with PLUGIN_ALLOW_DIRS="*", full-disk
+    # access) needs far more than the 15s default -- scanning a whole drive
+    # tree routinely takes longer than that.
+    "plugin_fs_search": 120.0,
 }
 _TOOL_RESULT_MAX_CHARS = 2000
 # How long a gated tool call waits for an approve/decline before it's treated
@@ -142,90 +148,6 @@ def resolve_tool_approval(request_id: str, approved: bool) -> bool:
         _active_voice_approval_id = None
     return True
 
-
-# Background agents have no Brain instance to speak through (see
-# charlie/agents/base.py module boundary), so main.py wires the same
-# on_thought_callback it gives Brain into this module-level slot instead.
-_agent_notify_callback: Optional[Callable[[str], None]] = None
-
-# Background tasks have no foreground turn forcing a quick answer, so they
-# get a much longer approval window than the interactive _TOOL_APPROVAL_TIMEOUT_SEC.
-_AGENT_APPROVAL_WAIT_MAX_S = 6 * 3600.0
-
-
-def set_agent_notify_callback(cb: Optional[Callable[[str], None]]) -> None:
-    global _agent_notify_callback
-    _agent_notify_callback = cb
-
-
-async def request_agent_tool_approval(
-    blackboard: Any,
-    task_id: str,
-    agent_name: str,
-    tool_name: str,
-    arguments: Dict[str, Any],
-    reason: str,
-) -> bool:
-    """Pause a background agent's task and ask the user to approve/decline a
-    gated tool call, instead of the old hard block. Reuses the exact same
-    pending_tool_approvals/resolve_tool_approval machinery and
-    "tool_approval_request"/"tool_approve"/"tool_reject" channel
-    Brain.request_tool_approval uses for the foreground chat turn, so the
-    existing dashboard dialog and main.py WS command handlers need no changes.
-    """
-    global _active_voice_approval_id
-    from charlie import recovery
-
-    request_id = f"tool_{make_id(6)}"
-    describe = arguments.get("command") or arguments.get("path") or str(arguments)
-    prompt = (
-        f"A background task ({agent_name}) needs your permission to {reason}: "
-        f"{describe}. Approve on the dashboard or say yes or no."
-    )
-
-    blackboard.update_task(task_id, status="paused", approval_status="pending_approval")
-    loop = asyncio.get_running_loop()
-    fut: "asyncio.Future[bool]" = loop.create_future()
-    pending_tool_approvals[request_id] = fut
-    approved = False
-
-    try:
-        if recovery.get_active_ws_count() > 0 and recovery._event_bus:
-            await recovery._event_bus.emit(
-                "tool_approval_request",
-                {
-                    "request_id": request_id,
-                    "tool_name": tool_name,
-                    "arguments": arguments,
-                    "reason": reason,
-                    "agent_name": agent_name,
-                    "task_id": task_id,
-                    "session_id": recovery.get_active_session_id(),
-                },
-            )
-        elif _agent_notify_callback is not None:
-            _active_voice_approval_id = request_id
-            _agent_notify_callback(prompt)
-        else:
-            logger.warning(
-                "Gated agent tool call with no approval channel available -- declining safely."
-            )
-            return False
-
-        try:
-            approved = await asyncio.wait_for(fut, timeout=_AGENT_APPROVAL_WAIT_MAX_S)
-        except asyncio.TimeoutError:
-            logger.warning("Agent tool approval %s timed out, declining", request_id)
-            approved = False
-        return approved
-    finally:
-        pending_tool_approvals.pop(request_id, None)
-        if _active_voice_approval_id == request_id:
-            _active_voice_approval_id = None
-        blackboard.update_task(
-            task_id, status="running",
-            approval_status="approved" if approved else "rejected",
-        )
 
 # --- Fast-path: time/date queries answered from system clock (zero LLM) ---
 _TIME_DATE_RE = re.compile(
@@ -1078,6 +1000,8 @@ _TOOL_RULES = (
     "- NEVER use tools for: time, date, calculations, math, or general knowledge.\n"
     "- The current time and date are provided above - use them directly.\n"
     "- Use a tool at MOST ONCE per question. Never repeat the same tool call.\n"
+    "- If a tool call already succeeded, trust that result -- never redo the same goal with a second, different tool.\n"
+    "- Prefer native desktop_* tools over any MCP/third-party equivalent for the same capability.\n"
     "- After receiving tool results, answer immediately using those results.\n"
     "- Do NOT call tools if you already have the answer from prior results.\n"
     "- If a tool fails, times out, or returns an error, describe the error clearly,\n"
@@ -1131,8 +1055,6 @@ def _build_capabilities_block(config: "Config") -> str:
     when a tool or agent for the request already exists, and so a stale claim
     elsewhere (e.g. in SOUL.md) never wins over what's actually available.
     """
-    from charlie.agents import AGENT_REGISTRY
-
     lines = [
         "YOUR ACTUAL CAPABILITIES (authoritative -- overrides any conflicting "
         "claim anywhere else, including your own persona/identity text above "
@@ -1150,15 +1072,6 @@ def _build_capabilities_block(config: "Config") -> str:
             "content a screen-reader can't describe. This is real, not "
             "hypothetical; use the desktop_* tools for it."
         )
-    agent_lines = ", ".join(
-        f"{name} ({cls.description})" for name, cls in AGENT_REGISTRY.items()
-    )
-    lines.append(
-        "- You can delegate work to specialized agents via delegate_to_agent "
-        f"instead of doing everything inline yourself: {agent_lines}. Use "
-        "this for tasks suited to a specialist rather than refusing or "
-        "saying you can't parallelize/research/plan."
-    )
     lines.append(
         "- Memory: you have both a running conversation memory and a "
         "longer-term store (vector search + a knowledge graph of facts). "
@@ -1234,14 +1147,14 @@ def _detect_set_goal(query: str) -> Optional[str]:
     return m.group(1).strip().rstrip(".") if m else None
 
 
-# --- H.E.L.M. operator persona (Phase 4 desktop-control identity) ---
+# --- Helm operator persona (Phase 4 desktop-control identity) ---
 _HELM_ADDRESS_RE = re.compile(r"^\s*helm\b[,:]?\s*", re.IGNORECASE)
 _HELM_ACTION_RE = re.compile(
     r"\b(click|double.?click|drag(?!\s+(queen|racing|race|on\b))|scroll|type in(to)?|on (the |my )?screen)\b",
     re.IGNORECASE,
 )
 _HELM_PERSONA_TEXT = (
-    "[H.E.L.M. MODE] You are speaking as H.E.L.M. (Hands-on Executive Logic "
+    "[Helm MODE] You are speaking as Helm (Hands-on Executive Logic "
     "Module), Charlie's desktop-control operator persona. Narrate each step "
     "briefly before acting -- one short clause per step, not a paragraph. "
     "Prefer desktop_observe, desktop_click, desktop_type, desktop_invoke, "
@@ -1269,7 +1182,7 @@ _HELM_PERSONA_TEXT = (
 
 
 def _detect_operator_persona(query: str) -> bool:
-    """True if the user addressed H.E.L.M. by name, or the query implies
+    """True if the user addressed Helm by name, or the query implies
     direct desktop-action intent (click/drag/scroll/type on screen)."""
     stripped = query.strip()
     return bool(_HELM_ADDRESS_RE.match(stripped)) or bool(_HELM_ACTION_RE.search(stripped))
@@ -1353,12 +1266,6 @@ def _build_volatile_tier(
         parts.append(f"Answer style: {verbosity_hint}.")
     if active_goal:
         parts.append(f"Current goal: {active_goal}. Stay focused on this.")
-    parts.append(
-        "For background desktop work (the user asks for something to run "
-        "unattended, e.g. 'in the background' or 'while I'm away'), call "
-        "delegate_to_agent with agent_name=\"H.E.L.M.\" instead of acting on "
-        "desktop_* tools inline yourself."
-    )
     if operator_persona:
         parts.append(_HELM_PERSONA_TEXT)
     if tool_catalog:
@@ -1424,7 +1331,6 @@ class Brain:
         on_tool_call: Optional[callable] = None,
         on_tool_result: Optional[callable] = None,
         on_thinking_update: Optional[callable] = None,
-        blackboard=None,
     ):
         self.config = config
         self.on_thought_callback = on_thought_callback
@@ -1433,7 +1339,6 @@ class Brain:
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
         self.on_thinking_update = on_thinking_update
-        self._blackboard = blackboard
         small_headers: Dict[str, str] = build_auth_headers(config.small_llm_key)
         self.client = httpx.AsyncClient(
             base_url=config.small_llm_url,
@@ -2341,15 +2246,7 @@ class Brain:
                 for c, r in zip(tool_calls, exec_results)
             ]
 
-            tool_results = [
-                {
-                    "tool_call_id": c.get("id"),
-                    "role": "tool",
-                    "name": c["name"],
-                    "content": r,
-                }
-                for c, r in zip(tool_calls, exec_results)
-            ]
+            tool_results = _build_native_tool_results(tool_calls, exec_results)
 
             # Format results based on native vs text-based calling
             is_text_based = any(c.get("id") is None for c in tool_calls)
@@ -2553,9 +2450,9 @@ class Brain:
         real parameter names, read live from the registry (see
         ToolRegistry.get_tool_param_names) instead of a hand-maintained dict.
         That dict previously covered only 6 of the 19+ registered tools --
-        every other tool (all desktop_* tools, delegate_to_agent, the graph/
-        vector-memory tools, any MCP/plugin/extension tool) fell through to a
-        generic `query` kwarg and crashed with a TypeError at call time."""
+        every other tool (all desktop_* tools, the graph/vector-memory tools,
+        any MCP/plugin/extension tool) fell through to a generic `query`
+        kwarg and crashed with a TypeError at call time."""
         params_list = tool_registry.get_tool_param_names(tool_name)
         if not params_list:
             # Unknown tool name, or a registered tool that takes no
@@ -2643,6 +2540,25 @@ class Brain:
 # =====================================================================
 # Module-level helpers (kept outside Brain to avoid duplication)
 # =====================================================================
+
+
+def _build_native_tool_results(
+    tool_calls: List[Dict[str, Any]], exec_results: List[str]
+) -> List[Dict[str, Any]]:
+    """Build native (OpenAI-style) tool role messages for the follow-up
+    payload. Truncates to _TOOL_RESULT_MAX_CHARS like _format_text_tool_summary
+    already does for the text-based path -- an MCP tool (e.g. a screenshot)
+    can return a raw, unbounded blob, and sending that straight into the
+    payload 400s against the API."""
+    return [
+        {
+            "tool_call_id": c.get("id"),
+            "role": "tool",
+            "name": c["name"],
+            "content": r[:_TOOL_RESULT_MAX_CHARS],
+        }
+        for c, r in zip(tool_calls, exec_results)
+    ]
 
 
 def _format_text_tool_summary(
