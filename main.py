@@ -187,6 +187,22 @@ def _schedule_process(coro, loop):
     return fut
 
 
+async def _restart_mcp_client(old_client, config):
+    """Stop old_client and start a fresh one, both off the event loop.
+
+    mcp_client.stop() and start_mcp() are synchronous and block on
+    subprocess handshakes (up to config.timeout, default 30s per server);
+    called directly inside an async def they freeze the whole event loop,
+    including consume_web_commands, for that long.
+    """
+    if old_client is not None:
+        await asyncio.to_thread(old_client.stop)
+    if not config.mcp_enabled:
+        return None
+    from charlie.mcp_client import start_mcp
+    return await asyncio.to_thread(start_mcp, config)
+
+
 async def main():
     loop = asyncio.get_running_loop()
     _orig_handler = loop.call_exception_handler
@@ -770,21 +786,14 @@ async def main():
     async def _reload_mcp_client():
         """Stop the MCP subprocess client and restart it if still enabled."""
         nonlocal mcp_client
-        if mcp_client is not None:
-            try:
-                mcp_client.stop()
-            except Exception as ex:
-                logger.warning(f"Error stopping MCP client on reload: {ex}")
-            mcp_client = None
         from charlie.tools import registry
         for k in [k for k in registry._tools if k.startswith("mcp_")]:
             registry._tools.pop(k, None)
-        if config.mcp_enabled:
-            try:
-                from charlie.mcp_client import start_mcp
-                mcp_client = start_mcp(config)
-            except Exception as ex:
-                logger.warning(f"Error starting MCP client on reload: {ex}")
+        try:
+            mcp_client = await _restart_mcp_client(mcp_client, config)
+        except Exception as ex:
+            logger.warning(f"Error reloading MCP client: {ex}")
+            mcp_client = None
 
     def _reload_plugin_tools():
         """Re-register plugin tools to match the current enabled flag / allow-dirs."""
@@ -960,7 +969,7 @@ async def main():
                     config.apply_env_updates(env_values)
 
                     await _reload_mcp_client()
-                    _reload_plugin_tools()
+                    await asyncio.to_thread(_reload_plugin_tools)
                     await _reload_voice_engine()
                     brain.rebuild_stable_tier()
 
