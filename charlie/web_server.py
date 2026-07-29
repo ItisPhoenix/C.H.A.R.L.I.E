@@ -40,40 +40,19 @@ active_connections: Set[WebSocket] = set()
 # connected browsers.
 ws_sessions: dict[WebSocket, str] = {}
 
-# MCP tools are discovered once here at web-server startup (mirroring main.py)
-# and registered into the shared registry so /api/mcp/* reflects reality.
+# MCP/plugin registration (mirroring main.py) is real: it can spawn actual
+# subprocesses (MCP servers) and register real tools into the shared
+# registry. That must happen in lifespan()'s startup, not here at import
+# time -- merely importing this module (e.g. from a test) must not have
+# live side effects. mcp_client is populated in lifespan() if enabled;
+# plugin_manager always starts as a bare manager so /api/extensions has one
+# to enable individual plugins into even when PLUGINS_ENABLED is off (Phase
+# 5's per-plugin control works independently of that flag), and lifespan()
+# swaps in the real one when PLUGINS_ENABLED=true.
+from charlie.plugins import PluginManager
+
 mcp_client = None
-if config.mcp_enabled:
-    try:
-        from charlie.mcp_client import start_mcp
-
-        mcp_client = start_mcp(config)
-        if mcp_client is None:
-            logger.info("Web MCP subsystem not started (no servers configured)")
-    except Exception as e:
-        logger.warning("Web MCP subsystem failed to initialize: %s", e)
-        mcp_client = None
-
-# Same mirroring as mcp_client above: register_plugin_tools() previously ran
-# only in main.py's voice process, so the web process's registry never had
-# plugin_* tools even with PLUGINS_ENABLED=true -- /api/extensions needs a
-# live manager here to enable/disable individual plugins at runtime.
-plugin_manager = None
-if config.plugins_enabled:
-    try:
-        from charlie.tools import register_plugin_tools
-
-        plugin_manager = register_plugin_tools(config)
-    except Exception as e:
-        logger.warning("Web plugin subsystem failed to initialize: %s", e)
-        plugin_manager = None
-if plugin_manager is None:
-    # Always give /api/extensions a manager to enable individual plugins
-    # into, even when the blanket PLUGINS_ENABLED flag is off -- Phase 5's
-    # per-plugin control is meant to work independently of that flag.
-    from charlie.plugins import PluginManager
-
-    plugin_manager = PluginManager()
+plugin_manager = PluginManager()
 
 # In-process registry of installed extensions (Phase 5) -- see
 # charlie/extensions/__init__.py's ExtensionManager docstring for the
@@ -171,9 +150,29 @@ pipeline_state: str = "idle"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init EventBus + ZMQ guard. Shutdown: tear down EventBus."""
+    """Startup: init EventBus + ZMQ guard + MCP/plugin tools. Shutdown: tear down EventBus."""
     # --- startup ---
-    global event_bus
+    global event_bus, mcp_client, plugin_manager
+    if config.mcp_enabled:
+        try:
+            from charlie.mcp_client import start_mcp
+
+            mcp_client = start_mcp(config)
+            if mcp_client is None:
+                logger.info("Web MCP subsystem not started (no servers configured)")
+        except Exception as e:
+            logger.warning("Web MCP subsystem failed to initialize: %s", e)
+            mcp_client = None
+    if config.plugins_enabled:
+        try:
+            from charlie.tools import register_plugin_tools
+
+            real_plugin_manager = register_plugin_tools(config)
+            if real_plugin_manager is not None:
+                plugin_manager = real_plugin_manager
+        except Exception as e:
+            logger.warning("Web plugin subsystem failed to initialize: %s", e)
+
     event_bus = EventBus(
         pub_port=DEFAULT_EVENT_PORT,
         pull_port=DEFAULT_COMMAND_PORT,

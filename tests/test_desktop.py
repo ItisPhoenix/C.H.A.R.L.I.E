@@ -22,6 +22,7 @@ from charlie.desktop import DESKTOP_AVAILABLE, UIA_EXECUTOR
 from charlie.desktop import actions as desktop_actions
 from charlie.desktop import vision as desktop_vision
 from charlie.desktop.uia import Element, merge_ocr_elements, resolve_bounds, resolve_is_password, resolve_name
+from charlie.tools import config as _tools_config
 from charlie.tools import (
     desktop_click,
     desktop_observe,
@@ -59,9 +60,19 @@ def test_system_control_is_gated():
 
 
 def test_desktop_tools_disabled_by_default():
-    """desktop_control_enabled defaults to false -- tools must refuse, not crash."""
-    assert "disabled" in desktop_observe()
-    assert "disabled" in desktop_click(1)
+    """desktop_control_enabled defaults to false -- tools must refuse, not crash.
+
+    Forces the flag rather than trusting ambient state: a developer's local
+    .env commonly sets DESKTOP_CONTROL_ENABLED=true, which would otherwise
+    make this test exercise a real click instead of the disabled path.
+    """
+    original = _tools_config.desktop_control_enabled
+    _tools_config.desktop_control_enabled = False
+    try:
+        assert "disabled" in desktop_observe()
+        assert "disabled" in desktop_click(1)
+    finally:
+        _tools_config.desktop_control_enabled = original
 
 
 def test_desktop_gate_reason_arms_once_per_session(brain_config):
@@ -93,7 +104,13 @@ def test_type_text_unknown_id_returns_error_not_raise():
 
 
 def test_desktop_read_screen_disabled_by_default():
-    assert "disabled" in desktop_read_screen()
+    """Same ambient-.env hazard as test_desktop_tools_disabled_by_default above."""
+    original = _tools_config.desktop_control_enabled
+    _tools_config.desktop_control_enabled = False
+    try:
+        assert "disabled" in desktop_read_screen()
+    finally:
+        _tools_config.desktop_control_enabled = original
 
 
 def test_merge_ocr_elements_continues_mark_id_sequence():
@@ -110,7 +127,13 @@ def test_merge_ocr_elements_continues_mark_id_sequence():
 
 
 def test_desktop_screenshot_disabled_by_default():
-    assert "disabled" in desktop_screenshot()
+    """Same ambient-.env hazard as test_desktop_tools_disabled_by_default above."""
+    original = _tools_config.desktop_control_enabled
+    _tools_config.desktop_control_enabled = False
+    try:
+        assert "disabled" in desktop_screenshot()
+    finally:
+        _tools_config.desktop_control_enabled = original
 
 
 def test_pending_vision_image_pops_once():
