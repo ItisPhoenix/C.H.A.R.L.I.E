@@ -91,6 +91,28 @@ export default function Page() {
     }
   }, []);
 
+  // The backend's "active session" (which routes voice input) is one shared
+  // value with no per-tab isolation -- any connected tab announcing itself
+  // silently steals routing from whichever tab the user is actually looking
+  // at, including a background tab reconnecting on its own after a network
+  // blip. Only the visible tab may announce itself as active.
+  const announceActiveSession = useCallback((sid: string) => {
+    if (!sid || typeof document === "undefined" || document.visibilityState !== "visible") {
+      return;
+    }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "session_active", payload: { session_id: sid } }));
+    } else {
+      fetch("/api/session/active", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sid }),
+      }).catch(() => {
+        console.warn("Failed to sync active session over HTTP fallback (network error)");
+      });
+    }
+  }, []);
+
   // Resolve session id from a top-level field or payload nesting.
   const sessionOf = (msg: { session_id?: string; payload?: { session_id?: string } }): string | undefined =>
     msg.session_id || msg.payload?.session_id;
@@ -179,6 +201,10 @@ export default function Page() {
   useEffect(() => {
     fetchMessagesRef.current = fetchMessages;
   }, [fetchMessages]);
+  const announceActiveSessionRef = useRef(announceActiveSession);
+  useEffect(() => {
+    announceActiveSessionRef.current = announceActiveSession;
+  }, [announceActiveSession]);
 
 
   // Connect WebSocket
@@ -200,16 +226,16 @@ export default function Page() {
       }
       // Sync active session on (re)connect, then pull the latest transcript
       // so the UI self-heals after a dropout without a manual page refresh.
+      // announceActiveSession no-ops if this tab isn't visible -- a
+      // background tab reconnecting on its own must not steal routing.
       if (currentSessionIdRef.current) {
-        socket.send(JSON.stringify({ type: "session_active", payload: { session_id: currentSessionIdRef.current } }));
+        announceActiveSessionRef.current(currentSessionIdRef.current);
         fetchMessagesRef.current(currentSessionIdRef.current);
-        // Re-send the subscription shortly after, guarded by a still-open
-        // socket. This survives the ZMQ slow-joiner race where the first
-        // session_active can arrive before the subscriber is wired up.
+        // Re-send the subscription shortly after. This survives the ZMQ
+        // slow-joiner race where the first session_active can arrive before
+        // the subscriber is wired up.
         setTimeout(() => {
-          if (socket.readyState === WebSocket.OPEN && currentSessionIdRef.current) {
-            socket.send(JSON.stringify({ type: "session_active", payload: { session_id: currentSessionIdRef.current } }));
-          }
+          announceActiveSessionRef.current(currentSessionIdRef.current);
         }, 250);
       }
     };
@@ -337,6 +363,9 @@ export default function Page() {
           if (eventSession && eventSession !== currentSessionIdRef.current) return;
           store.setActiveToolApproval(msg.payload);
         }
+        else if (msg.type === "background_task") {
+          store.setBackgroundTask(msg.payload);
+        }
         // Handle real-time token stream. Only render tokens for the active
         // session; the server also filters by subscription, but we guard
         // here too so a stray cross-session token can never bleed in.
@@ -404,6 +433,22 @@ export default function Page() {
 
   const handleRejectToolCall = (requestId: string) => {
     sendWS({ type: "tool_reject", payload: { request_id: requestId } });
+  };
+
+  const sendBackgroundTaskStart = (text: string) => {
+    sendWS({ type: "background_task_start", payload: { text } });
+  };
+
+  const sendBackgroundTaskCancel = (taskId: string) => {
+    sendWS({ type: "background_task_cancel", payload: { task_id: taskId } });
+  };
+
+  const sendBackgroundTaskApprove = (taskId: string) => {
+    sendWS({ type: "background_task_approve", payload: { task_id: taskId } });
+  };
+
+  const sendBackgroundTaskReject = (taskId: string) => {
+    sendWS({ type: "background_task_reject", payload: { task_id: taskId } });
   };
 
   // Export full chat history (real backend data)
@@ -567,34 +612,32 @@ export default function Page() {
     void init();
   }, [fetchSessions, handleCreateSession, setAudio, setMic, fetchJson, setLaunchId, setSessionScope, setDesktopControlEnabled]);
 
-  // Sync messages when active session changes
+  // Sync messages when active session changes. announceActiveSession
+  // no-ops (including its own HTTP fallback) if this tab isn't visible.
   useEffect(() => {
     if (currentSessionId) {
       fetchMessages(currentSessionId);
-      
-      // Sync WebSocket focus
-      sendWS({ type: "session_active", payload: { session_id: currentSessionId } });
-
-      // HTTP fallback only when the socket is actually down -- mirrors the
-      // same WS-first, HTTP-fallback pattern handleSendMessage uses, instead
-      // of always double-sending this on every session switch.
-      if (!(wsRef.current && wsRef.current.readyState === WebSocket.OPEN)) {
-        fetch("/api/session/active", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: currentSessionId }),
-        })
-          .then((res) => {
-            if (!res.ok) {
-              console.warn("Failed to sync active session over HTTP fallback:", res.status);
-            }
-          })
-          .catch(() => {
-            console.warn("Failed to sync active session over HTTP fallback (network error)");
-          });
-      }
+      announceActiveSession(currentSessionId);
     }
-  }, [currentSessionId, fetchMessages]);
+  }, [currentSessionId, fetchMessages, announceActiveSession]);
+
+  // Reclaim active-session routing when this tab regains visibility/focus --
+  // otherwise a background tab that becomes the one the user is actually
+  // looking at never re-announces itself, and voice stays routed to
+  // whatever tab last had focus.
+  useEffect(() => {
+    const reclaim = () => {
+      if (document.visibilityState === "visible" && currentSessionIdRef.current) {
+        announceActiveSessionRef.current(currentSessionIdRef.current);
+      }
+    };
+    document.addEventListener("visibilitychange", reclaim);
+    window.addEventListener("focus", reclaim);
+    return () => {
+      document.removeEventListener("visibilitychange", reclaim);
+      window.removeEventListener("focus", reclaim);
+    };
+  }, []);
 
   // Connect WebSocket loop
   useEffect(() => {
@@ -695,7 +738,13 @@ export default function Page() {
 
           {/* Right: insight rail (Memory / Extensions / Desktop) */}
           <div className="hidden xl:flex h-full">
-            <InsightRail systemStatus={systemStatus} />
+            <InsightRail
+              systemStatus={systemStatus}
+              onStartBackgroundTask={sendBackgroundTaskStart}
+              onCancelBackgroundTask={sendBackgroundTaskCancel}
+              onApproveBackgroundTask={sendBackgroundTaskApprove}
+              onRejectBackgroundTask={sendBackgroundTaskReject}
+            />
           </div>
         </div>
 

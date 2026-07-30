@@ -103,17 +103,12 @@ Edit `.env` with your settings:
 
 ```env
 # Required: Your LLM endpoint
-SMALL_LLM_URL=https://your-api-endpoint/v1
-SMALL_LLM_API_KEY=your-key-here
-SMALL_LLM_MODEL=your-model-id
+LLM_URL=https://your-api-endpoint/v1
+LLM_API_KEY=your-key-here
+LLM_MODEL=your-model-id
 
 # Optional: Self-hosted SearXNG for private web search
 SEARXNG_URL=http://localhost:8080
-
-# Optional: Big LLM (auto-failover when small LLM fails)
-# BIG_LLM_URL=https://your-big-endpoint/v1
-# BIG_LLM_API_KEY=your-key
-# BIG_LLM_MODEL=your-model
 
 # Optional: Hardware overrides
 MIC_INDEX=-1          # -1 = system default, >=0 = specific device
@@ -149,19 +144,16 @@ All settings are via environment variables (`.env` file). See `.env.example` for
 
 | Variable | Default | Description |
 |---|---|---|
-| `SMALL_LLM_URL` | (required) | OpenAI-compatible API base URL |
-| `SMALL_LLM_API_KEY` | (required) | API key for the small LLM |
-| `SMALL_LLM_MODEL` | (required) | Model ID to use |
+| `LLM_URL` | (required) | OpenAI-compatible API base URL |
+| `LLM_API_KEY` | (required) | API key for the small LLM |
+| `LLM_MODEL` | (required) | Model ID to use |
 | `SEARXNG_URL` | (empty) | Self-hosted SearXNG URL for private search |
 | `WHISPER_MODEL` | `large-v3` | Whisper model for ASR |
 | `KOKORO_VOICE` | `af_heart` | Kokoro TTS voice |
 | `VAD_THRESHOLD` | `0.25` | Voice activity detection sensitivity (RMS) |
 | `VAD_SILENCE_TIMEOUT` | `1.5` | Seconds of silence before processing |
 | `ENABLE_BARGE_IN` | `true` | Allow interrupting Charlie mid-response |
-| `SMALL_LLM_DISABLE_REASONING` | `true` | Disable chain-of-thought for lower latency |
-| `BIG_LLM_URL` | (empty) | Secondary LLM endpoint for automatic failover |
-| `BIG_LLM_API_KEY` | `no-key` | API key for the big LLM |
-| `BIG_LLM_MODEL` | (empty) | Model ID for the big LLM |
+| `LLM_DISABLE_REASONING` | `true` | Disable chain-of-thought for lower latency |
 | `DESKTOP_CONTROL_ENABLED` | `false` | Enable native click/type/invoke/key desktop control |
 | `DESKTOP_OCR_ENABLED` | `true` | OCR fallback tier (needs Tesseract installed) |
 | `VISION_ENABLED` | `false` | Local vision model tier for icon/canvas targets |

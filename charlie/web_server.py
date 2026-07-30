@@ -40,19 +40,33 @@ active_connections: Set[WebSocket] = set()
 # connected browsers.
 ws_sessions: dict[WebSocket, str] = {}
 
-# MCP/plugin registration (mirroring main.py) is real: it can spawn actual
-# subprocesses (MCP servers) and register real tools into the shared
-# registry. That must happen in lifespan()'s startup, not here at import
-# time -- merely importing this module (e.g. from a test) must not have
-# live side effects. mcp_client is populated in lifespan() if enabled;
-# plugin_manager always starts as a bare manager so /api/extensions has one
-# to enable individual plugins into even when PLUGINS_ENABLED is off (Phase
-# 5's per-plugin control works independently of that flag), and lifespan()
-# swaps in the real one when PLUGINS_ENABLED=true.
+# MCP/plugin registration can spawn subprocesses -- never at import time, only in lifespan()/_ensure_mcp_client().
 from charlie.plugins import PluginManager
 
 mcp_client = None
 plugin_manager = PluginManager()
+
+
+def _ensure_mcp_client():
+    """Lazily start this process's own MCP client on first need, not a redundant second one at every launch."""
+    global mcp_client
+    if mcp_client is not None or not config.mcp_enabled:
+        return mcp_client
+    try:
+        from charlie.mcp_client import start_mcp
+
+        mcp_client = start_mcp(config)
+        if mcp_client is None:
+            logger.info("Web MCP subsystem not started (no servers configured)")
+    except Exception as e:
+        logger.warning("Web MCP subsystem failed to initialize: %s", e)
+        mcp_client = None
+    return mcp_client
+
+
+async def _ensure_mcp_client_async():
+    """Runs the lazy MCP start on a thread so it doesn't freeze this process's event loop."""
+    return await asyncio.to_thread(_ensure_mcp_client)
 
 # In-process registry of installed extensions (Phase 5) -- see
 # charlie/extensions/__init__.py's ExtensionManager docstring for the
@@ -150,19 +164,10 @@ pipeline_state: str = "idle"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init EventBus + ZMQ guard + MCP/plugin tools. Shutdown: tear down EventBus."""
+    """Startup: init EventBus + ZMQ guard + plugin tools. MCP starts lazily,
+    see _ensure_mcp_client(). Shutdown: tear down EventBus."""
     # --- startup ---
-    global event_bus, mcp_client, plugin_manager
-    if config.mcp_enabled:
-        try:
-            from charlie.mcp_client import start_mcp
-
-            mcp_client = start_mcp(config)
-            if mcp_client is None:
-                logger.info("Web MCP subsystem not started (no servers configured)")
-        except Exception as e:
-            logger.warning("Web MCP subsystem failed to initialize: %s", e)
-            mcp_client = None
+    global event_bus, plugin_manager
     if config.plugins_enabled:
         try:
             from charlie.tools import register_plugin_tools
@@ -550,6 +555,7 @@ async def get_mcp_tools():
 
         if not config.mcp_enabled:
             return {"tools": []}
+        await _ensure_mcp_client_async()
         defs = [
             d for d in registry.get_tool_definitions()
             if d.get("name", "").startswith("mcp_")
@@ -567,6 +573,8 @@ async def get_mcp_status():
         from charlie.tools import registry
 
         enabled = config.mcp_enabled
+        if enabled:
+            await _ensure_mcp_client_async()
         connected = enabled and any(
             d.get("name", "").startswith("mcp_")
             for d in registry.get_tool_definitions()
@@ -668,6 +676,8 @@ async def enable_extension(name: str):
     if ext is None:
         return {"status": "error", "message": f"Unknown extension '{name}'"}
 
+    if ext.kind == "mcp":
+        await _ensure_mcp_client_async()
     if ext.kind == "mcp" and mcp_client is not None:
         tool_names = mcp_client.enable_server(registry, name)
     elif ext.kind == "plugin":

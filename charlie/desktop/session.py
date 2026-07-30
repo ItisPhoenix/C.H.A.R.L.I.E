@@ -7,10 +7,10 @@ input arrives.
 
 Limitation: pyautogui's own synthetic input also bumps GetLastInputInfo's
 timestamp on Windows, so user_idle_seconds() alone cannot tell "the user
-just moved the mouse" apart from "our own automation just moved it." A
-later task must have the automation loop record its own last-action tick
-and compare a fresh _last_input_tick_ms() read against it to detect real
-external input; this module only provides the raw building blocks.
+just moved the mouse" apart from "our own automation just moved it."
+external_input_since() compares a fresh _last_input_tick_ms() read against
+the automation loop's own last-action tick (charlie.desktop.actions.
+last_action_tick_ms()) to detect real external input.
 
 No import guard here: charlie.desktop is Windows-only (see __init__.py's
 DESKTOP_AVAILABLE), and ctypes.windll is only touched inside function
@@ -47,6 +47,15 @@ def _now_tick_ms() -> int:
 
 def user_idle_seconds() -> float:
     return max(0.0, (_now_tick_ms() - _last_input_tick_ms()) / 1000.0)
+
+
+def external_input_since(tick_ms: int) -> bool:
+    """True if real user input landed after `tick_ms` (an automation
+    action's own last-recorded tick, from charlie.desktop.actions.
+    last_action_tick_ms()). Distinguishes the user's own mouse/keyboard from
+    pyautogui's synthetic input, which also bumps GetLastInputInfo -- see the
+    module docstring."""
+    return _last_input_tick_ms() > tick_ms
 
 
 def acquire_desktop(owner_id: str) -> bool:

@@ -288,7 +288,7 @@ class TestConfig:
 
     def test_config_loads(self):
         from charlie.config import config
-        assert hasattr(config, "small_llm_url")
+        assert hasattr(config, "llm_url")
         assert hasattr(config, "charlie_host")
         assert hasattr(config, "charlie_port")
 

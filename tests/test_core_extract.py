@@ -12,17 +12,14 @@ from charlie.core import Brain
 def _make_brain(use_native_tools: bool) -> Brain:
     """Build a Brain stub with the desired tool-calling mode."""
     cfg = MagicMock()
-    cfg.small_llm_url = "https://example.com/v1"
-    cfg.small_llm_key = "test-key"
-    cfg.small_llm_model = "test-model"
+    cfg.llm_url = "https://example.com/v1"
+    cfg.llm_key = "test-key"
+    cfg.llm_model = "test-model"
     cfg.soul = "You are a test assistant."
     cfg.memory_file = "/dev/null"
     cfg.user_file = "/dev/null"
     cfg.opinions_file = "/dev/null"
     cfg.prompt_memory_max = 2200
-    cfg.big_llm_url = ""
-    cfg.big_llm_key = "no-key"
-    cfg.big_llm_model = ""
     cfg.native_tool_calling = use_native_tools
     cfg.llm_disable_reasoning = True
     cfg.iteration_budget_max = 12
@@ -39,7 +36,6 @@ def _make_brain(use_native_tools: bool) -> Brain:
     brain._stable_tier = ""
     brain._context_tier = ""
     brain._installed_skill_blocks = {}
-    brain._big_client = None
     brain.on_thought_callback = None
     brain.session_store = None
     brain.memory_store = None

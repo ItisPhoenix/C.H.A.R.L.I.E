@@ -16,6 +16,7 @@ from uuid import uuid4
 import httpx
 
 from charlie.budget import IterationBudget
+from charlie.known_apps import APP_REGISTRY as _APP_REGISTRY
 from charlie.streaming import (
     FollowupStreamState,
     TextStreamFilter,
@@ -24,7 +25,7 @@ from charlie.streaming import (
     stream_followup_content,
 )
 from charlie.text_utils import format_app_list
-from charlie.tools import get_path_gate_reason, is_shell_command_gated, pop_pending_vision_image
+from charlie.tools import is_shell_command_gated, pop_pending_vision_image
 from charlie.tools import registry as tool_registry
 from charlie.utils import build_auth_headers, make_id
 
@@ -54,15 +55,9 @@ _DESKTOP_CONTROL_TOOLS = frozenset({
 _DESKTOP_COM_TOOLS = _DESKTOP_CONTROL_TOOLS | frozenset(
     {"desktop_observe", "desktop_read_screen", "desktop_screenshot"}
 )
-# Voice/text phrase to revoke a session-long desktop-control arm early.
-_DESKTOP_DISARM_RE = re.compile(
-    r"\b(stop|disable|revoke|disarm)\b.{0,20}\bdesktop\b|\bdesktop\b.{0,20}\b(stop|disable|revoke|disarm)\b",
-    re.IGNORECASE,
-)
 # Screen-content questions must always be answered from a fresh observation,
 # never from history -- the model has shown it will otherwise repeat an old
-# answer verbatim instead of re-observing (see core.py:_desktop_gate_reason
-# neighbourhood for the related arm/confirm design).
+# answer verbatim instead of re-observing.
 _SCREEN_QUERY_RE = re.compile(
     r"\bwhat'?s (on|happening on) (my |the )?screen\b"
     r"|\bwhat (do|can) you see\b"
@@ -385,80 +380,28 @@ def _is_probable_domain(text: str) -> bool:
     return ext.isalpha() and 2 <= len(ext) <= 6
 
 
-# Known popular websites (whitelisted so users don't need to say .com/.org)
-_POPULAR_WEBSITES = {
-    "instagram": "https://instagram.com",
-    "facebook": "https://facebook.com",
-    "twitter": "https://x.com",
-    "x": "https://x.com",
-    "youtube": "https://youtube.com",
-    "github": "https://github.com",
-    "google": "https://google.com",
-    "gmail": "https://mail.google.com",
-    "reddit": "https://reddit.com",
-    "wikipedia": "https://wikipedia.org",
-    "netflix": "https://netflix.com",
-    "amazon": "https://amazon.com",
-}
-
-# Known app mappings for closing (Windows process name mapping)
+# Derived from the single app registry (charlie/known_apps.py) instead of
+# three separately-maintained dicts -- see that module for the source data.
 _CLOSE_APP_MAP = {
-    "chrome": "chrome.exe",
-    "google chrome": "chrome.exe",
-    "browser": "chrome.exe",
-    "firefox": "firefox.exe",
-    "edge": "msedge.exe",
-    "microsoft edge": "msedge.exe",
-    "notepad": "notepad.exe",
-    "calculator": "calc.exe",
-    "calc": "calc.exe",
-    "spotify": "spotify.exe",
-    "discord": "discord.exe",
-    "slack": "slack.exe",
-    "vs code": "code.exe",
-    "vscode": "code.exe",
-    "code": "code.exe",
-    "terminal": "WindowsTerminal.exe",
-    "powershell": "powershell.exe",
-    "cmd": "cmd.exe",
-    "command prompt": "cmd.exe",
-    "paint": "mspaint.exe",
-    "mspaint": "mspaint.exe",
-    "task manager": "taskmgr.exe",
-    "taskmgr": "taskmgr.exe",
-    "word": "winword.exe",
-    "excel": "excel.exe",
+    name: entry.close_process
+    for name, entry in _APP_REGISTRY.items()
+    if entry.close_process
 }
+_OPEN_APP_MAP = {name: entry.open_cmd for name, entry in _APP_REGISTRY.items()}
 
-# Known app mappings for opening (Windows execution commands or URLs)
-_OPEN_APP_MAP = {
-    "chrome": "chrome",
-    "google chrome": "chrome",
-    "browser": "chrome",
-    "firefox": "firefox",
-    "edge": "msedge",
-    "microsoft edge": "msedge",
-    "notepad": "notepad",
-    "calculator": "calc",
-    "calc": "calc",
-    "spotify": "spotify",
-    "discord": "discord",
-    "slack": "slack",
-    "vs code": "code",
-    "vscode": "code",
-    "code": "code",
-    "terminal": "wt",
-    "powershell": "powershell",
-    "cmd": "cmd",
-    "command prompt": "cmd",
-    "paint": "mspaint",
-    "mspaint": "mspaint",
-    "task manager": "taskmgr",
-    "taskmgr": "taskmgr",
-    "word": "winword",
-    "excel": "excel",
-    **_POPULAR_WEBSITES,
-}
+
+def _is_process_running(process_name: str) -> bool:
+    """True if a process named `process_name` (e.g. "notepad.exe") is currently running."""
+    import psutil
+
+    target = process_name.lower()
+    for proc in psutil.process_iter(["name"]):
+        try:
+            if (proc.info["name"] or "").lower() == target:
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return False
 
 
 def _detect_close_app(query: str) -> Optional[str]:
@@ -566,8 +509,18 @@ def _detect_close_app(query: str) -> Optional[str]:
     return " ".join(parts)
 
 
-def _detect_open_app(query: str) -> Optional[str]:
-    """Detect if the user wants to open one or more known apps or websites. Returns status message or None."""
+def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
+    """Detect if the user wants to open one or more known apps or websites.
+
+    Returns None if no app-open intent is detected at all (falls through to
+    the LLM). Otherwise returns (status_message, remaining_instruction):
+    remaining_instruction is None when the query was open-only (turn ends
+    here), or the leftover text past the matched app name(s) when the query
+    was compound (e.g. "open notepad and write X") -- the app(s) still get
+    opened deterministically as a side effect here, but the caller hands
+    remaining_instruction to the LLM instead of bypassing the fast-path
+    entirely, so the model isn't burning tool calls re-discovering how to
+    open an app that's already open."""
     q = query.lower().strip()
     q_clean = re.sub(
         r"^(?:hey\s+charlie,?|ok\s+charlie,?|charlie,?)?\s*", "", q
@@ -619,19 +572,23 @@ def _detect_open_app(query: str) -> Optional[str]:
     if not matched_apps:
         return None
 
-    # Check if remaining_text contains non-trivial words (conjunctions are allowed)
+    # Check if remaining_text contains non-trivial words (conjunctions are allowed).
+    # Non-trivial no longer bypasses the fast-path entirely -- the app(s) still get
+    # opened deterministically below, and the leftover instruction (the uncleaned
+    # remaining_text, which keeps real words like "write" that cleaned_remaining
+    # strips for this check only) is handed back for the caller to continue with.
     cleaned_remaining = re.sub(
         r"\b(and|or|then|please|also|to|write|save|type)\b|\.exe\b|[.,;&!?]",
         " ",
         remaining_text,
         flags=re.IGNORECASE
     ).strip()
-    if cleaned_remaining:
+    leftover_instruction = remaining_text.strip() if cleaned_remaining else None
+    if leftover_instruction:
         logger.info(
-            "Extra instructions detected in open app query: '%s', bypassing fast-path",
-            cleaned_remaining
+            "Compound open-app query: '%s' -- opening app(s) now, continuing with: '%s'",
+            query, leftover_instruction
         )
-        return None
     import subprocess
     import sys
 
@@ -642,12 +599,22 @@ def _detect_open_app(query: str) -> Optional[str]:
         launched_commands,
     )
     if sys.platform != "win32":
-        return f"App launching is only supported on Windows (detected {sys.platform})."
+        return (f"App launching is only supported on Windows (detected {sys.platform}).", leftover_instruction)
 
     success_apps = []
+    already_open_apps = []
     failed_apps = []
 
     for app, cmd in zip(matched_apps, launched_commands):
+        # Already-running local apps get focused via the native tool, not relaunched.
+        process_name = _CLOSE_APP_MAP.get(app)
+        if process_name and _is_process_running(process_name):
+            from charlie.desktop.windows import focus_window
+
+            focus_window(process_name.removesuffix(".exe"))
+            already_open_apps.append(app)
+            continue
+
         launched = False
         last_error = None
         # Strategy 1: `start "" <cmd>` (handles apps + URLs)
@@ -676,16 +643,20 @@ def _detect_open_app(query: str) -> Optional[str]:
             logger.error("Failed to launch %s (%s): %s", app, cmd, last_error)
             failed_apps.append((app, error_detail))
 
-    if not success_apps:
+    if not success_apps and not already_open_apps:
         failed_names = [f"{name} ({err})" for name, err in failed_apps]
-        return f"I could not open {', '.join(failed_names)}."
+        return (f"I could not open {', '.join(failed_names)}.", leftover_instruction)
 
     # Build response message
-    msg = f"I've opened {format_app_list(success_apps)} for you."
+    msg_parts = []
+    if success_apps:
+        msg_parts.append(f"I've opened {format_app_list(success_apps)} for you.")
+    if already_open_apps:
+        msg_parts.append(f"{format_app_list(already_open_apps)} was already open -- switched to it.")
     if failed_apps:
         failed_names = [name for name, _ in failed_apps]
-        msg += f" (Failed to open: {format_app_list(failed_names)})"
-    return msg
+        msg_parts.append(f"(Failed to open: {format_app_list(failed_names)})")
+    return (" ".join(msg_parts), leftover_instruction)
 
 
 def strip_internal_reasoning(text: str) -> str:
@@ -877,9 +848,9 @@ async def _generate_summary(
     try:
         import httpx
 
-        url = getattr(config, "small_llm_url", "")
-        key = getattr(config, "small_llm_key", "no-key")
-        model = getattr(config, "small_llm_model", "")
+        url = getattr(config, "llm_url", "")
+        key = getattr(config, "llm_key", "no-key")
+        model = getattr(config, "llm_model", "")
 
         if not url:
             return f"{len(messages)} earlier messages omitted due to length."
@@ -966,8 +937,8 @@ _DEFAULT_OUTPUT_RULES = (
 _SKILLS_INDEX = (
     "SKILLS INDEX -- scan before acting. If a skill matches user intent, use its tool sequence.\n"
     "\n"
-    "- app-launcher: Open/start applications by name. Use shell_execute with OS-specific start command.\n"
-    "- system-volume: Query or adjust system volume. Use shell_execute with platform audio commands.\n"
+    "- app-launcher: Open/start applications by name. Prefer native desktop_* tools; shell_execute is a last resort.\n"
+    "- system-volume: Use system_control for up/down/mute; shell_execute only to set an exact level.\n"
     "- web-search: Search the internet for live/external data. Use web_search tool.\n"
     "- memory-manager: Remember user preferences or recall what you know about them. Use memory tool.\n"
     "- session-history: Search past conversations. Use session_search tool.\n"
@@ -1331,24 +1302,30 @@ class Brain:
         on_tool_call: Optional[callable] = None,
         on_tool_result: Optional[callable] = None,
         on_thinking_update: Optional[callable] = None,
+        register_panic_hotkey: bool = True,
+        approval_timeout: Optional[float] = _TOOL_APPROVAL_TIMEOUT_SEC,
+        is_background: bool = False,
     ):
         self.config = config
         self.on_thought_callback = on_thought_callback
+        self._is_background = is_background
         self.session_store = session_store
         self.memory_store = memory_store
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
         self.on_thinking_update = on_thinking_update
-        small_headers: Dict[str, str] = build_auth_headers(config.small_llm_key)
+        self._approval_timeout = approval_timeout
+        llm_headers: Dict[str, str] = build_auth_headers(config.llm_key)
         self.client = httpx.AsyncClient(
-            base_url=config.small_llm_url,
-            headers=small_headers,
+            base_url=config.llm_url,
+            headers=llm_headers,
             timeout=60.0,
         )
         self._chat_generation = 0
-        self._desktop_armed: bool = False
+        # Per-turn halt; module-global _HALT is reserved for the physical panic hotkey.
+        self._turn_halted: bool = False
         self._panic_hotkey_listener = None
-        if self.config.desktop_control_enabled and _DESKTOP_AVAILABLE:
+        if register_panic_hotkey and self.config.desktop_control_enabled and _DESKTOP_AVAILABLE:
             try:
                 from pynput import keyboard as _pynput_keyboard
                 hotkey_str = "+".join(
@@ -1373,7 +1350,7 @@ class Brain:
 
         # --- Hybrid tool calling: detect native support ---
         # Auto-detect local model servers -- they ignore the native tools payload
-        _url = config.small_llm_url.lower()
+        _url = config.llm_url.lower()
         _is_local = any(h in _url for h in ("127.0.0.1", "localhost"))
         if _is_local:
             self._use_native_tools = False
@@ -1398,21 +1375,6 @@ class Brain:
         self._context_tier: str = _build_context_tier(
             memory_content, user_content, opinions_content, self._installed_skill_blocks
         )
-
-        # --- Fallback LLM client for provider failover ---
-        self._big_client = None
-        if (
-            config.big_llm_url
-            and config.big_llm_key
-            and config.big_llm_key not in ("no-key", "no_key")
-        ):
-            self._big_client = httpx.AsyncClient(
-                base_url=config.big_llm_url,
-                headers={"Authorization": f"Bearer {config.big_llm_key}"},
-                timeout=60.0,
-            )
-            self._big_model = config.big_llm_model
-            logger.info("Big LLM configured: %s", config.big_llm_url)
 
         # --- Vision LLM client (separate, opt-in endpoint for desktop_screenshot) ---
         self._vision_client = None
@@ -1545,9 +1507,9 @@ class Brain:
             current_len = sum(len(e) for e in entries) + (len(entries) - 1 if entries else 0)
             if current_len / max_chars < 0.8:
                 continue
-            # Skip if no small LLM URL configured for consolidation
-            if not self.config.small_llm_url:
-                logger.debug("Skipping consolidation: no small LLM URL configured")
+            # Skip if no LLM URL configured for consolidation
+            if not self.config.llm_url:
+                logger.debug("Skipping consolidation: no LLM URL configured")
                 continue
 
             prompt = (
@@ -1565,16 +1527,16 @@ class Brain:
             )
             try:
                 import httpx as _httpx
-                small_headers = build_auth_headers(self.config.small_llm_key)
+                llm_headers = build_auth_headers(self.config.llm_key)
                 payload = {
-                    "model": self.config.small_llm_model,
+                    "model": self.config.llm_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.1,
                     "max_tokens": max_chars,
                 }
                 async with _httpx.AsyncClient(
-                    base_url=self.config.small_llm_url,
-                    headers=small_headers,
+                    base_url=self.config.llm_url,
+                    headers=llm_headers,
                     timeout=90.0,
                 ) as client:
                     resp = await client.post("chat/completions", json=payload)
@@ -1599,13 +1561,9 @@ class Brain:
         self.cancel_chat()
         logger.warning("Desktop panic hotkey triggered -- halting desktop control and cancelling chat.")
 
-    def _desktop_gate_reason(self) -> Optional[str]:
-        """Arm once per session: first approval covers every desktop action
-        until you explicitly disarm it (say e.g. "stop controlling my
-        desktop") or the session restarts."""
-        if self._desktop_armed:
-            return None
-        return "take control of your desktop"
+    def _is_desktop_halted(self) -> bool:
+        """True if the physical panic hotkey or this instance's own turn-halt tripped."""
+        return (desktop_actions is not None and desktop_actions.is_halted()) or self._turn_halted
 
     async def request_tool_approval(self, tool_name: str, arguments: Dict[str, Any], reason: str) -> bool:
         """Ask the user to approve/decline a gated tool call and wait for the
@@ -1614,8 +1572,13 @@ class Brain:
         dashboard is connected, falls back to voice: speaks the prompt via
         `on_thought_callback` and waits for main.py's speech handler to route
         the next transcript here as a yes/no (see get_active_voice_approval).
-        Times out to declined (safe default) after _TOOL_APPROVAL_TIMEOUT_SEC,
-        matching charlie.recovery.request_recovery_approval's fail-safe stance.
+        Times out to declined (safe default) after self._approval_timeout seconds
+        (matching charlie.recovery.request_recovery_approval's fail-safe stance),
+        or parks indefinitely if approval_timeout=None (background tasks). Background
+        Brains omit session_id from the broadcast -- the dashboard filters
+        tool_approval_request by "is this the session I'm currently viewing,"
+        and a background task has no chat session tab open at all, so tagging
+        it with the foreground's active session would get it silently dropped.
         """
         global _active_voice_approval_id
         from charlie import recovery
@@ -1637,7 +1600,7 @@ class Brain:
                         "tool_name": tool_name,
                         "arguments": arguments,
                         "reason": reason,
-                        "session_id": recovery.get_active_session_id(),
+                        "session_id": None if self._is_background else recovery.get_active_session_id(),
                     },
                 )
             elif self.on_thought_callback:
@@ -1648,7 +1611,7 @@ class Brain:
                 return False
 
             try:
-                return await asyncio.wait_for(fut, timeout=_TOOL_APPROVAL_TIMEOUT_SEC)
+                return await asyncio.wait_for(fut, timeout=self._approval_timeout)
             except asyncio.TimeoutError:
                 logger.warning("Tool approval %s timed out, declining", request_id)
                 return False
@@ -1660,8 +1623,6 @@ class Brain:
     async def close(self) -> None:
         """Close the HTTP client."""
         await self.client.aclose()
-        if self._big_client:
-            await self._big_client.aclose()
         if self._vision_client:
             await self._vision_client.aclose()
         if self._panic_hotkey_listener is not None:
@@ -1672,49 +1633,19 @@ class Brain:
         payload: Dict[str, Any],
         generation: int,
     ) -> tuple:
-        """Stream a chat completion with automatic fallback to secondary provider.
-
-        Returns (accumulated_text, tool_calls_list, fallback_used).
-        """
-        client = self.client
-        model = self.config.small_llm_model
-
-        try:
-            async with client.stream(
-                "POST", "chat/completions", json=payload
-            ) as response:
-                response.raise_for_status()
-                accumulated, tc_by_index, cancelled = await parse_sse_stream(
-                    response, generation, lambda: self._chat_generation
-                )
-                if cancelled:
-                    logger.info("Chat generation cancelled (barge-in)")
-                    return ("", [], False)
-                tool_calls = collect_tool_calls(tc_by_index)
-                return (accumulated, tool_calls, False)
-
-        except Exception as exc:
-            logger.warning("Primary LLM stream error: %s", exc)
-            if not self._big_client:
-                raise
-            client = self._big_client
-            model = self._big_model
-            logger.info(
-                "Falling back to big LLM: %s", self.config.big_llm_url
-            )
-
-        # Fallback attempt
-        payload["model"] = model
-        async with client.stream("POST", "chat/completions", json=payload) as response:
+        """Stream a chat completion. Returns (accumulated_text, tool_calls_list)."""
+        async with self.client.stream(
+            "POST", "chat/completions", json=payload
+        ) as response:
             response.raise_for_status()
             accumulated, tc_by_index, cancelled = await parse_sse_stream(
                 response, generation, lambda: self._chat_generation
             )
             if cancelled:
                 logger.info("Chat generation cancelled (barge-in)")
-                return ("", [], True)
+                return ("", [])
             tool_calls = collect_tool_calls(tc_by_index)
-            return (accumulated, tool_calls, True)
+            return (accumulated, tool_calls)
 
     def _build_payload(
         self,
@@ -1723,7 +1654,7 @@ class Brain:
     ) -> Dict[str, Any]:
         """Build the API payload for chat completions."""
         payload: Dict[str, Any] = {
-            "model": self.config.small_llm_model,
+            "model": self.config.llm_model,
             "messages": messages,
             "temperature": _LLM_TEMPERATURE,
             "stream": True,
@@ -1740,16 +1671,14 @@ class Brain:
         return payload
 
     def _select_followup_route(
-        self, payload: Dict[str, Any], used_fallback: bool
+        self, payload: Dict[str, Any]
     ) -> Tuple[httpx.AsyncClient, str, bool]:
         """Pick which endpoint serves a follow-up completion: vision (if this
-        payload carries an image block from desktop_screenshot), big (if
-        already using it), else small. Returns (client, model, is_vision)."""
+        payload carries an image block from desktop_screenshot), else small.
+        Returns (client, model, is_vision)."""
         if self._vision_client is not None and _payload_is_vision(payload):
             return self._vision_client, self._vision_model, True
-        if used_fallback and self._big_client:
-            return self._big_client, self._big_model, False
-        return self.client, self.config.small_llm_model, False
+        return self.client, self.config.llm_model, False
 
     async def _stream_followup_once(
         self,
@@ -1823,6 +1752,9 @@ class Brain:
 
         generation = self._chat_generation
         turn_id = str(uuid4())
+        # Preserved for history/memory even if a fast-path below rebinds user_input
+        # to a compound instruction's leftover text (see the open-app fast-path).
+        original_user_input = user_input
         fast = _answer_time_date(user_input)
         if fast is not None:
             logger.info("Fast-path time/date: %s -> %s", user_input, fast)
@@ -1882,12 +1814,6 @@ class Brain:
                 logger.warning("Failed to update verbosity: %s", ve)
 
 
-        # --- Fast-path: disarm desktop control (deterministic, no LLM needed) ---
-        if self._desktop_armed and _DESKTOP_DISARM_RE.search(user_input):
-            self._desktop_armed = False
-            yield "Desktop control disarmed. I'll ask again before touching your mouse or keyboard."
-            return
-
         # --- Fast-path: close app (deterministic, no LLM needed) ---
         close_res = await asyncio.to_thread(_detect_close_app, user_input)
         if close_res is not None:
@@ -1898,9 +1824,21 @@ class Brain:
         # --- Fast-path: open app (deterministic, no LLM needed) ---
         open_res = await asyncio.to_thread(_detect_open_app, user_input)
         if open_res is not None:
-            logger.info("Fast-path open app result: %s -> %s", user_input, open_res)
-            yield open_res
-            return
+            open_msg, open_remaining = open_res
+            if open_remaining is None:
+                logger.info("Fast-path open app result: %s -> %s", user_input, open_msg)
+                yield open_msg
+                return
+            # Compound instruction: the app(s) are already open (side effect ran
+            # inside _detect_open_app). Stream the confirmation now, then keep
+            # going with just the leftover text instead of bypassing the fast-path
+            # entirely -- the LLM never has to re-discover how to open the app.
+            logger.info(
+                "Fast-path partial open: %s -> opened=%s, continuing with: %s",
+                user_input, open_msg, open_remaining,
+            )
+            yield open_msg + " "
+            user_input = open_remaining
 
         search_results = (
             "" if skip_pre_search else await asyncio.to_thread(_pre_search, user_input)
@@ -2018,11 +1956,12 @@ class Brain:
         messages.append({"role": "user", "content": effective_input})
         messages = await _prep_messages(messages, self.config)
 
-        # Save user message to history
-        self.history.append({"role": "user", "content": user_input})
+        # Save user message to history -- the full original utterance, even if a
+        # fast-path above rebound user_input to a compound instruction's leftover.
+        self.history.append({"role": "user", "content": original_user_input})
 
         payload = self._build_payload(messages, skip_tools=skip_tools)
-        accumulated, tool_calls, used_fallback = await self._stream_completion(
+        accumulated, tool_calls = await self._stream_completion(
             payload, generation
         )
 
@@ -2086,37 +2025,26 @@ class Brain:
             if self.on_tool_call:
                 self.on_tool_call(call["name"], call["arguments"])
 
-            # Gated tools (destructive shell keywords, sensitive file paths,
-            # desktop control) require explicit approve/decline before _run()
-            # is ever called -- see charlie.tools.is_shell_command_gated /
-            # get_path_gate_reason, Brain._desktop_gate_reason, and
-            # Brain.request_tool_approval.
+            # Only destructive shell keywords require explicit approve/decline
+            # before _run() is ever called -- see charlie.tools.is_shell_command_gated
+            # and Brain.request_tool_approval. File paths and desktop control run
+            # autonomously (hard-blocked shell keywords and the panic hotkey/auto-halt
+            # remain the only stops for those).
             gate_reason: Optional[str] = None
             if tool_name == "shell_execute":
                 gate_reason = is_shell_command_gated(call["arguments"].get("command", ""))
-            elif tool_name in ("file_read", "file_write"):
-                gate_reason = get_path_gate_reason(call["arguments"].get("path", ""))
-            elif tool_name in _DESKTOP_CONTROL_TOOLS:
-                gate_reason = self._desktop_gate_reason()
 
             approved = True
             if gate_reason:
                 approved = await self.request_tool_approval(tool_name, call["arguments"], gate_reason)
-                if approved and tool_name in _DESKTOP_CONTROL_TOOLS:
-                    self._desktop_armed = True
 
             if gate_reason and not approved:
                 r = f"Error: Command declined by user (required approval: {gate_reason})."
-            elif (
-                tool_name in _DESKTOP_CONTROL_TOOLS
-                and desktop_actions is not None
-                and desktop_actions.is_halted()
-            ):
+            elif tool_name in _DESKTOP_CONTROL_TOOLS and self._is_desktop_halted():
                 r = "Error: Desktop control is halted (panic or repeated failure). Say 'continue' to resume."
             elif tool_name in _DESKTOP_CONTROL_TOOLS and _desktop_action_count[0] >= self.config.desktop_max_actions:
                 r = f"Error: Desktop action limit reached ({self.config.desktop_max_actions} for this turn)."
-                if desktop_actions is not None:
-                    desktop_actions.halt()
+                self._turn_halted = True
             else:
                 if tool_name in _DESKTOP_CONTROL_TOOLS:
                     _desktop_action_count[0] += 1
@@ -2171,8 +2099,8 @@ class Brain:
             if tool_name in _DESKTOP_CONTROL_TOOLS:
                 if r.startswith("Error"):
                     _desktop_fail_counts[ck] = _desktop_fail_counts.get(ck, 0) + 1
-                    if _desktop_fail_counts[ck] >= 2 and desktop_actions is not None:
-                        desktop_actions.halt()
+                    if _desktop_fail_counts[ck] >= 2:
+                        self._turn_halted = True
                         logger.warning(
                             "Desktop action %s failed twice consecutively -- auto-halting.", tool_name
                         )
@@ -2210,10 +2138,12 @@ class Brain:
                     generation,
                 )
                 break
-            if desktop_actions is not None and desktop_actions.is_halted():
+            if self._is_desktop_halted():
                 logger.info("Desktop control halted -- stopping tool loop.")
                 yield "Desktop control halted (panic hotkey or repeated failure). Stopping here."
-                desktop_actions.clear_halt()
+                if desktop_actions is not None and desktop_actions.is_halted():
+                    desktop_actions.clear_halt()
+                self._turn_halted = False
                 break
             if not tool_calls:
                 break
@@ -2278,7 +2208,7 @@ class Brain:
 
             followup_payload = self._build_payload(messages)
             followup_client, followup_model, is_vision = self._select_followup_route(
-                followup_payload, used_fallback
+                followup_payload
             )
 
             state = FollowupStreamState()
@@ -2288,30 +2218,10 @@ class Brain:
                 ):
                     yield filtered
             except Exception as tool_exc:
-                if is_vision:
-                    # Vision is a separate, feature-flagged tier -- an image
-                    # payload must never retry against the text-only big/small
-                    # clients, which would 400 on the image_url content block.
-                    logger.warning("Vision follow-up LLM error: %s", tool_exc)
-                    break
-                elif self._big_client:
-                    logger.warning(
-                        "Follow-up primary LLM error: %s, falling back", tool_exc
-                    )
-                    followup_client = self._big_client
-                    followup_model = self._big_model
-                    state = FollowupStreamState()
-                    try:
-                        async for filtered in self._stream_followup_once(
-                            followup_client, followup_model, followup_payload, generation, state
-                        ):
-                            yield filtered
-                    except Exception as fb_exc:
-                        logger.warning("Follow-up fallback LLM also failed: %s", fb_exc)
-                        break
-                else:
-                    logger.warning("Tool follow-up LLM error: %s", tool_exc)
-                    break
+                logger.warning(
+                    "%s follow-up LLM error: %s", "Vision" if is_vision else "Tool", tool_exc
+                )
+                break
 
             if state.cancelled:
                 logger.info("Tool follow-up cancelled (barge-in)")
@@ -2319,30 +2229,6 @@ class Brain:
 
             accumulated = state.accumulated
             tool_calls = collect_tool_calls(state.tc_by_index)
-            # If follow-up returned empty and we haven't tried fallback yet, retry
-            if (
-                not accumulated
-                and not tool_calls
-                and not used_fallback
-                and not is_vision
-                and self._big_client
-            ):
-                logger.warning("Follow-up returned empty, retrying with fallback LLM")
-                used_fallback = True
-                followup_client = self._big_client
-                followup_model = self._big_model
-                state = FollowupStreamState()
-                try:
-                    async for filtered in self._stream_followup_once(
-                        followup_client, followup_model, followup_payload, generation, state
-                    ):
-                        yield filtered
-                except Exception as fb_exc:
-                    logger.warning("Follow-up fallback retry also failed: %s", fb_exc)
-                if state.cancelled:
-                    return
-                accumulated = state.accumulated
-                tool_calls = collect_tool_calls(state.tc_by_index)
             # Save final follow-up response to history (after tool loop)
             if accumulated:
                 hist_filter = TextStreamFilter()
@@ -2391,9 +2277,8 @@ class Brain:
                 f"{m['role']}: {m['content'][:200]}" for m in recent
             )
 
-            # Use big LLM for reflection if available, else small
-            client = self._big_client or self.client
-            model = getattr(self, "_big_model", None) or self.config.small_llm_model
+            client = self.client
+            model = self.config.llm_model
 
             prompt = (
                 "Review this recent conversation and extract key facts. "

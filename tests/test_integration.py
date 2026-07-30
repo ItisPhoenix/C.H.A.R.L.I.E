@@ -121,9 +121,9 @@ class TestConfigBrainIntegration:
         from charlie.core import Brain
 
         cfg = Config(
-            small_llm_url="http://localhost:11434",
-            small_llm_key="no-key",
-            small_llm_model="test",
+            llm_url="http://localhost:11434",
+            llm_key="no-key",
+            llm_model="test",
             soul="Custom soul text",
         )
         brain = Brain(cfg)
@@ -134,38 +134,22 @@ class TestConfigBrainIntegration:
         from charlie.core import Brain
 
         cfg = Config(
-            small_llm_url="http://localhost:11434",
-            small_llm_key="no-key",
-            small_llm_model="test",
+            llm_url="http://localhost:11434",
+            llm_key="no-key",
+            llm_model="test",
             iteration_budget_max=5,
         )
         brain = Brain(cfg)
         assert brain._history_max_turns == 5
-
-    def test_brain_small_llm_key_guard(self):
-        """Brain should not create big client when key is no-key."""
-        from charlie.config import Config
-        from charlie.core import Brain
-
-        cfg = Config(
-            small_llm_url="http://127.0.0.1:11434",
-            small_llm_key="test-key",
-            small_llm_model="test",
-            big_llm_url="http://127.0.0.1:11435",
-            big_llm_key="no-key",
-            big_llm_model="fast",
-        )
-        brain = Brain(cfg)
-        assert brain._big_client is None
 
     def test_brain_local_model_uses_text_tools(self):
         from charlie.config import Config
         from charlie.core import Brain
 
         cfg = Config(
-            small_llm_url="http://localhost:11434",
-            small_llm_key="test-key",
-            small_llm_model="test",
+            llm_url="http://localhost:11434",
+            llm_key="test-key",
+            llm_model="test",
         )
         brain = Brain(cfg)
         assert brain._use_native_tools is False

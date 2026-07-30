@@ -1,5 +1,4 @@
 import enum
-import json
 import logging
 import os
 import re
@@ -138,64 +137,6 @@ def run_command_safe(command: str) -> subprocess.CompletedProcess:
         text=True,
         timeout=15.0
     )
-
-async def query_big_llm(brain: Any, command: str, failure: Dict[str, Any]) -> Optional[str]:
-    """Queries the fallback LLM to dynamically suggest a command modification."""
-    has_fallback = (
-        brain._big_client
-        and brain.config.big_llm_key
-        and brain.config.big_llm_key not in ("no-key", "no_key")
-    )
-    if not has_fallback:
-        logger.info("Big LLM not configured, skipping LLM recovery")
-        return None
-
-    prompt = (
-        "You are the fallback error recovery engine for Charlie.\n"
-        "A command failed with a runtime exception. Analyze the command and failure details, "
-        "then propose a fixed version of the command that satisfies the original intent without the failure.\n\n"
-        f"Original Command: {command}\n"
-        f"Exception Type: {failure['error_class']}\n"
-        f"Error Message: {failure['message']}\n"
-        f"Failure Classification: {failure['failure_class'].value}\n"
-        f"Current OS: {sys.platform}\n\n"
-        "You MUST return a JSON object with the following schema:\n"
-        "{\n"
-        "    \"fixed_command\": \"the corrected command to run\",\n"
-        "    \"explanation\": \"brief explanation of why the original failed and how this fixes it\"\n"
-        "}\n"
-        "Return ONLY the raw JSON object, no Markdown syntax, no thinking blocks, and no extra text."
-    )
-
-    try:
-        payload = {
-            "model": brain.config.big_llm_model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"}
-        }
-
-        response = await brain._big_client.post(
-            "chat/completions",
-            json=payload,
-            headers={"Authorization": f"Bearer {brain.config.big_llm_key}"}
-        )
-        if response.status_code == 200:
-            res_data = response.json()
-            content = res_data["choices"][0]["message"]["content"].strip()
-            if "{" in content:
-                content = content[content.find("{"):content.rfind("}")+1]
-            data = json.loads(content)
-            fixed_cmd = data.get("fixed_command")
-            logger.info(
-                "Fallback LLM suggested fixed command: %s (Explanation: %s)",
-                fixed_cmd,
-                data.get("explanation")
-            )
-            return fixed_cmd
-    except Exception as exc:
-        logger.exception("Fallback LLM query failed: %s", exc)
-    return None
 
 import asyncio
 
@@ -438,21 +379,8 @@ async def recover_tool(
                 except Exception as strat_exc:
                     logger.warning("Strategy execution failed: %s", strat_exc)
 
-        # Fallback LLM query
-        logger.info("All strategies exhausted. Querying big LLM for recovery command.")
-        fixed_cmd = await query_big_llm(brain, command, failure)
-        if fixed_cmd:
-            approval_res = await request_recovery_approval(
-                original_command=command,
-                proposed_command=fixed_cmd,
-                failure_class=failure_class.value,
-                explanation="AI-generated command correction.",
-                source="llm"
-            )
-            if approval_res is not None:
-                if "rejected" not in approval_res.lower() and "error" not in approval_res.lower():
-                    set_cached_resolution(command, failure_class.value, error_msg, fixed_cmd)
-                return approval_res
+        logger.info("All recovery strategies exhausted.")
+        return None
 
 
 class BaseRecoveryStrategy:

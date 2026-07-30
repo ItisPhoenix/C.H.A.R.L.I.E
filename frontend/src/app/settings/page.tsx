@@ -22,16 +22,14 @@ type SaveState = "idle" | "saved" | "error";
 // two-to-a-row so cards stay compact instead of one long vertical list.
 const WIDE_TYPES = new Set(["list"]);
 const WIDE_KEYS = new Set([
-  "SMALL_LLM_URL",
-  "BIG_LLM_URL",
+  "LLM_URL",
   "VISION_LLM_URL",
   "MEMORY_EMBEDDING_URL",
   "SEARXNG_URL",
   "WAKE_WORD_MODEL_PATH",
   "WAKE_WORD_CHIME_PATH",
   "MCP_CONFIG_PATH",
-  "SMALL_LLM_MODEL",
-  "BIG_LLM_MODEL",
+  "LLM_MODEL",
   "MEMORY_EMBEDDING_MODEL",
 ]);
 

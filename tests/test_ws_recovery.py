@@ -70,7 +70,7 @@ async def test_session_isolation_and_routing():
     assert "thinking" in b_sent
 
 @pytest.mark.asyncio
-async def test_recovery_approval_gate():
+async def test_recovery_approval_gate(monkeypatch):
     """Assert rejected/disconnected recovery never calls shell execution."""
     # 1. Disconnected test
     set_active_ws_count(0)
@@ -102,28 +102,15 @@ async def test_recovery_approval_gate():
 
     asyncio.create_task(simulate_reject())
 
-    # Mock big LLM query to return a replacement command
-    mock_brain = MagicMock()
-    mock_brain.config.big_llm_key = "test-key"
-    mock_brain.config.big_llm_model = "test-model"
-    # mock http post client for LLM query
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {
-        "choices": [
-            {
-                "message": {
-                    "content": '{"fixed_command": "dir c:\\\\", "explanation": "fix"}'
-                }
-            }
-        ]
-    }
-    mock_client = AsyncMock()
-    mock_client.post.return_value = mock_response
-    mock_brain._big_client = mock_client
+    # Mock a recovery-cache hit to return a replacement command (deterministic
+    # path to the approval gate, now that the big-LLM fallback is removed).
+    import charlie.recovery_cache
+    monkeypatch.setattr(
+        charlie.recovery_cache, "get_cached_resolution", lambda *a, **k: "dir c:\\"
+    )
 
     res = await recover_tool(
-        brain=mock_brain,
+        brain=MagicMock(),
         tool_name="shell_execute",
         arguments={"command": "dir_nonexistent"},
         e=FileNotFoundError("[winerror 2] The system cannot find the file specified")

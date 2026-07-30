@@ -72,3 +72,15 @@ def test_user_idle_seconds_past_signed_wraparound_point(monkeypatch):
     monkeypatch.setattr(session, "_last_input_tick_ms", lambda: 3_000_000_000)
     monkeypatch.setattr(session, "_now_tick_ms", lambda: 3_000_005_000)
     assert session.user_idle_seconds() == pytest.approx(5.0)
+
+
+def test_external_input_since_false_for_automations_own_action(monkeypatch):
+    # The task's own click bumped GetLastInputInfo at tick 1000 -- must not read as external.
+    monkeypatch.setattr(session, "_last_input_tick_ms", lambda: 1_000)
+    assert session.external_input_since(1_000) is False
+
+
+def test_external_input_since_true_for_real_input_after_action(monkeypatch):
+    # Real input landed at tick 2000, after the automation's last action at 1000.
+    monkeypatch.setattr(session, "_last_input_tick_ms", lambda: 2_000)
+    assert session.external_input_since(1_000) is True

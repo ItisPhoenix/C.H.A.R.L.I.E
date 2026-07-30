@@ -80,6 +80,16 @@ export interface DesktopFrame {
   receivedAt: number;
 }
 
+export interface BackgroundTask {
+  id: string;
+  text: string;
+  steps: string[];
+  current_step: number;
+  status: "planning" | "awaiting_approval" | "running" | "paused" | "done" | "failed" | "cancelled";
+  flagged_steps: number[];
+  error: string | null;
+}
+
 interface CharlieState {
   connected: boolean;
   systemStatus: SystemStatus;
@@ -127,6 +137,8 @@ interface CharlieState {
   setLatestDesktopFrame: (f: DesktopFrame | null) => void;
   desktopControlEnabled: boolean;
   setDesktopControlEnabled: (enabled: boolean) => void;
+  backgroundTask: BackgroundTask | null;
+  setBackgroundTask: (t: BackgroundTask | null) => void;
 }
 
 export const useCharlieStore = create<CharlieState>((set) => ({
@@ -196,6 +208,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setLatestDesktopFrame: (latestDesktopFrame) => set({ latestDesktopFrame }),
   desktopControlEnabled: false,
   setDesktopControlEnabled: (desktopControlEnabled) => set({ desktopControlEnabled }),
+  backgroundTask: null,
+  setBackgroundTask: (backgroundTask) => set({ backgroundTask }),
 }));
 
 export function hexToRgb(hex: string) {

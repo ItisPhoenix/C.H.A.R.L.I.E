@@ -14,6 +14,10 @@ interface SystemStatus {
 
 interface InsightRailProps {
   systemStatus: SystemStatus | null;
+  onStartBackgroundTask: (text: string) => void;
+  onCancelBackgroundTask: (taskId: string) => void;
+  onApproveBackgroundTask: (taskId: string) => void;
+  onRejectBackgroundTask: (taskId: string) => void;
 }
 
 interface Fact {
@@ -169,6 +173,10 @@ function MemoryGraph({ facts }: { facts: Fact[] }): ReactElement {
 
 export function InsightRail({
   systemStatus,
+  onStartBackgroundTask,
+  onCancelBackgroundTask,
+  onApproveBackgroundTask,
+  onRejectBackgroundTask,
 }: InsightRailProps): ReactElement {
   const [tab, setTab] = useState<Tab>("memory");
   const [facts, setFacts] = useState<Fact[]>([]);
@@ -733,7 +741,7 @@ export function InsightRail({
                                 className="mt-2 pt-2 border-t border-[var(--color-glass-border)] space-y-1.5 text-[10px] font-mono text-[var(--color-text-muted)]"
                               >
                                 <p className="font-semibold text-[var(--color-text-secondary)]">Parameters:</p>
-                                {Object.entries(t.function.parameters.properties).map(([pName, pInfo]: [string, any]) => {
+                                {Object.entries(t.function.parameters.properties).map(([pName, pInfo]: [string, { type: string; description?: string }]) => {
                                   const isRequired = t.function?.parameters?.required?.includes(pName);
                                   return (
                                     <div key={pName} className="flex flex-col bg-[var(--color-glass-bg-2)] p-1.5 rounded border border-[var(--color-glass-border)]">
@@ -769,7 +777,14 @@ export function InsightRail({
           </div>
         )}
 
-        {tab === "desktop" && <DesktopView />}
+        {tab === "desktop" && (
+          <DesktopView
+            onStartBackgroundTask={onStartBackgroundTask}
+            onCancelBackgroundTask={onCancelBackgroundTask}
+            onApproveBackgroundTask={onApproveBackgroundTask}
+            onRejectBackgroundTask={onRejectBackgroundTask}
+          />
+        )}
       </div>
 
       {systemStatus && (

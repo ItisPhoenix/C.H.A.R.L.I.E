@@ -15,9 +15,9 @@ from charlie.tools import config as tools_config
 
 def _vision_config(**overrides):
     fields = dict(
-        small_llm_url="http://localhost:11434",
-        small_llm_key="no-key",
-        small_llm_model="dummy",
+        llm_url="http://localhost:11434",
+        llm_key="no-key",
+        llm_model="dummy",
         vision_enabled=True,
         vision_llm_url="http://localhost:1234/v1",
         vision_llm_key="no-key",

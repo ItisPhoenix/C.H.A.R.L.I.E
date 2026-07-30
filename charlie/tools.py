@@ -38,10 +38,15 @@ CONTENT_MAX_CHARS = 800
 MIN_CLEANED_WORDS = 2
 
 # --- HTTP timeouts (seconds) ---
-SEARXNG_TIMEOUT = 10.0
-EXA_TIMEOUT = 10.0
-TAVILY_TIMEOUT = 10.0
-DDG_TIMEOUT = 8.0
+# Tuned against real observed latency, not guessed: live SearXNG calls this
+# session consistently completed in 1.2-1.7s (server-timing header), so a
+# 10s timeout was pure wasted wait if a tier ever actually goes down --
+# tiers run sequentially, so each one's timeout is fully on the critical
+# path before the next tier is even tried.
+SEARXNG_TIMEOUT = 5.0
+EXA_TIMEOUT = 6.0
+TAVILY_TIMEOUT = 6.0
+DDG_TIMEOUT = 5.0
 
 # --- DuckDuckGo ---
 DDG_MIN_CONTENT_LEN = 20
@@ -615,7 +620,8 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
             "dir ",
             "cmd ",
         )
-        if not any(lowered.startswith(prefix) for prefix in allowed_prefixes):
+        # Accept the bare command too (e.g. "notepad" with no args), not just "notepad <arg>".
+        if not any(lowered == prefix.strip() or lowered.startswith(prefix) for prefix in allowed_prefixes):
             return (
                 "Error: Command not on the allowed list for voice mode. "
                 "Use the web UI for unrestricted shell access."

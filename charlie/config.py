@@ -35,19 +35,12 @@ def _meta(
 
 @dataclass
 class Config:
-    small_llm_url: str = field(default=os.getenv("SMALL_LLM_URL", ""), metadata=_meta("SMALL_LLM_URL", "LLM"))
-    small_llm_key: str = field(
-        default=os.getenv("SMALL_LLM_API_KEY", "no-key"),
-        metadata=_meta("SMALL_LLM_API_KEY", "LLM", secret=True),
+    llm_url: str = field(default=os.getenv("LLM_URL", ""), metadata=_meta("LLM_URL", "LLM"))
+    llm_key: str = field(
+        default=os.getenv("LLM_API_KEY", "no-key"),
+        metadata=_meta("LLM_API_KEY", "LLM", secret=True),
     )
-    small_llm_model: str = field(default=os.getenv("SMALL_LLM_MODEL", ""), metadata=_meta("SMALL_LLM_MODEL", "LLM"))
-    # Big LLM provider (used when small LLM fails)
-    big_llm_url: str = field(default=os.getenv("BIG_LLM_URL", ""), metadata=_meta("BIG_LLM_URL", "LLM"))
-    big_llm_key: str = field(
-        default=os.getenv("BIG_LLM_API_KEY", "no-key"),
-        metadata=_meta("BIG_LLM_API_KEY", "LLM", secret=True),
-    )
-    big_llm_model: str = field(default=os.getenv("BIG_LLM_MODEL", ""), metadata=_meta("BIG_LLM_MODEL", "LLM"))
+    llm_model: str = field(default=os.getenv("LLM_MODEL", ""), metadata=_meta("LLM_MODEL", "LLM"))
 
     # -1 = system default input device; >=0 = specific device index
     mic_index: int = field(
@@ -140,8 +133,8 @@ class Config:
     )
 
     llm_disable_reasoning: bool = field(
-        default=os.getenv("SMALL_LLM_DISABLE_REASONING", "true").lower() == "true",
-        metadata=_meta("SMALL_LLM_DISABLE_REASONING", "Chat Behavior"),
+        default=os.getenv("LLM_DISABLE_REASONING", "true").lower() == "true",
+        metadata=_meta("LLM_DISABLE_REASONING", "Chat Behavior"),
     )
     # Enable native JSON tool calling for compatible remote APIs (OpenAI, Anthropic).
     # When False, falls back to text-based TOOL: parsing for local models.
@@ -300,6 +293,15 @@ class Config:
     desktop_ocr_enabled: bool = field(
         default=os.getenv("DESKTOP_OCR_ENABLED", "true").lower() == "true",
         metadata=_meta("DESKTOP_OCR_ENABLED", "Desktop Control"),
+    )
+    # Per-turn caps for background tasks -- see charlie.background_task's dataclasses.replace(config, ...).
+    background_iteration_budget_max: int = field(
+        default=int(os.getenv("BACKGROUND_ITERATION_BUDGET_MAX", "40")),
+        metadata=_meta("BACKGROUND_ITERATION_BUDGET_MAX", "Desktop Control"),
+    )
+    background_max_actions: int = field(
+        default=int(os.getenv("BACKGROUND_MAX_ACTIONS", "100")),
+        metadata=_meta("BACKGROUND_MAX_ACTIONS", "Desktop Control"),
     )
     tesseract_cmd: str = field(
         default=os.getenv("TESSERACT_CMD", ""),

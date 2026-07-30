@@ -203,6 +203,36 @@ def test_shell_execute_recovery_communicate_is_bounded(monkeypatch):
     assert all(t is not None for t in calls)
 
 
+def test_shell_execute_voice_mode_allows_bare_command(monkeypatch):
+    """Bare "notepad" (no trailing arg) must pass the voice-mode allowlist,
+    not just "notepad <arg>" -- found live when a bare-command retry got
+    wrongly rejected as "not on the allowed list"."""
+    import subprocess as subprocess_module
+
+    from charlie import tools as tools_module
+
+    class FakeProcess:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def communicate(self, input=None, timeout=None):
+            if timeout is not None:
+                raise subprocess_module.TimeoutExpired(cmd="notepad", timeout=timeout)
+            return ("", "")
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(
+        tools_module.subprocess, "Popen", lambda *a, **k: FakeProcess()
+    )
+    output = shell_execute("notepad", voice_mode=True)
+    assert "not on the allowed list" not in output
+
+
 def test_shell_execute_blocks_metacharacters_and_keywords():
     """Locks the exact error text shell_execute returns via the shared
     is_shell_command_blocked() guard, now also reused by charlie.recovery."""
@@ -396,6 +426,8 @@ def test_desktop_observe_wires_up_capture_and_emit_frame(monkeypatch):
 
     monkeypatch.setattr(tools_module, "_desktop_ready", lambda: True)
     monkeypatch.setattr(tools_module, "_ocr_fallback_marks", lambda uia_elements: elements)
+    # Unmocked, this hits a real vision-LLM call when VISION_ENABLED=true -- see test_desktop_grounding.py.
+    monkeypatch.setattr(tools_module, "_grounding_marks", lambda els: els)
 
     import charlie.desktop.uia as uia_module
     monkeypatch.setattr(uia_module, "snapshot_tree", lambda max_depth=8: [])

@@ -18,6 +18,7 @@ logger = logging.getLogger("charlie.desktop.windows")
 # see .github/workflows/ci.yml); guard so importing this module never raises
 # there, mirroring charlie/desktop/__init__.py's DESKTOP_AVAILABLE pattern.
 _user32 = ctypes.windll.user32 if sys.platform == "win32" else None
+_kernel32 = ctypes.windll.kernel32 if sys.platform == "win32" else None
 
 try:
     import pyautogui
@@ -61,16 +62,29 @@ def focus_window(title_substr: str) -> str:
     w = find_window(title_substr)
     if w is None:
         return f"Error: no window matching '{title_substr}'."
-    _user32.ShowWindow(w["hwnd"], _SW_RESTORE)
-    if not _user32.SetForegroundWindow(w["hwnd"]):
-        # Windows blocks cross-process focus steals unless the caller owns
-        # the foreground; the alt-key tap is the documented workaround.
-        if _HAS_PYAUTOGUI:
-            pyautogui.press("alt")
-            _user32.SetForegroundWindow(w["hwnd"])
-        else:
-            logger.warning("Focus-steal fallback skipped: pyautogui not installed")
-    return f"Focused window: {w['title']}"
+    hwnd = w["hwnd"]
+    _user32.ShowWindow(hwnd, _SW_RESTORE)
+    if _user32.SetForegroundWindow(hwnd):
+        return f"Focused window: {w['title']}"
+    # Windows blocks cross-process focus steals unless the caller shares the
+    # foreground thread's input state -- AttachThreadInput grants that.
+    fg_thread = _user32.GetWindowThreadProcessId(_user32.GetForegroundWindow(), None)
+    current_thread = _kernel32.GetCurrentThreadId()
+    can_attach = bool(fg_thread) and fg_thread != current_thread
+    attached = can_attach and _user32.AttachThreadInput(current_thread, fg_thread, True)
+    try:
+        _user32.BringWindowToTop(hwnd)
+        ok = _user32.SetForegroundWindow(hwnd)
+    finally:
+        if attached:
+            _user32.AttachThreadInput(current_thread, fg_thread, False)
+    if not ok and _HAS_PYAUTOGUI:
+        pyautogui.press("alt")
+        ok = _user32.SetForegroundWindow(hwnd)
+    if ok:
+        return f"Focused window: {w['title']}"
+    logger.warning("Could not bring '%s' to foreground.", w["title"])
+    return f"Warning: could not bring '{w['title']}' to foreground."
 
 
 def manage_window(title_substr: str, action: str) -> str:

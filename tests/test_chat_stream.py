@@ -7,98 +7,11 @@ from charlie.core import Brain
 @pytest.fixture
 def brain_config():
     return Config(
-        small_llm_url="http://localhost:11434",
-        small_llm_key="no-key",
-        small_llm_model="dummy",
+        llm_url="http://localhost:11434",
+        llm_key="no-key",
+        llm_model="dummy",
         iteration_budget_max=3,
     )
-
-
-@pytest.fixture
-def brain_config_with_fallback():
-    return Config(
-        small_llm_url="http://localhost:11434",
-        small_llm_key="no-key",
-        small_llm_model="dummy",
-        big_llm_url="http://example.com/v1",
-        big_llm_key="real-key",
-        big_llm_model="big-dummy",
-        iteration_budget_max=5,
-    )
-
-
-@pytest.mark.asyncio
-async def test_followup_fallback_on_primary_error_streams_content(
-    monkeypatch, brain_config_with_fallback
-):
-    """Regression test: when the primary follow-up stream errors mid-turn,
-    the fallback (big) LLM's response must be parsed correctly and its
-    content must reach the caller. This was broken by a missing [0] index
-    on `chunk.get("choices", [{}]).get("delta", {})` in the on-error
-    fallback branch, which raised AttributeError on every fallback chunk
-    (silently swallowed) and produced no output at all.
-    """
-    brain = Brain(brain_config_with_fallback)
-
-    primary_call_count = 0
-
-    def mock_primary_stream(*args, **kwargs):
-        nonlocal primary_call_count
-        primary_call_count += 1
-        call_num = primary_call_count
-
-        class MockResponse:
-            def raise_for_status(self):
-                pass
-
-            async def aiter_lines(self):
-                # Initial completion call: return a tool call.
-                yield (
-                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"1",'
-                    '"function":{"name":"web_search","arguments":"{\\"query\\":\\"x\\"}"}}]}}]}'
-                )
-                yield "data: [DONE]"
-
-            async def __aenter__(self):
-                if call_num == 2:
-                    # Simulate a connection drop on the follow-up request.
-                    raise RuntimeError("simulated primary connection drop")
-                return self
-
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-
-        return MockResponse()
-
-    def mock_fallback_stream(*args, **kwargs):
-        class MockResponse:
-            def raise_for_status(self):
-                pass
-
-            async def aiter_lines(self):
-                yield 'data: {"choices":[{"delta":{"content":"fallback answer"}}]}'
-                yield "data: [DONE]"
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-
-        return MockResponse()
-
-    monkeypatch.setattr(brain.client, "stream", mock_primary_stream)
-    monkeypatch.setattr(brain._big_client, "stream", mock_fallback_stream)
-    monkeypatch.setattr(
-        "charlie.tools.registry.execute_tool",
-        lambda name, args: "mock search result",
-    )
-
-    results = []
-    async for chunk in brain.chat_stream("test"):
-        results.append(chunk)
-
-    assert "fallback answer" in "".join(results)
 
 
 @pytest.mark.asyncio
@@ -149,7 +62,7 @@ def test_extract_bare_tool_calls():
     from charlie.config import Config
 
     brain = Brain(
-        Config(small_llm_url="http://localhost:11434", small_llm_key="no-key", small_llm_model="dummy")
+        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy")
     )
     text = 'shell_execute(command="start https://youtube.com")\nshell_execute(command="start https://twitter.com")'
     calls = brain._extract_tool_calls(text)
@@ -165,7 +78,7 @@ def test_extract_bare_tool_dedup():
     from charlie.config import Config
 
     brain = Brain(
-        Config(small_llm_url="http://localhost:11434", small_llm_key="no-key", small_llm_model="dummy")
+        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy")
     )
     text = 'TOOL: web_search("test")\nweb_search("test")'
     calls = brain._extract_tool_calls(text)
@@ -178,7 +91,7 @@ def test_extract_mixed_tool_formats():
     from charlie.config import Config
 
     brain = Brain(
-        Config(small_llm_url="http://localhost:11434", small_llm_key="no-key", small_llm_model="dummy")
+        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy")
     )
     text = 'TOOL: web_search("news")\nshell_execute(command="dir")'
     calls = brain._extract_tool_calls(text)
@@ -191,7 +104,7 @@ def test_extract_multi_arg_tool_calls():
     """Verify tool calls with multiple arguments map to correct names."""
     from charlie.config import Config
     brain = Brain(
-        Config(small_llm_url="http://localhost:11434", small_llm_key="no-key", small_llm_model="dummy")
+        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy")
     )
     # Test TOOL: format
     text = 'TOOL: file_write("C:\\\\test.txt", "hello world")'
@@ -285,30 +198,39 @@ def test_detect_open_app(monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", mock_popen)
     monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("charlie.core._is_process_running", lambda name: False)
 
     # 1. Test opening single app
     res = _detect_open_app("open calculator")
-    assert res == "I've opened Calculator for you."
+    msg, remaining = res
+    assert msg == "I've opened Calculator for you."
+    assert remaining is None
     assert 'start "" calc' in called_cmds
     called_cmds.clear()
     res = _detect_open_app("open chrome and calculator")
-    assert "Calculator and Chrome" in res
+    msg, remaining = res
+    assert "Calculator and Chrome" in msg
+    assert remaining is None
     assert 'start "" chrome' in called_cmds
     assert 'start "" calc' in called_cmds
 
     # 3. Test opening whitelisted websites by name
     called_cmds.clear()
     res = _detect_open_app("open youtube and github")
-    assert "Youtube and Github" in res or "Github and Youtube" in res
+    msg, remaining = res
+    assert "Youtube and Github" in msg or "Github and Youtube" in msg
+    assert remaining is None
     assert 'start "" https://youtube.com' in called_cmds
     assert 'start "" https://github.com' in called_cmds
 
     # 4. Test opening generic domains/URLs
     called_cmds.clear()
     res = _detect_open_app("open reddit.com, wikipedia.org and https://neon.tech")
-    assert "reddit.com" in res
-    assert "wikipedia.org" in res
-    assert "https://neon.tech" in res
+    msg, remaining = res
+    assert "reddit.com" in msg
+    assert "wikipedia.org" in msg
+    assert "https://neon.tech" in msg
+    assert remaining is None
     assert 'start "" https://reddit.com' in called_cmds
     assert 'start "" https://wikipedia.org' in called_cmds
     assert 'start "" https://neon.tech' in called_cmds
@@ -321,9 +243,16 @@ def test_detect_open_app(monkeypatch):
     res = _detect_open_app("open unknownapp")
     assert res is None
 
-    # 7. Test compound command bypass
+    # 7. Compound instruction: the app still opens as a side effect (no more
+    # full bypass), and the leftover instruction comes back for the caller
+    # to hand to the LLM instead of the fast-path silently doing nothing extra.
+    called_cmds.clear()
     res = _detect_open_app("open notepad and write hello")
-    assert res is None
+    assert res is not None
+    msg, remaining = res
+    assert "Notepad" in msg
+    assert remaining == "and write hello"
+    assert 'start "" notepad' in called_cmds
 
 
 def test_detect_open_app_partial_failure(monkeypatch):
@@ -353,17 +282,20 @@ def test_detect_open_app_partial_failure(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", mock_popen)
     monkeypatch.setattr(os, "startfile", mock_startfile, raising=False)
     monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("charlie.core._is_process_running", lambda name: False)
 
     # Test: open two apps, one fails
     res = _detect_open_app("open chrome notepad")
-    assert "Chrome" in res  # First app succeeds
-    assert "Notepad" in res  # Second app should appear in failed list
-    assert "Failed to open" in res
+    msg, remaining = res
+    assert remaining is None
+    assert "Chrome" in msg  # First app succeeds
+    assert "Notepad" in msg  # Second app should appear in failed list
+    assert "Failed to open" in msg
     # Ensure no raw tuple syntax leaks (the old bug)
-    assert "(" not in res or res.count("(") == res.count(")")
+    assert "(" not in msg or msg.count("(") == msg.count(")")
     # Ensure .exe/.title tuple artifacts don't leak
-    assert "error_detail" not in res.lower()
-    assert "OSError" not in res
+    assert "error_detail" not in msg.lower()
+    assert "OSError" not in msg
 
 
 def test_detect_open_app_all_failures(monkeypatch):
@@ -379,11 +311,87 @@ def test_detect_open_app_all_failures(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", mock_fail)
     monkeypatch.setattr(os, "startfile", mock_fail, raising=False)
     monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("charlie.core._is_process_running", lambda name: False)
 
     res = _detect_open_app("open chrome notepad")
     assert res is not None
-    assert "chrome" in res.lower() or "Chrome" in res
+    msg, remaining = res
+    assert remaining is None
+    assert "chrome" in msg.lower() or "Chrome" in msg
     # Must not crash with AttributeError on tuples
+
+
+def test_is_process_running_against_real_processes():
+    from charlie.core import _is_process_running
+
+    assert _is_process_running("python.exe") is True  # this test itself is running
+    assert _is_process_running("definitely-not-a-real-process-xyz.exe") is False
+
+
+def test_detect_open_app_focuses_already_running_instead_of_relaunching(monkeypatch):
+    """Regression: several apps (Windows 11's modern Notepad included) allow
+    multiple simultaneous instances, so a blind relaunch piles up duplicate
+    windows instead of erroring like a single-instance app would -- found
+    live during Phase 3 background-task testing (4+ Notepad windows from
+    repeated "open notepad" calls). An already-running app gets focused via
+    the same native focus_window() the desktop_focus tool uses, not relaunched."""
+    import subprocess
+
+    from charlie.core import _detect_open_app
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("charlie.core._is_process_running", lambda name: name == "notepad.exe")
+
+    popen_calls = []
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda cmd, *a, **kw: popen_calls.append(cmd)
+    )
+
+    focus_calls = []
+    monkeypatch.setattr(
+        "charlie.desktop.windows.focus_window",
+        lambda title: focus_calls.append(title) or f"Focused window: {title}",
+    )
+
+    res = _detect_open_app("open notepad")
+
+    msg, remaining = res
+    assert remaining is None
+    assert "already open" in msg
+    assert focus_calls == ["notepad"]
+    assert popen_calls == []
+
+
+def test_detect_open_app_mixed_running_and_not_running(monkeypatch):
+    """One app already running (focused) and one not (launched) in a single
+    multi-app request are handled independently."""
+    import subprocess
+
+    from charlie.core import _detect_open_app
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("charlie.core._is_process_running", lambda name: name == "notepad.exe")
+
+    popen_calls = []
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda cmd, *a, **kw: popen_calls.append(cmd)
+    )
+
+    focus_calls = []
+    monkeypatch.setattr(
+        "charlie.desktop.windows.focus_window",
+        lambda title: focus_calls.append(title) or f"Focused window: {title}",
+    )
+
+    res = _detect_open_app("open notepad and calculator")
+
+    msg, remaining = res
+    assert remaining is None
+    assert "already open" in msg
+    assert "opened" in msg.lower()
+    assert focus_calls == ["notepad"]
+    assert 'start "" calc' in popen_calls
+
 
 @pytest.mark.asyncio
 async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
@@ -407,6 +415,7 @@ async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
     monkeypatch.setattr(subprocess, "run", mock_run)
     monkeypatch.setattr(subprocess, "Popen", mock_popen)
     monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("charlie.core._is_process_running", lambda name: False)
 
     called_stream = False
 
@@ -431,6 +440,53 @@ async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
     assert results == ["I've opened Calculator for you."]
     assert not called_stream
 
+
+@pytest.mark.asyncio
+async def test_chat_stream_compound_open_app_continues_with_llm(monkeypatch, brain_config):
+    """Decision 2: a compound "open X and <do something>" instruction must
+    open the app deterministically via the fast-path (no LLM round-trip
+    needed for that part) AND continue the turn with the leftover
+    instruction, instead of the old all-or-nothing bypass that sent the
+    whole compound sentence to the LLM (re-discovering how to open the app
+    via slow, flaky tool calls -- the exact pattern observed live)."""
+    import subprocess
+
+    from charlie.core import Brain
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("P", (), {"pid": 1})())
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("charlie.core._is_process_running", lambda name: False)
+
+    brain = Brain(brain_config)
+
+    captured_payloads = []
+
+    async def mock_stream_completion(payload, generation):
+        captured_payloads.append(payload)
+        return ("Sure, writing that now.", [])
+
+    monkeypatch.setattr(brain, "_stream_completion", mock_stream_completion)
+
+    results = []
+    async for chunk in brain.chat_stream("open notepad and write hello"):
+        results.append(chunk)
+
+    joined = "".join(results)
+    assert "Notepad" in joined  # fast-path confirmation streamed first
+    assert "Sure, writing that now." in joined  # then the LLM continuation
+
+    # The LLM only saw the leftover instruction, not the app-open part it
+    # can't help with any faster than the fast-path already did.
+    assert len(captured_payloads) == 1
+    llm_message = captured_payloads[0]["messages"][-1]["content"]
+    assert "write hello" in llm_message
+    assert "open notepad" not in llm_message.lower()
+
+    # But session history keeps the user's full original utterance.
+    user_history = [m for m in brain.history if m["role"] == "user"]
+    assert user_history[-1]["content"] == "open notepad and write hello"
+
+
 @pytest.mark.asyncio
 async def test_visual_screenshot_queued_after_initial_payload_not_before(monkeypatch):
     """Regression test for the ordering bug: a visual-content query used to
@@ -452,9 +508,9 @@ async def test_visual_screenshot_queued_after_initial_payload_not_before(monkeyp
     from charlie.core import Brain
 
     cfg = Config(
-        small_llm_url="https://example.com/v1",
-        small_llm_key="test-key",
-        small_llm_model="dummy",
+        llm_url="https://example.com/v1",
+        llm_key="test-key",
+        llm_model="dummy",
         iteration_budget_max=3,
         native_tool_calling=True,
         vision_enabled=True,
@@ -471,7 +527,7 @@ async def test_visual_screenshot_queued_after_initial_payload_not_before(monkeyp
 
     async def mock_stream_completion(*args, **kwargs):
         # Model returns no content and no tool calls at all this turn.
-        return ("", [], False)
+        return ("", [])
 
     brain = Brain(cfg)
     monkeypatch.setattr(brain, "_stream_completion", mock_stream_completion)
@@ -518,7 +574,7 @@ async def test_chat_stream_skip_tools(monkeypatch, brain_config):
     monkeypatch.setattr("charlie.tools.registry.execute_tool", mock_execute)
 
     async def mock_stream_completion(*args, **kwargs):
-        return ('Hello world TOOL: file_write("C:\\\\test.txt", "hello")', [], False)
+        return ('Hello world TOOL: file_write("C:\\\\test.txt", "hello")', [])
 
     brain = Brain(brain_config)
     monkeypatch.setattr(brain, "_stream_completion", mock_stream_completion)

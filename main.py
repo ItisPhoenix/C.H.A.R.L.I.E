@@ -320,19 +320,25 @@ async def main():
         plugin_manager = PluginManager()
 
     # Wire the MCP subsystem into the SAME shared tool registry (no-op unless enabled).
+    # Runs on a thread, awaited later, so it overlaps with VoiceEngine/STT startup instead of blocking it.
     mcp_client = None
-    try:
-        if config.mcp_enabled:
-            from charlie.mcp_client import start_mcp
 
-            mcp_client = start_mcp(config)
-            if mcp_client is None:
-                logger.info("MCP subsystem not started (no servers configured)")
-        else:
-            logger.info("MCP subsystem not enabled (MCP_ENABLED=false)")
-    except Exception as e:
-        logger.warning(f"MCP subsystem failed to initialize: {e}")
-        mcp_client = None
+    async def _start_mcp_task():
+        nonlocal mcp_client
+        try:
+            if config.mcp_enabled:
+                from charlie.mcp_client import start_mcp
+
+                mcp_client = await asyncio.to_thread(start_mcp, config)
+                if mcp_client is None:
+                    logger.info("MCP subsystem not started (no servers configured)")
+            else:
+                logger.info("MCP subsystem not enabled (MCP_ENABLED=false)")
+        except Exception as e:
+            logger.warning(f"MCP subsystem failed to initialize: {e}")
+            mcp_client = None
+
+    mcp_start_task = asyncio.create_task(_start_mcp_task())
 
     # Placeholder for event_bus (set later in async context)
     event_bus = None
@@ -977,6 +983,20 @@ async def main():
                         "severity": "success",
                         "message": "System configuration successfully reloaded and engine restarted.",
                     })
+                elif cmd_type == "background_task_start":
+                    payload = cmd.get("payload", {})
+                    from charlie import background_task
+                    try:
+                        await background_task.start(
+                            config, event_bus, payload.get("text", ""),
+                            session_store=store, memory_store=memory_store,
+                        )
+                    except RuntimeError as ex:
+                        await event_bus.emit("alert", {"severity": "warn", "message": str(ex)})
+                elif cmd_type == "background_task_cancel":
+                    payload = cmd.get("payload", {})
+                    from charlie import background_task
+                    background_task.cancel(payload.get("task_id", ""))
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1168,6 +1188,7 @@ async def main():
                     _voice_loop_idle(voice),
                     consume_web_commands(bus, brain),
                     _emit_system_status(bus),
+                    mcp_start_task,
                 )
             finally:
                 logging.getLogger().removeHandler(zmq_handler)

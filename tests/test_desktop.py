@@ -12,7 +12,6 @@ from charlie.config import Config
 from charlie.core import (
     _DESKTOP_COM_TOOLS,
     _DESKTOP_CONTROL_TOOLS,
-    _DESKTOP_DISARM_RE,
     _SCREEN_QUERY_RE,
     Brain,
     _payload_is_vision,
@@ -36,9 +35,9 @@ from charlie.tools import (
 @pytest.fixture
 def brain_config():
     return Config(
-        small_llm_url="http://localhost:11434",
-        small_llm_key="no-key",
-        small_llm_model="dummy",
+        llm_url="http://localhost:11434",
+        llm_key="no-key",
+        llm_model="dummy",
         iteration_budget_max=3,
     )
 
@@ -73,15 +72,6 @@ def test_desktop_tools_disabled_by_default():
         assert "disabled" in desktop_click(1)
     finally:
         _tools_config.desktop_control_enabled = original
-
-
-def test_desktop_gate_reason_arms_once_per_session(brain_config):
-    brain = Brain(brain_config)
-    assert brain._desktop_gate_reason() == "take control of your desktop"
-    brain._desktop_armed = True
-    # Stays armed across turns -- one approval covers the whole session.
-    assert brain._desktop_gate_reason() is None
-    assert brain._desktop_gate_reason() is None
 
 
 def test_actions_halt_toggle():
@@ -166,21 +156,15 @@ def test_select_followup_route_prefers_vision_when_payload_carries_image(brain_c
     brain._vision_client = object()
     brain._vision_model = "vision-model"
     payload = {"messages": [{"role": "user", "content": [{"type": "text", "text": "x"}]}]}
-    client, model, is_vision = brain._select_followup_route(payload, used_fallback=False)
+    client, model, is_vision = brain._select_followup_route(payload)
     assert (client, model, is_vision) == (brain._vision_client, "vision-model", True)
 
 
-def test_select_followup_route_falls_back_to_small_without_image(brain_config):
+def test_select_followup_route_uses_llm_without_image(brain_config):
     brain = Brain(brain_config)
     payload = {"messages": [{"role": "user", "content": "hi"}]}
-    client, model, is_vision = brain._select_followup_route(payload, used_fallback=False)
-    assert (client, model, is_vision) == (brain.client, brain_config.small_llm_model, False)
-
-
-def test_desktop_disarm_phrase_matches():
-    assert _DESKTOP_DISARM_RE.search("stop controlling my desktop")
-    assert _DESKTOP_DISARM_RE.search("please disarm desktop control")
-    assert not _DESKTOP_DISARM_RE.search("open notepad and type hello")
+    client, model, is_vision = brain._select_followup_route(payload)
+    assert (client, model, is_vision) == (brain.client, brain_config.llm_model, False)
 
 
 def test_screen_query_phrase_matches():
@@ -244,7 +228,7 @@ if __name__ == "__main__":
     test_pending_vision_image_pops_once()
     test_with_vision_image_rewrites_last_user_message_only()
     test_select_followup_route_prefers_vision_when_payload_carries_image(brain_config())
-    test_select_followup_route_falls_back_to_small_without_image(brain_config())
+    test_select_followup_route_uses_llm_without_image(brain_config())
     test_desktop_com_tools_covers_perception_and_effectors()
     test_uia_executor_matches_desktop_availability()
     test_vision_annotate_unavailable_without_pillow()
