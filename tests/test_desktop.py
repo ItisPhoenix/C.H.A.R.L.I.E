@@ -155,6 +155,41 @@ def test_pending_vision_image_pops_once():
     assert pop_pending_vision_image() is None
 
 
+def test_build_payload_uses_instance_pending_image_not_shared_global():
+    """Regression: two concurrent Brain instances (e.g. foreground + a
+    background task) both calling desktop_screenshot used to race on one
+    shared tools.py global -- whichever Brain's _build_payload ran second
+    could steal or corrupt the other's image. _exec_one now pops the global
+    into self._pending_vision_image_url immediately after its own
+    desktop_screenshot call, so _build_payload only ever reads its own
+    Brain's value and never touches (or is affected by) the shared global."""
+    from charlie.config import Config
+    from charlie.core import Brain
+
+    cfg = Config(
+        llm_url="https://example.com/v1",
+        llm_key="test-key",
+        llm_model="dummy",
+        native_tool_calling=True,
+        vision_enabled=True,
+    )
+    brain = Brain(cfg)
+    brain._pending_vision_image_url = "image-for-this-brain"
+    # Simulates a second, concurrent Brain instance's own desktop_screenshot
+    # call leaving its image in the shared global.
+    set_pending_vision_image("image-from-a-different-brain")
+
+    payload = brain._build_payload([{"role": "user", "content": "hi"}])
+
+    content = payload["messages"][-1]["content"]
+    assert any(
+        isinstance(block, dict) and block.get("image_url", {}).get("url") == "image-for-this-brain"
+        for block in content
+    )
+    # The shared global is untouched by this Brain's payload build.
+    assert pop_pending_vision_image() == "image-from-a-different-brain"
+
+
 def test_with_vision_image_rewrites_last_user_message_only():
     messages = [
         {"role": "system", "content": "sys"},

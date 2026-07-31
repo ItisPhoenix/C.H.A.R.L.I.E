@@ -140,3 +140,77 @@ async def test_recover_tool_file_write_redirect(monkeypatch):
     assert "Redirected save" in res
     assert redirected_path is not None
     assert "Documents" in redirected_path
+
+
+@pytest.mark.asyncio
+async def test_recover_tool_gated_declass_requires_approval(monkeypatch):
+    """Regression: DeclassProcessStrategy's same-command auto-relaunch must not
+    bypass the gated-keyword approval gate. Before this fix, a gated command
+    that timed out was silently re-launched via Popen with zero approval."""
+    from charlie import recovery
+    from charlie.recovery import recover_tool
+    from charlie.recovery_cache import CACHE_FILE
+
+    if os.path.exists(CACHE_FILE):
+        os.remove(CACHE_FILE)
+    monkeypatch.setattr(recovery, "get_active_ws_count", lambda: 1)
+
+    popen_calls = []
+    monkeypatch.setattr(
+        subprocess, "Popen",
+        lambda *a, **kw: popen_calls.append(a) or type("P", (), {"pid": 1})(),
+    )
+
+    approval_calls = []
+
+    async def mock_approval(**kwargs):
+        approval_calls.append(kwargs)
+        return "approved and executed"
+
+    monkeypatch.setattr(recovery, "request_recovery_approval", mock_approval)
+
+    class DummyBrain:
+        _fallback_client = None
+
+    command = "taskkill /IM foo.exe /F"
+    e = subprocess.TimeoutExpired(cmd=command, timeout=15)
+    res = await recover_tool(DummyBrain(), "shell_execute", {"command": command}, e)
+
+    assert res == "approved and executed"
+    assert len(approval_calls) == 1
+    assert approval_calls[0]["proposed_command"] == command
+    assert popen_calls == []
+
+
+@pytest.mark.asyncio
+async def test_recover_tool_declass_non_gated_command_skips_approval(monkeypatch):
+    """Non-gated commands keep the existing fast, silent auto-relaunch --
+    only gated keywords need the extra approval round-trip."""
+    from charlie import recovery
+    from charlie.recovery import recover_tool
+    from charlie.recovery_cache import CACHE_FILE
+
+    if os.path.exists(CACHE_FILE):
+        os.remove(CACHE_FILE)
+    monkeypatch.setattr(recovery, "get_active_ws_count", lambda: 1)
+
+    popen_calls = []
+    monkeypatch.setattr(
+        subprocess, "Popen",
+        lambda *a, **kw: popen_calls.append(a) or type("P", (), {"pid": 1})(),
+    )
+
+    async def mock_approval(**kwargs):
+        raise AssertionError("must not be called for a non-gated command")
+
+    monkeypatch.setattr(recovery, "request_recovery_approval", mock_approval)
+
+    class DummyBrain:
+        _fallback_client = None
+
+    command = "notepad test.txt"
+    e = subprocess.TimeoutExpired(cmd=command, timeout=15)
+    res = await recover_tool(DummyBrain(), "shell_execute", {"command": command}, e)
+
+    assert res == "Process launched in background."
+    assert len(popen_calls) == 1

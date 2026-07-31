@@ -416,6 +416,19 @@ class TestVisualContentQueryFastPath:
         assert _SCREEN_QUERY_RE.search("read my screen")
         assert not _VISUAL_CONTENT_QUERY_RE.search("read my screen")
 
+    def test_visual_content_query_regex_matches_widened_phrasing(self):
+        """Decision 9: the old 5-phrase whitelist missed common ways to ask
+        about a visible error/popup -- widened without touching the automatic
+        grounding-fallback tier, which stays regex-independent."""
+        from charlie.core import _VISUAL_CONTENT_QUERY_RE
+        assert _VISUAL_CONTENT_QUERY_RE.search("what's the error on my screen")
+        assert _VISUAL_CONTENT_QUERY_RE.search("what's wrong with this")
+        assert _VISUAL_CONTENT_QUERY_RE.search("what's going on on my screen")
+        assert _VISUAL_CONTENT_QUERY_RE.search("what is this popup")
+        assert _VISUAL_CONTENT_QUERY_RE.search("what's this")
+        assert _VISUAL_CONTENT_QUERY_RE.search("help me fix this")
+        assert not _VISUAL_CONTENT_QUERY_RE.search("what's for dinner")
+
     def test_should_queue_visual_screenshot_true_when_fully_enabled(self):
         from charlie.core import _should_queue_visual_screenshot
         cfg = MagicMock()

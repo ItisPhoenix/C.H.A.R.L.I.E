@@ -149,7 +149,7 @@ class Config:
         metadata=_meta("ITERATION_BUDGET_MAX", "Chat Behavior"),
     )
     context_window: int = field(
-        default=int(os.getenv("CONTEXT_WINDOW", "8192")),
+        default=int(os.getenv("CONTEXT_WINDOW", "32000")),
         metadata=_meta("CONTEXT_WINDOW", "Chat Behavior"),
     )
     compression_threshold: float = field(

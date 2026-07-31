@@ -12,7 +12,15 @@ import argparse
 import asyncio
 import os
 import sys
+import uuid
 from pathlib import Path
+
+# Web-only mode never inherits a launch_id from a parent process (main.py
+# generates one for its subprocess) -- set one here, before any charlie.*
+# import, since charlie/__init__.py eagerly imports charlie.config and bakes
+# in whatever CHARLIE_LAUNCH_ID is set at that moment.
+if "--web-only" in sys.argv:
+    os.environ.setdefault("CHARLIE_LAUNCH_ID", str(uuid.uuid4()))
 
 # Windows event-loop policy (must precede zmq/asyncio imports)
 from charlie.runtime import configure as _configure_platform

@@ -79,7 +79,12 @@ _VISUAL_CONTENT_QUERY_RE = re.compile(
     r"|\bdescribe (this|the) (image|photo|picture|screen|window|page)\b"
     r"|\bwhat does this look like\b"
     r"|\bwho('?s| is) (this|that|he|she)\b"
-    r"|\bwhat (do|can) you see\b",
+    r"|\bwhat (do|can) you see\b"
+    r"|\bwhat'?s (wrong|going on) (with|on) (this|my|the)\b"
+    r"|\bwhat'?s (the |this )?(error|message|popup|dialog|problem|issue)\b"
+    r"|\bwhat (is|does) (this|that) (error|message|popup|dialog|icon|button|image)\b"
+    r"|\bwhat'?s this\b"
+    r"|\bhelp me (understand|fix) (this|what)\b",
     re.IGNORECASE,
 )
 # Live background-task progress query -- only fires if a task is actually running (see below).
@@ -930,7 +935,7 @@ async def _compress_messages(
     messages: List[Dict[str, Any]], config: "Config"
 ) -> List[Dict[str, Any]]:
     total = _token_count(messages)
-    window = getattr(config, "context_window", 8192)
+    window = getattr(config, "context_window", 32000)
     compression_threshold = getattr(config, "compression_threshold", 0.8)
     threshold = int(compression_threshold * window)
     if total <= threshold:
@@ -1371,6 +1376,8 @@ class Brain:
         self._chat_generation = 0
         # Per-turn halt; module-global _HALT is reserved for the physical panic hotkey.
         self._turn_halted: bool = False
+        # Per-instance, not the shared tools.py global -- see _exec_one's immediate pop.
+        self._pending_vision_image_url: Optional[str] = None
         self._panic_hotkey_listener = None
         if register_panic_hotkey and self.config.desktop_control_enabled and _DESKTOP_AVAILABLE:
             try:
@@ -1712,7 +1719,7 @@ class Brain:
         if getattr(self.config, "llm_disable_reasoning", False):
             payload["reasoning"] = {"effort": "none"}
         if self.config.vision_enabled and self._use_native_tools:
-            image_url = pop_pending_vision_image()
+            image_url, self._pending_vision_image_url = self._pending_vision_image_url, None
             if image_url:
                 payload["messages"] = _with_vision_image(messages, image_url)
         return payload
@@ -2161,6 +2168,10 @@ class Brain:
                         )
                 else:
                     _desktop_fail_counts[ck] = 0
+
+            # Pop immediately (no await above) so a concurrent Brain can't overwrite it first.
+            if tool_name == "desktop_screenshot":
+                self._pending_vision_image_url = pop_pending_vision_image()
 
             if self.on_tool_result:
                 self.on_tool_result(call["name"], r)

@@ -348,6 +348,19 @@ async def recover_tool(
                         if res.command == command:
                             if not is_safe_to_recover(res.command):
                                 continue
+                            from charlie.tools import is_shell_command_gated
+                            gate_reason = is_shell_command_gated(res.command)
+                            if gate_reason:
+                                approval_res = await request_recovery_approval(
+                                    original_command=command,
+                                    proposed_command=res.command,
+                                    failure_class=failure_class.value,
+                                    explanation=res.message or f"Retry requires approval: {gate_reason}",
+                                    source="strategy"
+                                )
+                                if approval_res is not None:
+                                    return approval_res
+                                continue
                             try:
                                 logger.info("Executing automatic local recovery strategy: %s", res.command)
                                 if type(strategy).__name__ == "DeclassProcessStrategy":
@@ -391,23 +404,17 @@ class BaseRecoveryStrategy:
         raise NotImplementedError()
 
 class DeclassProcessStrategy(BaseRecoveryStrategy):
-    """Strategy for TIMEOUT: runs process detached via Popen."""
+    """Strategy for TIMEOUT: proposes a detached relaunch of the same command.
+
+    Does not execute anything itself -- recover_tool's orchestrator is the
+    single place that safety-checks, gate-checks, and launches, so a
+    strategy can never bypass either check by acting before it runs.
+    """
     def can_handle(self, failure: Dict[str, Any]) -> bool:
         return failure["failure_class"] == FailureClass.TIMEOUT
 
     async def recover(self, command: str, failure: Dict[str, Any]) -> RecoveryResult:
-        try:
-            logger.info("DeclassProcessStrategy: Retrying command detached: %s", command)
-            full_cmd = f'start "" {command}'
-            subprocess.Popen(
-                full_cmd, shell=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=subprocess.DETACHED_PROCESS if sys.platform == "win32" else 0,
-                close_fds=True
-            )
-            return RecoveryResult(success=True, command=command, message="Process launched in background.")
-        except Exception as e:
-            return RecoveryResult(success=False, error=str(e))
+        return RecoveryResult(success=True, command=command, message="Process launched in background.")
 
 class SystemPathSearchStrategy(BaseRecoveryStrategy):
     """Strategy for NOT_FOUND: searches PATH, registry and standard program folders."""
