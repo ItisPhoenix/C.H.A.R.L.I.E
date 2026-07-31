@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useCallback, useRef, useState } from "react";
-import { useCharlieStore, rgba } from "../store/useCharlieStore";
+import { useCharlieStore, rgba, type BackgroundTask } from "../store/useCharlieStore";
 import { SessionRail } from "../components/SessionRail";
 import { ChatView } from "../components/ChatView";
 import { InsightRail } from "../components/InsightRail";
@@ -47,6 +47,7 @@ export default function Page() {
   const activeProposal = useCharlieStore((s) => s.activeProposal);
   const setActiveProposal = useCharlieStore((s) => s.setActiveProposal);
   const setDesktopControlEnabled = useCharlieStore((s) => s.setDesktopControlEnabled);
+  const setBackgroundTask = useCharlieStore((s) => s.setBackgroundTask);
 
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -608,9 +609,23 @@ export default function Page() {
       if (mic && typeof (mic as { mic_muted: boolean }).mic_muted === "boolean") {
         setMic({ mic_muted: (mic as { mic_muted: boolean }).mic_muted });
       }
+
+      // 5. Resync background-task state (otherwise push-only over the websocket).
+      const bgTask = await fetchJson("/api/background_task");
+      setBackgroundTask((bgTask as { task: BackgroundTask | null } | null)?.task ?? null);
     };
     void init();
-  }, [fetchSessions, handleCreateSession, setAudio, setMic, fetchJson, setLaunchId, setSessionScope, setDesktopControlEnabled]);
+  }, [
+    fetchSessions,
+    handleCreateSession,
+    setAudio,
+    setMic,
+    fetchJson,
+    setLaunchId,
+    setSessionScope,
+    setDesktopControlEnabled,
+    setBackgroundTask,
+  ]);
 
   // Sync messages when active session changes. announceActiveSession
   // no-ops (including its own HTTP fallback) if this tab isn't visible.

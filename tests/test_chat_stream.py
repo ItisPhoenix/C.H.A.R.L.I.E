@@ -181,6 +181,222 @@ def test_detect_close_app(monkeypatch):
     assert res is None
 
 
+def test_is_low_confidence_desktop_call_true_for_click_at():
+    from charlie.core import _is_low_confidence_desktop_call
+
+    assert _is_low_confidence_desktop_call("desktop_click_at", {"x": 1, "y": 2}) is True
+
+
+def test_is_low_confidence_desktop_call_uses_mark_resolution(monkeypatch):
+    from charlie import core
+
+    monkeypatch.setattr(core.desktop_uia, "is_low_confidence_mark", lambda mark_id: mark_id == 7)
+    assert core._is_low_confidence_desktop_call("desktop_click", {"mark_id": 7}) is True
+    assert core._is_low_confidence_desktop_call("desktop_click", {"mark_id": 1}) is False
+
+
+def test_is_low_confidence_desktop_call_false_for_non_mark_tool():
+    from charlie.core import _is_low_confidence_desktop_call
+
+    assert _is_low_confidence_desktop_call("desktop_key", {"key": "enter"}) is False
+
+
+@pytest.mark.asyncio
+async def test_auto_halt_threshold_is_one_for_low_confidence_call(monkeypatch, brain_config):
+    """desktop_click_at is always low-confidence (raw coords, no verification)
+    -- a single failure must halt, not the usual 2-strike threshold."""
+    from charlie.core import Brain
+
+    call_count = 0
+
+    def mock_stream(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+
+        class MockResponse:
+            def raise_for_status(self):
+                pass
+
+            async def aiter_lines(self):
+                yield (
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"1",'
+                    f'"function":{{"name":"desktop_click_at","arguments":"{{\\"x\\":{call_count},\\"y\\":1}}"}}'
+                    '}]}}]}'
+                )
+                yield "data: [DONE]"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        return MockResponse()
+
+    exec_count = 0
+
+    def mock_execute_tool(name, args):
+        nonlocal exec_count
+        exec_count += 1
+        return "Error: click missed"
+
+    brain = Brain(brain_config)
+    monkeypatch.setattr(brain.client, "stream", mock_stream)
+    monkeypatch.setattr("charlie.tools.registry.execute_tool", mock_execute_tool)
+
+    results = []
+    async for chunk in brain.chat_stream("click somewhere"):
+        results.append(chunk)
+
+    assert any("halted" in str(r).lower() for r in results)
+    assert exec_count == 1  # halted after the first failure, never retried
+
+
+@pytest.mark.asyncio
+async def test_auto_halt_threshold_is_two_for_regular_desktop_call(monkeypatch, brain_config):
+    """A non-mark-based desktop tool (desktop_key) keeps the original 2-strike threshold."""
+    from charlie.core import Brain
+
+    def mock_stream(*args, **kwargs):
+        class MockResponse:
+            def raise_for_status(self):
+                pass
+
+            async def aiter_lines(self):
+                yield (
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"1",'
+                    '"function":{"name":"desktop_key","arguments":"{\\"key\\":\\"enter\\"}"}'
+                    '}]}}]}'
+                )
+                yield "data: [DONE]"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        return MockResponse()
+
+    exec_count = 0
+
+    def mock_execute_tool(name, args):
+        nonlocal exec_count
+        exec_count += 1
+        return "Error: key send failed"
+
+    brain = Brain(brain_config)
+    monkeypatch.setattr(brain.client, "stream", mock_stream)
+    monkeypatch.setattr("charlie.tools.registry.execute_tool", mock_execute_tool)
+
+    results = []
+    async for chunk in brain.chat_stream("press enter"):
+        results.append(chunk)
+
+    assert any("halted" in str(r).lower() for r in results)
+    assert exec_count == 2  # took 2 identical failures before halting
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_injects_idle_seconds_when_desktop_available(monkeypatch, brain_config):
+    from charlie import core
+
+    monkeypatch.setattr(core, "desktop_session", type("S", (), {"user_idle_seconds": staticmethod(lambda: 12.0)}))
+
+    captured_payloads = []
+
+    async def mock_stream_completion(payload, generation):
+        captured_payloads.append(payload)
+        return ("hi", [])
+
+    brain = core.Brain(brain_config)
+    monkeypatch.setattr(brain, "_stream_completion", mock_stream_completion)
+
+    async for _ in brain.chat_stream("hello"):
+        pass
+
+    system_msg = captured_payloads[0]["messages"][0]["content"]
+    assert "idle time: 12s" in system_msg
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_omits_idle_seconds_when_desktop_unavailable(monkeypatch, brain_config):
+    from charlie import core
+
+    monkeypatch.setattr(core, "desktop_session", None)
+
+    captured_payloads = []
+
+    async def mock_stream_completion(payload, generation):
+        captured_payloads.append(payload)
+        return ("hi", [])
+
+    brain = core.Brain(brain_config)
+    monkeypatch.setattr(brain, "_stream_completion", mock_stream_completion)
+
+    async for _ in brain.chat_stream("hello"):
+        pass
+
+    system_msg = captured_payloads[0]["messages"][0]["content"]
+    assert "idle time" not in system_msg.lower()
+
+
+def test_detect_background_task_status_no_active_task(monkeypatch):
+    """Casual phrasing like "what are you doing" must fall through to normal
+    chat when nothing is actually running -- not hijacked just by regex match."""
+    from charlie import background_task
+    from charlie.core import _detect_background_task_status
+
+    monkeypatch.setattr(background_task, "get_current_task", lambda: None)
+    assert _detect_background_task_status("what are you doing") is None
+
+
+def test_detect_background_task_status_no_match():
+    from charlie.core import _detect_background_task_status
+
+    assert _detect_background_task_status("what's the weather like") is None
+
+
+def test_detect_background_task_status_running_task(monkeypatch):
+    from charlie import background_task
+    from charlie.core import _detect_background_task_status
+
+    task = background_task.BackgroundTask(
+        id="t1", text="open notepad and calculator", status="running",
+        steps=["Open notepad", "Open calculator"], current_step=0,
+    )
+    monkeypatch.setattr(background_task, "get_current_task", lambda: task)
+
+    res = _detect_background_task_status("what are you doing")
+    assert res is not None
+    assert "open notepad and calculator" in res
+    assert "step 1 of 2" in res
+    assert "Open notepad" in res
+
+
+def test_detect_background_task_status_paused_task(monkeypatch):
+    from charlie import background_task
+    from charlie.core import _detect_background_task_status
+
+    task = background_task.BackgroundTask(id="t1", text="x", status="paused")
+    monkeypatch.setattr(background_task, "get_current_task", lambda: task)
+
+    res = _detect_background_task_status("how's the task going")
+    assert res is not None
+    assert "paused" in res
+
+
+def test_detect_background_task_status_terminal_task_falls_through(monkeypatch):
+    """A finished task must not keep answering "what are you doing" forever --
+    once terminal, the query should fall through to normal chat."""
+    from charlie import background_task
+    from charlie.core import _detect_background_task_status
+
+    task = background_task.BackgroundTask(id="t1", text="x", status="done")
+    monkeypatch.setattr(background_task, "get_current_task", lambda: task)
+    assert _detect_background_task_status("what are you doing") is None
+
+
 def test_detect_open_app(monkeypatch):
     import subprocess
 
@@ -438,6 +654,38 @@ async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
     async for chunk in brain.chat_stream("open calculator"):
         results.append(chunk)
     assert results == ["I've opened Calculator for you."]
+    assert not called_stream
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_background_task_status_fast_path(monkeypatch, brain_config):
+    """A live progress query about a running background task must be
+    answered deterministically, with no LLM round-trip."""
+    from charlie import background_task
+    from charlie.core import Brain
+
+    task = background_task.BackgroundTask(
+        id="t1", text="tidy up my downloads folder", status="running",
+        steps=["List files", "Move files"], current_step=1,
+    )
+    monkeypatch.setattr(background_task, "get_current_task", lambda: task)
+
+    called_stream = False
+
+    def mock_stream(*args, **kwargs):
+        nonlocal called_stream
+        called_stream = True
+
+    brain = Brain(brain_config)
+    monkeypatch.setattr(brain.client, "stream", mock_stream)
+
+    results = []
+    async for chunk in brain.chat_stream("what are you doing"):
+        results.append(chunk)
+
+    assert len(results) == 1
+    assert "tidy up my downloads folder" in results[0]
+    assert "step 2 of 2" in results[0]
     assert not called_stream
 
 

@@ -85,6 +85,82 @@ async def test_start_returns_without_blocking_on_run_loop(monkeypatch, bg_config
     await asyncio.sleep(0.05)
 
 
+class _FakeVoice:
+    def __init__(self):
+        self.spoken = []
+
+    def speak(self, text, emotion="neutral"):
+        self.spoken.append(text)
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_alerts_speak_and_emit_start_and_complete(monkeypatch, bg_config):
+    """Background-task start/complete must reuse the resource-alert pattern
+    (event_bus "alert" emit + voice.speak), not stay silent."""
+    monkeypatch.setattr(Brain, "chat_stream", _fake_plan_chat_stream)
+    monkeypatch.setattr(background_task, "_DESKTOP_AVAILABLE", False)
+    bus = FakeEventBus()
+    fake_voice = _FakeVoice()
+    task = await background_task.start(bg_config, bus, "do the thing", voice=fake_voice)
+    await asyncio.sleep(0.05)  # let _run_loop finish both fake steps
+    alert_messages = [payload["message"] for etype, payload in bus.events if etype == "alert"]
+    assert any("Starting background task" in m for m in alert_messages)
+    assert any("Background task complete" in m for m in alert_messages)
+    assert any("Starting background task" in m for m in fake_voice.spoken)
+    assert any("Background task complete" in m for m in fake_voice.spoken)
+    assert task.status == "done"
+
+
+# --- restart persistence ---
+
+
+@pytest.fixture(autouse=True)
+def _isolate_state_file(monkeypatch, tmp_path):
+    """Never touch the real .charlie_background_task_state.json on disk."""
+    monkeypatch.setattr(background_task, "_STATE_FILE", str(tmp_path / "bg_state.json"))
+
+
+def test_check_interrupted_task_returns_none_when_no_file():
+    assert background_task.check_interrupted_task() is None
+
+
+def test_check_interrupted_task_returns_none_when_last_run_was_terminal():
+    task = background_task.BackgroundTask(id="t1", text="x", status="done")
+    background_task._save_state(task)
+    assert background_task.check_interrupted_task() is None
+
+
+def test_check_interrupted_task_detects_and_marks_failed_non_terminal_state():
+    """A BackgroundTask must not silently vanish if the process restarts
+    mid-task -- the last known state should be recoverable and reported once."""
+    task = background_task.BackgroundTask(
+        id="t1", text="open notepad and calculator", status="running",
+        steps=["Open notepad", "Open calculator"], current_step=0,
+    )
+    background_task._save_state(task)
+
+    result = background_task.check_interrupted_task()
+    assert result is not None
+    assert result["text"] == "open notepad and calculator"
+    assert result["current_step"] == 0
+    assert result["status"] == "failed"
+    assert "restarted" in result["error"]
+
+    # Second call must not re-report -- the file was rewritten as terminal.
+    assert background_task.check_interrupted_task() is None
+
+
+@pytest.mark.asyncio
+async def test_run_loop_persists_state_to_disk(monkeypatch, bg_config):
+    monkeypatch.setattr(Brain, "chat_stream", _fake_plan_chat_stream)
+    monkeypatch.setattr(background_task, "_DESKTOP_AVAILABLE", False)
+    bus = FakeEventBus()
+    task = await background_task.start(bg_config, bus, "do the thing")
+    await asyncio.sleep(0.05)  # let _run_loop finish both fake steps
+    assert task.status == "done"
+    assert background_task.check_interrupted_task() is None  # done == terminal, nothing to report
+
+
 def test_parse_steps_ignores_non_numbered_lines():
     text = "Sure, here is the plan:\n1. First step\n2) Second step\nSome trailing note"
     assert background_task._parse_steps(text) == ["First step", "Second step"]

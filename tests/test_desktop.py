@@ -20,7 +20,14 @@ from charlie.core import (
 from charlie.desktop import DESKTOP_AVAILABLE, UIA_EXECUTOR
 from charlie.desktop import actions as desktop_actions
 from charlie.desktop import vision as desktop_vision
-from charlie.desktop.uia import Element, merge_ocr_elements, resolve_bounds, resolve_is_password, resolve_name
+from charlie.desktop.uia import (
+    Element,
+    is_low_confidence_mark,
+    merge_ocr_elements,
+    resolve_bounds,
+    resolve_is_password,
+    resolve_name,
+)
 from charlie.tools import config as _tools_config
 from charlie.tools import (
     desktop_click,
@@ -114,6 +121,20 @@ def test_merge_ocr_elements_continues_mark_id_sequence():
     assert resolve_bounds(2) == (20, 20, 30, 30)
     assert resolve_is_password(2) is False
     assert resolve_name(2) == "hello"
+
+
+def test_is_low_confidence_mark_true_for_ocr_element():
+    uia = [Element(mark_id=1, name="Save", control_type="Button", bounds=(0, 0, 10, 10),
+                    is_password=False, is_offscreen=False)]
+    ocr = [Element(mark_id=1, name="hello", control_type="ocr_text", bounds=(20, 20, 30, 30),
+                    is_password=False, is_offscreen=False)]
+    merged = merge_ocr_elements(uia, ocr)
+    ocr_mark_id = merged[1].mark_id
+    assert is_low_confidence_mark(ocr_mark_id) is True
+
+
+def test_is_low_confidence_mark_true_for_unresolvable_mark():
+    assert is_low_confidence_mark(999999) is True
 
 
 def test_desktop_screenshot_disabled_by_default():

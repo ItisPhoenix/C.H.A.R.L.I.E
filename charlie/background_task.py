@@ -17,6 +17,7 @@ back to session.user_idle_seconds() for its first idle check.
 import asyncio
 import dataclasses
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
@@ -24,7 +25,7 @@ from typing import Any, Dict, List, Literal, Optional
 from charlie.config import Config
 from charlie.core import Brain
 from charlie.tools import get_path_gate_reason, is_shell_command_gated
-from charlie.utils import make_id
+from charlie.utils import json_dumps, json_loads, make_id
 
 try:
     from charlie.desktop import actions as desktop_actions
@@ -40,6 +41,9 @@ logger = logging.getLogger("charlie.background_task")
 _OWNER_ID = "background_task"
 _POLL_INTERVAL_SEC = 2.0
 _STEP_RE = re.compile(r"^\s*\d+[.)]\s+(.+)$")
+# Mirrors charlie/recovery_cache.py's dotfile-in-cwd convention.
+_STATE_FILE = ".charlie_background_task_state.json"
+_TERMINAL_STATUSES = ("done", "failed", "cancelled")
 # Heuristic pre-scan over free-text plan steps, not a guarantee -- the real gate runs during execution.
 _DESKTOP_KEYWORD_RE = re.compile(
     r"\b(click|type|open|close|desktop|screen|window)\b", re.IGNORECASE
@@ -74,12 +78,53 @@ class BackgroundTask:
             "error": self.error,
         }
 
+    def to_state_dict(self) -> Dict[str, Any]:
+        """to_event() plus session_id, for on-disk persistence."""
+        return {**self.to_event(), "session_id": self.session_id}
+
 
 _current_task: Optional[BackgroundTask] = None
 
 
 def get_current_task() -> Optional[BackgroundTask]:
     return _current_task
+
+
+def _save_state(task: BackgroundTask) -> None:
+    try:
+        with open(_STATE_FILE, "w", encoding="utf-8") as f:
+            f.write(json_dumps(task.to_state_dict()))
+    except Exception:
+        logger.warning("Failed to persist background-task state", exc_info=True)
+
+
+async def _emit_task_event(event_bus, task: BackgroundTask) -> None:
+    """WS event plus on-disk persist -- single choke point, see check_interrupted_task()."""
+    await event_bus.emit("background_task", task.to_event())
+    _save_state(task)
+
+
+def check_interrupted_task() -> Optional[Dict[str, Any]]:
+    """Call at startup: report+clear a non-terminal state left by a process restart mid-task."""
+    if not os.path.exists(_STATE_FILE):
+        return None
+    try:
+        with open(_STATE_FILE, "r", encoding="utf-8") as f:
+            state = json_loads(f.read())
+    except Exception:
+        logger.warning("Failed to read background-task state file", exc_info=True)
+        return None
+    if not isinstance(state, dict) or state.get("status") in _TERMINAL_STATUSES:
+        return None
+
+    state["status"] = "failed"
+    state["error"] = "Charlie restarted while this task was still running."
+    try:
+        with open(_STATE_FILE, "w", encoding="utf-8") as f:
+            f.write(json_dumps(state))
+    except Exception:
+        logger.warning("Failed to rewrite background-task state file", exc_info=True)
+    return state
 
 
 def _parse_steps(plan_text: str) -> List[str]:
@@ -99,7 +144,22 @@ def _scan_gated_steps(steps: List[str]) -> List[int]:
     return flagged
 
 
-async def start(config: Config, event_bus, text: str, session_store=None, memory_store=None) -> BackgroundTask:
+async def _announce(event_bus, voice, severity: str, message: str) -> None:
+    """Mirror main.py's resource-alert pattern: an "alert" event plus spoken TTS."""
+    try:
+        await event_bus.emit("alert", {"severity": severity, "message": message})
+    except Exception:
+        logger.warning("Failed to emit background-task alert event", exc_info=True)
+    if voice is not None:
+        try:
+            voice.speak(message, "neutral")
+        except Exception:
+            logger.warning("Failed to speak background-task alert", exc_info=True)
+
+
+async def start(
+    config: Config, event_bus, text: str, session_store=None, memory_store=None, voice=None,
+) -> BackgroundTask:
     """Plan a background task and start running it immediately -- no upfront
     approval gate. Returns once the plan is generated and the run loop is
     scheduled; does not await task completion. _run_loop reports progress
@@ -125,7 +185,7 @@ async def start(config: Config, event_bus, text: str, session_store=None, memory
         is_background=True,
     )
 
-    await event_bus.emit("background_task", task.to_event())
+    await _emit_task_event(event_bus, task)
 
     plan_prompt = (
         "Break the following task into a short numbered list of concrete steps. "
@@ -139,8 +199,9 @@ async def start(config: Config, event_bus, text: str, session_store=None, memory
     task.flagged_steps = _scan_gated_steps(task.steps)
 
     task.status = "running"
-    await event_bus.emit("background_task", task.to_event())
-    asyncio.create_task(_run_loop(task, event_bus))
+    await _emit_task_event(event_bus, task)
+    await _announce(event_bus, voice, "info", f"Starting background task: {text}")
+    asyncio.create_task(_run_loop(task, event_bus, voice))
     return task
 
 
@@ -172,24 +233,31 @@ async def _wait_until_clear(task: BackgroundTask, config: Config, event_bus) -> 
         if clear:
             if paused:
                 task.status = "running"
-                await event_bus.emit("background_task", task.to_event())
+                await _emit_task_event(event_bus, task)
             return True
         if not paused:
             paused = True
             task.status = "paused"
-            await event_bus.emit("background_task", task.to_event())
+            await _emit_task_event(event_bus, task)
         await asyncio.sleep(_POLL_INTERVAL_SEC)
 
 
-async def _run_loop(task: BackgroundTask, event_bus) -> None:
+async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
     config = task.brain.config
     try:
         while task.current_step < len(task.steps):
+            if task.current_step in task.flagged_steps:
+                await _announce(
+                    event_bus, voice, "warning",
+                    f"Background task flagged step {task.current_step + 1}: {task.steps[task.current_step]}",
+                )
+
             if not await _wait_until_clear(task, config, event_bus):
                 task.status = "cancelled" if task.cancel_requested else "failed"
                 if task.status == "failed":
                     task.error = "Desktop control halted (panic hotkey)."
-                await event_bus.emit("background_task", task.to_event())
+                    await _announce(event_bus, voice, "error", f"Background task failed: {task.error}")
+                await _emit_task_event(event_bus, task)
                 return
 
             if _DESKTOP_AVAILABLE:
@@ -203,14 +271,16 @@ async def _run_loop(task: BackgroundTask, event_bus) -> None:
                     desktop_session.release_desktop(_OWNER_ID)
 
             task.current_step += 1
-            await event_bus.emit("background_task", task.to_event())
+            await _emit_task_event(event_bus, task)
 
         task.status = "done"
-        await event_bus.emit("background_task", task.to_event())
+        await _emit_task_event(event_bus, task)
+        await _announce(event_bus, voice, "success", f"Background task complete: {task.text}")
     except Exception as e:
         logger.error("Background task %s failed at step %d: %s", task.id, task.current_step, e, exc_info=True)
         task.status = "failed"
         task.error = str(e)
-        await event_bus.emit("background_task", task.to_event())
+        await _emit_task_event(event_bus, task)
+        await _announce(event_bus, voice, "error", f"Background task failed: {e}")
     finally:
         await task.brain.close()

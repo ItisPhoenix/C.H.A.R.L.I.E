@@ -33,10 +33,14 @@ try:
     from charlie.desktop import DESKTOP_AVAILABLE as _DESKTOP_AVAILABLE
     from charlie.desktop import UIA_EXECUTOR as _UIA_EXECUTOR
     from charlie.desktop import actions as desktop_actions
+    from charlie.desktop import session as desktop_session
+    from charlie.desktop import uia as desktop_uia
 except ImportError:  # pragma: no cover - guard mirrors charlie/desktop/__init__.py
     _DESKTOP_AVAILABLE = False
     _UIA_EXECUTOR = None
     desktop_actions = None
+    desktop_session = None
+    desktop_uia = None
 
 logger = logging.getLogger("charlie.core")
 if TYPE_CHECKING:
@@ -76,6 +80,15 @@ _VISUAL_CONTENT_QUERY_RE = re.compile(
     r"|\bwhat does this look like\b"
     r"|\bwho('?s| is) (this|that|he|she)\b"
     r"|\bwhat (do|can) you see\b",
+    re.IGNORECASE,
+)
+# Live background-task progress query -- only fires if a task is actually running (see below).
+_BACKGROUND_TASK_STATUS_RE = re.compile(
+    r"\bwhat are you doing\b"
+    r"|\bhow'?s (it|the task|your task|the background task) (going|doing)\b"
+    r"|\bwhat('?s| is) the status of\b.*\btask\b"
+    r"|\bwhat step (are you on|is the task on)\b"
+    r"|\b(is|has) the (background )?task (done|finished|complete)\b",
     re.IGNORECASE,
 )
 _TOOL_TIMEOUTS = {
@@ -659,6 +672,37 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
     return (" ".join(msg_parts), leftover_instruction)
 
 
+def _is_low_confidence_desktop_call(tool_name: str, arguments: Dict[str, Any]) -> bool:
+    """True for raw-coordinate clicks or OCR/vision-grounded (non-UIA-backed) marks."""
+    if tool_name == "desktop_click_at":
+        return True
+    if tool_name in ("desktop_click", "desktop_type", "desktop_invoke") and desktop_uia is not None:
+        mark_id = arguments.get("mark_id")
+        if isinstance(mark_id, int):
+            try:
+                return desktop_uia.is_low_confidence_mark(mark_id)
+            except Exception:
+                return False
+    return False
+
+
+def _detect_background_task_status(query: str) -> Optional[str]:
+    """Fast-path progress reply for a running background task; None if none is active."""
+    if not _BACKGROUND_TASK_STATUS_RE.search(query):
+        return None
+    from charlie import background_task  # lazy: background_task imports Brain from here
+
+    task = background_task.get_current_task()
+    if task is None or task.status in ("done", "failed", "cancelled"):
+        return None
+
+    total = len(task.steps)
+    if task.status == "paused":
+        return f'Background task "{task.text}" is paused, waiting for you to step away from the keyboard.'
+    step_desc = task.steps[task.current_step] if task.current_step < total else "wrapping up"
+    return f'Background task "{task.text}" is on step {task.current_step + 1} of {total}: {step_desc}.'
+
+
 def strip_internal_reasoning(text: str) -> str:
     """Remove model reasoning/thinking tags before user-facing output."""
     text = re.sub(
@@ -1212,6 +1256,7 @@ def _build_volatile_tier(
     active_goal: Optional[str] = None,
     operator_persona: bool = False,
     tool_catalog: str = "",
+    idle_seconds: Optional[float] = None,
 ) -> str:
     """Build the volatile tier: date/time, platform, budget, evidence blocks. Changes each turn."""
     output_rules = _PLATFORM_OUTPUT_RULES.get(platform, _DEFAULT_OUTPUT_RULES)
@@ -1233,6 +1278,8 @@ def _build_volatile_tier(
         f"Evidence blocks present this turn: {evidence_str}.\n"
         "If an evidence block is listed above, it IS available. Never claim you cannot access it.",
     ]
+    if idle_seconds is not None:
+        parts.append(f"User keyboard/mouse idle time: {idle_seconds:.0f}s.")
     if verbosity_hint:
         parts.append(f"Answer style: {verbosity_hint}.")
     if active_goal:
@@ -1840,6 +1887,13 @@ class Brain:
             yield open_msg + " "
             user_input = open_remaining
 
+        # --- Fast-path: live background-task progress query (deterministic, no LLM needed) ---
+        task_status_res = _detect_background_task_status(user_input)
+        if task_status_res is not None:
+            logger.info("Fast-path background-task status: %s -> %s", user_input, task_status_res)
+            yield task_status_res
+            return
+
         search_results = (
             "" if skip_pre_search else await asyncio.to_thread(_pre_search, user_input)
         )
@@ -1911,6 +1965,7 @@ class Brain:
             active_goal=self._active_goal,
             operator_persona=_detect_operator_persona(user_input),
             tool_catalog="" if self._use_native_tools else tool_registry.build_tool_prompt(),
+            idle_seconds=desktop_session.user_idle_seconds() if desktop_session is not None else None,
         )
         system_msg = _assemble_system_prompt(
             self._stable_tier, self._context_tier, volatile
@@ -2093,16 +2148,16 @@ class Brain:
                         r = f"Error executing tool '{tool_name}': {e}"
                     logger.warning("Tool %s raised an exception: %s", tool_name, e)
 
-            # Anomaly auto-halt: the same desktop call failing twice in a row
-            # (e.g. a stale mark id) means the model is looping, not making
-            # progress -- halt rather than let it keep retrying blind.
+            # Anomaly auto-halt: repeated failure of the same call means looping, not progress.
             if tool_name in _DESKTOP_CONTROL_TOOLS:
                 if r.startswith("Error"):
                     _desktop_fail_counts[ck] = _desktop_fail_counts.get(ck, 0) + 1
-                    if _desktop_fail_counts[ck] >= 2:
+                    threshold = 1 if _is_low_confidence_desktop_call(tool_name, call["arguments"]) else 2
+                    if _desktop_fail_counts[ck] >= threshold:
                         self._turn_halted = True
                         logger.warning(
-                            "Desktop action %s failed twice consecutively -- auto-halting.", tool_name
+                            "Desktop action %s failed %d time(s) (threshold %d) -- auto-halting.",
+                            tool_name, _desktop_fail_counts[ck], threshold,
                         )
                 else:
                     _desktop_fail_counts[ck] = 0

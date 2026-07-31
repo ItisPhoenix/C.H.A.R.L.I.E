@@ -178,6 +178,15 @@ def resolve_is_password(mark_id: int) -> bool:
     return bool(getattr(handle, "IsPassword", False))
 
 
+def is_low_confidence_mark(mark_id: int) -> bool:
+    """True if a mark has no live UIA control handle (OCR/vision-sourced) or doesn't resolve."""
+    try:
+        handle = resolve_mark(mark_id)
+    except KeyError:
+        return True
+    return isinstance(handle, Element)
+
+
 def resolve_name(mark_id: int) -> str:
     handle = resolve_mark(mark_id)
     if isinstance(handle, Element):

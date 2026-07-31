@@ -384,6 +384,15 @@ async def status():
     }
 
 
+@app.get("/api/background_task")
+async def background_task_status():
+    """Current background-task state, for dashboard resync (otherwise push-only over WS)."""
+    from charlie import background_task
+
+    task = background_task.get_current_task()
+    return {"task": task.to_event() if task is not None else None}
+
+
 @app.get("/api/sessions")
 async def list_sessions(request: Request):
     """List sessions, optionally filtered by launch_id or source."""

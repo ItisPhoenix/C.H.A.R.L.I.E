@@ -989,7 +989,7 @@ async def main():
                     try:
                         await background_task.start(
                             config, event_bus, payload.get("text", ""),
-                            session_store=store, memory_store=memory_store,
+                            session_store=store, memory_store=memory_store, voice=voice,
                         )
                     except RuntimeError as ex:
                         await event_bus.emit("alert", {"severity": "warn", "message": str(ex)})
@@ -1133,6 +1133,18 @@ async def main():
             charlie.recovery.set_active_session_id(current_web_session_id)
             import charlie.tools
             charlie.tools.set_event_bus(bus, asyncio.get_running_loop())
+
+            from charlie import background_task as _background_task
+            interrupted_task = _background_task.check_interrupted_task()
+            if interrupted_task is not None:
+                _interrupted_msg = (
+                    f"Note: your background task \"{interrupted_task.get('text', '')}\" was "
+                    f"interrupted by a restart at step {interrupted_task.get('current_step', 0) + 1} "
+                    f"of {len(interrupted_task.get('steps', []))}."
+                )
+                logger.info(_interrupted_msg)
+                await bus.emit("alert", {"severity": "warning", "message": _interrupted_msg})
+                voice.speak(_interrupted_msg, "neutral")
 
             def _read_cpu_ram_percent() -> Tuple[float, float]:
                 import psutil

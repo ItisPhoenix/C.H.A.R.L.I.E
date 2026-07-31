@@ -208,6 +208,22 @@ class TestGroundingRules:
         assert "desktop_click" in tier
         assert "graph_add_fact" in tier
 
+    def test_volatile_tier_omits_idle_time_by_default(self):
+        from datetime import datetime
+
+        from charlie.core import _build_volatile_tier
+        now = datetime(2026, 1, 15, 10, 30)
+        tier = _build_volatile_tier("voice", now, 10)
+        assert "idle" not in tier.lower()
+
+    def test_volatile_tier_includes_idle_time_when_provided(self):
+        from datetime import datetime
+
+        from charlie.core import _build_volatile_tier
+        now = datetime(2026, 1, 15, 10, 30)
+        tier = _build_volatile_tier("voice", now, 10, idle_seconds=42.0)
+        assert "idle time: 42s" in tier
+
 
 class TestInstalledSkillBlocks:
     """A "skill" kind extension installed via the web dashboard is mirrored
