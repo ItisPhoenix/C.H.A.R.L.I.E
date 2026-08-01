@@ -4,7 +4,7 @@ A low-latency, voice-first AI assistant that runs entirely on your local machine
 
 **C**ompletely **H**elpful **A**nd **R**ather **L**ocal **I**ntelligent **E**ngine.
 
-[![CI](https://github.com/ItisPhoenix/C.H.A.R.L.I.E./actions/workflows/ci.yml/badge.svg)](https://github.com/ItisPhoenix/C.H.A.R.L.I.E./actions/workflows/ci.yml)
+[![CI](https://github.com/ItisPhoenix/C.H.A.R.L.I.E/actions/workflows/ci.yml/badge.svg)](https://github.com/ItisPhoenix/C.H.A.R.L.I.E/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ```
@@ -128,8 +128,8 @@ Every call is capped by `IterationBudget` (12/turn interactive, higher for backg
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/ItisPhoenix/C.H.A.R.L.I.E..git
-cd "C.H.A.R.L.I.E."
+git clone https://github.com/ItisPhoenix/C.H.A.R.L.I.E.git
+cd C.H.A.R.L.I.E
 ```
 
 ### 2. Install dependencies
