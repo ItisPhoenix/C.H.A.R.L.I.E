@@ -5,6 +5,10 @@ A low-latency, voice-first AI assistant that runs entirely on your local machine
 **C**ompletely **H**elpful **A**nd **R**ather **L**ocal **I**ntelligent **E**ngine.
 
 [![CI](https://github.com/ItisPhoenix/C.H.A.R.L.I.E/actions/workflows/ci.yml/badge.svg)](https://github.com/ItisPhoenix/C.H.A.R.L.I.E/actions/workflows/ci.yml)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Node 20+](https://img.shields.io/badge/node-20%2B-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows&logoColor=white)](#requirements)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ```
