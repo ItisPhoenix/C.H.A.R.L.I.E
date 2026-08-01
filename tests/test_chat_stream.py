@@ -303,6 +303,7 @@ async def test_auto_halt_threshold_is_two_for_regular_desktop_call(monkeypatch, 
 async def test_chat_stream_injects_idle_seconds_when_desktop_available(monkeypatch, brain_config):
     from charlie import core
 
+    monkeypatch.setattr(core, "_DESKTOP_AVAILABLE", True)
     monkeypatch.setattr(core, "desktop_session", type("S", (), {"user_idle_seconds": staticmethod(lambda: 12.0)}))
 
     captured_payloads = []
