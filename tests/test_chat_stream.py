@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 from charlie.config import Config
@@ -537,6 +539,7 @@ def test_detect_open_app_all_failures(monkeypatch):
     # Must not crash with AttributeError on tuples
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="process name ends in .exe on Windows only")
 def testis_process_running_against_real_processes():
     from charlie.core import is_process_running
 

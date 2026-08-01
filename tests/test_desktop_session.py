@@ -1,4 +1,5 @@
 import ctypes
+import sys
 
 import pytest
 
@@ -46,11 +47,13 @@ def test_user_idle_seconds(monkeypatch):
     assert session.user_idle_seconds() == 60.0
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real GetTickCount/GetLastInputInfo calls, Windows only")
 def test_tick_functions_return_int():
     assert isinstance(session._now_tick_ms(), int)
     assert isinstance(session._last_input_tick_ms(), int)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real GetTickCount call, Windows only")
 def test_gettickcount_restype_is_unsigned():
     # ctypes defaults an unset restype to signed c_int/c_long. Without this,
     # GetTickCount's raw DWORD gets read as signed, going negative after

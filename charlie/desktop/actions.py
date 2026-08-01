@@ -21,7 +21,7 @@ try:
     # per-turn auto-halt below, not this uncoordinated pyautogui default.
     pyautogui.FAILSAFE = False
     _HAS_PYAUTOGUI = True
-except ImportError:
+except Exception:  # pyautogui also raises on headless Linux (no X display), not just ImportError
     _HAS_PYAUTOGUI = False
 
 _HALT = threading.Event()

@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from charlie.desktop import windows
 
@@ -69,14 +69,17 @@ def test_focus_window_no_match_errors(monkeypatch):
 
 
 def test_focus_window_success_does_not_use_alt_fallback(monkeypatch):
+    # No real pyautogui import needed -- this path succeeds on the first
+    # SetForegroundWindow call and never touches the alt-fallback at all.
     monkeypatch.setattr(windows, "find_window", lambda _: {"hwnd": 5, "title": "Test"})
     mock_user32 = MagicMock()
     mock_user32.SetForegroundWindow.return_value = 1
     monkeypatch.setattr(windows, "_user32", mock_user32)
-    with patch("pyautogui.press") as mock_press:
-        result = windows.focus_window("test")
+    mock_pyautogui = MagicMock()
+    monkeypatch.setattr(windows, "pyautogui", mock_pyautogui, raising=False)
+    result = windows.focus_window("test")
     mock_user32.ShowWindow.assert_called_once_with(5, windows._SW_RESTORE)
-    mock_press.assert_not_called()
+    mock_pyautogui.press.assert_not_called()
     assert "Test" in result
 
 

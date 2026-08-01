@@ -23,7 +23,7 @@ _kernel32 = ctypes.windll.kernel32 if sys.platform == "win32" else None
 try:
     import pyautogui
     _HAS_PYAUTOGUI = True
-except ImportError:
+except Exception:  # pyautogui also raises on headless Linux (no X display), not just ImportError
     _HAS_PYAUTOGUI = False
 
 _SW_MINIMIZE, _SW_MAXIMIZE, _SW_RESTORE = 6, 3, 9

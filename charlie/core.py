@@ -1978,7 +1978,11 @@ class Brain:
             active_goal=self._active_goal,
             operator_persona=_detect_operator_persona(user_input),
             tool_catalog="" if self._use_native_tools else tool_registry.build_tool_prompt(),
-            idle_seconds=desktop_session.user_idle_seconds() if desktop_session is not None else None,
+            idle_seconds=(
+                desktop_session.user_idle_seconds()
+                if _DESKTOP_AVAILABLE and desktop_session is not None
+                else None
+            ),
         )
         system_msg = _assemble_system_prompt(
             self._stable_tier, self._context_tier, volatile

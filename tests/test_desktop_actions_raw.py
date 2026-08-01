@@ -1,3 +1,4 @@
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,12 +16,13 @@ def _reset_capture_bounds():
 @pytest.fixture
 def fake_pyautogui(monkeypatch):
     fake = MagicMock()
-    monkeypatch.setattr(actions, "pyautogui", fake)
+    monkeypatch.setattr(actions, "pyautogui", fake, raising=False)
     monkeypatch.setattr(actions, "_HAS_PYAUTOGUI", True)
     actions.clear_halt()
     return fake
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real GetTickCount call, Windows only")
 def test_check_halt_records_action_tick():
     actions._last_action_tick_ms = 0
     actions._check_halt()
