@@ -2,9 +2,9 @@
 
 @theme {
   /* Fonts: Space Grotesk is display, Inter is body, JetBrains Mono is reserved for logs and data. */
-  --font-sans: "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-sans: var(--font-sans), "Segoe UI", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", monospace;
-  --font-display: "Space Grotesk", sans-serif;
+  --font-display: var(--font-display), sans-serif;
 
   /* Pure black canvas theme */
   --color-canvas: #000000;

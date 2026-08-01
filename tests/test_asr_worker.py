@@ -104,3 +104,18 @@ def test_filter_drops_low_confidence_segment():
         avg_logprob=-1.4,
     )
     assert _filter_hallucinated_segments([low_confidence]) == []
+
+
+def test_filter_drops_thank_you_hallucination_on_borderline_silence():
+    """Real bug: Whisper hallucinates 'Thank you.' on room noise/silence with
+    no_speech_prob just under the hard 0.6 cutoff -- confident enough to pass
+    the other filters, but still elevated compared to real speech."""
+    hallucinated = _FakeSegment(text=" Thank you.", no_speech_prob=0.45, compression_ratio=1.0)
+    assert _filter_hallucinated_segments([hallucinated]) == []
+
+
+def test_filter_keeps_genuine_thank_you():
+    """A real, deliberately spoken 'thank you' has the model confident it's
+    speech (low no_speech_prob) -- must not be swept up by the phrase denylist."""
+    genuine = _FakeSegment(text=" Thank you.", no_speech_prob=0.05, compression_ratio=1.0)
+    assert _filter_hallucinated_segments([genuine]) == [genuine]

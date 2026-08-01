@@ -139,6 +139,8 @@ interface CharlieState {
   setDesktopControlEnabled: (enabled: boolean) => void;
   backgroundTask: BackgroundTask | null;
   setBackgroundTask: (t: BackgroundTask | null) => void;
+  selectedFileContent: string;
+  setSelectedFileContent: (content: string) => void;
 }
 
 export const useCharlieStore = create<CharlieState>((set) => ({
@@ -158,7 +160,9 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   toolActivity: [],
   launchId: "",
   sessionScope: "all",
-  accentColor: typeof window !== "undefined" ? localStorage.getItem("charlie_accent") || "#a855f7" : "#a855f7",
+  // Always starts at the default; the persisted value (if any) is applied after mount
+  // (see page.tsx) so the first client render matches the server-rendered HTML.
+  accentColor: "#a855f7",
 
   setConnected: (connected) => set({ connected }),
   setSystemStatus: (systemStatus) => set({ systemStatus }),
@@ -210,6 +214,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setDesktopControlEnabled: (desktopControlEnabled) => set({ desktopControlEnabled }),
   backgroundTask: null,
   setBackgroundTask: (backgroundTask) => set({ backgroundTask }),
+  selectedFileContent: "",
+  setSelectedFileContent: (selectedFileContent) => set({ selectedFileContent }),
 }));
 
 export function hexToRgb(hex: string) {

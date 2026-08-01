@@ -20,6 +20,30 @@ logger = logging.getLogger("charlie.asr_worker")
 _NO_SPEECH_PROB_THRESHOLD = 0.6
 _COMPRESSION_RATIO_THRESHOLD = 2.4
 _AVG_LOGPROB_THRESHOLD = -1.0
+# A real "thank you" the user actually said has the model confident it heard
+# speech (low no_speech_prob, well under this). A hallucinated one on silence
+# still scores noticeably higher, just not high enough to cross the 0.6 cutoff
+# above -- so gate the phrase denylist below on this softer secondary threshold
+# instead of dropping every instance of these phrases outright.
+_HALLUCINATION_PHRASE_NO_SPEECH_THRESHOLD = 0.3
+
+# Whisper's well-documented failure mode: on near-silence/room noise it doesn't
+# just say nothing, it confidently hallucinates one of a handful of stock
+# phrases from its training data (YouTube-style captions). These pass the
+# confidence filters above because the model IS confident -- just wrong. Only
+# drop them when no_speech_prob also clears the softer threshold above, so a
+# genuinely spoken "thank you" still comes through.
+_HALLUCINATION_PHRASES = frozenset({
+    "thank you",
+    "thanks for watching",
+    "thank you for watching",
+    "please subscribe",
+    "bye",
+    "bye bye",
+    "goodbye",
+    "okay",
+    "i'm sorry",
+})
 
 
 def _filter_hallucinated_segments(segments) -> list:
@@ -33,6 +57,10 @@ def _filter_hallucinated_segments(segments) -> list:
         if s.no_speech_prob < _NO_SPEECH_PROB_THRESHOLD
         and s.compression_ratio < _COMPRESSION_RATIO_THRESHOLD
         and s.avg_logprob > _AVG_LOGPROB_THRESHOLD
+        and not (
+            s.no_speech_prob >= _HALLUCINATION_PHRASE_NO_SPEECH_THRESHOLD
+            and s.text.strip().lower().rstrip(".") in _HALLUCINATION_PHRASES
+        )
     ]
 
 

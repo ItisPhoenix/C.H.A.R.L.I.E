@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import Link from "next/link";
+import { ArrowLeft, Save, RefreshCw, Search } from "lucide-react";
 
 interface FieldSpec {
   key: string;
@@ -17,9 +17,6 @@ interface FieldSpec {
 
 type SaveState = "idle" | "saved" | "error";
 
-// Fields whose value is long-form (multi-line lists or full URLs) get the
-// full card width; short scalars (numbers, toggles, short strings) pair up
-// two-to-a-row so cards stay compact instead of one long vertical list.
 const WIDE_TYPES = new Set(["list"]);
 const WIDE_KEYS = new Set([
   "LLM_URL",
@@ -66,10 +63,10 @@ const GROUP_HELP: Record<string, string> = {
 };
 
 const RESTART_META: Record<string, { label: string; color: string; bg: string }> = {
-  voice: { label: "Voice · via Reload", color: "var(--color-accent-teal)", bg: "var(--color-accent-teal-dim)" },
-  mcp: { label: "MCP · via Reload", color: "var(--color-accent-teal)", bg: "var(--color-accent-teal-dim)" },
-  plugins: { label: "Plugins · via Reload", color: "var(--color-accent-teal)", bg: "var(--color-accent-teal-dim)" },
-  process: { label: "Needs full restart", color: "var(--color-status-warning)", bg: "var(--color-status-warning-dim)" },
+  voice: { label: "Voice · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "rgba(6, 182, 212, 0.1)" },
+  mcp: { label: "MCP · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "rgba(6, 182, 212, 0.1)" },
+  plugins: { label: "Plugins · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "rgba(6, 182, 212, 0.1)" },
+  process: { label: "Needs restart", color: "#f59e0b", bg: "rgba(245, 158, 11, 0.1)" },
 };
 
 const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
@@ -136,8 +133,6 @@ export default function SettingsPage(): ReactElement {
     return map;
   }, [fields]);
 
-  // Only ever called from the Save button -- typing/toggling a field just
-  // updates local state below, nothing reaches the network until then.
   const handleSaveAll = async () => {
     if (dirtyKeys.size === 0) return;
     const payload: Record<string, unknown> = {};
@@ -145,7 +140,7 @@ export default function SettingsPage(): ReactElement {
       const spec = fieldsByKey.get(key);
       if (!spec) continue;
       const raw = localValues[key];
-      if (spec.secret && raw === "") continue; // blank means "leave the existing secret alone"
+      if (spec.secret && raw === "") continue;
       if (spec.type === "list") {
         payload[key] = String(raw).split("\n").map((s) => s.trim()).filter(Boolean);
       } else if (spec.type === "int") {
@@ -186,8 +181,6 @@ export default function SettingsPage(): ReactElement {
     }
   };
 
-  // The only path that ever touches the running engine -- applies whatever
-  // is currently in .env (i.e. whatever the last Save wrote).
   const handleReload = async () => {
     setReloadingEngine(true);
     setReloadStatus("idle");
@@ -225,83 +218,123 @@ export default function SettingsPage(): ReactElement {
   const visibleGroups = GROUP_ORDER.filter((g) => (grouped.get(g)?.length ?? 0) > 0);
   const hasPending = dirtyKeys.size > 0;
 
+  const scrollToGroup = (group: string) => {
+    const el = document.getElementById(`group-${group.replace(/\s+/g, "-")}`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  };
+
   return (
-    <div className="h-full w-full overflow-y-auto scrollbar">
-      <div className="max-w-[1400px] mx-auto px-8 py-8">
-        {/* Sticky header: identity + actions stay reachable while the grid scrolls */}
-        <div className="sticky top-0 z-10 -mx-8 px-8 pb-5 pt-1 bg-[var(--color-canvas)]/90 backdrop-blur-md">
+    <div className="h-full w-full bg-black text-[#f4f6fa] flex flex-col overflow-hidden font-sans">
+      
+      {/* Header bar */}
+      <header className="px-8 py-4 border-b border-[rgba(255,255,255,0.07)] bg-zinc-950/80 backdrop-blur-md flex items-center justify-between shrink-0 select-none">
+        <div className="flex items-center gap-4">
           <Link
             href="/"
-            className="text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition inline-flex items-center gap-1.5"
+            className="rounded-lg w-8 h-8 grid place-items-center text-slate-400 hover:text-slate-100 hover:bg-white/5 active:scale-95 transition"
+            aria-label="Back to chat"
           >
-            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M15 18l-6-6 6-6" />
-            </svg>
-            Back to Charlie
+            <ArrowLeft className="w-4 h-4" />
           </Link>
-
-          <div className="mt-3 flex items-start justify-between gap-6 flex-wrap">
-            <div className="max-w-2xl">
-              <h1 className="font-display text-3xl font-semibold text-[var(--color-text-primary)]">Settings</h1>
-              <p className="text-sm text-[var(--color-text-secondary)] mt-2 leading-relaxed">
-                Nothing applies automatically. Edit any field, click <span className="font-medium text-[var(--color-text-primary)]">Save</span> to
-                write it, then <span className="font-medium text-[var(--color-text-primary)]">Reload</span> to apply it to the running engine. Fields
-                marked <span className="font-medium" style={{ color: RESTART_META.process.color }}>Needs full restart</span> only
-                take effect the next time you launch Charlie, even after Reload.
-              </p>
-            </div>
-
-            <div className="flex items-center gap-3 shrink-0">
-              <span className="text-sm text-[var(--color-text-muted)]">
-                {hasPending ? `${dirtyKeys.size} unsaved` : "No unsaved changes"}
-              </span>
-              <button
-                onClick={() => void handleSaveAll()}
-                disabled={!hasPending || saving}
-                className="px-4 py-2 rounded-xl text-sm font-semibold bg-[var(--color-status-success)] text-white transition hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-              >
-                {saving ? "Saving…" : "Save"}
-              </button>
-              <button
-                onClick={() => void handleReload()}
-                disabled={reloadingEngine}
-                className="px-4 py-2 rounded-xl text-sm font-semibold bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-glass-border-hover)] transition disabled:opacity-60 cursor-pointer flex items-center gap-2"
-              >
-                <svg viewBox="0 0 24 24" className={`w-4 h-4 ${reloadingEngine ? "animate-spin" : ""}`} fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
-                </svg>
-                {reloadingEngine ? "Reloading…" : reloadStatus === "done" ? "Reloaded" : reloadStatus === "error" ? "Reload failed" : "Reload"}
-              </button>
-            </div>
+          <div>
+            <h1 className="font-display text-lg font-bold uppercase tracking-wide">
+              Settings Config
+            </h1>
+            <p className="text-[10px] text-slate-500 font-mono">
+              Charlie Engine Properties Editor
+            </p>
           </div>
-
-          <input
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search settings..."
-            className="w-full max-w-md mt-5 bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] rounded-xl px-4 py-2.5 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-glass-border-hover)] transition"
-          />
         </div>
 
-        {loading ? (
-          <div className="flex flex-col items-center justify-center py-24 gap-3">
-            <div className="w-8 h-8 rounded-full border-2 border-t-transparent border-[var(--color-text-muted)] animate-spin" />
-            <p className="text-sm text-[var(--color-text-muted)] font-mono">Loading settings...</p>
+        {/* Global actions */}
+        <div className="flex items-center gap-3">
+          <span className="text-xs font-mono text-slate-500">
+            {hasPending ? `${dirtyKeys.size} unsaved` : "No modifications"}
+          </span>
+          <button
+            onClick={() => void handleSaveAll()}
+            disabled={!hasPending || saving}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold uppercase disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition active:scale-[0.98]"
+          >
+            <Save className="w-3.5 h-3.5" />
+            {saving ? "Saving..." : "Save"}
+          </button>
+          <button
+            onClick={() => void handleReload()}
+            disabled={reloadingEngine}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-900 border border-white/10 hover:bg-zinc-800 text-slate-200 text-xs font-bold uppercase disabled:opacity-60 cursor-pointer transition active:scale-[0.98]"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${reloadingEngine ? "animate-spin" : ""}`} />
+            {reloadingEngine ? "Reloading..." : reloadStatus === "done" ? "Reloaded" : reloadStatus === "error" ? "Reload failed" : "Reload"}
+          </button>
+        </div>
+      </header>
+
+      {/* Main settings area */}
+      <div className="flex-1 flex overflow-hidden">
+        
+        {/* Sticky sidebar category navigator */}
+        <nav className="w-60 border-r border-[rgba(255,255,255,0.07)] bg-zinc-950/20 p-4 shrink-0 flex flex-col gap-1 overflow-y-auto scrollbar select-none">
+          <div className="relative flex items-center mb-3">
+            <Search className="absolute left-2.5 w-3.5 h-3.5 text-slate-500" />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search properties..."
+              className="w-full rounded-lg bg-zinc-900/60 border border-[rgba(255,255,255,0.07)] pl-8 pr-2.5 py-1.5 text-xs text-[#f4f6fa] placeholder:text-slate-500 outline-none transition focus:border-[rgba(255,255,255,0.15)]"
+            />
           </div>
-        ) : visibleGroups.length === 0 ? (
-          <p className="text-sm text-[var(--color-text-muted)] font-mono text-center py-24">
-            No settings match &quot;{query}&quot;.
-          </p>
-        ) : (
-          <div className="mt-2 pb-16 columns-1 lg:columns-2 2xl:columns-3 gap-5">
+
+          <h3 className="px-2 text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono mb-2">
+            Categories
+          </h3>
+
+          <div className="space-y-0.5">
             {visibleGroups.map((group) => (
-              <section key={group} className="glass rounded-2xl p-5 flex flex-col gap-4 mb-5 break-inside-avoid">
-                <div>
-                  <h2 className="font-display text-lg font-semibold text-[var(--color-text-primary)]">{group}</h2>
-                  <p className="text-sm text-[var(--color-text-muted)] mt-1">{GROUP_HELP[group]}</p>
+              <button
+                key={group}
+                onClick={() => scrollToGroup(group)}
+                className="w-full text-left rounded-lg px-2.5 py-2 text-xs text-slate-400 hover:text-slate-100 hover:bg-white/5 active:scale-[0.98] transition truncate cursor-pointer font-medium"
+              >
+                {group}
+              </button>
+            ))}
+          </div>
+        </nav>
+
+        {/* Scrollable pane of settings sections */}
+        <div className="flex-1 overflow-y-auto p-8 scrollbar space-y-8 bg-zinc-950/10">
+          {loading ? (
+            <div className="h-full flex flex-col items-center justify-center gap-3">
+              <RefreshCw className="w-6 h-6 text-slate-600 animate-spin" />
+              <p className="text-xs text-slate-500 font-mono">Querying properties spec...</p>
+            </div>
+          ) : visibleGroups.length === 0 ? (
+            <p className="text-xs text-slate-500 font-mono text-center py-12">
+              No matching properties found.
+            </p>
+          ) : (
+            visibleGroups.map((group) => (
+              <section
+                key={group}
+                id={`group-${group.replace(/\s+/g, "-")}`}
+                className="scroll-mt-6 space-y-4"
+              >
+                {/* Category Header */}
+                <div className="border-b border-white/5 pb-2">
+                  <h2 className="font-display text-lg font-bold text-slate-100 uppercase tracking-wide">
+                    {group}
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    {GROUP_HELP[group]}
+                  </p>
                 </div>
-                <div className="grid grid-cols-2 gap-x-3 gap-y-3 items-stretch content-start">
+
+                {/* Form fields Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {grouped.get(group)!.map((spec) => (
                     <FieldRow
                       key={spec.key}
@@ -314,9 +347,9 @@ export default function SettingsPage(): ReactElement {
                   ))}
                 </div>
               </section>
-            ))}
-          </div>
-        )}
+            ))
+          )}
+        </div>
       </div>
     </div>
   );
@@ -340,19 +373,21 @@ function FieldRow({
 
   return (
     <div
-      className={`${wide ? "col-span-2" : "col-span-2 sm:col-span-1"} h-full flex flex-col gap-2 rounded-lg border border-[var(--color-glass-border)] bg-[var(--color-surface-hover)] p-3`}
+      className={`${
+        wide ? "col-span-1 md:col-span-2" : "col-span-1"
+      } flex flex-col justify-between p-4 bg-zinc-900/30 border border-[rgba(255,255,255,0.07)] rounded-xl transition hover:border-[rgba(255,255,255,0.12)] min-h-[110px]`}
     >
       <div>
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-sm font-semibold text-[var(--color-text-primary)]">{spec.label}</span>
-          {saveState === "saved" && <span className="text-xs text-[var(--color-status-success)]">saved</span>}
-          {saveState === "error" && <span className="text-xs text-[var(--color-status-error)]">failed</span>}
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-semibold text-slate-200">{spec.label}</span>
+          {saveState === "saved" && <span className="text-[10px] font-mono text-emerald-400 uppercase font-bold">Saved</span>}
+          {saveState === "error" && <span className="text-[10px] font-mono text-red-400 uppercase font-bold">Failed</span>}
         </div>
-        <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
-          <span className="text-[11px] font-mono text-[var(--color-text-muted)]">{spec.key}</span>
+        <div className="flex items-center gap-1.5 flex-wrap mt-1">
+          <span className="text-[9px] font-mono text-slate-500 uppercase">{spec.key}</span>
           {restartMeta && (
             <span
-              className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full"
+              className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full"
               style={{ color: restartMeta.color, background: restartMeta.bg }}
             >
               {restartMeta.label}
@@ -361,25 +396,27 @@ function FieldRow({
         </div>
       </div>
 
-      <div className="mt-auto">
+      <div className="mt-4">
         {spec.type === "bool" ? (
           <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
             <input
               type="checkbox"
               checked={Boolean(value)}
               onChange={(e) => onChange(e.target.checked)}
-              className="w-4 h-4 rounded"
+              className="w-4 h-4 rounded border-white/10 bg-zinc-950 checked:bg-cyan-500 cursor-pointer"
             />
-            <span className="text-sm text-[var(--color-text-secondary)]">{Boolean(value) ? "Enabled" : "Disabled"}</span>
+            <span className="text-xs text-slate-400 font-medium">
+              {Boolean(value) ? "Enabled" : "Disabled"}
+            </span>
           </label>
         ) : options ? (
           <select
             value={String(value ?? "")}
             onChange={(e) => onChange(e.target.value)}
-            className="w-full bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] rounded-lg px-3 py-2 text-sm text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-glass-border-hover)] transition"
+            className="w-full bg-zinc-950 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-white/20 transition cursor-pointer"
           >
             {options.map((o) => (
-              <option key={o.value} value={o.value}>
+              <option key={o.value} value={o.value} className="bg-zinc-950 text-slate-200">
                 {o.label}
               </option>
             ))}
@@ -390,16 +427,16 @@ function FieldRow({
             onChange={(e) => onChange(e.target.value)}
             placeholder="One entry per line"
             rows={2}
-            className="w-full bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-glass-border-hover)] transition resize-y"
+            className="w-full bg-zinc-950 border border-white/10 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-white/20 transition resize-y scrollbar"
           />
         ) : (
           <input
             type={spec.secret ? "password" : spec.type === "int" || spec.type === "float" ? "number" : "text"}
             value={String(value ?? "")}
             onChange={(e) => onChange(e.target.value)}
-            placeholder={spec.secret ? (spec.is_set ? "Set -- leave blank to keep" : "Not set") : ""}
+            placeholder={spec.secret ? (spec.is_set ? "•••••••• (click to change)" : "Not configured") : ""}
             step={spec.type === "float" ? "any" : undefined}
-            className="w-full bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-glass-border-hover)] transition"
+            className="w-full bg-zinc-950 border border-white/10 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-white/20 transition"
           />
         )}
       </div>

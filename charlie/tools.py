@@ -20,7 +20,9 @@ import httpx
 
 from charlie import recovery
 from charlie.config import config
+from charlie.known_apps import APP_REGISTRY
 from charlie.session_store import SessionStore
+from charlie.utils import is_process_running
 
 logger = logging.getLogger("charlie.tools")
 
@@ -585,6 +587,37 @@ def is_shell_command_gated(command: str) -> Optional[str]:
     return is_command_keyword_gated(command)
 
 
+# Wrapper prefixes the model tends to reach for when a plain "start <app>" gets
+# blocked (see _detect_app_launch below) -- stripped one at a time so any
+# combination still reduces to the bare app token underneath.
+_LAUNCH_WRAPPER_RES = [
+    re.compile(r"^cmd(?:\.exe)?\s*/c\s+", re.IGNORECASE),
+    re.compile(r"^powershell(?:\.exe)?\s+-command\s+", re.IGNORECASE),
+    re.compile(r"^start-process\s+", re.IGNORECASE),
+    re.compile(r"^start\s+(?:\"\"\s+)?", re.IGNORECASE),
+]
+
+
+def _detect_app_launch(command: str):
+    """If `command` is a bare launch of a known local app (optionally wrapped
+    in "start"/"cmd /c start"/"powershell Start-Process"), return its
+    known_apps.AppEntry. Deliberately conservative -- only a bare launch
+    matches, e.g. "notepad" or "start notepad", not "notepad file.txt" (a
+    real file argument means a genuinely new instance may be wanted)."""
+    token = command.strip()
+    for wrapper_re in _LAUNCH_WRAPPER_RES:
+        token = wrapper_re.sub("", token).strip()
+    token = token.strip("\"'").strip()
+    token = re.sub(r"\.exe$", "", token, flags=re.IGNORECASE).strip("\"'").strip()
+    if not token:
+        return None
+    token_lower = token.lower()
+    for entry in APP_REGISTRY.values():
+        if entry.close_process and token_lower == entry.open_cmd.lower():
+            return entry
+    return None
+
+
 @registry.register_tool(
     name="shell_execute",
     description="Run a shell command and get output. Risky commands are blocked.",
@@ -607,6 +640,15 @@ def is_shell_command_gated(command: str) -> Optional[str]:
 def shell_execute(command: str, *, voice_mode: bool = False) -> str:
     lowered = command.lower().strip()
 
+    # An already-running known app gets focused instead of relaunched -- applies
+    # regardless of voice_mode, and before the allowlist check below so a blocked
+    # wrapper (e.g. "powershell -Command Start-Process notepad") never even gets
+    # a chance to fail: if the app's already open, there's nothing to launch.
+    app_entry = _detect_app_launch(command)
+    if app_entry and sys.platform == "win32" and is_process_running(app_entry.close_process):
+        from charlie.desktop.windows import focus_window
+        return focus_window(app_entry.close_process.removesuffix(".exe"))
+
     if voice_mode:
         if not lowered:
             return "Error: No command provided."
@@ -619,6 +661,8 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
             "notepad ",
             "dir ",
             "cmd ",
+            "move ",
+            "copy ",
         )
         # Accept the bare command too (e.g. "notepad" with no args), not just "notepad <arg>".
         if not any(lowered == prefix.strip() or lowered.startswith(prefix) for prefix in allowed_prefixes):
@@ -832,17 +876,29 @@ def _resolve_user_placeholders(path: str) -> str:
     """Replace Windows user-folder placeholders (e.g. C:\\Users\\YourUsername\\...)
     with the real username. Splits on a literal backslash rather than
     os.path.sep -- Charlie targets Windows paths regardless of the host
-    platform this runs on (e.g. pure-logic tests on Linux CI)."""
+    platform this runs on (e.g. pure-logic tests on Linux CI).
+
+    Also catches the case where the model wrote a real-looking but wrong
+    username (e.g. C:\\Users\\Charlie -- guessing its own name instead of the
+    actual account) rather than an obvious <placeholder>: if the segment
+    right after "Users" doesn't match an existing directory, it's swapped for
+    the real one too."""
     import getpass
     placeholders = {"yourusername", "username", "user"}
     current_user = getpass.getuser()
-    parts = []
-    for part in path.split("\\"):
-        clean_part = part.strip("<>").lower()
-        if clean_part in placeholders:
-            parts.append(current_user)
-        else:
-            parts.append(part)
+    parts = path.split("\\")
+    for i, part in enumerate(parts):
+        clean_part = part.strip("<>")
+        if clean_part.lower() in placeholders:
+            parts[i] = current_user
+        elif (
+            i > 0
+            and parts[i - 1].lower() == "users"
+            and clean_part
+            and clean_part.lower() != current_user.lower()
+            and not os.path.isdir("\\".join(parts[: i + 1]))
+        ):
+            parts[i] = current_user
     return "\\".join(parts)
 
 

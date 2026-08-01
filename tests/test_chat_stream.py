@@ -414,7 +414,7 @@ def test_detect_open_app(monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", mock_popen)
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.core._is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.core.is_process_running", lambda name: False)
 
     # 1. Test opening single app
     res = _detect_open_app("open calculator")
@@ -498,7 +498,7 @@ def test_detect_open_app_partial_failure(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", mock_popen)
     monkeypatch.setattr(os, "startfile", mock_startfile, raising=False)
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.core._is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.core.is_process_running", lambda name: False)
 
     # Test: open two apps, one fails
     res = _detect_open_app("open chrome notepad")
@@ -527,7 +527,7 @@ def test_detect_open_app_all_failures(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", mock_fail)
     monkeypatch.setattr(os, "startfile", mock_fail, raising=False)
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.core._is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.core.is_process_running", lambda name: False)
 
     res = _detect_open_app("open chrome notepad")
     assert res is not None
@@ -537,11 +537,11 @@ def test_detect_open_app_all_failures(monkeypatch):
     # Must not crash with AttributeError on tuples
 
 
-def test_is_process_running_against_real_processes():
-    from charlie.core import _is_process_running
+def testis_process_running_against_real_processes():
+    from charlie.core import is_process_running
 
-    assert _is_process_running("python.exe") is True  # this test itself is running
-    assert _is_process_running("definitely-not-a-real-process-xyz.exe") is False
+    assert is_process_running("python.exe") is True  # this test itself is running
+    assert is_process_running("definitely-not-a-real-process-xyz.exe") is False
 
 
 def test_detect_open_app_focuses_already_running_instead_of_relaunching(monkeypatch):
@@ -556,7 +556,7 @@ def test_detect_open_app_focuses_already_running_instead_of_relaunching(monkeypa
     from charlie.core import _detect_open_app
 
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.core._is_process_running", lambda name: name == "notepad.exe")
+    monkeypatch.setattr("charlie.core.is_process_running", lambda name: name == "notepad.exe")
 
     popen_calls = []
     monkeypatch.setattr(
@@ -586,7 +586,7 @@ def test_detect_open_app_mixed_running_and_not_running(monkeypatch):
     from charlie.core import _detect_open_app
 
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.core._is_process_running", lambda name: name == "notepad.exe")
+    monkeypatch.setattr("charlie.core.is_process_running", lambda name: name == "notepad.exe")
 
     popen_calls = []
     monkeypatch.setattr(
@@ -607,6 +607,25 @@ def test_detect_open_app_mixed_running_and_not_running(monkeypatch):
     assert "opened" in msg.lower()
     assert focus_calls == ["notepad"]
     assert 'start "" calc' in popen_calls
+
+
+def test_detect_open_app_does_not_open_filename_as_website(monkeypatch):
+    """Real bug: "open notepad and write X and save it as test.txt" matched
+    "test.txt" as a probable domain (".txt" looks exactly like a TLD-shaped
+    suffix) and opened https://test.txt in a browser instead of treating it
+    as a filename."""
+    import subprocess
+
+    from charlie.core import _detect_open_app
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("charlie.core.is_process_running", lambda name: False)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: None)
+
+    res = _detect_open_app("open notepad and write this is a test and save it as test.txt")
+    assert res is not None
+    msg, _remaining = res
+    assert "test.txt" not in msg
 
 
 @pytest.mark.asyncio
@@ -631,7 +650,7 @@ async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
     monkeypatch.setattr(subprocess, "run", mock_run)
     monkeypatch.setattr(subprocess, "Popen", mock_popen)
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.core._is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.core.is_process_running", lambda name: False)
 
     called_stream = False
 
@@ -703,7 +722,7 @@ async def test_chat_stream_compound_open_app_continues_with_llm(monkeypatch, bra
 
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("P", (), {"pid": 1})())
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.core._is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.core.is_process_running", lambda name: False)
 
     brain = Brain(brain_config)
 

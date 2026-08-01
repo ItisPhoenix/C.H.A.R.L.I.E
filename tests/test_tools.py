@@ -124,6 +124,38 @@ def test_resolve_user_placeholders():
     assert _resolve_user_placeholders(p2) == f"C:\\Users\\{curr_user}\\Documents\\charlie.txt"
     assert _resolve_user_placeholders(p3) == f"C:\\Users\\{curr_user}\\Documents\\charlie.txt"
 
+
+def test_resolve_user_placeholders_corrects_hallucinated_username():
+    """Real bug: the model wrote C:\\Users\\Charlie\\... (guessing its own name)
+    instead of an obvious <placeholder> or the real account name. Since
+    "Charlie" isn't a real directory under C:\\Users, it must still be
+    corrected -- not just the literal placeholder tokens."""
+    import getpass
+
+    from charlie.tools import _resolve_user_placeholders
+    curr_user = getpass.getuser()
+
+    bad_path = "C:\\Users\\Charlie\\Desktop\\charlie_test.txt"
+    assert _resolve_user_placeholders(bad_path) == f"C:\\Users\\{curr_user}\\Desktop\\charlie_test.txt"
+
+
+def test_resolve_user_placeholders_leaves_real_existing_user_dir_alone():
+    """A path for a genuinely different, real user account on the machine
+    must not be silently rewritten to the current user."""
+    import os
+
+    from charlie.tools import _resolve_user_placeholders
+
+    real_other_dirs = [
+        d for d in os.listdir("C:\\Users") if os.path.isdir(f"C:\\Users\\{d}")
+    ] if os.path.isdir("C:\\Users") else []
+    other = next((d for d in real_other_dirs if d.lower() != "public"), None)
+    if other is None:
+        return  # nothing to assert on this machine
+    path = f"C:\\Users\\{other}\\Documents\\charlie.txt"
+    assert _resolve_user_placeholders(path) == path
+
+
 def test_shell_execute_lists_env(monkeypatch):
     import os
 
@@ -231,6 +263,79 @@ def test_shell_execute_voice_mode_allows_bare_command(monkeypatch):
     )
     output = shell_execute("notepad", voice_mode=True)
     assert "not on the allowed list" not in output
+
+
+def test_shell_execute_voice_mode_allows_move_and_copy(monkeypatch):
+    """Real bug: relocating a file the user asked to save on Desktop needed
+    move/copy, both blocked as "not on the allowed list" in voice mode --
+    forcing repeated failed retries until the tool budget ran out."""
+    from charlie import tools as tools_module
+
+    class FakeProcess:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def communicate(self, input=None, timeout=None):
+            return ("", "")
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(tools_module.subprocess, "Popen", lambda *a, **k: FakeProcess())
+    move_output = shell_execute('move "a.txt" "b.txt"', voice_mode=True)
+    copy_output = shell_execute('copy "a.txt" "b.txt"', voice_mode=True)
+    assert "not on the allowed list" not in move_output
+    assert "not on the allowed list" not in copy_output
+
+
+def test_detect_app_launch_matches_bare_and_wrapped_forms():
+    """Root-cause fix for a live session: the model retried "powershell -Command
+    Start-Process notepad", "cmd /c start notepad.exe", etc. after "start notepad"
+    got blocked -- all of these must reduce to the same known app."""
+    from charlie.tools import _detect_app_launch
+
+    assert _detect_app_launch("notepad").close_process == "notepad.exe"
+    assert _detect_app_launch("start notepad").close_process == "notepad.exe"
+    assert _detect_app_launch('start "" notepad').close_process == "notepad.exe"
+    assert _detect_app_launch("notepad.exe").close_process == "notepad.exe"
+    assert _detect_app_launch("cmd /c start notepad.exe").close_process == "notepad.exe"
+    assert (
+        _detect_app_launch('powershell -Command Start-Process notepad').close_process
+        == "notepad.exe"
+    )
+
+
+def test_detect_app_launch_ignores_commands_with_real_arguments():
+    """"notepad file.txt" opens a specific file -- must not be treated as a
+    bare relaunch of an already-open, unrelated Notepad window."""
+    from charlie.tools import _detect_app_launch
+
+    assert _detect_app_launch("notepad file.txt") is None
+    assert _detect_app_launch("echo hello") is None
+
+
+def test_shell_execute_focuses_already_running_app_instead_of_relaunching(monkeypatch):
+    """The actual bug report: Charlie kept trying to relaunch Notepad instead
+    of focusing the one already open, burning its tool-call budget."""
+    from charlie import tools as tools_module
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(tools_module, "is_process_running", lambda name: name == "notepad.exe")
+    monkeypatch.setattr(
+        "charlie.desktop.windows.focus_window",
+        lambda title: f"Focused window: Untitled - Notepad ({title})",
+    )
+    popen_calls = []
+    monkeypatch.setattr(
+        tools_module.subprocess, "Popen", lambda *a, **k: popen_calls.append(a) or None
+    )
+
+    output = shell_execute("start notepad")
+    assert "Focused window" in output
+    assert popen_calls == []
 
 
 def test_shell_execute_blocks_metacharacters_and_keywords():

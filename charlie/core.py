@@ -27,7 +27,7 @@ from charlie.streaming import (
 from charlie.text_utils import format_app_list
 from charlie.tools import is_shell_command_gated, pop_pending_vision_image
 from charlie.tools import registry as tool_registry
-from charlie.utils import build_auth_headers, make_id
+from charlie.utils import build_auth_headers, is_process_running, make_id
 
 try:
     from charlie.desktop import DESKTOP_AVAILABLE as _DESKTOP_AVAILABLE
@@ -63,7 +63,7 @@ _DESKTOP_COM_TOOLS = _DESKTOP_CONTROL_TOOLS | frozenset(
 # never from history -- the model has shown it will otherwise repeat an old
 # answer verbatim instead of re-observing.
 _SCREEN_QUERY_RE = re.compile(
-    r"\bwhat'?s (on|happening on) (my |the )?screen\b"
+    r"\bwhat(?:'s| is) (on|happening on) (my |the )?screen\b"
     r"|\bwhat (do|can) you see\b"
     r"|\b(read|look at|check) (my |the )?screen\b",
     re.IGNORECASE,
@@ -80,10 +80,10 @@ _VISUAL_CONTENT_QUERY_RE = re.compile(
     r"|\bwhat does this look like\b"
     r"|\bwho('?s| is) (this|that|he|she)\b"
     r"|\bwhat (do|can) you see\b"
-    r"|\bwhat'?s (wrong|going on) (with|on) (this|my|the)\b"
-    r"|\bwhat'?s (the |this )?(error|message|popup|dialog|problem|issue)\b"
+    r"|\bwhat(?:'s| is) (wrong|going on) (with|on) (this|my|the)\b"
+    r"|\bwhat(?:'s| is) (the |this )?(error|message|popup|dialog|problem|issue)\b"
     r"|\bwhat (is|does) (this|that) (error|message|popup|dialog|icon|button|image)\b"
-    r"|\bwhat'?s this\b"
+    r"|\bwhat(?:'s| is) this\b"
     r"|\bhelp me (understand|fix) (this|what)\b",
     re.IGNORECASE,
 )
@@ -384,6 +384,21 @@ _URL_RE = re.compile(
 )
 
 
+# Common file extensions that are also alphabetic 2-6 char strings, so they'd
+# otherwise pass the same shape check a real TLD does (e.g. "test.txt" ->
+# looks exactly like "test.<tld>") -- excluded so a filename mentioned in a
+# compound command ("write X and save it as test.txt") never gets opened as
+# a website instead of being treated as, well, a filename.
+_FILE_EXTENSIONS = frozenset({
+    "txt", "doc", "docx", "pdf", "csv", "xlsx", "xls", "ppt", "pptx",
+    "png", "jpg", "jpeg", "gif", "bmp", "svg", "ico",
+    "mp3", "mp4", "wav", "avi", "mov", "mkv",
+    "py", "js", "ts", "jsx", "tsx", "json", "xml", "yaml", "yml", "toml",
+    "zip", "rar", "7z", "tar", "gz", "exe", "msi", "dll", "bat", "ps1",
+    "log", "md", "ini", "cfg", "env",
+})
+
+
 def _is_probable_domain(text: str) -> bool:
     """Validate if a token looks like a real domain name (not a float, version number, or file path)."""
     if "." not in text:
@@ -395,6 +410,8 @@ def _is_probable_domain(text: str) -> bool:
     # Extract extension and verify it's alphabetic and 2-6 chars long
     parts = text.split(".")
     ext = parts[-1].lower()
+    if ext in _FILE_EXTENSIONS:
+        return False
     return ext.isalpha() and 2 <= len(ext) <= 6
 
 
@@ -406,20 +423,6 @@ _CLOSE_APP_MAP = {
     if entry.close_process
 }
 _OPEN_APP_MAP = {name: entry.open_cmd for name, entry in _APP_REGISTRY.items()}
-
-
-def _is_process_running(process_name: str) -> bool:
-    """True if a process named `process_name` (e.g. "notepad.exe") is currently running."""
-    import psutil
-
-    target = process_name.lower()
-    for proc in psutil.process_iter(["name"]):
-        try:
-            if (proc.info["name"] or "").lower() == target:
-                return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-    return False
 
 
 def _detect_close_app(query: str) -> Optional[str]:
@@ -626,7 +629,7 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
     for app, cmd in zip(matched_apps, launched_commands):
         # Already-running local apps get focused via the native tool, not relaunched.
         process_name = _CLOSE_APP_MAP.get(app)
-        if process_name and _is_process_running(process_name):
+        if process_name and is_process_running(process_name):
             from charlie.desktop.windows import focus_window
 
             focus_window(process_name.removesuffix(".exe"))
@@ -1226,10 +1229,13 @@ def _assess_tool_result_relevance(tool_name: str, tool_result: str) -> bool:
 
 def _should_queue_visual_screenshot(user_input: str, config: "Config") -> bool:
     """True if this turn should pre-call desktop_screenshot to queue a vision
-    image for the follow-up (see _VISUAL_CONTENT_QUERY_RE). Requires both a
-    configured vision model and desktop control -- otherwise a no-op."""
+    image for the follow-up (see _VISUAL_CONTENT_QUERY_RE). Also fires for the
+    broader _SCREEN_QUERY_RE phrasing ("what's on my screen") -- when a vision
+    model is configured, a real fresh screenshot beats the UIA/OCR text summary
+    injected below, which was the only signal these queries got before. Requires
+    both a configured vision model and desktop control -- otherwise a no-op."""
     return bool(
-        _VISUAL_CONTENT_QUERY_RE.search(user_input)
+        (_VISUAL_CONTENT_QUERY_RE.search(user_input) or _SCREEN_QUERY_RE.search(user_input))
         and config.vision_enabled
         and config.desktop_control_enabled
     )

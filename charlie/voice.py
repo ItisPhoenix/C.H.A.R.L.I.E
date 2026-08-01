@@ -1056,6 +1056,10 @@ class VoiceEngine:
         speech_buffer = []
         _frame_count = 0
         _rms_log_interval = int(3.0 * samplerate / block_size)  # log every ~3s
+        # Require 2 consecutive loud frames (~128ms) before confirming onset, so a single
+        # ~64ms keyboard click transient can't trigger it -- real speech sustains across frames.
+        _onset_debounce_frames = 2
+        _consecutive_loud_frames = 0
 
         # Wake word sliding buffer (~2s at 16kHz for inference)
         _ww_buffer_samples = samplerate * 2  # 32000 samples = 2s
@@ -1121,7 +1125,12 @@ class VoiceEngine:
 
             if not is_speech:
                 if rms > _vad_threshold:
+                    _consecutive_loud_frames += 1
+                else:
+                    _consecutive_loud_frames = 0
+                if _consecutive_loud_frames >= _onset_debounce_frames:
                     is_speech = True
+                    _consecutive_loud_frames = 0
                     speech_start_time = time.time()
                     last_speech_time = time.time()
                     logger.info(

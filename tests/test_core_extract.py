@@ -380,8 +380,10 @@ class TestRebuildStableTier:
 
 class TestVisualContentQueryFastPath:
     """Task D1: ambient "what am I looking at" fast-path queues a vision
-    screenshot for graphical content OCR/UIA marks can't describe, without
-    duplicating _SCREEN_QUERY_RE's existing text-based fast-path."""
+    screenshot for graphical content OCR/UIA marks can't describe.
+    _should_queue_visual_screenshot now also fires for _SCREEN_QUERY_RE's
+    broader "what's on my screen" phrasing -- a real screenshot beats the
+    UIA/OCR text summary whenever a vision model is actually configured."""
 
     def test_visual_content_query_regex_matches_expected_phrases(self):
         from charlie.core import _VISUAL_CONTENT_QUERY_RE
@@ -429,6 +431,19 @@ class TestVisualContentQueryFastPath:
         assert _VISUAL_CONTENT_QUERY_RE.search("help me fix this")
         assert not _VISUAL_CONTENT_QUERY_RE.search("what's for dinner")
 
+    def test_visual_content_query_regex_matches_what_is_uncontracted(self):
+        """"what's" only matched the contracted form -- "what is this popup"
+        (no apostrophe) fell through both regexes and got no fresh signal at all."""
+        from charlie.core import _VISUAL_CONTENT_QUERY_RE
+        assert _VISUAL_CONTENT_QUERY_RE.search("what is this popup")
+        assert _VISUAL_CONTENT_QUERY_RE.search("what is wrong with this")
+        assert _VISUAL_CONTENT_QUERY_RE.search("what is this")
+
+    def test_screen_query_regex_matches_what_is_uncontracted(self):
+        from charlie.core import _SCREEN_QUERY_RE
+        assert _SCREEN_QUERY_RE.search("what is on my screen right now")
+        assert _SCREEN_QUERY_RE.search("what's on my screen")
+
     def test_should_queue_visual_screenshot_true_when_fully_enabled(self):
         from charlie.core import _should_queue_visual_screenshot
         cfg = MagicMock()
@@ -456,6 +471,18 @@ class TestVisualContentQueryFastPath:
         cfg.vision_enabled = True
         cfg.desktop_control_enabled = True
         assert not _should_queue_visual_screenshot("what time is it", cfg)
+
+    def test_should_queue_visual_screenshot_true_for_screen_query_re_too(self):
+        """A real screenshot beats the UIA/OCR text summary for "what's on my
+        screen"-style queries too, once a vision model is configured -- not just
+        the narrower _VISUAL_CONTENT_QUERY_RE phrasing."""
+        from charlie.core import _should_queue_visual_screenshot
+        cfg = MagicMock()
+        cfg.vision_enabled = True
+        cfg.desktop_control_enabled = True
+        assert _should_queue_visual_screenshot("what's on my screen", cfg)
+        assert _should_queue_visual_screenshot("what is on my screen right now", cfg)
+        assert _should_queue_visual_screenshot("read my screen", cfg)
 
 
 class TestMaybeInjectVisualScreenshotCall:
