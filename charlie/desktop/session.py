@@ -12,22 +12,24 @@ external_input_since() compares a fresh _last_input_tick_ms() read against
 the automation loop's own last-action tick (charlie.desktop.actions.
 last_action_tick_ms()) to detect real external input.
 
-No import guard here: charlie.desktop is Windows-only (see __init__.py's
-DESKTOP_AVAILABLE), and ctypes.windll is only touched inside function
-bodies below, so importing this module stays safe on non-Windows -- it
-would only raise (AttributeError on ctypes.windll) if those functions were
-actually called off-Windows, same call-time binding the rest of the package
-relies on.
+ctypes.windll only exists on Windows -- guarded the same way as
+charlie/desktop/windows.py's _user32/_kernel32 so importing this module
+(e.g. from tests collected on CI's ubuntu-latest runner) never raises.
+charlie.desktop is Windows-only in practice (see __init__.py's
+DESKTOP_AVAILABLE), so _kernel32 being None off-Windows is fine -- the
+functions below are never actually called there.
 """
 import ctypes
+import sys
 import threading
 from typing import Optional
 
 _lock = threading.Lock()
 _owner: Optional[str] = None
 
-_kernel32 = ctypes.windll.kernel32
-_kernel32.GetTickCount.restype = ctypes.c_uint
+_kernel32 = ctypes.windll.kernel32 if sys.platform == "win32" else None
+if _kernel32 is not None:
+    _kernel32.GetTickCount.restype = ctypes.c_uint
 
 
 class _LASTINPUTINFO(ctypes.Structure):
