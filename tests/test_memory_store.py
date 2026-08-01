@@ -46,9 +46,9 @@ class FakeConfig:
     memory_embedding_model = "test-model"
     memory_relevance_threshold = 0.5
     memory_auto_extract = True
-    small_llm_url = ""
-    small_llm_model = ""
-    small_llm_key = "no-key"
+    llm_url = ""
+    llm_model = ""
+    llm_key = "no-key"
 
 
 # ---------------------------------------------------------------------------
@@ -199,9 +199,9 @@ class TestMemoryStoreEdgeCases:
         assert store.is_available is False
 
     def test_fact_extraction_disabled(self, monkeypatch):
-        """When small_llm_url is empty, _extract_facts returns []."""
+        """When llm_url is empty, _extract_facts returns []."""
         store = self._make_store(monkeypatch)
-        store.config.small_llm_url = ""
+        store.config.llm_url = ""
         assert store._extract_facts("Some long text here.") == []
 
     def test_search_no_metadata(self, monkeypatch):

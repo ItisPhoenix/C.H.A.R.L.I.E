@@ -95,8 +95,7 @@ from charlie.memory_store import MemoryStore
 from charlie.personality import get_emotion_for_context, parse_voice_command, parse_yes_no
 from charlie.session_store import SessionStore
 from charlie.voice import VoiceEngine
-from charlie.blackboard import Blackboard
-from charlie.swarm import SwarmOrchestrator
+from charlie.monitors import start_monitor_thread
 
 logger = logging.getLogger("charlie.main")
 # Unique launch identity -- every main() invocation gets one so the sidebar can
@@ -188,6 +187,22 @@ def _schedule_process(coro, loop):
     return fut
 
 
+async def _restart_mcp_client(old_client, config):
+    """Stop old_client and start a fresh one, both off the event loop.
+
+    mcp_client.stop() and start_mcp() are synchronous and block on
+    subprocess handshakes (up to config.timeout, default 30s per server);
+    called directly inside an async def they freeze the whole event loop,
+    including consume_web_commands, for that long.
+    """
+    if old_client is not None:
+        await asyncio.to_thread(old_client.stop)
+    if not config.mcp_enabled:
+        return None
+    from charlie.mcp_client import start_mcp
+    return await asyncio.to_thread(start_mcp, config)
+
+
 async def main():
     loop = asyncio.get_running_loop()
     _orig_handler = loop.call_exception_handler
@@ -203,14 +218,13 @@ async def main():
     store = None
     speech_echo_cooldown = 0.0
     last_emotion = "neutral"
-    # VAD can over-segment one utterance (a mid-sentence pause, or the user
-    # repeating themselves unsure Charlie heard) into multiple speech segments
-    # that each transcribe to the same/near-identical text -- each reaching
-    # on_speech independently and spawning its own full turn. Track recently
-    # dispatched text to suppress duplicates within a short window.
+    # VAD-fragmented duplicate text within this window is suppressed (see on_speech).
     recent_turn_texts: Dict[str, float] = {}
-    _DEDUPE_WINDOW_SEC = 5.0
+    _DEDUPE_WINDOW_SEC = 20.0
     web_proc = None
+    # True while a chat turn's LLM/tool loop runs -- see _dispatch_or_queue.
+    turn_active = False
+    pending_turns: list = []
 
     try:
         store = SessionStore(config.session_db_path)
@@ -223,9 +237,6 @@ async def main():
         memory_store = MemoryStore(config)
     except Exception as e:
         logger.warning(f"Vector memory disabled: {e}")
-    # Initialize Blackboard for agent swarm coordination
-    blackboard = Blackboard()
-
 
     def speaking_callback(text):
         if voice:
@@ -268,7 +279,6 @@ async def main():
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_thinking_update=on_thinking_update,
-            blackboard=blackboard,
         )
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")
@@ -283,8 +293,6 @@ async def main():
     # Wire knowledge graph into tool registry
     if brain is not None and hasattr(brain, "memory_graph"):
         tool_registry.set_memory_graph(brain.memory_graph)
-    # Wire blackboard into tool registry
-    tool_registry.set_blackboard(blackboard)
 
     # Wire the plugin system into the tool registry (no-op unless enabled).
     # The SAME registry the LLM calls, so when PLUGINS_ENABLED=true the
@@ -312,46 +320,31 @@ async def main():
         plugin_manager = PluginManager()
 
     # Wire the MCP subsystem into the SAME shared tool registry (no-op unless enabled).
+    # Runs on a thread, awaited later, so it overlaps with VoiceEngine/STT startup instead of blocking it.
     mcp_client = None
-    try:
-        if config.mcp_enabled:
-            from charlie.mcp_client import start_mcp
 
-            mcp_client = start_mcp(config)
-            if mcp_client is None:
-                logger.info("MCP subsystem not started (no servers configured)")
-        else:
-            logger.info("MCP subsystem not enabled (MCP_ENABLED=false)")
-    except Exception as e:
-        logger.warning(f"MCP subsystem failed to initialize: {e}")
-        mcp_client = None
+    async def _start_mcp_task():
+        nonlocal mcp_client
+        try:
+            if config.mcp_enabled:
+                from charlie.mcp_client import start_mcp
 
-    # Build the swarm with a real LLM client so agents do genuine work.
-    if brain is not None:
-        from charlie.utils import build_auth_headers
+                mcp_client = await asyncio.to_thread(start_mcp, config)
+                if mcp_client is None:
+                    logger.info("MCP subsystem not started (no servers configured)")
+            else:
+                logger.info("MCP subsystem not enabled (MCP_ENABLED=false)")
+        except Exception as e:
+            logger.warning(f"MCP subsystem failed to initialize: {e}")
+            mcp_client = None
 
-        class _AgentLLMClient:
-            def __init__(self, client, model: str, api_key: str) -> None:
-                self._client = client
-                self.model = model
-                self.headers = build_auth_headers(api_key)
-
-            def post(self, path: str, *, json=None, **kwargs):
-                headers = dict(kwargs.pop("headers", {}))
-                headers.update(self.headers)
-                return self._client.post(path, json=json, headers=headers, **kwargs)
-
-        swarm = SwarmOrchestrator(
-            blackboard,
-            llm_client=_AgentLLMClient(brain.client, config.small_llm_model, config.small_llm_key),
-        )
-    else:
-        swarm = SwarmOrchestrator(blackboard)
+    mcp_start_task = asyncio.create_task(_start_mcp_task())
 
     # Placeholder for event_bus (set later in async context)
     event_bus = None
-    # Use the session id provided by the web UI when available; otherwise default
-    current_web_session_id = "default"
+    # Per-launch fallback, not the old shared "default" bucket across all launches.
+    current_web_session_id = f"voice_{_LAUNCH_ID}"
+    _voice_fallback_session_id = current_web_session_id
 
     def ensure_session_ready(session_id: str):
         if not session_id:
@@ -404,14 +397,35 @@ async def main():
             return
         recent_turn_texts[normalized] = now
 
-        session_id = "default"
-        if current_web_session_id not in (None, "default", ""):
+        session_id = _voice_fallback_session_id
+        if current_web_session_id not in (None, _voice_fallback_session_id, ""):
             session_id = current_web_session_id
         ensure_session_ready(session_id)
-        _schedule_process(_process(text, brain, voice, session_id=session_id), loop)
+        _schedule_process(_dispatch_or_queue(text, session_id), loop)
+
+    async def _dispatch_or_queue(text, session_id, platform="voice"):
+        """Run the turn now, or queue it if one is already running tool calls.
+
+        Only ever called via _schedule_process (run_coroutine_threadsafe), so
+        this always executes on the loop thread -- the turn_active check and
+        pending_turns mutation below are a single synchronous span with no
+        await in between, making them atomic with respect to any other
+        coroutine on this loop without needing a lock.
+        """
+        nonlocal turn_active
+        from charlie.core import get_active_voice_approval
+        # A gated tool call inside the still-running turn is waiting on a
+        # spoken yes/no -- that answer must reach _process() immediately
+        # (it routes to resolve_tool_approval), never queued behind the
+        # very turn it's meant to unblock.
+        if turn_active and not voice.is_speaking.is_set() and not get_active_voice_approval():
+            pending_turns.append((text, session_id, platform))
+            logger.info(f"Queued utterance (a turn is already running tool calls): {text}")
+            return
+        await _process(text, brain, voice, session_id=session_id, platform=platform)
 
     async def _process(text, brain, voice, session_id="default", platform="voice"):
-        nonlocal speech_echo_cooldown, last_emotion
+        nonlocal speech_echo_cooldown, last_emotion, turn_active
         if time.time() < speech_echo_cooldown:
             logger.info(f"Echo suppressed: {text}")
             return
@@ -562,124 +576,141 @@ async def main():
         is_first_chunk = True
 
         is_first_flush = True
-        async for chunk in brain.chat_stream(text, platform=platform):
-            if is_first_chunk:
-                print("\r" + " " * 30 + "\r", end="", flush=True)
-                is_first_chunk = False
-            print(chunk, end="", flush=True)
-            sentence_buffer += chunk
-            full_reply_buffer += chunk
-            web_buffer += chunk
+        turn_active = True
+        try:
+            async for chunk in brain.chat_stream(text, platform=platform):
+                if is_first_chunk:
+                    print("\r" + " " * 30 + "\r", end="", flush=True)
+                    is_first_chunk = False
+                print(chunk, end="", flush=True)
+                sentence_buffer += chunk
+                full_reply_buffer += chunk
+                web_buffer += chunk
 
-            # Real-time UI token stream: emit whole sentences as they complete.
-            # This is the ONLY source of "token" events for the chat UI, so the
-            # text accumulates without duplication. Internal model text like
-            # <think>...</think>, [SEARCH RESULTS]...[/SEARCH RESULTS], and
-            # TOOL: ... lines are stripped here so reasoning/tool metadata
-            # never leaks into the chat.
-            if event_bus and _SENTENCE_BOUNDARY.search(web_buffer):
-                parts = _SENTENCE_BOUNDARY.split(web_buffer)
-                for part in parts[:-1]:
-                    if part.strip():
-                        safe = _strip_search_result_tags(part.strip())
-                        safe = _strip_tool_lines(safe)
-                        safe = _strip_think(safe)
-                        if safe:
-                            asyncio.create_task(
-                                event_bus.emit(
-                                    "token",
-                                    {
-                                        "text": safe if safe.endswith((".", "!", "?")) else safe + ". ",
-                                        "session_id": session_id,
-                                    },
+                # Real-time UI token stream: emit whole sentences as they complete.
+                # This is the ONLY source of "token" events for the chat UI, so the
+                # text accumulates without duplication. Internal model text like
+                # <think>...</think>, [SEARCH RESULTS]...[/SEARCH RESULTS], and
+                # TOOL: ... lines are stripped here so reasoning/tool metadata
+                # never leaks into the chat.
+                if event_bus and _SENTENCE_BOUNDARY.search(web_buffer):
+                    parts = _SENTENCE_BOUNDARY.split(web_buffer)
+                    for part in parts[:-1]:
+                        if part.strip():
+                            safe = _strip_search_result_tags(part.strip())
+                            safe = _strip_tool_lines(safe)
+                            safe = _strip_think(safe)
+                            if safe:
+                                asyncio.create_task(
+                                    event_bus.emit(
+                                        "token",
+                                        {
+                                            "text": safe if safe.endswith((".", "!", "?")) else safe + ". ",
+                                            "session_id": session_id,
+                                        },
+                                    )
                                 )
+                    web_buffer = parts[-1]
+
+                # Progressive flush: sentence boundary > clause boundary > force-flush.
+                flushed = False
+
+                # Early first-flush: wait for first sentence boundary, or force at 150 chars
+                if is_first_flush:
+                    sentence_buffer, flushed = _flush_complete_sentences(
+                        sentence_buffer,
+                        lambda part: _safe_speak(voice, part, detected_emotion, "first-flush"),
+                    )
+                    if flushed:
+                        is_first_flush = False
+                    elif len(sentence_buffer) >= 150:
+                        idx = sentence_buffer.rfind(" ", 0, 150)
+                        if idx > 0:
+                            _safe_speak(voice, sentence_buffer[:idx], detected_emotion, "first-force")
+                            sentence_buffer = sentence_buffer[idx:].lstrip()
+                        is_first_flush = False
+                        flushed = True
+
+                if not flushed:
+                    sentence_buffer, flushed = _flush_complete_sentences(
+                        sentence_buffer,
+                        lambda part: _safe_speak(voice, part, detected_emotion, "sentence"),
+                    )
+
+                if not flushed and len(sentence_buffer) >= _MAX_FLUSH_CHARS:
+                    # Force-flush: prefer clause (comma/semicolon) boundary,
+                    # fall back to word boundary to avoid mid-word splits.
+                    clause_idx = _CLAUSE_BOUNDARY.search(sentence_buffer[:_MAX_FLUSH_CHARS])
+                    if clause_idx:
+                        flush_end = clause_idx.end()
+                        _safe_speak(voice, sentence_buffer[:flush_end], detected_emotion, "clause")
+                        sentence_buffer = sentence_buffer[flush_end:].lstrip()
+                    else:
+                        word_idx = sentence_buffer.rfind(" ", 0, _MAX_FLUSH_CHARS)
+                        if word_idx > 0:
+                            _safe_speak(voice, sentence_buffer[:word_idx], detected_emotion, "word")
+                            sentence_buffer = sentence_buffer[word_idx:].lstrip()
+                        elif sentence_buffer.strip():
+                            _safe_speak(
+                                voice,
+                                sentence_buffer[:_MAX_FLUSH_CHARS],
+                                detected_emotion,
+                                "force",
                             )
-                web_buffer = parts[-1]
+                            sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
 
-            # Progressive flush: sentence boundary > clause boundary > force-flush.
-            flushed = False
-
-            # Early first-flush: wait for first sentence boundary, or force at 150 chars
-            if is_first_flush:
-                sentence_buffer, flushed = _flush_complete_sentences(
-                    sentence_buffer,
-                    lambda part: _safe_speak(voice, part, detected_emotion, "first-flush"),
-                )
-                if flushed:
-                    is_first_flush = False
-                elif len(sentence_buffer) >= 150:
-                    idx = sentence_buffer.rfind(" ", 0, 150)
-                    if idx > 0:
-                        _safe_speak(voice, sentence_buffer[:idx], detected_emotion, "first-force")
-                        sentence_buffer = sentence_buffer[idx:].lstrip()
-                    is_first_flush = False
-                    flushed = True
-
-            if not flushed:
-                sentence_buffer, flushed = _flush_complete_sentences(
-                    sentence_buffer,
-                    lambda part: _safe_speak(voice, part, detected_emotion, "sentence"),
+            # Final web UI flush - emit any remaining text stuck in web_buffer
+            if event_bus and web_buffer.strip():
+                asyncio.create_task(
+                    event_bus.emit(
+                        "token",
+                        {
+                            "text": _strip_think(
+                                _strip_tool_lines(
+                                    _strip_search_result_tags(web_buffer.strip())
+                                )
+                            ),
+                            "session_id": session_id,
+                        },
+                    )
                 )
 
-            if not flushed and len(sentence_buffer) >= _MAX_FLUSH_CHARS:
-                # Force-flush: prefer clause (comma/semicolon) boundary,
-                # fall back to word boundary to avoid mid-word splits.
-                clause_idx = _CLAUSE_BOUNDARY.search(sentence_buffer[:_MAX_FLUSH_CHARS])
-                if clause_idx:
-                    flush_end = clause_idx.end()
-                    _safe_speak(voice, sentence_buffer[:flush_end], detected_emotion, "clause")
-                    sentence_buffer = sentence_buffer[flush_end:].lstrip()
-                else:
-                    word_idx = sentence_buffer.rfind(" ", 0, _MAX_FLUSH_CHARS)
-                    if word_idx > 0:
-                        _safe_speak(voice, sentence_buffer[:word_idx], detected_emotion, "word")
-                        sentence_buffer = sentence_buffer[word_idx:].lstrip()
-                    elif sentence_buffer.strip():
-                        _safe_speak(
-                            voice,
-                            sentence_buffer[:_MAX_FLUSH_CHARS],
-                            detected_emotion,
-                            "force",
-                        )
-                        sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
+            # Final TTS
+            if sentence_buffer.strip():
+                _safe_speak(voice, sparkle + sentence_buffer, detected_emotion, "final")
 
-        # Final web UI flush - emit any remaining text stuck in web_buffer
-        if event_bus and web_buffer.strip():
-            asyncio.create_task(
-                event_bus.emit(
-                    "token",
-                    {
-                        "text": _strip_think(
-                            _strip_tool_lines(
-                                _strip_search_result_tags(web_buffer.strip())
-                            )
-                        ),
-                        "session_id": session_id,
-                    },
+            # Persist the generated reply, falling back to web_buffer if cancelled.
+            final_reply = full_reply_buffer.strip() or web_buffer.strip()
+            if final_reply:
+                try:
+                    store.append("assistant", final_reply, session_id=session_id)
+                    store.touch_session(session_id)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to archive assistant message or touch session: {e}"
+                    )
+
+            # Emit response_done event so the UI can stop its typing indicator.
+            if event_bus:
+                asyncio.create_task(
+                    event_bus.emit("response_done", {"session_id": session_id})
                 )
-            )
-
-
-        # Final TTS
-        if sentence_buffer.strip():
-            _safe_speak(voice, sparkle + sentence_buffer, detected_emotion, "final")
-
-        # Persist the generated reply, falling back to web_buffer if cancelled.
-        final_reply = full_reply_buffer.strip() or web_buffer.strip()
-        if final_reply:
-            try:
-                store.append("assistant", final_reply, session_id=session_id)
-                store.touch_session(session_id)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to archive assistant message or touch session: {e}"
+        except Exception:
+            # Turn failures used to be silent -- surface one, then re-raise.
+            _safe_speak(voice, "Sorry, something went wrong on my end. Try again?", last_emotion, "turn-failed")
+            if event_bus:
+                asyncio.create_task(
+                    event_bus.emit("response_done", {"session_id": session_id})
                 )
-
-        # Emit response_done event so the UI can stop its typing indicator.
-        if event_bus:
-            asyncio.create_task(
-                event_bus.emit("response_done", {"session_id": session_id})
-            )
+            raise
+        finally:
+            turn_active = False
+            if pending_turns:
+                next_text, next_session, next_platform = pending_turns.pop(0)
+                logger.info(f"Dequeuing pending turn: {next_text}")
+                _schedule_process(
+                    _dispatch_or_queue(next_text, next_session, next_platform), loop
+                )
 
         # Learning loop: deferred to background -- doesn't block next turn.
         # Skipped for screen-content queries -- the reply is a description of
@@ -761,21 +792,14 @@ async def main():
     async def _reload_mcp_client():
         """Stop the MCP subprocess client and restart it if still enabled."""
         nonlocal mcp_client
-        if mcp_client is not None:
-            try:
-                mcp_client.stop()
-            except Exception as ex:
-                logger.warning(f"Error stopping MCP client on reload: {ex}")
-            mcp_client = None
         from charlie.tools import registry
         for k in [k for k in registry._tools if k.startswith("mcp_")]:
             registry._tools.pop(k, None)
-        if config.mcp_enabled:
-            try:
-                from charlie.mcp_client import start_mcp
-                mcp_client = start_mcp(config)
-            except Exception as ex:
-                logger.warning(f"Error starting MCP client on reload: {ex}")
+        try:
+            mcp_client = await _restart_mcp_client(mcp_client, config)
+        except Exception as ex:
+            logger.warning(f"Error reloading MCP client: {ex}")
+            mcp_client = None
 
     def _reload_plugin_tools():
         """Re-register plugin tools to match the current enabled flag / allow-dirs."""
@@ -799,20 +823,14 @@ async def main():
                 cmd_type = cmd.get("type")
                 if cmd_type == "chat":
                     payload_sid = cmd.get("payload", {}).get("session_id")
-                    current_web_session_id = cmd.get("session_id") or payload_sid or "default"
+                    current_web_session_id = cmd.get("session_id") or payload_sid or _voice_fallback_session_id
                     from charlie.recovery import set_active_session_id
                     set_active_session_id(current_web_session_id)
                     chat_text = cmd.get("text") or cmd.get("payload", {}).get("text", "")
-                    await _process(
-                        chat_text,
-                        brain,
-                        voice,
-                        session_id=current_web_session_id,
-                        platform="web",
-                    )
+                    await _dispatch_or_queue(chat_text, current_web_session_id, platform="web")
                 elif cmd_type == "session_active":
                     payload_sid = cmd.get("payload", {}).get("session_id")
-                    current_web_session_id = cmd.get("session_id") or payload_sid or "default"
+                    current_web_session_id = cmd.get("session_id") or payload_sid or _voice_fallback_session_id
                     from charlie.recovery import set_active_session_id
                     set_active_session_id(current_web_session_id)
                     logger.info(f"Active session updated to: {current_web_session_id}")
@@ -847,66 +865,9 @@ async def main():
                     if request_id:
                         from charlie.core import resolve_tool_approval
                         resolve_tool_approval(request_id, False)
-                elif cmd_type == "hitl_approve":
-                    # Flips approval_status so get_pending_tasks() picks the
-                    # task up and runs it through the normal
-                    # pending->running->done lifecycle -- does NOT fake
-                    # completion by setting status="done" directly (the
-                    # previous version of this handler did, skipping the
-                    # task ever actually running).
-                    payload = cmd.get("payload", {})
-                    task_id = payload.get("task_id")
-                    if task_id:
-                        blackboard.update_task(task_id, approval_status="approved")
-                        await event_bus.emit("blackboard_update", blackboard.snapshot())
-                elif cmd_type == "hitl_reject":
-                    payload = cmd.get("payload", {})
-                    task_id = payload.get("task_id")
-                    reason = payload.get("reason", "Rejected by user")
-                    if task_id:
-                        blackboard.update_task(
-                            task_id,
-                            approval_status="rejected",
-                            status="failed",
-                            result=f"Rejection: {reason}"
-                        )
-                        await event_bus.emit("blackboard_update", blackboard.snapshot())
-                elif cmd_type == "task_retry":
-                    payload = cmd.get("payload", {})
-                    task_id = payload.get("task_id")
-                    if task_id:
-                        blackboard.update_task(
-                            task_id,
-                            status="pending",
-                            approval_status="approved",
-                            retry_count=0
-                        )
-                        await event_bus.emit("blackboard_update", blackboard.snapshot())
-                elif cmd_type == "task_cancel":
-                    payload = cmd.get("payload", {})
-                    task_id = payload.get("task_id")
-                    if task_id:
-                        task = blackboard.get_task(task_id)
-                        if task:
-                            blackboard.update_task(task_id, status="cancelled")
-                            if task.assigned_to:
-                                swarm.terminate_agent(task.assigned_to)
-                            await event_bus.emit("blackboard_update", blackboard.snapshot())
                 elif cmd_type == "stop":
                     voice.stop_tts()
                     brain.cancel_chat()
-                elif cmd_type == "task_create":
-                    payload = cmd.get("payload", {})
-                    task_name = payload.get("name", "Web Task")
-                    assigned = payload.get("assigned_to", "")
-                    blackboard.add_task(task_name, assigned_to=assigned)
-                    # Broadcast update
-                    await event_bus.emit("blackboard_update", blackboard.snapshot())
-                elif cmd_type == "agent_kill":
-                    agent_name = cmd.get("payload", {}).get("name")
-                    if agent_name:
-                        swarm.terminate_agent(agent_name)
-                        await event_bus.emit("blackboard_update", blackboard.snapshot())
                 elif cmd_type == "audio_control":
                     payload = cmd.get("payload", {})
                     state = voice.set_audio_state(
@@ -1014,13 +975,28 @@ async def main():
                     config.apply_env_updates(env_values)
 
                     await _reload_mcp_client()
-                    _reload_plugin_tools()
+                    await asyncio.to_thread(_reload_plugin_tools)
                     await _reload_voice_engine()
+                    brain.rebuild_stable_tier()
 
                     await event_bus.emit("alert", {
                         "severity": "success",
                         "message": "System configuration successfully reloaded and engine restarted.",
                     })
+                elif cmd_type == "background_task_start":
+                    payload = cmd.get("payload", {})
+                    from charlie import background_task
+                    try:
+                        await background_task.start(
+                            config, event_bus, payload.get("text", ""),
+                            session_store=store, memory_store=memory_store, voice=voice,
+                        )
+                    except RuntimeError as ex:
+                        await event_bus.emit("alert", {"severity": "warn", "message": str(ex)})
+                elif cmd_type == "background_task_cancel":
+                    payload = cmd.get("payload", {})
+                    from charlie import background_task
+                    background_task.cancel(payload.get("task_id", ""))
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1131,21 +1107,17 @@ async def main():
                 _gpu_reader["value"] = 0.0
             return _gpu_reader["value"]
 
-        async def _emit_system_status_and_blackboard(bus):
+        async def _emit_system_status(bus):
             import psutil
             try:
                 while True:
-                    # Emit system status metrics
                     cpu_percent = psutil.cpu_percent()
                     ram_percent = psutil.virtual_memory().percent
                     await bus.emit("system_status", {
                         "cpu": cpu_percent,
                         "ram": ram_percent,
                         "gpu": await asyncio.to_thread(_read_gpu_percent),
-                        "active_agents": list(swarm.active_agents) if hasattr(swarm, "active_agents") else []
                     })
-                    # Emit blackboard update
-                    await bus.emit("blackboard_update", blackboard.snapshot())
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 pass
@@ -1161,6 +1133,48 @@ async def main():
             charlie.recovery.set_active_session_id(current_web_session_id)
             import charlie.tools
             charlie.tools.set_event_bus(bus, asyncio.get_running_loop())
+
+            from charlie import background_task as _background_task
+            interrupted_task = _background_task.check_interrupted_task()
+            if interrupted_task is not None:
+                _interrupted_msg = (
+                    f"Note: your background task \"{interrupted_task.get('text', '')}\" was "
+                    f"interrupted by a restart at step {interrupted_task.get('current_step', 0) + 1} "
+                    f"of {len(interrupted_task.get('steps', []))}."
+                )
+                logger.info(_interrupted_msg)
+                await bus.emit("alert", {"severity": "warning", "message": _interrupted_msg})
+                voice.speak(_interrupted_msg, "neutral")
+
+            def _read_cpu_ram_percent() -> Tuple[float, float]:
+                import psutil
+                return psutil.cpu_percent(), psutil.virtual_memory().percent
+
+            _monitor_loop = asyncio.get_running_loop()
+
+            def _on_resource_alert(message: str) -> None:
+                logger.warning(f"Resource alert: {message}")
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        bus.emit("alert", {"severity": "warning", "message": message}),
+                        _monitor_loop,
+                    )
+                except Exception:
+                    logger.warning("Failed to emit resource alert event", exc_info=True)
+                try:
+                    voice.speak(message, "neutral")
+                except Exception:
+                    logger.warning("Failed to speak resource alert", exc_info=True)
+
+            try:
+                start_monitor_thread(
+                    get_cpu_ram=_read_cpu_ram_percent,
+                    on_alert=_on_resource_alert,
+                    cpu_threshold_pct=config.alert_cpu_pct,
+                    ram_threshold_pct=config.alert_ram_pct,
+                )
+            except Exception:
+                logger.error("Failed to start resource monitor thread", exc_info=True)
 
             class ZmqLogHandler(logging.Handler):
                 def emit(self, record):
@@ -1185,8 +1199,8 @@ async def main():
                 await asyncio.gather(
                     _voice_loop_idle(voice),
                     consume_web_commands(bus, brain),
-                    swarm.run(),
-                    _emit_system_status_and_blackboard(bus),
+                    _emit_system_status(bus),
+                    mcp_start_task,
                 )
             finally:
                 logging.getLogger().removeHandler(zmq_handler)

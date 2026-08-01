@@ -19,9 +19,10 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 
 from charlie import recovery
-from charlie.agents import AGENT_REGISTRY
 from charlie.config import config
+from charlie.known_apps import APP_REGISTRY
 from charlie.session_store import SessionStore
+from charlie.utils import is_process_running
 
 logger = logging.getLogger("charlie.tools")
 
@@ -30,8 +31,6 @@ logger = logging.getLogger("charlie.tools")
 _memory_store = None  # type: Optional[Any]
 # --- Knowledge graph store (set via set_memory_graph at init) ---
 _memory_graph = None  # type: Optional[Any]
-# --- Blackboard for agent swarm (set via set_blackboard at init) ---
-_blackboard = None  # type: Optional[Any]
 # --- Pending vision-tier screenshot: written by desktop_screenshot, consumed
 # --- once by Brain._build_payload for the very next outgoing payload. ---
 _pending_vision_image = None  # type: Optional[str]
@@ -41,10 +40,15 @@ CONTENT_MAX_CHARS = 800
 MIN_CLEANED_WORDS = 2
 
 # --- HTTP timeouts (seconds) ---
-SEARXNG_TIMEOUT = 10.0
-EXA_TIMEOUT = 10.0
-TAVILY_TIMEOUT = 10.0
-DDG_TIMEOUT = 8.0
+# Tuned against real observed latency, not guessed: live SearXNG calls this
+# session consistently completed in 1.2-1.7s (server-timing header), so a
+# 10s timeout was pure wasted wait if a tier ever actually goes down --
+# tiers run sequentially, so each one's timeout is fully on the critical
+# path before the next tier is even tried.
+SEARXNG_TIMEOUT = 5.0
+EXA_TIMEOUT = 6.0
+TAVILY_TIMEOUT = 6.0
+DDG_TIMEOUT = 5.0
 
 # --- DuckDuckGo ---
 DDG_MIN_CONTENT_LEN = 20
@@ -53,6 +57,9 @@ DDG_USER_AGENT = "Mozilla/5.0"
 
 # --- Shell ---
 SHELL_TIMEOUT = 10.0
+# Bound on the post-kill drain call below -- its return value is discarded,
+# it only exists to reap the process, so it must never block indefinitely.
+_SHELL_KILL_DRAIN_TIMEOUT = 2.0
 
 # --- Dashboard live view (desktop_frame event) ---
 _DESKTOP_FRAME_FPS = 2.0
@@ -196,10 +203,6 @@ class ToolRegistry:
         """Inject knowledge graph store for graph tools."""
         global _memory_graph
         _memory_graph = graph
-    def set_blackboard(self, blackboard: Any) -> None:
-        """Inject Blackboard for delegate_to_agent tool."""
-        global _blackboard
-        _blackboard = blackboard
 
 
 # Global tool registry
@@ -584,6 +587,37 @@ def is_shell_command_gated(command: str) -> Optional[str]:
     return is_command_keyword_gated(command)
 
 
+# Wrapper prefixes the model tends to reach for when a plain "start <app>" gets
+# blocked (see _detect_app_launch below) -- stripped one at a time so any
+# combination still reduces to the bare app token underneath.
+_LAUNCH_WRAPPER_RES = [
+    re.compile(r"^cmd(?:\.exe)?\s*/c\s+", re.IGNORECASE),
+    re.compile(r"^powershell(?:\.exe)?\s+-command\s+", re.IGNORECASE),
+    re.compile(r"^start-process\s+", re.IGNORECASE),
+    re.compile(r"^start\s+(?:\"\"\s+)?", re.IGNORECASE),
+]
+
+
+def _detect_app_launch(command: str):
+    """If `command` is a bare launch of a known local app (optionally wrapped
+    in "start"/"cmd /c start"/"powershell Start-Process"), return its
+    known_apps.AppEntry. Deliberately conservative -- only a bare launch
+    matches, e.g. "notepad" or "start notepad", not "notepad file.txt" (a
+    real file argument means a genuinely new instance may be wanted)."""
+    token = command.strip()
+    for wrapper_re in _LAUNCH_WRAPPER_RES:
+        token = wrapper_re.sub("", token).strip()
+    token = token.strip("\"'").strip()
+    token = re.sub(r"\.exe$", "", token, flags=re.IGNORECASE).strip("\"'").strip()
+    if not token:
+        return None
+    token_lower = token.lower()
+    for entry in APP_REGISTRY.values():
+        if entry.close_process and token_lower == entry.open_cmd.lower():
+            return entry
+    return None
+
+
 @registry.register_tool(
     name="shell_execute",
     description="Run a shell command and get output. Risky commands are blocked.",
@@ -606,6 +640,15 @@ def is_shell_command_gated(command: str) -> Optional[str]:
 def shell_execute(command: str, *, voice_mode: bool = False) -> str:
     lowered = command.lower().strip()
 
+    # An already-running known app gets focused instead of relaunched -- applies
+    # regardless of voice_mode, and before the allowlist check below so a blocked
+    # wrapper (e.g. "powershell -Command Start-Process notepad") never even gets
+    # a chance to fail: if the app's already open, there's nothing to launch.
+    app_entry = _detect_app_launch(command)
+    if app_entry and sys.platform == "win32" and is_process_running(app_entry.close_process):
+        from charlie.desktop.windows import focus_window
+        return focus_window(app_entry.close_process.removesuffix(".exe"))
+
     if voice_mode:
         if not lowered:
             return "Error: No command provided."
@@ -618,8 +661,11 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
             "notepad ",
             "dir ",
             "cmd ",
+            "move ",
+            "copy ",
         )
-        if not any(lowered.startswith(prefix) for prefix in allowed_prefixes):
+        # Accept the bare command too (e.g. "notepad" with no args), not just "notepad <arg>".
+        if not any(lowered == prefix.strip() or lowered.startswith(prefix) for prefix in allowed_prefixes):
             return (
                 "Error: Command not on the allowed list for voice mode. "
                 "Use the web UI for unrestricted shell access."
@@ -678,7 +724,13 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
             # instance. Kill the now-idle wrapper shell but report this as
             # still-running, not a failure.
             process.kill()
-            process.communicate()
+            try:
+                # A detached grandchild (e.g. "start notepad") can keep the
+                # stdout/stderr pipe open past the killed parent's exit, so
+                # this drain must stay bounded too -- its result is unused.
+                process.communicate(timeout=_SHELL_KILL_DRAIN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                pass
             return (
                 f"Command is still running after {SHELL_TIMEOUT}s with no output "
                 "(left running -- if this opened an app or window, it launched "
@@ -704,10 +756,7 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
         return f"Error executing shell command: {e}"
 
 
-# --- System diagnostics: fixed commands only, no user-supplied string ever
-# reaches the shell. Used by the K.A.R.E.N. swarm agent, which is not
-# supervised turn-by-turn like shell_execute's caller, so it must not be
-# given an open command parameter.
+# --- System diagnostics: fixed commands only, no user-supplied string ever reaches the shell.
 _DIAGNOSTIC_COMMANDS: Dict[str, str] = {
     "disk": (
         'powershell -NoProfile -Command "Get-PSDrive -PSProvider FileSystem | '
@@ -827,17 +876,29 @@ def _resolve_user_placeholders(path: str) -> str:
     """Replace Windows user-folder placeholders (e.g. C:\\Users\\YourUsername\\...)
     with the real username. Splits on a literal backslash rather than
     os.path.sep -- Charlie targets Windows paths regardless of the host
-    platform this runs on (e.g. pure-logic tests on Linux CI)."""
+    platform this runs on (e.g. pure-logic tests on Linux CI).
+
+    Also catches the case where the model wrote a real-looking but wrong
+    username (e.g. C:\\Users\\Charlie -- guessing its own name instead of the
+    actual account) rather than an obvious <placeholder>: if the segment
+    right after "Users" doesn't match an existing directory, it's swapped for
+    the real one too."""
     import getpass
     placeholders = {"yourusername", "username", "user"}
     current_user = getpass.getuser()
-    parts = []
-    for part in path.split("\\"):
-        clean_part = part.strip("<>").lower()
-        if clean_part in placeholders:
-            parts.append(current_user)
-        else:
-            parts.append(part)
+    parts = path.split("\\")
+    for i, part in enumerate(parts):
+        clean_part = part.strip("<>")
+        if clean_part.lower() in placeholders:
+            parts[i] = current_user
+        elif (
+            i > 0
+            and parts[i - 1].lower() == "users"
+            and clean_part
+            and clean_part.lower() != current_user.lower()
+            and not os.path.isdir("\\".join(parts[: i + 1]))
+        ):
+            parts[i] = current_user
     return "\\".join(parts)
 
 
@@ -1234,120 +1295,6 @@ def graph_consolidate() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Swarm delegation tool (delegate tasks to MARVEL agents)
-# ---------------------------------------------------------------------------
-
-# Derived from AGENT_REGISTRY (the swarm's single source of truth for
-# registered agents) so this list can never drift out of sync with which
-# agents actually exist -- it previously hand-listed only 5 of the 7
-# registered agents, silently excluding J.A.R.V.I.S. and Vision.
-_VALID_AGENTS = tuple(AGENT_REGISTRY.keys())
-_POLL_INTERVAL_S = 0.5
-_POLL_TIMEOUT_S = 60.0
-# Each agent's own `description` class attribute, surfaced here so the model
-# actually learns what each agent specializes in instead of just its name --
-# previously only the bare enum reached the prompt.
-_AGENT_NAME_DESCRIPTIONS = "; ".join(
-    f"{name} ({cls.description})" for name, cls in AGENT_REGISTRY.items()
-)
-
-
-@registry.register_tool(
-    name="delegate_to_agent",
-    description=(
-        "Delegate a task to a MARVEL agent for parallel execution. "
-        "Use when a subtask requires deep focus (research, analysis, file ops) "
-        "while you continue the main conversation. Returns the agent's result."
-    ),
-    schema={
-        "type": "object",
-        "properties": {
-            "agent_name": {
-                "type": "string",
-                "enum": list(_VALID_AGENTS),
-                "description": f"Which MARVEL agent to assign the task to: {_AGENT_NAME_DESCRIPTIONS}",
-            },
-            "task_description": {
-                "type": "string",
-                "description": "Clear, self-contained description of what to do",
-            },
-        },
-        "required": ["agent_name", "task_description"],
-    },
-)
-def delegate_to_agent(agent_name: str, task_description: str) -> str:
-    """Add a task to the blackboard, poll up to 60s, and return the result."""
-    global _blackboard
-    if _blackboard is None:
-        return (
-            "Error: Swarm orchestrator is not running. "
-            "Cannot delegate tasks without an active blackboard."
-        )
-
-    if agent_name not in _VALID_AGENTS:
-        agents_str = ", ".join(_VALID_AGENTS)
-        return f"Error: Unknown agent '{agent_name}'. Valid agents: {agents_str}"
-
-    try:
-        task = _blackboard.add_task(
-            name=task_description,
-            assigned_to=agent_name,
-            column="todo",
-        )
-        task_id = task.id
-        logger.info(
-            "Delegated task [%s] to %s: %s",
-            task_id, agent_name, task_description,
-        )
-
-        # Poll loop: wait for status to be 'done' or 'failed'
-        deadline = time.monotonic() + _POLL_TIMEOUT_S
-        last_status = "pending"
-        while time.monotonic() < deadline:
-            time.sleep(_POLL_INTERVAL_S)
-            current = _blackboard.get_task(task_id)
-            if current is None:
-                return f"Error: Task {task_id} was removed from the blackboard."
-            if current.status == "done":
-                logger.info(
-                    "Task [%s] completed by %s (result length=%d)",
-                    task_id, agent_name, len(current.result or ""),
-                )
-                result = current.result or "(no result content)"
-                elapsed = _POLL_TIMEOUT_S - (deadline - time.monotonic())
-                return (
-                    f"Agent {agent_name} completed task in {elapsed:.1f}s. "
-                    f"Result:\n{result}"
-                )
-            if current.status == "failed":
-                logger.warning("Task [%s] failed for %s", task_id, agent_name)
-                return (
-                    f"Agent {agent_name} failed to complete the task. "
-                    f"Status: {current.status}. Result: {current.result or 'N/A'}"
-                )
-            if current.status != last_status:
-                logger.info(
-                    "Task [%s] status changed: %s -> %s",
-                    task_id, last_status, current.status,
-                )
-                last_status = current.status
-
-        # Timeout
-        logger.warning(
-            "Task [%s] timed out after %.1fs (status=%s)",
-            task_id, _POLL_TIMEOUT_S, last_status,
-        )
-        return (
-            f"Agent {agent_name} did not complete the task within "
-            f"{_POLL_TIMEOUT_S:.0f} seconds. The task ({task_id}) is still "
-            f"in status '{last_status}' and will continue running."
-        )
-    except Exception as e:
-        logger.exception("delegate_to_agent error")
-        return f"Error delegating to agent: {e}"
-
-
-# ---------------------------------------------------------------------------
 # Plugin system bridge
 # ---------------------------------------------------------------------------
 # Plugins are only wired into the LLM when config.plugins_enabled is true
@@ -1599,6 +1546,35 @@ def _ocr_fallback_marks(uia_elements: List[Any]) -> List[Any]:
     return merge_ocr_elements(uia_elements, ocr_elements) if ocr_elements else uia_elements
 
 
+# Below this many merged UIA+OCR elements, the window is probably a
+# non-UIA surface (Electron/canvas content OCR can't read either) rather
+# than just a sparse toolbar -- worth the vision-LLM round trip.
+_GROUNDING_FALLBACK_THRESHOLD = 3
+
+
+def _grounding_marks(elements: List[Any]) -> List[Any]:
+    """Vision-LLM fallback for surfaces UIA+OCR can't see into.
+
+    Unlike _ocr_fallback_marks this is a real vision-LLM round trip (not
+    free), so it only runs when the merged pass came back too sparse to be
+    useful, not on every observe/screenshot call.
+    """
+    if len(elements) >= _GROUNDING_FALLBACK_THRESHOLD or not config.vision_enabled:
+        return elements
+    from charlie.desktop import ocr as desktop_ocr
+    if not desktop_ocr.OCR_AVAILABLE:
+        return elements
+    from charlie.desktop import grounding as desktop_grounding
+    from charlie.desktop.uia import merge_ocr_elements
+    try:
+        png = desktop_ocr.capture()
+        grounded = desktop_grounding.detect(png, config)
+    except Exception:
+        logger.warning("Grounding fallback pass failed", exc_info=True)
+        return elements
+    return merge_ocr_elements(elements, grounded) if grounded else elements
+
+
 @registry.register_tool(
     name="desktop_observe",
     description=(
@@ -1613,7 +1589,7 @@ def desktop_observe() -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
     from charlie.desktop.uia import serialize_marks, snapshot_tree
-    elements = _ocr_fallback_marks(snapshot_tree(max_depth=8))
+    elements = _grounding_marks(_ocr_fallback_marks(snapshot_tree(max_depth=8)))
     _capture_and_emit_frame(elements)
     if not elements:
         return "No UI elements found in the foreground window."
@@ -1727,6 +1703,112 @@ def desktop_key(keys: str) -> str:
 
 
 @registry.register_tool(
+    name="desktop_click_at",
+    description=(
+        "Click a raw pixel coordinate from the most recent desktop_observe or "
+        "desktop_screenshot capture. Prefer desktop_click with a mark id when "
+        "one exists -- use this only for targets with no accessible mark "
+        "(icons, canvases, images, game content). Coordinates are image "
+        "pixels from that capture, not physical screen pixels; passing "
+        "coordinates from stale or hallucinated positions will click the "
+        "wrong place, so always re-observe or re-screenshot immediately "
+        "before using this."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "x": {"type": "integer", "description": "X pixel coordinate from the latest capture."},
+            "y": {"type": "integer", "description": "Y pixel coordinate from the latest capture."},
+            "button": {"type": "string", "enum": ["left", "right"], "description": "Mouse button. Defaults to left."},
+            "double": {"type": "boolean", "description": "Double-click instead of single-click. Defaults to false."},
+        },
+        "required": ["x", "y"],
+    },
+    is_interactive=True,
+)
+def desktop_click_at(x: int, y: int, button: str = "left", double: bool = False) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import click_at
+    return click_at(x, y, button=button, double=double)
+
+
+@registry.register_tool(
+    name="desktop_move",
+    description=(
+        "Move the mouse cursor to a raw pixel coordinate from the most recent "
+        "desktop_observe or desktop_screenshot capture, without clicking. "
+        "Coordinates are image pixels from that capture, not physical screen pixels."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "x": {"type": "integer", "description": "X pixel coordinate from the latest capture."},
+            "y": {"type": "integer", "description": "Y pixel coordinate from the latest capture."},
+        },
+        "required": ["x", "y"],
+    },
+    is_interactive=True,
+)
+def desktop_move(x: int, y: int) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import move_to
+    return move_to(x, y)
+
+
+@registry.register_tool(
+    name="desktop_drag",
+    description=(
+        "Drag the mouse from one raw pixel coordinate to another, from the "
+        "most recent desktop_observe or desktop_screenshot capture. Use for "
+        "sliders, canvases, drawing, or drag-and-drop where no mark id "
+        "applies. Coordinates are image pixels from that capture, not "
+        "physical screen pixels."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "x1": {"type": "integer", "description": "Start X pixel coordinate."},
+            "y1": {"type": "integer", "description": "Start Y pixel coordinate."},
+            "x2": {"type": "integer", "description": "End X pixel coordinate."},
+            "y2": {"type": "integer", "description": "End Y pixel coordinate."},
+        },
+        "required": ["x1", "y1", "x2", "y2"],
+    },
+    is_interactive=True,
+)
+def desktop_drag(x1: int, y1: int, x2: int, y2: int) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import drag
+    return drag(x1, y1, x2, y2)
+
+
+@registry.register_tool(
+    name="desktop_scroll",
+    description=(
+        "Scroll the foreground window at the current cursor position. "
+        "Positive notches scroll up, negative scroll down. Roughly 3 notches "
+        "moves one screen section."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "notches": {"type": "integer", "description": "Scroll amount; positive=up, negative=down."},
+        },
+        "required": ["notches"],
+    },
+    is_interactive=True,
+)
+def desktop_scroll(notches: int) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import scroll
+    return scroll(notches)
+
+
+@registry.register_tool(
     name="desktop_screenshot",
     description=(
         "Capture the foreground window as an annotated screenshot for the vision model, "
@@ -1740,7 +1822,7 @@ def desktop_screenshot() -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
     from charlie.desktop.uia import serialize_marks, snapshot_tree
-    elements = _ocr_fallback_marks(snapshot_tree(max_depth=8))
+    elements = _grounding_marks(_ocr_fallback_marks(snapshot_tree(max_depth=8)))
     text_result = serialize_marks(elements) if elements else "No UI elements found in the foreground window."
     if not config.vision_enabled:
         _capture_and_emit_frame(elements)
@@ -1757,6 +1839,114 @@ def desktop_screenshot() -> str:
     except Exception:
         logger.warning("desktop_screenshot vision annotation failed", exc_info=True)
     return text_result
+
+
+@registry.register_tool(
+    name="desktop_windows",
+    description=(
+        "List all visible top-level windows by title, for switching between "
+        "apps or finding a window to focus/move."
+    ),
+    schema={"type": "object", "properties": {}, "required": []},
+)
+def desktop_windows() -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.windows import list_windows
+    windows = list_windows()
+    if not windows:
+        return "No visible windows found."
+    return "\n".join(w["title"] for w in windows)
+
+
+@registry.register_tool(
+    name="desktop_focus",
+    description=(
+        "Bring a window to the foreground by title substring "
+        "(case-insensitive). Use desktop_windows first to see available titles."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "window": {"type": "string", "description": "Title substring to match, e.g. 'Notepad' or 'Chrome'."},
+        },
+        "required": ["window"],
+    },
+    is_interactive=True,
+)
+def desktop_focus(window: str) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.windows import focus_window
+    return focus_window(window)
+
+
+@registry.register_tool(
+    name="desktop_window",
+    description="Minimize, maximize, restore, or close a window by title substring.",
+    schema={
+        "type": "object",
+        "properties": {
+            "window": {"type": "string", "description": "Title substring to match."},
+            "action": {"type": "string", "enum": ["minimize", "maximize", "restore", "close"]},
+        },
+        "required": ["window", "action"],
+    },
+    is_interactive=True,
+)
+def desktop_window(window: str, action: str) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.windows import manage_window
+    return manage_window(window, action)
+
+
+@registry.register_tool(
+    name="desktop_move_window",
+    description="Move and resize a window by title substring, e.g. to arrange two windows side by side.",
+    schema={
+        "type": "object",
+        "properties": {
+            "window": {"type": "string", "description": "Title substring to match."},
+            "x": {"type": "integer", "description": "New left position in screen pixels."},
+            "y": {"type": "integer", "description": "New top position in screen pixels."},
+            "width": {"type": "integer", "description": "New width in pixels."},
+            "height": {"type": "integer", "description": "New height in pixels."},
+        },
+        "required": ["window", "x", "y", "width", "height"],
+    },
+    is_interactive=True,
+)
+def desktop_move_window(window: str, x: int, y: int, width: int, height: int) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.windows import move_resize_window
+    return move_resize_window(window, x, y, width, height)
+
+
+@registry.register_tool(
+    name="system_control",
+    description=(
+        "Control system volume and media playback via keyboard media keys: "
+        "volume_up, volume_down, mute, play_pause, next_track, prev_track."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["volume_up", "volume_down", "mute", "play_pause", "next_track", "prev_track"],
+            },
+        },
+        "required": ["action"],
+    },
+    is_interactive=True,
+)
+def system_control(action: str) -> str:
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.desktop.actions import system_control as _system_control
+    return _system_control(action)
 
 
 def set_pending_vision_image(url: Optional[str]) -> None:

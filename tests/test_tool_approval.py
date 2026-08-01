@@ -23,9 +23,9 @@ from charlie.core import (
 @pytest.fixture
 def brain_config():
     return Config(
-        small_llm_url="http://localhost:11434",
-        small_llm_key="no-key",
-        small_llm_model="dummy",
+        llm_url="http://localhost:11434",
+        llm_key="no-key",
+        llm_model="dummy",
         iteration_budget_max=3,
     )
 

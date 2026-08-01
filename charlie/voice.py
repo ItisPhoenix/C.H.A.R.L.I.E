@@ -29,7 +29,6 @@ logger = logging.getLogger("charlie.voice")
 # --- TTS text humanization constants ---
 _MIN_TEXT_LEN = 3
 _ECHO_WINDOW_SEC = 2.0
-_ECHO_MAX_WORDS = 4
 # Sentinel pushed to playback_queue after every chunk of a single TTS run has
 # been enqueued. Lets the playback worker distinguish "utterance fully spoken"
 # from momentary inter-chunk queue gaps.
@@ -126,8 +125,12 @@ class VoiceEngine:
         self._last_speech_time = 0.0
         self._last_speech_text = ""
         self._last_speech_end = 0.0
+        # Union of words spoken across every speak() chunk of the current
+        # reply, not just the most recent chunk -- a long reply spans many
+        # speak() calls (one per sentence flush), and the mic can pick up
+        # any part of it, not only the last one.
+        self._recent_spoken_words: set = set()
         self.speech_echo_window = _ECHO_WINDOW_SEC
-        self.speech_echo_max_words = _ECHO_MAX_WORDS
         self._widget_callback = None
 
         # Speaker output state (driven by the dashboard audio controls).
@@ -458,21 +461,24 @@ class VoiceEngine:
         return text
 
     def is_echo(self, text: str) -> bool:
-        """True if `text` is a short subset of what Charlie just spoke.
+        """True if `text` is a subset of words Charlie is currently speaking
+        (or just finished speaking).
 
         Used both here (to skip re-speaking a near-duplicate) and by main.py
         barge-in (to suppress the assistant hearing its own TTS output).
+        Covers the whole reply, not just a fixed window after the most
+        recently flushed sentence chunk -- a long reply spans multiple
+        speak() calls, and an open mic can pick up any part of it, well
+        past a short fixed window from the first chunk.
         """
         now = time.time()
-        if now - getattr(self, "_last_speech_time", 0.0) >= self.speech_echo_window:
+        still_speaking = self.is_speaking.is_set()
+        recently_finished = now - getattr(self, "_last_speech_end", 0.0) < self.speech_echo_window
+        if not (still_speaking or recently_finished):
             return False
         new_words = set(text.lower().split())
-        old_words = set(getattr(self, "_last_speech_text", "").lower().split())
-        return bool(
-            new_words
-            and len(new_words) <= self.speech_echo_max_words
-            and new_words.issubset(old_words)
-        )
+        old_words = getattr(self, "_recent_spoken_words", set())
+        return bool(new_words and new_words.issubset(old_words))
 
     def speak(self, text: str, emotional_state: str = "neutral"):
         """Sanitize text for TTS and enqueue. Non-blocking."""
@@ -482,6 +488,10 @@ class VoiceEngine:
         # Echo detection
         if self.is_echo(text):
             return ""
+        # A new reply (not a continuation chunk of one already being spoken)
+        # starts a fresh word set instead of carrying over the last reply's.
+        if not self.is_speaking.is_set():
+            self._recent_spoken_words = set()
         self._last_speech_time = time.time()
 
         # Strip URLs
@@ -495,6 +505,7 @@ class VoiceEngine:
         # in both speak() and main.py barge-in). Do this before ASCII cleanup
         # so comparisons match what Kokoro phonemizes.
         self._last_speech_text = text
+        self._recent_spoken_words |= set(text.lower().split())
 
         # Number and symbol conversion
         text = self._numbers_to_words(text)
@@ -1045,6 +1056,10 @@ class VoiceEngine:
         speech_buffer = []
         _frame_count = 0
         _rms_log_interval = int(3.0 * samplerate / block_size)  # log every ~3s
+        # Require 2 consecutive loud frames (~128ms) before confirming onset, so a single
+        # ~64ms keyboard click transient can't trigger it -- real speech sustains across frames.
+        _onset_debounce_frames = 2
+        _consecutive_loud_frames = 0
 
         # Wake word sliding buffer (~2s at 16kHz for inference)
         _ww_buffer_samples = samplerate * 2  # 32000 samples = 2s
@@ -1110,7 +1125,12 @@ class VoiceEngine:
 
             if not is_speech:
                 if rms > _vad_threshold:
+                    _consecutive_loud_frames += 1
+                else:
+                    _consecutive_loud_frames = 0
+                if _consecutive_loud_frames >= _onset_debounce_frames:
                     is_speech = True
+                    _consecutive_loud_frames = 0
                     speech_start_time = time.time()
                     last_speech_time = time.time()
                     logger.info(

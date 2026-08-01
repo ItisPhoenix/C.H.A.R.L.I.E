@@ -289,11 +289,11 @@ class TestVolatilityTierGoal:
 
 
 # ---------------------------------------------------------------------------
-# Phase 4: H.E.L.M. desktop-control operator persona
+# Phase 4: Helm desktop-control operator persona
 # ---------------------------------------------------------------------------
 
 class TestOperatorPersonaDetection:
-    """Verify _detect_operator_persona catches H.E.L.M. address."""
+    """Verify _detect_operator_persona catches Helm address."""
 
     def test_helm_with_comma(self):
         assert _detect_operator_persona("Helm, open my email") is True
@@ -309,17 +309,23 @@ class TestOperatorPersonaDetection:
 
 
 class TestVolatileTierOperatorPersona:
-    """Verify _build_volatile_tier injects the H.E.L.M. persona block."""
+    """Verify _build_volatile_tier injects the Helm persona block.
+
+    A bare "Helm" mention is no longer sufficient to prove the (token-
+    heavy) narration persona is active -- these tests check for the persona
+    block's own marker ("[Helm MODE]") instead of the bare name.
+    """
 
     def test_no_persona(self):
         from datetime import datetime
         tier = _build_volatile_tier("voice", datetime.now(), 5)
-        assert "H.E.L.M." not in tier
+        assert "[Helm MODE]" not in tier
 
     def test_with_persona(self):
         from datetime import datetime
         tier = _build_volatile_tier(
             "voice", datetime.now(), 5, operator_persona=True
         )
-        assert "H.E.L.M." in tier
+        assert "[Helm MODE]" in tier
+        assert "desktop_observe" in tier
         assert "desktop_observe" in tier

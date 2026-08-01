@@ -186,7 +186,7 @@ class MemoryStore:
     ) -> int:
         """Store facts from text. Returns number of facts stored.
 
-        If auto_extract is True, uses a fast LLM to extract factual statements.
+        If auto_extract is True, uses the configured LLM to extract factual statements.
         Otherwise stores the raw text as a single document.
         """
         if not self.is_available:
@@ -286,7 +286,7 @@ class MemoryStore:
         return filtered
 
     def _extract_facts(self, text: str) -> List[str]:
-        """Use a fast LLM to extract factual statements from text.
+        """Use the configured LLM to extract factual statements from text.
 
         Returns a list of fact strings, or empty list on failure.
         """
@@ -303,10 +303,10 @@ class MemoryStore:
         try:
             import httpx
 
-            # Use the small LLM endpoint (configurable)
-            fast_url = getattr(self.config, "small_llm_url", "")
-            fast_model = getattr(self.config, "small_llm_model", _FACT_EXTRACT_MODEL)
-            fast_key = getattr(self.config, "small_llm_key", "no-key")
+            # Use the configured LLM endpoint
+            fast_url = getattr(self.config, "llm_url", "")
+            fast_model = getattr(self.config, "llm_model", _FACT_EXTRACT_MODEL)
+            fast_key = getattr(self.config, "llm_key", "no-key")
 
             if not fast_url:
                 logger.debug("No LLM configured for fact extraction")

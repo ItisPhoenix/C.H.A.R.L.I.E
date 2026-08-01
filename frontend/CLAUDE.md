@@ -25,4 +25,4 @@ All three must pass cleanly. `npm test` runs vitest; store tests live in `src/st
 `npm run dev` starts the Next.js dev server standalone, but the dashboard is only fully
 functional against a running `charlie/web_server.py` (normally launched by `main.py`, which also
 sets `CHARLIE_LAUNCH_ID` -- see root CLAUDE.md section 11.3). For UI-only iteration this is fine;
-for anything touching live data (sessions, blackboard, transcripts) run the full stack via `main.py`.
+for anything touching live data (sessions, transcripts) run the full stack via `main.py`.

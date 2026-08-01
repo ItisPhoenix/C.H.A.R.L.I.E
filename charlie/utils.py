@@ -39,3 +39,17 @@ def build_auth_headers(api_key: str) -> Dict[str, str]:
 def utc_now_iso() -> str:
     """Current UTC time as an ISO-8601 string (space replaced by T, Z suffix)."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def is_process_running(process_name: str) -> bool:
+    """True if a process named `process_name` (e.g. "notepad.exe") is currently running."""
+    import psutil
+
+    target = process_name.lower()
+    for proc in psutil.process_iter(["name"]):
+        try:
+            if (proc.info["name"] or "").lower() == target:
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return False

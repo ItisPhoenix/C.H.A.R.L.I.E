@@ -12,7 +12,6 @@ from charlie.config import Config
 from charlie.core import (
     _DESKTOP_COM_TOOLS,
     _DESKTOP_CONTROL_TOOLS,
-    _DESKTOP_DISARM_RE,
     _SCREEN_QUERY_RE,
     Brain,
     _payload_is_vision,
@@ -21,7 +20,15 @@ from charlie.core import (
 from charlie.desktop import DESKTOP_AVAILABLE, UIA_EXECUTOR
 from charlie.desktop import actions as desktop_actions
 from charlie.desktop import vision as desktop_vision
-from charlie.desktop.uia import Element, merge_ocr_elements, resolve_bounds, resolve_is_password, resolve_name
+from charlie.desktop.uia import (
+    Element,
+    is_low_confidence_mark,
+    merge_ocr_elements,
+    resolve_bounds,
+    resolve_is_password,
+    resolve_name,
+)
+from charlie.tools import config as _tools_config
 from charlie.tools import (
     desktop_click,
     desktop_observe,
@@ -35,30 +42,43 @@ from charlie.tools import (
 @pytest.fixture
 def brain_config():
     return Config(
-        small_llm_url="http://localhost:11434",
-        small_llm_key="no-key",
-        small_llm_model="dummy",
+        llm_url="http://localhost:11434",
+        llm_key="no-key",
+        llm_model="dummy",
         iteration_budget_max=3,
     )
 
 
 def test_desktop_control_tools_frozenset():
-    assert _DESKTOP_CONTROL_TOOLS == {"desktop_click", "desktop_type", "desktop_invoke", "desktop_key"}
+    assert _DESKTOP_CONTROL_TOOLS == {
+        "desktop_click", "desktop_type", "desktop_invoke", "desktop_key",
+        "desktop_click_at", "desktop_move", "desktop_drag", "desktop_scroll",
+        "desktop_focus", "desktop_window", "desktop_move_window",
+        "system_control",
+    }
+
+
+def test_system_control_is_gated():
+    """Media-key presses mutate real system volume/playback state, same as
+    desktop_key sending a chord -- it must go through the same consent-arm/
+    panic-halt/rate-limit/idempotency-exclusion gate as every other effector."""
+    assert "system_control" in _DESKTOP_CONTROL_TOOLS
 
 
 def test_desktop_tools_disabled_by_default():
-    """desktop_control_enabled defaults to false -- tools must refuse, not crash."""
-    assert "disabled" in desktop_observe()
-    assert "disabled" in desktop_click(1)
+    """desktop_control_enabled defaults to false -- tools must refuse, not crash.
 
-
-def test_desktop_gate_reason_arms_once_per_session(brain_config):
-    brain = Brain(brain_config)
-    assert brain._desktop_gate_reason() == "take control of your desktop"
-    brain._desktop_armed = True
-    # Stays armed across turns -- one approval covers the whole session.
-    assert brain._desktop_gate_reason() is None
-    assert brain._desktop_gate_reason() is None
+    Forces the flag rather than trusting ambient state: a developer's local
+    .env commonly sets DESKTOP_CONTROL_ENABLED=true, which would otherwise
+    make this test exercise a real click instead of the disabled path.
+    """
+    original = _tools_config.desktop_control_enabled
+    _tools_config.desktop_control_enabled = False
+    try:
+        assert "disabled" in desktop_observe()
+        assert "disabled" in desktop_click(1)
+    finally:
+        _tools_config.desktop_control_enabled = original
 
 
 def test_actions_halt_toggle():
@@ -81,7 +101,13 @@ def test_type_text_unknown_id_returns_error_not_raise():
 
 
 def test_desktop_read_screen_disabled_by_default():
-    assert "disabled" in desktop_read_screen()
+    """Same ambient-.env hazard as test_desktop_tools_disabled_by_default above."""
+    original = _tools_config.desktop_control_enabled
+    _tools_config.desktop_control_enabled = False
+    try:
+        assert "disabled" in desktop_read_screen()
+    finally:
+        _tools_config.desktop_control_enabled = original
 
 
 def test_merge_ocr_elements_continues_mark_id_sequence():
@@ -97,8 +123,28 @@ def test_merge_ocr_elements_continues_mark_id_sequence():
     assert resolve_name(2) == "hello"
 
 
+def test_is_low_confidence_mark_true_for_ocr_element():
+    uia = [Element(mark_id=1, name="Save", control_type="Button", bounds=(0, 0, 10, 10),
+                    is_password=False, is_offscreen=False)]
+    ocr = [Element(mark_id=1, name="hello", control_type="ocr_text", bounds=(20, 20, 30, 30),
+                    is_password=False, is_offscreen=False)]
+    merged = merge_ocr_elements(uia, ocr)
+    ocr_mark_id = merged[1].mark_id
+    assert is_low_confidence_mark(ocr_mark_id) is True
+
+
+def test_is_low_confidence_mark_true_for_unresolvable_mark():
+    assert is_low_confidence_mark(999999) is True
+
+
 def test_desktop_screenshot_disabled_by_default():
-    assert "disabled" in desktop_screenshot()
+    """Same ambient-.env hazard as test_desktop_tools_disabled_by_default above."""
+    original = _tools_config.desktop_control_enabled
+    _tools_config.desktop_control_enabled = False
+    try:
+        assert "disabled" in desktop_screenshot()
+    finally:
+        _tools_config.desktop_control_enabled = original
 
 
 def test_pending_vision_image_pops_once():
@@ -107,6 +153,41 @@ def test_pending_vision_image_pops_once():
     set_pending_vision_image("data:image/png;base64,x")
     assert pop_pending_vision_image() == "data:image/png;base64,x"
     assert pop_pending_vision_image() is None
+
+
+def test_build_payload_uses_instance_pending_image_not_shared_global():
+    """Regression: two concurrent Brain instances (e.g. foreground + a
+    background task) both calling desktop_screenshot used to race on one
+    shared tools.py global -- whichever Brain's _build_payload ran second
+    could steal or corrupt the other's image. _exec_one now pops the global
+    into self._pending_vision_image_url immediately after its own
+    desktop_screenshot call, so _build_payload only ever reads its own
+    Brain's value and never touches (or is affected by) the shared global."""
+    from charlie.config import Config
+    from charlie.core import Brain
+
+    cfg = Config(
+        llm_url="https://example.com/v1",
+        llm_key="test-key",
+        llm_model="dummy",
+        native_tool_calling=True,
+        vision_enabled=True,
+    )
+    brain = Brain(cfg)
+    brain._pending_vision_image_url = "image-for-this-brain"
+    # Simulates a second, concurrent Brain instance's own desktop_screenshot
+    # call leaving its image in the shared global.
+    set_pending_vision_image("image-from-a-different-brain")
+
+    payload = brain._build_payload([{"role": "user", "content": "hi"}])
+
+    content = payload["messages"][-1]["content"]
+    assert any(
+        isinstance(block, dict) and block.get("image_url", {}).get("url") == "image-for-this-brain"
+        for block in content
+    )
+    # The shared global is untouched by this Brain's payload build.
+    assert pop_pending_vision_image() == "image-from-a-different-brain"
 
 
 def test_with_vision_image_rewrites_last_user_message_only():
@@ -131,21 +212,15 @@ def test_select_followup_route_prefers_vision_when_payload_carries_image(brain_c
     brain._vision_client = object()
     brain._vision_model = "vision-model"
     payload = {"messages": [{"role": "user", "content": [{"type": "text", "text": "x"}]}]}
-    client, model, is_vision = brain._select_followup_route(payload, used_fallback=False)
+    client, model, is_vision = brain._select_followup_route(payload)
     assert (client, model, is_vision) == (brain._vision_client, "vision-model", True)
 
 
-def test_select_followup_route_falls_back_to_small_without_image(brain_config):
+def test_select_followup_route_uses_llm_without_image(brain_config):
     brain = Brain(brain_config)
     payload = {"messages": [{"role": "user", "content": "hi"}]}
-    client, model, is_vision = brain._select_followup_route(payload, used_fallback=False)
-    assert (client, model, is_vision) == (brain.client, brain_config.small_llm_model, False)
-
-
-def test_desktop_disarm_phrase_matches():
-    assert _DESKTOP_DISARM_RE.search("stop controlling my desktop")
-    assert _DESKTOP_DISARM_RE.search("please disarm desktop control")
-    assert not _DESKTOP_DISARM_RE.search("open notepad and type hello")
+    client, model, is_vision = brain._select_followup_route(payload)
+    assert (client, model, is_vision) == (brain.client, brain_config.llm_model, False)
 
 
 def test_screen_query_phrase_matches():
@@ -209,7 +284,7 @@ if __name__ == "__main__":
     test_pending_vision_image_pops_once()
     test_with_vision_image_rewrites_last_user_message_only()
     test_select_followup_route_prefers_vision_when_payload_carries_image(brain_config())
-    test_select_followup_route_falls_back_to_small_without_image(brain_config())
+    test_select_followup_route_uses_llm_without_image(brain_config())
     test_desktop_com_tools_covers_perception_and_effectors()
     test_uia_executor_matches_desktop_availability()
     test_vision_annotate_unavailable_without_pillow()

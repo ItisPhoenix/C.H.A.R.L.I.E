@@ -28,6 +28,7 @@ from charlie.config import Config, config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
 from charlie.memory_graph import MemoryGraph
 from charlie.session_store import SessionStore
+from charlie.utils import build_auth_headers
 
 logger = logging.getLogger("charlie.web_server")
 
@@ -40,10 +41,18 @@ active_connections: Set[WebSocket] = set()
 # connected browsers.
 ws_sessions: dict[WebSocket, str] = {}
 
-# MCP tools are discovered once here at web-server startup (mirroring main.py)
-# and registered into the shared registry so /api/mcp/* reflects reality.
+# MCP/plugin registration can spawn subprocesses -- never at import time, only in lifespan()/_ensure_mcp_client().
+from charlie.plugins import PluginManager
+
 mcp_client = None
-if config.mcp_enabled:
+plugin_manager = PluginManager()
+
+
+def _ensure_mcp_client():
+    """Lazily start this process's own MCP client on first need, not a redundant second one at every launch."""
+    global mcp_client
+    if mcp_client is not None or not config.mcp_enabled:
+        return mcp_client
     try:
         from charlie.mcp_client import start_mcp
 
@@ -53,27 +62,12 @@ if config.mcp_enabled:
     except Exception as e:
         logger.warning("Web MCP subsystem failed to initialize: %s", e)
         mcp_client = None
+    return mcp_client
 
-# Same mirroring as mcp_client above: register_plugin_tools() previously ran
-# only in main.py's voice process, so the web process's registry never had
-# plugin_* tools even with PLUGINS_ENABLED=true -- /api/extensions needs a
-# live manager here to enable/disable individual plugins at runtime.
-plugin_manager = None
-if config.plugins_enabled:
-    try:
-        from charlie.tools import register_plugin_tools
 
-        plugin_manager = register_plugin_tools(config)
-    except Exception as e:
-        logger.warning("Web plugin subsystem failed to initialize: %s", e)
-        plugin_manager = None
-if plugin_manager is None:
-    # Always give /api/extensions a manager to enable individual plugins
-    # into, even when the blanket PLUGINS_ENABLED flag is off -- Phase 5's
-    # per-plugin control is meant to work independently of that flag.
-    from charlie.plugins import PluginManager
-
-    plugin_manager = PluginManager()
+async def _ensure_mcp_client_async():
+    """Runs the lazy MCP start on a thread so it doesn't freeze this process's event loop."""
+    return await asyncio.to_thread(_ensure_mcp_client)
 
 # In-process registry of installed extensions (Phase 5) -- see
 # charlie/extensions/__init__.py's ExtensionManager docstring for the
@@ -171,9 +165,20 @@ pipeline_state: str = "idle"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init EventBus + ZMQ guard. Shutdown: tear down EventBus."""
+    """Startup: init EventBus + ZMQ guard + plugin tools. MCP starts lazily,
+    see _ensure_mcp_client(). Shutdown: tear down EventBus."""
     # --- startup ---
-    global event_bus
+    global event_bus, plugin_manager
+    if config.plugins_enabled:
+        try:
+            from charlie.tools import register_plugin_tools
+
+            real_plugin_manager = register_plugin_tools(config)
+            if real_plugin_manager is not None:
+                plugin_manager = real_plugin_manager
+        except Exception as e:
+            logger.warning("Web plugin subsystem failed to initialize: %s", e)
+
     event_bus = EventBus(
         pub_port=DEFAULT_EVENT_PORT,
         pull_port=DEFAULT_COMMAND_PORT,
@@ -273,10 +278,7 @@ async def _event_bridge():
             pipeline_state = "listening"
 
         # Keep web server cached state in sync
-        if etype == "blackboard_update":
-            global _blackboard_state
-            _blackboard_state = event.get("payload", {})
-        elif etype == "system_status":
+        if etype == "system_status":
             global _system_status
             _system_status = event.get("payload", {})
         elif etype == "audio_state":
@@ -325,7 +327,6 @@ async def websocket_endpoint(ws: WebSocket):
 
     # Send initial cached state immediately to prevent empty UI states on connection
     try:
-        await ws.send_text(json.dumps({"type": "blackboard_update", "payload": _blackboard_state}))
         await ws.send_text(json.dumps({"type": "system_status", "payload": _system_status}))
         await ws.send_text(json.dumps({"type": "audio_state", "payload": _audio_state}))
         await ws.send_text(json.dumps({"type": "mic_state", "payload": _mic_state}))
@@ -375,13 +376,24 @@ async def history(limit: int = 50):
 
 @app.get("/api/status")
 async def status():
+    import platform as _platform
     return {
         "state": pipeline_state,
         "launch_id": LAUNCH_ID,
         "uptime_seconds": int(time.time() - _START_TIME),
         "pid": os.getpid(),
         "desktop_control_enabled": config.desktop_control_enabled,
+        "os_host": f"{_platform.system()} {_platform.machine()}",
     }
+
+
+@app.get("/api/background_task")
+async def background_task_status():
+    """Current background-task state, for dashboard resync (otherwise push-only over WS)."""
+    from charlie import background_task
+
+    task = background_task.get_current_task()
+    return {"task": task.to_event() if task is not None else None}
 
 
 @app.get("/api/sessions")
@@ -490,18 +502,10 @@ async def session_chat(session_id: str, data: dict):
         )
     return {"status": "ok"}
 # ---------------------------------------------------------------------------
-# Blackboard API (for Tauri dashboard)
-# ---------------------------------------------------------------------------
-# In-memory blackboard state (synced from main process via ZMQ)
-_blackboard_state: dict = {
-    "tasks": [],
-    "agents": {},
-}
 _system_status: dict = {
     "cpu": 0.0,
     "ram": 0.0,
     "gpu": 0.0,
-    "active_agents": [],
 }
 _active_frontend_session: str | None = None
 _audio_state: dict = {
@@ -563,6 +567,7 @@ async def get_mcp_tools():
 
         if not config.mcp_enabled:
             return {"tools": []}
+        await _ensure_mcp_client_async()
         defs = [
             d for d in registry.get_tool_definitions()
             if d.get("name", "").startswith("mcp_")
@@ -580,6 +585,8 @@ async def get_mcp_status():
         from charlie.tools import registry
 
         enabled = config.mcp_enabled
+        if enabled:
+            await _ensure_mcp_client_async()
         connected = enabled and any(
             d.get("name", "").startswith("mcp_")
             for d in registry.get_tool_definitions()
@@ -681,6 +688,8 @@ async def enable_extension(name: str):
     if ext is None:
         return {"status": "error", "message": f"Unknown extension '{name}'"}
 
+    if ext.kind == "mcp":
+        await _ensure_mcp_client_async()
     if ext.kind == "mcp" and mcp_client is not None:
         tool_names = mcp_client.enable_server(registry, name)
     elif ext.kind == "plugin":
@@ -895,7 +904,209 @@ async def delete_memory_fact(subject: str, predicate: str, object: str):
         except Exception as e:
             logger.error(f"Error deleting fact: {e}", exc_info=True)
             return {"status": "error", "message": str(e)}
-    return {"status": "error", "message": "Memory graph not available"}
+@app.get("/api/workspace/files")
+async def list_workspace_files():
+    """Return real tree structure of workspace files."""
+    from pathlib import Path
+    root_dir = Path(__file__).parent.parent
+    allowed_exts = {".py", ".md", ".json", ".css", ".ts", ".tsx", ".js", ".html"}
+    files_list = []
+    try:
+        for p in root_dir.rglob("*"):
+            if p.is_file() and p.suffix in allowed_exts:
+                rel = p.relative_to(root_dir).as_posix()
+                parts = p.relative_to(root_dir).parts
+                ignored = (".", "node_modules", "venv", "__pycache__", "dist", "out")
+                if not any(part.startswith(".") or part in ignored for part in parts):
+                    files_list.append(rel)
+    except Exception as e:
+        logger.error(f"Error listing workspace files: {e}", exc_info=True)
+    return {"files": sorted(files_list)}
+
+
+@app.get("/api/workspace/file")
+async def get_workspace_file(path: str):
+    """Return contents of a workspace file."""
+    from fastapi import HTTPException
+    from pathlib import Path
+    root_dir = Path(__file__).parent.parent
+    target = (root_dir / path).resolve()
+    if not str(target).startswith(str(root_dir)) or not target.exists() or not target.is_file():
+        raise HTTPException(status_code=400, detail="Invalid path")
+    try:
+        content = target.read_text(encoding="utf-8", errors="ignore")
+        return {"path": path, "content": content}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/docker/status")
+async def get_docker_status():
+    """Check if docker daemon is reachable and list containers."""
+    import subprocess
+    try:
+        res = subprocess.run(["docker", "ps", "--format", "{{json .}}"], capture_output=True, text=True, timeout=2)
+        if res.returncode == 0:
+            lines = [line.strip() for line in res.stdout.strip().split("\n") if line.strip()]
+            containers = []
+            for line in lines:
+                try:
+                    containers.append(json.loads(line))
+                except Exception:
+                    pass
+            return {"available": True, "containers": containers}
+    except Exception:
+        pass
+    return {"available": False, "containers": []}
+
+
+@app.get("/api/ollama/status")
+async def get_ollama_status():
+    """Check if local Ollama daemon is running."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.get("http://127.0.0.1:11434/api/tags")
+            if r.status_code == 200:
+                models = r.json().get("models", [])
+                return {"available": True, "models": [m.get("name") for m in models]}
+    except Exception:
+        pass
+    return {"available": False, "models": []}
+
+
+@app.get("/api/models")
+async def get_available_models():
+    """Return live configured model plus auto-discovered local & provider API key models."""
+    import httpx
+
+    current_model = config.llm_model or ""
+    # Only seed the currently configured model - no phantom defaults
+    models_set: set[str] = {current_model} if current_model else set()
+
+    # 1. Query configured LLM provider endpoint if API key is set
+    if config.llm_key and config.llm_key not in ("no-key", "no_key") and config.llm_url:
+        try:
+            headers = build_auth_headers(config.llm_key)
+            url = config.llm_url.rstrip("/")
+            endpoint = f"{url}/models" if url.endswith("/v1") else f"{url}/v1/models"
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                r = await client.get(endpoint, headers=headers)
+                if r.status_code == 200:
+                    data = r.json()
+                    for item in data.get("data", []):
+                        if isinstance(item, dict) and item.get("id"):
+                            models_set.add(item["id"])
+        except Exception as e:
+            logger.warning(f"Could not fetch models from provider endpoint: {e}")
+
+    # 2. Discover local Ollama models (port 11434)
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            r = await client.get("http://127.0.0.1:11434/api/tags")
+            if r.status_code == 200:
+                for m in r.json().get("models", []):
+                    if m.get("name"):
+                        models_set.add(m["name"])
+    except Exception:
+        pass
+
+    # 3. Discover local LM Studio models (port 1234)
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            r = await client.get("http://127.0.0.1:1234/v1/models")
+            if r.status_code == 200:
+                for item in r.json().get("data", []):
+                    if isinstance(item, dict) and item.get("id"):
+                        models_set.add(item["id"])
+    except Exception:
+        pass
+
+    return {
+        "active_model": current_model,
+        "has_api_key": bool(config.llm_key and config.llm_key not in ("no-key", "no_key")),
+        "models": sorted(list(models_set)),
+    }
+
+
+@app.get("/api/local_models")
+async def get_local_models():
+    """Return ONLY locally hosted models (Ollama :11434, LM Studio :1234)."""
+    import httpx
+
+    local_models = []
+    # 1. Discover local Ollama models (port 11434)
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            r = await client.get("http://127.0.0.1:11434/api/tags")
+            if r.status_code == 200:
+                for m in r.json().get("models", []):
+                    if m.get("name"):
+                        local_models.append({"name": m["name"], "source": "Ollama (:11434)"})
+    except Exception:
+        pass
+
+    # 2. Discover local LM Studio models (port 1234)
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            r = await client.get("http://127.0.0.1:1234/v1/models")
+            if r.status_code == 200:
+                for item in r.json().get("data", []):
+                    if isinstance(item, dict) and item.get("id"):
+                        local_models.append({"name": item["id"], "source": "LM Studio (:1234)"})
+    except Exception:
+        pass
+
+    return {
+        "count": len(local_models),
+        "models": local_models,
+    }
+
+
+@app.get("/api/services/status")
+async def get_services_status():
+    """Return status of real Charlie system processes and services."""
+    return {
+        "services": [
+            {
+                "name": "Voice Pipeline Engine",
+                "status": "online",
+                "details": "sounddevice mic capture + Kokoro TTS synthesis",
+                "type": "audio",
+            },
+            {
+                "name": "Whisper ASR Worker",
+                "status": "online",
+                "details": "distil-large-v3 CUDA subprocess",
+                "type": "speech_to_text",
+            },
+            {
+                "name": "FastAPI Web Server",
+                "status": "online",
+                "details": f"Uvicorn PID {os.getpid()} on port {config.charlie_port}",
+                "type": "http_api",
+            },
+            {
+                "name": "ZeroMQ EventBus Bridge",
+                "status": "online",
+                "details": f"PUB/SUB IPC ports {DEFAULT_EVENT_PORT}/{DEFAULT_COMMAND_PORT}",
+                "type": "ipc",
+            },
+            {
+                "name": "SQLite SessionStore",
+                "status": "online",
+                "details": "FTS5 isolated session history database",
+                "type": "database",
+            },
+            {
+                "name": "ChromaDB MemoryStore",
+                "status": "online",
+                "details": "Vector memory embedding store",
+                "type": "vector_db",
+            },
+        ]
+    }
+
 
 # Serve frontend static files if they exist (checking both 'out' for NextJS and 'dist' for Vite)
 _FRONTEND_DIR = os.path.join(

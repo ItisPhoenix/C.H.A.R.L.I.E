@@ -201,10 +201,18 @@ class FilesystemPlugin(Plugin):
 
     Provides read, write, list, and search for files within configured
     allowed directories. Enforces path safety to prevent traversal.
+
+    PLUGIN_ALLOW_DIRS="*" (user opt-in, e.g. "search my whole PC") lifts the
+    sandbox entirely instead of resolving "*" as a literal directory name.
     """
 
     def __init__(self, allowed_dirs: Optional[List[str]] = None) -> None:
-        self._allowed_dirs = [Path(d).resolve() for d in (allowed_dirs or [os.getcwd()])]
+        self._full_disk_access = allowed_dirs == ["*"]
+        self._allowed_dirs = (
+            []
+            if self._full_disk_access
+            else [Path(d).resolve() for d in (allowed_dirs or [os.getcwd()])]
+        )
 
     @property
     def name(self) -> str:
@@ -279,6 +287,8 @@ class FilesystemPlugin(Plugin):
     def _check_path(self, path_str: str) -> Path:
         """Resolve and validate path is within allowed directories."""
         resolved = Path(path_str).resolve()
+        if self._full_disk_access:
+            return resolved
         for allowed in self._allowed_dirs:
             try:
                 resolved.relative_to(allowed)

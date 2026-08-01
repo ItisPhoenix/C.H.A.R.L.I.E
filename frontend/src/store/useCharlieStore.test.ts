@@ -13,7 +13,6 @@ describe("useCharlieStore", () => {
       messagesLoading: false,
       alerts: [],
       logs: [],
-      blackboard: { tasks: [], agents: {} },
       voiceState: "idle",
       audioLevel: 0,
       toolActivity: [],
@@ -129,17 +128,6 @@ describe("useCharlieStore", () => {
     });
   });
 
-  describe("blackboard", () => {
-    it("sets blackboard state", () => {
-      const bb = {
-        tasks: [{ id: "t1", name: "task1", status: "running" as const }],
-        agents: { jarvis: { name: "jarvis", role: "orchestrator", status: "active" } },
-      };
-      useCharlieStore.getState().setBlackboard(bb);
-      expect(useCharlieStore.getState().blackboard).toEqual(bb);
-    });
-  });
-
   describe("voice state", () => {
     it("sets voice state", () => {
       useCharlieStore.getState().setVoiceState("listening");
@@ -149,7 +137,7 @@ describe("useCharlieStore", () => {
 
   describe("system status", () => {
     it("sets system status", () => {
-      const status = { cpu: 45.2, ram: 68.1, gpu: 30.0, active_agents: ["jarvis"] };
+      const status = { cpu: 45.2, ram: 68.1, gpu: 30.0 };
       useCharlieStore.getState().setSystemStatus(status);
       expect(useCharlieStore.getState().systemStatus).toEqual(status);
     });
@@ -230,6 +218,27 @@ describe("useCharlieStore", () => {
       expect(useCharlieStore.getState().activeToolApproval).toEqual(request);
       s.setActiveToolApproval(null);
       expect(useCharlieStore.getState().activeToolApproval).toBeNull();
+    });
+  });
+
+  describe("background task", () => {
+    it("manages background task state", () => {
+      const task = {
+        id: "bg_abc123",
+        text: "organize downloads folder",
+        steps: ["Open File Explorer", "Sort files by type"],
+        current_step: 0,
+        status: "awaiting_approval" as const,
+        flagged_steps: [0],
+        error: null,
+      };
+
+      const s = useCharlieStore.getState();
+      expect(s.backgroundTask).toBeNull();
+      s.setBackgroundTask(task);
+      expect(useCharlieStore.getState().backgroundTask).toEqual(task);
+      s.setBackgroundTask(null);
+      expect(useCharlieStore.getState().backgroundTask).toBeNull();
     });
   });
 });

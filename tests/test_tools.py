@@ -30,7 +30,6 @@ def test_registry_registration_and_schema():
     definitions = registry.get_tool_definitions()
     names = {d["function"]["name"] for d in definitions}
     assert names == {
-        "delegate_to_agent",
         "web_search",
         "shell_execute",
         "system_diagnostics",
@@ -49,6 +48,15 @@ def test_registry_registration_and_schema():
         "desktop_type",
         "desktop_invoke",
         "desktop_key",
+        "desktop_click_at",
+        "desktop_move",
+        "desktop_drag",
+        "desktop_scroll",
+        "desktop_windows",
+        "desktop_focus",
+        "desktop_window",
+        "desktop_move_window",
+        "system_control",
     }
     assert any(
         d["function"]["parameters"]["required"] == ["query"] for d in definitions
@@ -77,13 +85,20 @@ def test_get_tool_names_matches_definitions():
     }
 
 
-def test_delegate_to_agent_schema_describes_each_agent():
-    """Previously the agent_name enum listed only bare agent names -- the
-    model never learned what each one specializes in."""
-    definitions = {d["function"]["name"]: d["function"] for d in registry.get_tool_definitions()}
-    agent_desc = definitions["delegate_to_agent"]["parameters"]["properties"]["agent_name"]["description"]
-    assert "E.D.I.T.H." in agent_desc
-    assert "Research" in agent_desc or "research" in agent_desc
+def test_raw_desktop_tools_registered():
+    names = registry.get_tool_names()
+    for tool in ("desktop_click_at", "desktop_drag", "desktop_scroll", "desktop_move"):
+        assert tool in names
+
+
+def test_window_management_tools_registered():
+    names = registry.get_tool_names()
+    for tool in ("desktop_windows", "desktop_focus", "desktop_window", "desktop_move_window"):
+        assert tool in names
+
+
+def test_system_control_tool_registered():
+    assert "system_control" in registry.get_tool_names()
 
 
 def test_file_write_and_file_read(tmp_path):
@@ -108,6 +123,38 @@ def test_resolve_user_placeholders():
     assert _resolve_user_placeholders(p1) == f"C:\\Users\\{curr_user}\\Documents\\charlie.txt"
     assert _resolve_user_placeholders(p2) == f"C:\\Users\\{curr_user}\\Documents\\charlie.txt"
     assert _resolve_user_placeholders(p3) == f"C:\\Users\\{curr_user}\\Documents\\charlie.txt"
+
+
+def test_resolve_user_placeholders_corrects_hallucinated_username():
+    """Real bug: the model wrote C:\\Users\\Charlie\\... (guessing its own name)
+    instead of an obvious <placeholder> or the real account name. Since
+    "Charlie" isn't a real directory under C:\\Users, it must still be
+    corrected -- not just the literal placeholder tokens."""
+    import getpass
+
+    from charlie.tools import _resolve_user_placeholders
+    curr_user = getpass.getuser()
+
+    bad_path = "C:\\Users\\Charlie\\Desktop\\charlie_test.txt"
+    assert _resolve_user_placeholders(bad_path) == f"C:\\Users\\{curr_user}\\Desktop\\charlie_test.txt"
+
+
+def test_resolve_user_placeholders_leaves_real_existing_user_dir_alone():
+    """A path for a genuinely different, real user account on the machine
+    must not be silently rewritten to the current user."""
+    import os
+
+    from charlie.tools import _resolve_user_placeholders
+
+    real_other_dirs = [
+        d for d in os.listdir("C:\\Users") if os.path.isdir(f"C:\\Users\\{d}")
+    ] if os.path.isdir("C:\\Users") else []
+    other = next((d for d in real_other_dirs if d.lower() != "public"), None)
+    if other is None:
+        return  # nothing to assert on this machine
+    path = f"C:\\Users\\{other}\\Documents\\charlie.txt"
+    assert _resolve_user_placeholders(path) == path
+
 
 def test_shell_execute_lists_env(monkeypatch):
     import os
@@ -147,6 +194,148 @@ def test_shell_execute_timeout_does_not_report_error(monkeypatch):
     )
     output = shell_execute("notepad")
     assert "Error" not in output
+
+
+def test_shell_execute_recovery_communicate_is_bounded(monkeypatch):
+    """The post-kill communicate() call (draining the pipe after a timeout)
+    must pass an explicit timeout. On Windows a detached grandchild (e.g.
+    "start notepad") can keep the stdout/stderr pipe open long after the
+    killed cmd.exe parent exits, so an unbounded second call blocks forever
+    even though its return value is never used -- this was firing the
+    outer 30s tool-call timeout instead of shell_execute's own graceful
+    "still running" response."""
+    import subprocess as subprocess_module
+
+    from charlie import tools as tools_module
+
+    calls = []
+
+    class FakeProcess:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def communicate(self, input=None, timeout=None):
+            calls.append(timeout)
+            raise subprocess_module.TimeoutExpired(cmd="start notepad", timeout=timeout or 0)
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(
+        tools_module.subprocess, "Popen", lambda *a, **k: FakeProcess()
+    )
+
+    output = shell_execute("start notepad")
+
+    assert "Error" not in output
+    assert "still running" in output
+    assert all(t is not None for t in calls)
+
+
+def test_shell_execute_voice_mode_allows_bare_command(monkeypatch):
+    """Bare "notepad" (no trailing arg) must pass the voice-mode allowlist,
+    not just "notepad <arg>" -- found live when a bare-command retry got
+    wrongly rejected as "not on the allowed list"."""
+    import subprocess as subprocess_module
+
+    from charlie import tools as tools_module
+
+    class FakeProcess:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def communicate(self, input=None, timeout=None):
+            if timeout is not None:
+                raise subprocess_module.TimeoutExpired(cmd="notepad", timeout=timeout)
+            return ("", "")
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(
+        tools_module.subprocess, "Popen", lambda *a, **k: FakeProcess()
+    )
+    output = shell_execute("notepad", voice_mode=True)
+    assert "not on the allowed list" not in output
+
+
+def test_shell_execute_voice_mode_allows_move_and_copy(monkeypatch):
+    """Real bug: relocating a file the user asked to save on Desktop needed
+    move/copy, both blocked as "not on the allowed list" in voice mode --
+    forcing repeated failed retries until the tool budget ran out."""
+    from charlie import tools as tools_module
+
+    class FakeProcess:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def communicate(self, input=None, timeout=None):
+            return ("", "")
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(tools_module.subprocess, "Popen", lambda *a, **k: FakeProcess())
+    move_output = shell_execute('move "a.txt" "b.txt"', voice_mode=True)
+    copy_output = shell_execute('copy "a.txt" "b.txt"', voice_mode=True)
+    assert "not on the allowed list" not in move_output
+    assert "not on the allowed list" not in copy_output
+
+
+def test_detect_app_launch_matches_bare_and_wrapped_forms():
+    """Root-cause fix for a live session: the model retried "powershell -Command
+    Start-Process notepad", "cmd /c start notepad.exe", etc. after "start notepad"
+    got blocked -- all of these must reduce to the same known app."""
+    from charlie.tools import _detect_app_launch
+
+    assert _detect_app_launch("notepad").close_process == "notepad.exe"
+    assert _detect_app_launch("start notepad").close_process == "notepad.exe"
+    assert _detect_app_launch('start "" notepad').close_process == "notepad.exe"
+    assert _detect_app_launch("notepad.exe").close_process == "notepad.exe"
+    assert _detect_app_launch("cmd /c start notepad.exe").close_process == "notepad.exe"
+    assert (
+        _detect_app_launch('powershell -Command Start-Process notepad').close_process
+        == "notepad.exe"
+    )
+
+
+def test_detect_app_launch_ignores_commands_with_real_arguments():
+    """"notepad file.txt" opens a specific file -- must not be treated as a
+    bare relaunch of an already-open, unrelated Notepad window."""
+    from charlie.tools import _detect_app_launch
+
+    assert _detect_app_launch("notepad file.txt") is None
+    assert _detect_app_launch("echo hello") is None
+
+
+def test_shell_execute_focuses_already_running_app_instead_of_relaunching(monkeypatch):
+    """The actual bug report: Charlie kept trying to relaunch Notepad instead
+    of focusing the one already open, burning its tool-call budget."""
+    from charlie import tools as tools_module
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(tools_module, "is_process_running", lambda name: name == "notepad.exe")
+    monkeypatch.setattr(
+        "charlie.desktop.windows.focus_window",
+        lambda title: f"Focused window: Untitled - Notepad ({title})",
+    )
+    popen_calls = []
+    monkeypatch.setattr(
+        tools_module.subprocess, "Popen", lambda *a, **k: popen_calls.append(a) or None
+    )
+
+    output = shell_execute("start notepad")
+    assert "Focused window" in output
+    assert popen_calls == []
 
 
 def test_shell_execute_blocks_metacharacters_and_keywords():
@@ -342,6 +531,8 @@ def test_desktop_observe_wires_up_capture_and_emit_frame(monkeypatch):
 
     monkeypatch.setattr(tools_module, "_desktop_ready", lambda: True)
     monkeypatch.setattr(tools_module, "_ocr_fallback_marks", lambda uia_elements: elements)
+    # Unmocked, this hits a real vision-LLM call when VISION_ENABLED=true -- see test_desktop_grounding.py.
+    monkeypatch.setattr(tools_module, "_grounding_marks", lambda els: els)
 
     import charlie.desktop.uia as uia_module
     monkeypatch.setattr(uia_module, "snapshot_tree", lambda max_depth=8: [])

@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from charlie import web_server
-from charlie.blackboard import Blackboard
 from charlie.recovery import (
     pending_proposals,
     recover_tool,
@@ -71,7 +70,7 @@ async def test_session_isolation_and_routing():
     assert "thinking" in b_sent
 
 @pytest.mark.asyncio
-async def test_recovery_approval_gate():
+async def test_recovery_approval_gate(monkeypatch):
     """Assert rejected/disconnected recovery never calls shell execution."""
     # 1. Disconnected test
     set_active_ws_count(0)
@@ -103,28 +102,15 @@ async def test_recovery_approval_gate():
 
     asyncio.create_task(simulate_reject())
 
-    # Mock big LLM query to return a replacement command
-    mock_brain = MagicMock()
-    mock_brain.config.big_llm_key = "test-key"
-    mock_brain.config.big_llm_model = "test-model"
-    # mock http post client for LLM query
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {
-        "choices": [
-            {
-                "message": {
-                    "content": '{"fixed_command": "dir c:\\\\", "explanation": "fix"}'
-                }
-            }
-        ]
-    }
-    mock_client = AsyncMock()
-    mock_client.post.return_value = mock_response
-    mock_brain._big_client = mock_client
+    # Mock a recovery-cache hit to return a replacement command (deterministic
+    # path to the approval gate, now that the big-LLM fallback is removed).
+    import charlie.recovery_cache
+    monkeypatch.setattr(
+        charlie.recovery_cache, "get_cached_resolution", lambda *a, **k: "dir c:\\"
+    )
 
     res = await recover_tool(
-        brain=mock_brain,
+        brain=MagicMock(),
         tool_name="shell_execute",
         arguments={"command": "dir_nonexistent"},
         e=FileNotFoundError("[winerror 2] The system cannot find the file specified")
@@ -134,29 +120,3 @@ async def test_recovery_approval_gate():
     assert res is not None
     assert "rejected by user" in res.lower()
     assert "dir c:\\" in res
-
-@pytest.mark.asyncio
-async def test_task_approval_scheduling_gate():
-    """Assert the blackboard scheduler only selects approved pending tasks."""
-    board = Blackboard()
-
-    # 1. Swarm created task (pending_approval)
-    t1 = board.add_task("Jarvis Task", assigned_to="J.A.R.V.I.S.", approval_status="pending_approval")
-
-    # get_pending_tasks should be empty since t1 is not approved
-    assert len(board.get_pending_tasks()) == 0
-
-    # 2. User approves task
-    board.update_task(t1.id, approval_status="approved")
-
-    # Now it is ready for execution
-    pending = board.get_pending_tasks()
-    assert len(pending) == 1
-    assert pending[0].id == t1.id
-
-    # 3. User rejects a task
-    t2 = board.add_task("Friday Task", assigned_to="F.R.I.D.A.Y.", approval_status="pending_approval")
-    board.update_task(t2.id, approval_status="rejected", status="failed", result="Rejection: Not needed")
-
-    assert len(board.get_pending_tasks()) == 1  # Only t1 is pending/approved
-    assert board.get_task(t2.id).status == "failed"

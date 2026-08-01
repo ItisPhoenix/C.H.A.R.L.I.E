@@ -22,16 +22,33 @@ def _remove_db(db_path: str) -> None:
 async def test_get_dashboard_config():
     res = await web_server.get_dashboard_config()
     keys = {f["key"] for f in res["fields"]}
-    assert {"GPU_DEVICE", "KOKORO_LANG", "WHISPER_MODEL", "MCP_SERVERS"} <= keys
+    assert {"GPU_DEVICE", "KOKORO_LANG", "WHISPER_MODEL", "MCP_SERVERS", "DESKTOP_IDLE_THRESHOLD_S"} <= keys
     # a good chunk of the full Config surface should be exposed, not a hand-picked few
     assert len(res["fields"]) > 50
+
+
+def test_desktop_idle_threshold_default(monkeypatch):
+    # Real .env can override this (it does in dev, for faster live-testing), so isolate from it.
+    import importlib
+    import sys
+
+    # __init__.py shadows the "config" attribute with the singleton -- go via sys.modules for the real submodule.
+    config_module = sys.modules["charlie.config"]
+    monkeypatch.delenv("DESKTOP_IDLE_THRESHOLD_S", raising=False)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: None)
+    importlib.reload(config_module)
+    try:
+        assert config_module.Config().desktop_idle_threshold_s == 120.0
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config_module)
 
 
 @pytest.mark.asyncio
 async def test_get_dashboard_config_masks_secrets():
     res = await web_server.get_dashboard_config()
     by_key = {f["key"]: f for f in res["fields"]}
-    secret_field = by_key["SMALL_LLM_API_KEY"]
+    secret_field = by_key["LLM_API_KEY"]
     assert secret_field["secret"] is True
     assert secret_field["value"] is None
     assert isinstance(secret_field["is_set"], bool)

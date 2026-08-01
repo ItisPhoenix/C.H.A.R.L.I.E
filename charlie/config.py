@@ -35,19 +35,12 @@ def _meta(
 
 @dataclass
 class Config:
-    small_llm_url: str = field(default=os.getenv("SMALL_LLM_URL", ""), metadata=_meta("SMALL_LLM_URL", "LLM"))
-    small_llm_key: str = field(
-        default=os.getenv("SMALL_LLM_API_KEY", "no-key"),
-        metadata=_meta("SMALL_LLM_API_KEY", "LLM", secret=True),
+    llm_url: str = field(default=os.getenv("LLM_URL", ""), metadata=_meta("LLM_URL", "LLM"))
+    llm_key: str = field(
+        default=os.getenv("LLM_API_KEY", "no-key"),
+        metadata=_meta("LLM_API_KEY", "LLM", secret=True),
     )
-    small_llm_model: str = field(default=os.getenv("SMALL_LLM_MODEL", ""), metadata=_meta("SMALL_LLM_MODEL", "LLM"))
-    # Big LLM provider (used when small LLM fails)
-    big_llm_url: str = field(default=os.getenv("BIG_LLM_URL", ""), metadata=_meta("BIG_LLM_URL", "LLM"))
-    big_llm_key: str = field(
-        default=os.getenv("BIG_LLM_API_KEY", "no-key"),
-        metadata=_meta("BIG_LLM_API_KEY", "LLM", secret=True),
-    )
-    big_llm_model: str = field(default=os.getenv("BIG_LLM_MODEL", ""), metadata=_meta("BIG_LLM_MODEL", "LLM"))
+    llm_model: str = field(default=os.getenv("LLM_MODEL", ""), metadata=_meta("LLM_MODEL", "LLM"))
 
     # -1 = system default input device; >=0 = specific device index
     mic_index: int = field(
@@ -140,8 +133,8 @@ class Config:
     )
 
     llm_disable_reasoning: bool = field(
-        default=os.getenv("SMALL_LLM_DISABLE_REASONING", "true").lower() == "true",
-        metadata=_meta("SMALL_LLM_DISABLE_REASONING", "Chat Behavior"),
+        default=os.getenv("LLM_DISABLE_REASONING", "true").lower() == "true",
+        metadata=_meta("LLM_DISABLE_REASONING", "Chat Behavior"),
     )
     # Enable native JSON tool calling for compatible remote APIs (OpenAI, Anthropic).
     # When False, falls back to text-based TOOL: parsing for local models.
@@ -156,7 +149,7 @@ class Config:
         metadata=_meta("ITERATION_BUDGET_MAX", "Chat Behavior"),
     )
     context_window: int = field(
-        default=int(os.getenv("CONTEXT_WINDOW", "8192")),
+        default=int(os.getenv("CONTEXT_WINDOW", "32000")),
         metadata=_meta("CONTEXT_WINDOW", "Chat Behavior"),
     )
     compression_threshold: float = field(
@@ -256,10 +249,6 @@ class Config:
         metadata=_meta("MEMORY_GRAPH_DB", "Vector Memory", restart="process"),
     )
     # --- Agentic OS Toggles ---
-    blackboard_enabled: bool = field(
-        default=os.getenv("BLACKBOARD_ENABLED", "true").lower() == "true",
-        metadata=_meta("BLACKBOARD_ENABLED", "Agentic OS"),
-    )
     mcp_enabled: bool = field(
         default=os.getenv("MCP_ENABLED", "false").lower() == "true",
         metadata=_meta("MCP_ENABLED", "Agentic OS", restart="mcp"),
@@ -295,9 +284,24 @@ class Config:
         default=int(os.getenv("DESKTOP_MAX_ACTIONS", "40")),
         metadata=_meta("DESKTOP_MAX_ACTIONS", "Desktop Control"),
     )
+    # Seconds of no real user input required before Helm may start/continue
+    # an unattended background desktop task (charlie.desktop.session.user_idle_seconds).
+    desktop_idle_threshold_s: float = field(
+        default=float(os.getenv("DESKTOP_IDLE_THRESHOLD_S", "120.0")),
+        metadata=_meta("DESKTOP_IDLE_THRESHOLD_S", "Desktop Control"),
+    )
     desktop_ocr_enabled: bool = field(
         default=os.getenv("DESKTOP_OCR_ENABLED", "true").lower() == "true",
         metadata=_meta("DESKTOP_OCR_ENABLED", "Desktop Control"),
+    )
+    # Per-turn caps for background tasks -- see charlie.background_task's dataclasses.replace(config, ...).
+    background_iteration_budget_max: int = field(
+        default=int(os.getenv("BACKGROUND_ITERATION_BUDGET_MAX", "40")),
+        metadata=_meta("BACKGROUND_ITERATION_BUDGET_MAX", "Desktop Control"),
+    )
+    background_max_actions: int = field(
+        default=int(os.getenv("BACKGROUND_MAX_ACTIONS", "100")),
+        metadata=_meta("BACKGROUND_MAX_ACTIONS", "Desktop Control"),
     )
     tesseract_cmd: str = field(
         default=os.getenv("TESSERACT_CMD", ""),
@@ -330,6 +334,16 @@ class Config:
             if d.strip()
         ],
         metadata=_meta("PLUGIN_ALLOW_DIRS", "Plugins", restart="plugins"),
+    )
+    # --- Proactive resource monitoring ---
+    # CPU/RAM percent thresholds for proactive alerts (sustained 3 samples before alerting)
+    alert_cpu_pct: float = field(
+        default=float(os.getenv("ALERT_CPU_PCT", "95")),
+        metadata=_meta("ALERT_CPU_PCT", "Monitoring"),
+    )
+    alert_ram_pct: float = field(
+        default=float(os.getenv("ALERT_RAM_PCT", "92")),
+        metadata=_meta("ALERT_RAM_PCT", "Monitoring"),
     )
 
     charlie_host: str = field(

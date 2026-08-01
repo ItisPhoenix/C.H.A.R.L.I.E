@@ -1,15 +1,27 @@
 "use client";
 
-import { useState } from "react";
-import type { ReactElement } from "react";
-import Link from "next/link";
-import { useCharlieStore, rgba, lighten } from "@/store/useCharlieStore";
+import { useState, useMemo, type ReactElement } from "react";
+import { Plus, Search, MessageSquare, Edit2, Trash2, Download, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { useCharlieStore, rgba } from "../store/useCharlieStore";
 
 interface SessionItem {
   id: string;
   title: string;
   created_at?: string;
   updated_at?: string;
+}
+
+interface SessionRailProps {
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
+  sessions: SessionItem[];
+  currentId: string;
+  onSelect: (id: string) => void;
+  onCreate: () => void;
+  onRename: (id: string, title: string) => void;
+  onDelete: (id: string) => void;
+  onExport: () => void;
+  onScopeChange: (target: "all" | "this_launch") => void;
 }
 
 function relativeTime(iso?: string): string {
@@ -21,25 +33,50 @@ function relativeTime(iso?: string): string {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
-  return d.toLocaleDateString();
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-interface SessionRailProps {
-  collapsed: boolean;
-  onToggle: () => void;
-  sessions: SessionItem[];
-  currentId: string;
-  onSelect: (id: string) => void;
-  onCreate: () => void;
-  onRename: (id: string, title: string) => void;
-  onDelete: (id: string) => void;
-  onExport: () => void;
-  onScopeChange: (target: "all" | "this_launch") => void;
+function groupSessions(sessions: SessionItem[]) {
+  const groups: { [key: string]: SessionItem[] } = {
+    Today: [],
+    Yesterday: [],
+    Earlier: [],
+  };
+
+  const now = new Date();
+  const todayStr = now.toDateString();
+  
+  const yesterday = new Date();
+  yesterday.setDate(now.getDate() - 1);
+  const yesterdayStr = yesterday.toDateString();
+
+  for (const s of sessions) {
+    const dateStr = s.updated_at || s.created_at;
+    if (!dateStr) {
+      groups.Earlier.push(s);
+      continue;
+    }
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) {
+      groups.Earlier.push(s);
+      continue;
+    }
+    const ds = d.toDateString();
+    if (ds === todayStr) {
+      groups.Today.push(s);
+    } else if (ds === yesterdayStr) {
+      groups.Yesterday.push(s);
+    } else {
+      groups.Earlier.push(s);
+    }
+  }
+
+  return groups;
 }
 
 export function SessionRail({
-  collapsed,
-  onToggle,
+  collapsed = false,
+  onToggleCollapse,
   sessions,
   currentId,
   onSelect,
@@ -49,291 +86,264 @@ export function SessionRail({
   onExport,
   onScopeChange,
 }: SessionRailProps): ReactElement {
-  const sessionScope = useCharlieStore((s) => s.sessionScope);
-  const launchId = useCharlieStore((s) => s.launchId);
-  const accentColor = useCharlieStore((s) => s.accentColor);
-  const setAccentColor = useCharlieStore((s) => s.setAccentColor);
-  const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
+  const [editTitle, setEditTitle] = useState("");
+  const [filterQuery, setFilterQuery] = useState("");
 
-  const filtered = sessions.filter((s) =>
-    s.title.toLowerCase().includes(query.toLowerCase())
-  );
+  const scope = useCharlieStore((s) => s.sessionScope);
+  const accentColor = useCharlieStore((s) => s.accentColor);
 
-  const startEdit = (s: SessionItem): void => {
+  const startRename = (s: SessionItem) => {
     setEditingId(s.id);
-    setDraft(s.title);
+    setEditTitle(s.title);
   };
 
-  const commitEdit = (id: string): void => {
-    const title = draft.trim();
-    if (title) onRename(id, title);
+  const saveRename = (id: string) => {
+    const trimmed = editTitle.trim();
+    if (trimmed) {
+      onRename(id, trimmed);
+    }
     setEditingId(null);
   };
 
-  const accentDim = rgba(accentColor, 0.12);
-  const accentBorder = rgba(accentColor, 0.25);
-  const accentSoft = lighten(accentColor, 0.35);
+  const filteredSessions = useMemo(() => {
+    if (!filterQuery.trim()) return sessions;
+    return sessions.filter((s) =>
+      s.title.toLowerCase().includes(filterQuery.toLowerCase())
+    );
+  }, [sessions, filterQuery]);
 
-  return (
-    <aside
-      className={`glass glass-hover anim-left flex flex-col shrink-0 h-full overflow-hidden rounded-2xl ${
-        collapsed ? "w-[72px]" : "w-72"
-      }`}
-    >
-      {collapsed ? (
-        <div className="flex flex-col items-center gap-2 py-4 px-2 h-full">
-          <button
-            onClick={onToggle}
-            aria-label="Expand chats"
-            style={{ background: accentDim, color: accentSoft, borderColor: accentBorder }}
-            className="rounded-xl w-10 h-10 grid place-items-center border cursor-pointer transition hover:opacity-80"
-          >
-            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M9 18l6-6-6-6" />
-            </svg>
-          </button>
+  const grouped = useMemo(() => groupSessions(filteredSessions), [filteredSessions]);
+
+  const activeBg = rgba(accentColor, 0.12);
+  const activeBorder = rgba(accentColor, 0.35);
+
+  // Render collapsed 56px icon-only rail
+  if (collapsed) {
+    return (
+      <aside className="w-14 shrink-0 border-r border-[rgba(255,255,255,0.07)] bg-zinc-950/40 p-2 flex flex-col justify-between items-center select-none font-sans">
+        <div className="space-y-4 w-full flex flex-col items-center">
+          {onToggleCollapse && (
+            <button
+              onClick={onToggleCollapse}
+              className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition cursor-pointer"
+              title="Expand Sessions Rail"
+            >
+              <PanelLeftOpen className="w-4 h-4" />
+            </button>
+          )}
+
           <button
             onClick={onCreate}
-            aria-label="New chat"
-            style={{ background: accentDim, color: accentSoft, borderColor: accentBorder }}
-            className="rounded-xl w-10 h-10 grid place-items-center border cursor-pointer transition hover:opacity-80"
+            className="w-10 h-10 rounded-xl bg-gradient-to-r from-purple-600 to-cyan-500 text-black flex items-center justify-center font-bold hover:brightness-110 active:scale-95 transition cursor-pointer shadow-lg"
+            title="New Chat"
           >
-            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
+            <Plus className="w-5 h-5 text-black" />
           </button>
-          <button
-            onClick={onExport}
-            aria-label="Export history"
-            className="rounded-xl w-10 h-10 grid place-items-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] cursor-pointer transition"
-          >
-            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 3v12M7 10l5 5 5-5M5 21h14" />
-            </svg>
-          </button>
-          <div className="flex-1 w-full mt-2 space-y-2 overflow-y-auto scrollbar">
+
+          <div className="w-full space-y-2 pt-2 max-h-[calc(100vh-220px)] overflow-y-auto scrollbar flex flex-col items-center">
             {sessions.map((s) => {
               const active = s.id === currentId;
               return (
                 <button
                   key={s.id}
                   onClick={() => onSelect(s.id)}
-                  aria-label={s.title}
                   title={s.title}
-                  style={{
-                    background: active ? accentDim : "transparent",
-                    color: active ? accentSoft : "#6b7280",
-                    borderColor: active ? accentBorder : "transparent",
-                  }}
-                  className={`w-10 h-10 mx-auto grid place-items-center rounded-xl text-sm font-display transition cursor-pointer border`}
+                  className={`w-9 h-9 rounded-lg flex items-center justify-center cursor-pointer transition ${
+                    active ? "bg-white/10 text-cyan-400 border border-cyan-500/40" : "text-slate-500 hover:text-slate-300 hover:bg-white/5"
+                  }`}
                 >
-                  {(s.title || "?").charAt(0).toUpperCase()}
+                  <MessageSquare className="w-4 h-4" />
                 </button>
               );
             })}
           </div>
         </div>
-      ) : (
-        <>
-          <div className="px-5 py-4 flex items-center justify-between">
-            <h2 className="font-display text-base font-semibold text-[var(--color-text-primary)]">
+
+        <button
+          onClick={onExport}
+          className="p-2 rounded-lg text-slate-500 hover:text-slate-300 hover:bg-white/5 transition cursor-pointer"
+          title="Export Chat History"
+        >
+          <Download className="w-4 h-4" />
+        </button>
+      </aside>
+    );
+  }
+
+  // Full Expanded 240px Rail
+  return (
+    <aside className="w-60 shrink-0 border-r border-[rgba(255,255,255,0.07)] bg-zinc-950/40 p-4 flex flex-col justify-between select-none font-sans">
+      <div className="space-y-4">
+        {/* Top Header Controls */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <h2 className="font-display text-xs font-bold uppercase tracking-wider text-slate-200">
               Chats
             </h2>
-            <div className="flex items-center gap-1">
-              <button
-                onClick={onToggle}
-                aria-label="Collapse chats"
-                className="rounded-xl w-8 h-8 grid place-items-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] cursor-pointer transition"
-              >
-                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M15 18l-6-6 6-6" />
-                </svg>
-              </button>
-              <button
-                onClick={onCreate}
-                aria-label="New chat"
-                style={{ background: accentDim, color: accentSoft, borderColor: accentBorder }}
-                className="rounded-xl w-8 h-8 grid place-items-center border cursor-pointer transition hover:opacity-80"
-              >
-                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <path d="M12 5v14M5 12h14" />
-                </svg>
-              </button>
-              <button
-                onClick={onExport}
-                aria-label="Export history"
-                className="rounded-xl w-8 h-8 grid place-items-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] cursor-pointer transition"
-              >
-                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 3v12M7 10l5 5 5-5M5 21h14" />
-                </svg>
-              </button>
-            </div>
+            <span className="text-[10px] font-mono text-slate-500 bg-zinc-900 border border-white/5 px-1.5 py-0.5 rounded-md font-semibold">
+              {sessions.length}
+            </span>
           </div>
 
-          <div className="px-4 pb-3">
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search chats..."
-              aria-label="Search chats"
-              className="w-full rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none transition"
-              style={{
-                borderColor: query ? accentBorder : undefined,
-              }}
-              onFocus={(e) => { e.currentTarget.style.borderColor = accentBorder; }}
-              onBlur={(e) => { e.currentTarget.style.borderColor = query ? accentBorder : ""; }}
-            />
-          </div>
-
-          {launchId && (
-            <div className="px-4 pb-3">
-              <div className="flex rounded-xl bg-[var(--color-glass-bg-2)] border border-[var(--color-glass-border)] p-0.5 text-xs">
-                <button
-                onClick={() => onScopeChange("this_launch")}
-                aria-pressed={sessionScope === "this_launch"}
-                style={{
-                  background: sessionScope === "this_launch" ? accentColor : "transparent",
-                  color: sessionScope === "this_launch" ? "#03151a" : "#6b7280",
-                }}
-                className={`flex-1 rounded-lg py-1.5 font-medium cursor-pointer transition`}
-              >
-                This Launch
-              </button>
-              <button
-                onClick={() => onScopeChange("all")}
-                aria-pressed={sessionScope === "all"}
-                style={{
-                  background: sessionScope === "all" ? accentColor : "transparent",
-                  color: sessionScope === "all" ? "#03151a" : "#6b7280",
-                }}
-                className={`flex-1 rounded-lg py-1.5 font-medium cursor-pointer transition`}
-              >
-                All
-              </button>
-              </div>
-            </div>
-          )}
-
-          <div className="flex-1 overflow-y-auto px-3 pb-4 space-y-0.5 scrollbar">
-            {filtered.length === 0 && (
-              <div className="flex flex-col items-center gap-2 py-8 px-2">
-                <svg viewBox="0 0 24 24" className="w-8 h-8 text-[var(--color-text-muted)] opacity-30" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-                <p className="text-xs text-[var(--color-text-muted)] text-center">
-                  {query ? "No chats match your search." : "No chats yet. Create one above."}
-                </p>
-              </div>
-            )}
-            {filtered.map((s) => {
-              const active = s.id === currentId;
-              const ts = relativeTime(s.updated_at || s.created_at);
-              return (
-                <div
-                  key={s.id}
-                  onClick={() => onSelect(s.id)}
-                  style={{
-                    background: active ? rgba(accentColor, 0.13) : "transparent",
-                    borderColor: active ? accentBorder : "transparent",
-                  }}
-                  className={`group flex items-center gap-2 rounded-xl px-3 py-2.5 cursor-pointer transition border`}
-                >
-                  <div className="min-w-0 flex-1">
-                    {editingId === s.id ? (
-                      <input
-                        autoFocus
-                        value={draft}
-                        onChange={(e) => setDraft(e.target.value)}
-                        onBlur={() => commitEdit(s.id)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") commitEdit(s.id);
-                          if (e.key === "Escape") setEditingId(null);
-                        }}
-                        style={{ borderBottomColor: accentBorder }}
-                        className="w-full bg-transparent outline-none text-sm text-[var(--color-text-primary)] border-b"
-                      />
-                    ) : (
-                      <>
-                        <p
-                          onDoubleClick={() => startEdit(s)}
-                          className="text-sm text-[var(--color-text-primary)] truncate leading-tight"
-                          style={{ color: active ? accentSoft : undefined }}
-                          title={s.title}
-                        >
-                          {s.title}
-                        </p>
-                        {ts && (
-                          <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">{ts}</p>
-                        )}
-                      </>
-                    )}
-                  </div>
-                  {editingId !== s.id && (
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition shrink-0">
-                      <button
-                        aria-label="Rename chat"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          startEdit(s);
-                        }}
-                        className="rounded-md w-6 h-6 grid place-items-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] cursor-pointer"
-                      >
-                        <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
-                        </svg>
-                      </button>
-                      <button
-                        aria-label="Delete chat"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onDelete(s.id);
-                        }}
-                        className="rounded-md w-6 h-6 grid place-items-center text-[var(--color-text-muted)] hover:text-red-400 cursor-pointer"
-                      >
-                        <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
-                        </svg>
-                      </button>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Settings & Accent Color Pickers */}
-          <div className="px-5 py-3 border-t border-[var(--color-glass-border)] flex items-center justify-between shrink-0">
-            <Link
-              href="/settings"
-              className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)] hover:text-white transition cursor-pointer"
+          <div className="flex items-center gap-1">
+            <button
+              onClick={onCreate}
+              className="p-1.5 rounded-lg bg-zinc-900 border border-white/10 text-slate-200 hover:bg-zinc-800 active:scale-95 transition cursor-pointer"
+              title="New Chat"
             >
-              <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
-              <span>Settings</span>
-            </Link>
-            <div className="flex gap-1.5">
-              {["#a855f7", "#3b82f6", "#ef4444", "#f59e0b", "#06b6d4"].map((color) => (
-                <button
-                  key={color}
-                  onClick={() => setAccentColor(color)}
-                  className="w-3.5 h-3.5 rounded-full border border-white/20 transition hover:scale-110 cursor-pointer"
-                  style={{
-                    background: color,
-                    outline: accentColor === color ? `1.5px solid ${lighten(color, 0.35)}` : "none",
-                    outlineOffset: "1px",
-                  }}
-                  aria-label={`Set accent to ${color}`}
-                />
-              ))}
-            </div>
+              <Plus className="w-3.5 h-3.5" />
+            </button>
+            {onToggleCollapse && (
+              <button
+                onClick={onToggleCollapse}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition cursor-pointer"
+                title="Collapse Sessions Rail"
+              >
+                <PanelLeftClose className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
-        </>
-      )}
+        </div>
+
+        {/* Scope selector tabs */}
+        <div className="grid grid-cols-2 p-1 bg-zinc-950/80 border border-white/5 rounded-lg text-[10px] font-mono select-none">
+          <button
+            onClick={() => onScopeChange("this_launch")}
+            className={`py-1 rounded-md transition font-semibold ${
+              scope === "this_launch"
+                ? "bg-white/10 text-slate-100 shadow"
+                : "text-slate-500 hover:text-slate-300"
+            }`}
+          >
+            This Launch
+          </button>
+          <button
+            onClick={() => onScopeChange("all")}
+            className={`py-1 rounded-md transition font-semibold ${
+              scope === "all"
+                ? "bg-white/10 text-slate-100 shadow"
+                : "text-slate-500 hover:text-slate-300"
+            }`}
+          >
+            All History
+          </button>
+        </div>
+
+        {/* Local Search input */}
+        <div className="relative">
+          <Search className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-slate-500 pointer-events-none" />
+          <input
+            type="text"
+            value={filterQuery}
+            onChange={(e) => setFilterQuery(e.target.value)}
+            placeholder="Search sessions..."
+            className="w-full bg-zinc-900/60 border border-[rgba(255,255,255,0.07)] rounded-lg pl-8 pr-3 py-1.5 text-xs text-[#f4f6fa] placeholder:text-slate-500 outline-none transition focus:border-[rgba(255,255,255,0.15)]"
+          />
+        </div>
+
+        {/* Sessions List Grouped by Time */}
+        <div className="space-y-4 max-h-[calc(100vh-290px)] overflow-y-auto pr-1 scrollbar">
+          {Object.entries(grouped).map(([groupName, groupItems]) => {
+            if (groupItems.length === 0) return null;
+            return (
+              <div key={groupName} className="space-y-1">
+                <h3 className="px-2 text-[9px] font-mono font-bold uppercase tracking-widest text-slate-500">
+                  {groupName}
+                </h3>
+
+                <div className="space-y-0.5">
+                  {groupItems.map((s) => {
+                    const active = s.id === currentId;
+                    const isEditing = editingId === s.id;
+
+                    return (
+                      <div
+                        key={s.id}
+                        onClick={() => !isEditing && onSelect(s.id)}
+                        style={{
+                          backgroundColor: active ? activeBg : "transparent",
+                          borderColor: active ? activeBorder : "transparent",
+                        }}
+                        className={`group relative rounded-xl px-3 py-2 text-xs border transition cursor-pointer flex items-center justify-between ${
+                          active
+                            ? "text-slate-100 font-medium shadow-sm"
+                            : "text-slate-400 hover:text-slate-200 hover:bg-white/5"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-1 pr-2">
+                          <MessageSquare
+                            className={`w-3.5 h-3.5 shrink-0 ${
+                              active ? "text-cyan-400" : "text-slate-500"
+                            }`}
+                          />
+
+                          {isEditing ? (
+                            <input
+                              type="text"
+                              value={editTitle}
+                              onChange={(e) => setEditTitle(e.target.value)}
+                              onBlur={() => saveRename(s.id)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") saveRename(s.id);
+                                if (e.key === "Escape") setEditingId(null);
+                              }}
+                              autoFocus
+                              className="w-full bg-zinc-900 border border-white/20 rounded px-1.5 py-0.5 text-xs text-slate-100 outline-none"
+                            />
+                          ) : (
+                            <div className="truncate flex-1">
+                              <p className="truncate font-medium">{s.title}</p>
+                              <span className="text-[9px] text-slate-500 font-mono block">
+                                {relativeTime(s.updated_at || s.created_at)}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Edit/Delete actions on hover */}
+                        {!isEditing && (
+                          <div className="opacity-0 group-hover:opacity-100 transition flex items-center gap-1 shrink-0">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                startRename(s);
+                              }}
+                              className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-white/10"
+                              title="Rename"
+                            >
+                              <Edit2 className="w-3 h-3" />
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onDelete(s.id);
+                              }}
+                              className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-white/10"
+                              title="Delete"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Export Footer button */}
+      <button
+        onClick={onExport}
+        className="w-full py-2 px-3 rounded-xl border border-white/5 bg-zinc-900/40 hover:bg-white/5 text-xs font-mono text-slate-400 hover:text-slate-200 transition flex items-center justify-center gap-2 cursor-pointer active:scale-98"
+      >
+        <Download className="w-3.5 h-3.5" />
+        Export History
+      </button>
     </aside>
   );
 }

@@ -17,6 +17,7 @@ try:
     import uiautomation as _uia
     _HAS_UIA = True
 except ImportError:
+    _uia = None
     _HAS_UIA = False
 
 _MAX_DEPTH_DEFAULT = 8
@@ -46,6 +47,26 @@ class Element:
 # interactive lock, so this module-level cache is never touched concurrently.
 _controls: Dict[int, Any] = {}
 _lock = threading.Lock()
+
+# Screen rect of the most recent ocr.capture() grab, for image-to-screen coord mapping.
+_LAST_CAPTURE_BOUNDS: Optional[Tuple[int, int, int, int]] = None
+
+
+def set_last_capture_bounds(bounds: Optional[Tuple[int, int, int, int]]) -> None:
+    global _LAST_CAPTURE_BOUNDS
+    _LAST_CAPTURE_BOUNDS = bounds
+
+
+def get_last_capture_bounds() -> Optional[Tuple[int, int, int, int]]:
+    return _LAST_CAPTURE_BOUNDS
+
+
+def image_to_screen(x: int, y: int) -> Optional[Tuple[int, int]]:
+    """Translate captured-image pixel coords to absolute screen coords."""
+    if _LAST_CAPTURE_BOUNDS is None:
+        return None
+    left, top, _right, _bottom = _LAST_CAPTURE_BOUNDS
+    return left + x, top + y
 
 
 def _walk(control: Any, marks: List[Element], controls: Dict[int, Any], depth: int, max_depth: int) -> None:
@@ -78,6 +99,17 @@ def _walk(control: Any, marks: List[Element], controls: Dict[int, Any], depth: i
         return
     for child in children:
         _walk(child, marks, controls, depth + 1, max_depth)
+
+
+def control_from_hwnd(hwnd: int) -> Optional[Any]:
+    """Build a UIA control handle for a specific window hwnd, for snapshot_tree(root=...)."""
+    if not _HAS_UIA:
+        return None
+    try:
+        return _uia.ControlFromHandle(hwnd)
+    except Exception:
+        logger.warning("ControlFromHandle failed for hwnd %s", hwnd, exc_info=True)
+        return None
 
 
 def snapshot_tree(max_depth: int = _MAX_DEPTH_DEFAULT, root: Optional[Any] = None) -> List[Element]:
@@ -144,6 +176,15 @@ def resolve_is_password(mark_id: int) -> bool:
     if isinstance(handle, Element):
         return handle.is_password
     return bool(getattr(handle, "IsPassword", False))
+
+
+def is_low_confidence_mark(mark_id: int) -> bool:
+    """True if a mark has no live UIA control handle (OCR/vision-sourced) or doesn't resolve."""
+    try:
+        handle = resolve_mark(mark_id)
+    except KeyError:
+        return True
+    return isinstance(handle, Element)
 
 
 def resolve_name(mark_id: int) -> str:

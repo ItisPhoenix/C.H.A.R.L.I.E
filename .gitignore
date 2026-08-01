@@ -27,6 +27,8 @@ sessions.db
 
 # === Runtime state (regenerated, not source) ===
 blackboard.json
+.charlie_recovery_cache.json
+.charlie_background_task_state.json
 
 # === ML Models (large files) ===
 models/

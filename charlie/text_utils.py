@@ -1,7 +1,8 @@
 """Shared text utilities for voice command normalization and domain detection."""
 
 import re
-from typing import Set
+
+from charlie.known_apps import KNOWN_APP_NAMES as KNOWN_APPS
 
 # --- Text normalization for multi-app commands ---
 # When user says "Open Chrome calculator notepad", insert "and" between items
@@ -12,37 +13,6 @@ _APP_LIST_PATTERN = re.compile(
     r"(?:\s+(?:and\s+)?[a-zA-Z][a-zA-Z0-9]*)*)",
     re.IGNORECASE,
 )
-
-KNOWN_APPS: Set[str] = {
-    "chrome",
-    "firefox",
-    "edge",
-    "opera",
-    "brave",
-    "vivaldi",
-    "notepad",
-    "calculator",
-    "calc",
-    "paint",
-    "explorer",
-    "file",
-    "word",
-    "excel",
-    "powerpoint",
-    "outlook",
-    "teams",
-    "slack",
-    "discord",
-    "spotify",
-    "vlc",
-    "steam",
-    "code",
-    "vscode",
-    "terminal",
-    "powershell",
-    "cmd",
-    "prompt",
-}
 
 
 def normalize_app_list(text: str) -> str:

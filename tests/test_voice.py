@@ -4,6 +4,7 @@ Mocks sounddevice, Kokoro, and multiprocessing to avoid audio hardware.
 Focuses on the text humanization pipeline, RMS calculation, and init logic.
 """
 
+import time
 from unittest.mock import patch
 
 import numpy as np
@@ -307,3 +308,74 @@ class TestVoiceEngineInit:
     def test_rms_static_method(self):
         samples = np.zeros(100, dtype=np.float32)
         assert VoiceEngine._rms(samples) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Echo detection -- is Charlie hearing its own TTS output?
+# ---------------------------------------------------------------------------
+
+class TestEchoDetection:
+    """A long reply spans multiple speak() calls (one per sentence flush),
+    and the mic can pick up any part of it -- not just the first chunk, and
+    not only within a short fixed window. Found live: a mid-reply mishear of
+    Charlie's own voice was wrongly treated as new user input (barge-in),
+    cutting Charlie off for no real reason."""
+
+    def _make_engine(self):
+        with patch("charlie.voice.Kokoro"), \
+             patch("charlie.voice.sd"), \
+             patch("charlie.voice.mp.Queue"):
+            return VoiceEngine(FakeConfig(), on_speech=lambda _: None)
+
+    def test_echo_detected_while_still_speaking_past_old_fixed_window(self):
+        """The old code only checked a fixed 2s window from the most recent
+        speak() call -- a mishear arriving later than that, but while Charlie
+        is still genuinely speaking, must still be recognized as echo."""
+        engine = self._make_engine()
+        engine.speak("This is a longer reply that takes a while to say.")
+        engine.is_speaking.set()  # still speaking, well past the old 2s window
+        assert engine.is_echo("longer reply") is True
+
+    def test_echo_detected_from_earlier_chunk_of_same_reply(self):
+        """The old code only compared against the MOST RECENT speak() call's
+        text -- a mishear of an EARLIER sentence chunk of the same reply,
+        heard after a later chunk started, must still match."""
+        engine = self._make_engine()
+        engine.is_speaking.set()  # first chunk already playing
+        engine.speak("The first sentence chunk.")
+        engine.speak("A second sentence chunk follows.")
+        assert engine.is_echo("first sentence chunk") is True
+
+    def test_echo_window_covers_shortly_after_speaking_stops(self):
+        engine = self._make_engine()
+        engine.speak("Hello there friend.")
+        engine.is_speaking.clear()  # utterance just ended
+        engine._last_speech_end = time.time()
+        assert engine.is_echo("hello there") is True
+
+    def test_not_echo_once_window_and_speaking_both_expired(self):
+        engine = self._make_engine()
+        engine.speak("Hello there friend.")
+        engine.is_speaking.clear()
+        engine._last_speech_end = time.time() - 10.0  # long finished
+        assert engine.is_echo("hello there") is False
+
+    def test_new_reply_resets_accumulated_words(self):
+        """Once Charlie finishes one reply and starts a new one, the old
+        reply's words must not still count as an echo match."""
+        engine = self._make_engine()
+        engine.is_speaking.set()
+        engine.speak("Completely different earlier topic.")
+        engine.is_speaking.clear()
+        engine._last_speech_end = time.time() - 10.0  # force the old reply out of window
+        engine.speak("Brand new reply text.")  # is_speaking is clear -> fresh start
+        assert engine.is_echo("earlier topic") is False
+
+    def test_genuine_new_user_speech_is_not_suppressed_as_echo(self):
+        """Critical safety check: widening the echo window/word coverage
+        must not start swallowing real barge-in speech that just happens to
+        overlap zero words with what Charlie is currently saying."""
+        engine = self._make_engine()
+        engine.speak("The weather today is sunny and warm.")
+        engine.is_speaking.set()
+        assert engine.is_echo("open notepad and write this") is False

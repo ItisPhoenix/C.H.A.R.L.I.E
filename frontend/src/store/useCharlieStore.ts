@@ -20,20 +20,6 @@ export interface Message {
   content: string;
 }
 
-export interface Task {
-  id: string;
-  name: string;
-  status: "pending" | "running" | "done" | "failed" | "cancelled";
-  assigned_to?: string;
-  column?: "backlog" | "todo" | "in_progress" | "done";
-  priority?: number;
-  dependencies?: string[];
-  parent_task_id?: string | null;
-  result?: string;
-  retry_count?: number;
-  approval_status?: "pending_approval" | "approved" | "rejected";
-}
-
 export interface RecoveryProposal {
   proposal_id: string;
   original_command: string;
@@ -53,23 +39,10 @@ export interface ToolApprovalRequest {
   session_id: string;
 }
 
-export interface Agent {
-  name: string;
-  role: string;
-  current_task?: string;
-  status: string;
-}
-
-export interface BlackboardState {
-  tasks: Task[];
-  agents: Record<string, Agent>;
-}
-
 export interface SystemStatus {
   cpu: number;
   ram: number;
   gpu: number;
-  active_agents: string[];
 }
 
 export interface AudioState {
@@ -107,6 +80,16 @@ export interface DesktopFrame {
   receivedAt: number;
 }
 
+export interface BackgroundTask {
+  id: string;
+  text: string;
+  steps: string[];
+  current_step: number;
+  status: "planning" | "awaiting_approval" | "running" | "paused" | "done" | "failed" | "cancelled";
+  flagged_steps: number[];
+  error: string | null;
+}
+
 interface CharlieState {
   connected: boolean;
   systemStatus: SystemStatus;
@@ -116,7 +99,6 @@ interface CharlieState {
   messagesLoading: boolean;
   alerts: Alert[];
   logs: string[];
-  blackboard: BlackboardState;
   voiceState: VoiceState;
   listeningTrigger: ListeningTrigger;
   audio: AudioState;
@@ -137,7 +119,6 @@ interface CharlieState {
   setMessagesLoading: (l: boolean) => void;
   addAlert: (a: Alert) => void;
   addLog: (l: string) => void;
-  setBlackboard: (b: BlackboardState) => void;
   setVoiceState: (s: VoiceState) => void;
   setListeningTrigger: (t: ListeningTrigger) => void;
   setAudio: (a: AudioState) => void;
@@ -156,18 +137,21 @@ interface CharlieState {
   setLatestDesktopFrame: (f: DesktopFrame | null) => void;
   desktopControlEnabled: boolean;
   setDesktopControlEnabled: (enabled: boolean) => void;
+  backgroundTask: BackgroundTask | null;
+  setBackgroundTask: (t: BackgroundTask | null) => void;
+  selectedFileContent: string;
+  setSelectedFileContent: (content: string) => void;
 }
 
 export const useCharlieStore = create<CharlieState>((set) => ({
   connected: false,
-  systemStatus: { cpu: 0, ram: 0, gpu: 0, active_agents: [] },
+  systemStatus: { cpu: 0, ram: 0, gpu: 0 },
   sessions: [],
   currentSessionId: "",
   messages: [],
   messagesLoading: false,
   alerts: [],
   logs: [],
-  blackboard: { tasks: [], agents: {} },
   voiceState: "idle",
   listeningTrigger: null,
   audio: { muted: false, volume: 1.0 },
@@ -176,7 +160,9 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   toolActivity: [],
   launchId: "",
   sessionScope: "all",
-  accentColor: typeof window !== "undefined" ? localStorage.getItem("charlie_accent") || "#a855f7" : "#a855f7",
+  // Always starts at the default; the persisted value (if any) is applied after mount
+  // (see page.tsx) so the first client render matches the server-rendered HTML.
+  accentColor: "#a855f7",
 
   setConnected: (connected) => set({ connected }),
   setSystemStatus: (systemStatus) => set({ systemStatus }),
@@ -203,7 +189,6 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setMessagesLoading: (messagesLoading) => set({ messagesLoading }),
   addAlert: (alert) => set((state) => ({ alerts: [alert, ...state.alerts].slice(0, 100) })),
   addLog: (log) => set((state) => ({ logs: [log, ...state.logs].slice(0, 500) })),
-  setBlackboard: (blackboard) => set({ blackboard }),
   setVoiceState: (voiceState: VoiceState) => set({ voiceState }),
   setListeningTrigger: (listeningTrigger: ListeningTrigger) => set({ listeningTrigger }),
   setAudio: (audio) => set({ audio }),
@@ -227,6 +212,10 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setLatestDesktopFrame: (latestDesktopFrame) => set({ latestDesktopFrame }),
   desktopControlEnabled: false,
   setDesktopControlEnabled: (desktopControlEnabled) => set({ desktopControlEnabled }),
+  backgroundTask: null,
+  setBackgroundTask: (backgroundTask) => set({ backgroundTask }),
+  selectedFileContent: "",
+  setSelectedFileContent: (selectedFileContent) => set({ selectedFileContent }),
 }));
 
 export function hexToRgb(hex: string) {
