@@ -131,6 +131,27 @@ class TestBarePatternGating:
         calls = brain._extract_tool_calls('TOOL: totally_made_up_tool("something")')
         assert calls[0]["arguments"] == {"query": "something"}
 
+    def test_repeated_identical_tool_prefix_deduped(self):
+        """Small local models sometimes loop and repeat the same TOOL: line
+        verbatim in one completion -- must not execute the call twice."""
+        brain = _make_brain(use_native_tools=False)
+        text = (
+            'TOOL: shell_execute("dir C:\\\\Users")\n'
+            'TOOL: shell_execute("dir C:\\\\Users")\n'
+        )
+        calls = brain._extract_tool_calls(text)
+        assert len(calls) == 1
+        assert calls[0]["name"] == "shell_execute"
+
+    def test_repeated_calls_with_different_args_both_kept(self):
+        brain = _make_brain(use_native_tools=False)
+        text = (
+            'TOOL: shell_execute("dir C:\\\\Users")\n'
+            'TOOL: shell_execute("dir C:\\\\Windows")\n'
+        )
+        calls = brain._extract_tool_calls(text)
+        assert len(calls) == 2
+
 class TestGroundingRules:
     """Grounding rules must be present in the system prompt stable tier."""
 

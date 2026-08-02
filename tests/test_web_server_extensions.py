@@ -3,22 +3,26 @@
 import pytest
 
 import charlie.web_server as web_server
+from charlie.config import config
 from charlie.extensions import ExtensionManager
 from charlie.plugins import PluginManager
 
 
 @pytest.fixture(autouse=True)
-def _fresh_extension_state(monkeypatch):
+def _fresh_extension_state(monkeypatch, tmp_path):
     """Isolate each test from module-level singleton state, including the
     real shared charlie.tools.registry -- these tests register real
     plugin_*/skill_* tools into it, which must not leak into other test
-    files that also import the same global registry singleton."""
+    files that also import the same global registry singleton. Also points
+    extensions_state_path at a tmp file so tests never touch (or leak into)
+    the real repo-root extensions_state.json."""
     from charlie.tools import registry
 
     before = set(registry._tools.keys())
     monkeypatch.setattr(web_server, "_extension_manager", ExtensionManager())
     monkeypatch.setattr(web_server, "plugin_manager", PluginManager())
     monkeypatch.setattr(web_server, "mcp_client", None)
+    monkeypatch.setattr(config, "extensions_state_path", str(tmp_path / "extensions_state.json"))
     yield
     for name in set(registry._tools.keys()) - before:
         registry.unregister_tool(name)
@@ -282,3 +286,66 @@ class TestVoiceProcessMirroring:
 
     async def _install_calendar(self):
         await _install_calendar_extension()
+
+
+@pytest.mark.asyncio
+class TestExtensionsPersistAcrossRestart:
+    """_save_extensions()/_load_extensions() -- confirm/enable/disable/
+    uninstall write extensions_state_path, and a fresh ExtensionManager
+    (simulating a process restart) reloads from it."""
+
+    async def test_missing_state_file_does_not_raise(self):
+        web_server._load_extensions()
+        assert (await web_server.list_extensions())["extensions"] == []
+
+    async def test_corrupt_state_file_does_not_raise(self):
+        with open(config.extensions_state_path, "w", encoding="utf-8") as f:
+            f.write("not valid json {{{")
+
+        web_server._load_extensions()
+
+        assert (await web_server.list_extensions())["extensions"] == []
+
+    async def test_reload_reinstalls_enabled_extension(self, monkeypatch):
+        await _install_calendar_extension()
+
+        # Simulate a restart: fresh in-memory manager, same state file on disk.
+        monkeypatch.setattr(web_server, "_extension_manager", ExtensionManager())
+        web_server._load_extensions()
+
+        listed = (await web_server.list_extensions())["extensions"]
+        assert listed[0]["name"] == "calendar"
+        assert listed[0]["enabled"] is True
+        assert listed[0]["tool_names"] == ["plugin_cal_list_events"]
+
+        from charlie.tools import registry
+
+        assert "plugin_cal_list_events" in {
+            d["function"]["name"] for d in registry.get_tool_definitions()
+        }
+
+    async def test_reload_keeps_disabled_extension_disabled(self, monkeypatch):
+        await _install_calendar_extension()
+        await web_server.disable_extension("calendar")
+
+        monkeypatch.setattr(web_server, "_extension_manager", ExtensionManager())
+        web_server._load_extensions()
+
+        listed = (await web_server.list_extensions())["extensions"]
+        assert listed[0]["enabled"] is False
+        assert listed[0]["tool_names"] == []
+
+        from charlie.tools import registry
+
+        assert "plugin_cal_list_events" not in {
+            d["function"]["name"] for d in registry.get_tool_definitions()
+        }
+
+    async def test_uninstall_removes_from_state_file(self, monkeypatch):
+        await _install_calendar_extension()
+        await web_server.uninstall_extension("calendar")
+
+        monkeypatch.setattr(web_server, "_extension_manager", ExtensionManager())
+        web_server._load_extensions()
+
+        assert (await web_server.list_extensions())["extensions"] == []

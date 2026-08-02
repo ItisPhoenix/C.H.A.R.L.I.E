@@ -578,7 +578,7 @@ async def main():
         is_first_flush = True
         turn_active = True
         try:
-            async for chunk in brain.chat_stream(text, platform=platform):
+            async for chunk in brain.chat_stream(text, platform=platform, session_id=session_id):
                 if is_first_chunk:
                     print("\r" + " " * 30 + "\r", end="", flush=True)
                     is_first_chunk = False

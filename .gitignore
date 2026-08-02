@@ -29,6 +29,7 @@ sessions.db
 blackboard.json
 .charlie_recovery_cache.json
 .charlie_background_task_state.json
+extensions_state.json
 
 # === ML Models (large files) ===
 models/

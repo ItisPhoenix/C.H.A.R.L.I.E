@@ -152,8 +152,12 @@ class Config:
         default=int(os.getenv("CONTEXT_WINDOW", "32000")),
         metadata=_meta("CONTEXT_WINDOW", "Chat Behavior"),
     )
+    compression_soft_threshold: float = field(
+        default=float(os.getenv("COMPRESSION_SOFT_THRESHOLD", "0.5")),
+        metadata=_meta("COMPRESSION_SOFT_THRESHOLD", "Chat Behavior"),
+    )
     compression_threshold: float = field(
-        default=float(os.getenv("COMPRESSION_THRESHOLD", "0.8")),
+        default=float(os.getenv("COMPRESSION_THRESHOLD", "0.85")),
         metadata=_meta("COMPRESSION_THRESHOLD", "Chat Behavior"),
     )
     history_keep_recent: int = field(
@@ -180,6 +184,10 @@ class Config:
     session_db_path: str = field(
         default=os.getenv("SESSION_DB_PATH", "sessions.db"),
         metadata=_meta("SESSION_DB_PATH", "Server", restart="process"),
+    )
+    extensions_state_path: str = field(
+        default=os.getenv("EXTENSIONS_STATE_PATH", "extensions_state.json"),
+        metadata=_meta("EXTENSIONS_STATE_PATH", "Server", restart="process"),
     )
     # Search provider (SearXNG self-hosted)
     searxng_url: str = field(default=os.getenv("SEARXNG_URL", ""), metadata=_meta("SEARXNG_URL", "Search Providers"))

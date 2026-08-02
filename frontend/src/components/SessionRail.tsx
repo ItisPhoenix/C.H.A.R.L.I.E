@@ -121,7 +121,7 @@ export function SessionRail({
   // Render collapsed 56px icon-only rail
   if (collapsed) {
     return (
-      <aside className="w-14 shrink-0 border-r border-[rgba(255,255,255,0.07)] bg-zinc-950/40 p-2 flex flex-col justify-between items-center select-none font-sans">
+      <aside className="w-14 shrink-0 border-r border-[var(--color-glass-border)] bg-zinc-950/40 p-2 flex flex-col justify-between items-center select-none font-sans">
         <div className="space-y-4 w-full flex flex-col items-center">
           {onToggleCollapse && (
             <button
@@ -135,7 +135,7 @@ export function SessionRail({
 
           <button
             onClick={onCreate}
-            className="w-10 h-10 rounded-xl bg-gradient-to-r from-purple-600 to-cyan-500 text-black flex items-center justify-center font-bold hover:brightness-110 active:scale-95 transition cursor-pointer shadow-lg"
+            className="w-10 h-10 rounded-xl bg-accent text-black flex items-center justify-center font-bold hover:brightness-110 active:scale-95 transition cursor-pointer shadow-lg"
             title="New Chat"
           >
             <Plus className="w-5 h-5 text-black" />
@@ -173,7 +173,7 @@ export function SessionRail({
 
   // Full Expanded 240px Rail
   return (
-    <aside className="w-60 shrink-0 border-r border-[rgba(255,255,255,0.07)] bg-zinc-950/40 p-4 flex flex-col justify-between select-none font-sans">
+    <aside className="w-60 shrink-0 border-r border-[var(--color-glass-border)] bg-zinc-950/40 p-4 flex flex-col justify-between select-none font-sans">
       <div className="space-y-4">
         {/* Top Header Controls */}
         <div className="flex items-center justify-between">
@@ -238,7 +238,7 @@ export function SessionRail({
             value={filterQuery}
             onChange={(e) => setFilterQuery(e.target.value)}
             placeholder="Search sessions..."
-            className="w-full bg-zinc-900/60 border border-[rgba(255,255,255,0.07)] rounded-lg pl-8 pr-3 py-1.5 text-xs text-[#f4f6fa] placeholder:text-slate-500 outline-none transition focus:border-[rgba(255,255,255,0.15)]"
+            className="w-full bg-zinc-900/60 border border-[var(--color-glass-border)] rounded-lg pl-8 pr-3 py-1.5 text-xs text-[var(--color-text-primary)] placeholder:text-slate-500 outline-none transition focus:border-[var(--color-glass-border-hover)]"
           />
         </div>
 
@@ -248,7 +248,7 @@ export function SessionRail({
             if (groupItems.length === 0) return null;
             return (
               <div key={groupName} className="space-y-1">
-                <h3 className="px-2 text-[9px] font-mono font-bold uppercase tracking-widest text-slate-500">
+                <h3 className="px-2 text-[10px] font-mono font-bold uppercase tracking-widest text-slate-500">
                   {groupName}
                 </h3>
 
@@ -294,7 +294,7 @@ export function SessionRail({
                           ) : (
                             <div className="truncate flex-1">
                               <p className="truncate font-medium">{s.title}</p>
-                              <span className="text-[9px] text-slate-500 font-mono block">
+                              <span className="text-[10px] text-slate-500 font-mono block">
                                 {relativeTime(s.updated_at || s.created_at)}
                               </span>
                             </div>

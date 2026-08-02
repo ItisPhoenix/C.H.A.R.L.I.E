@@ -118,15 +118,16 @@ class InstalledExtension:
     card: SkillCard
     enabled: bool = True
     tool_names: List[str] = field(default_factory=list)
+    raw_text: str = ""
 
 
 class ExtensionManager:
     """In-process registry of installed extensions plus pending (proposed
     but not yet confirmed) installs -- the web dashboard's gate: propose()
     returns a SkillCard for the user to review, confirm() only then calls
-    the caller-supplied installer. Not persisted across restarts; each
-    process starts with an empty registry (a known gap, see
-    plans/PHASE_5_plugin_skill_system.md's REST section)."""
+    the caller-supplied installer. Persistence across restarts is the
+    caller's job (see web_server.py's _save_extensions()/startup reload) --
+    this class itself is just the in-memory registry."""
 
     def __init__(self) -> None:
         self._installed: Dict[str, InstalledExtension] = {}

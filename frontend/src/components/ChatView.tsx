@@ -6,6 +6,7 @@ import {
   Circle, CheckCircle2, Terminal, ChevronDown, ChevronUp
 } from "lucide-react";
 import { useCharlieStore, type ToolActivityEntry, type RecoveryProposal, type ToolApprovalRequest, rgba } from "../store/useCharlieStore";
+import { Button } from "./Button";
 
 function CopyButton({ text }: { text: string }): ReactElement {
   const [copied, setCopied] = useState(false);
@@ -94,7 +95,7 @@ function formatMessageContent(content: string): React.ReactNode {
                 <span>{language}</span>
                 <CopyButton text={codeText} />
               </div>
-              <pre className="p-3 overflow-x-auto text-[#f4f6fa] leading-relaxed scrollbar">
+              <pre className="p-3 overflow-x-auto text-[var(--color-text-primary)] leading-relaxed scrollbar">
                 <code>{codeText}</code>
               </pre>
             </div>
@@ -196,16 +197,13 @@ export function ChatView({
   ];
 
   return (
-    <section className="flex flex-col h-full overflow-hidden bg-black/40 border border-[rgba(255,255,255,0.07)] rounded-2xl">
+    <section className="flex flex-col h-full overflow-hidden bg-black/40 border border-[var(--color-glass-border)] rounded-2xl">
       {/* Header */}
-      <header className="flex items-center justify-between px-6 py-4 border-b border-[rgba(255,255,255,0.07)]">
+      <header className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-glass-border)]">
         <div className="min-w-0">
-          <h1 className="font-display text-lg font-semibold text-[#f4f6fa] tracking-wide">
+          <h1 className="font-display text-lg font-semibold text-[var(--color-text-primary)] tracking-wide">
             Console Chat
           </h1>
-          <p className="text-[10px] text-slate-500 font-mono mt-0.5">
-            Engine Session Stream
-          </p>
         </div>
         <span className="flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-slate-400">
           <span
@@ -225,8 +223,8 @@ export function ChatView({
       >
         {messages.length === 0 && (
           <div className="h-full flex flex-col items-center justify-center py-10 max-w-lg mx-auto">
-            <Sparkles className="w-10 h-10 text-purple-400/40 mb-4 animate-[pulse_3s_infinite]" />
-            <h3 className="font-display text-base font-semibold text-[#f4f6fa] tracking-wide text-center">
+            <Sparkles className="w-10 h-10 text-purple-400/40 mb-4" />
+            <h3 className="font-display text-base font-semibold text-[var(--color-text-primary)] tracking-wide text-center">
               CHARLIE Engine Ready
             </h3>
             <p className="text-xs text-slate-400 text-center mt-1.5 leading-relaxed">
@@ -239,7 +237,7 @@ export function ChatView({
                 <button
                   key={i}
                   onClick={() => submit(p.text)}
-                  className="p-3 text-left rounded-xl bg-zinc-900/40 border border-[rgba(255,255,255,0.05)] transition hover:border-[rgba(255,255,255,0.15)] hover:bg-zinc-900/80 group cursor-pointer"
+                  className="p-3 text-left rounded-xl bg-zinc-900/40 border border-[rgba(255,255,255,0.05)] transition hover:border-[var(--color-glass-border-hover)] hover:bg-zinc-900/80 group cursor-pointer"
                 >
                   <p className="text-xs font-semibold text-slate-300 group-hover:text-slate-100 transition truncate">
                     {p.label}
@@ -289,16 +287,16 @@ export function ChatView({
               
               <div className="space-y-2 mb-4 font-mono text-[11px]">
                 <div className="p-2.5 rounded bg-red-950/20 border border-red-500/10 text-red-200">
-                  <span className="text-[9px] uppercase font-bold text-red-400 block mb-1">Error Command</span>
+                  <span className="text-[10px] uppercase font-bold text-red-400 block mb-1">Error Command</span>
                   {activeProposal.original_command}
                 </div>
                 <div className="p-2.5 rounded bg-emerald-950/20 border border-emerald-500/10 text-emerald-200">
-                  <span className="text-[9px] uppercase font-bold text-emerald-400 block mb-1">Proposed Fix</span>
+                  <span className="text-[10px] uppercase font-bold text-emerald-400 block mb-1">Proposed Fix</span>
                   {activeProposal.proposed_command}
                 </div>
                 {activeProposal.explanation && (
                   <div className="p-2.5 rounded bg-zinc-900 border border-white/5 text-slate-400">
-                    <span className="text-[9px] uppercase font-bold text-slate-400 block mb-1">Rationale</span>
+                    <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Rationale</span>
                     {activeProposal.explanation}
                   </div>
                 )}
@@ -356,18 +354,18 @@ export function ChatView({
 
               <div className="space-y-2 mb-4 font-mono text-[11px]">
                 <div className="p-2.5 rounded bg-zinc-900 border border-white/5 text-slate-200">
-                  <span className="text-[9px] uppercase font-bold text-slate-400 block mb-1">Restricted Tool</span>
+                  <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Restricted Tool</span>
                   {activeToolApproval.tool_name}
                 </div>
                 {activeToolApproval.reason && (
                   <div className="p-2.5 rounded bg-zinc-900 border border-white/5 text-amber-300">
-                    <span className="text-[9px] uppercase font-bold text-slate-400 block mb-1">Reason</span>
+                    <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Reason</span>
                     {activeToolApproval.reason}
                   </div>
                 )}
                 {activeToolApproval.arguments && (
                   <div className="p-2.5 rounded bg-zinc-950 border border-white/5 text-cyan-300 whitespace-pre-wrap break-all max-h-32 overflow-y-auto">
-                    <span className="text-[9px] uppercase font-bold text-slate-400 block mb-1">Arguments</span>
+                    <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Arguments</span>
                     {Object.entries(activeToolApproval.arguments).map(([k, v]) => `${k}: ${String(v)}`).join("\n")}
                   </div>
                 )}
@@ -432,7 +430,7 @@ export function ChatView({
                   <div key={idx} className="relative flex flex-col text-[11px] font-mono leading-relaxed">
                     {bullet}
                     <div className="flex items-center gap-2">
-                      <span className={`uppercase text-[8px] px-1 rounded ${
+                      <span className={`uppercase text-[10px] px-1 rounded ${
                         isCall ? "bg-purple-950/60 text-purple-300" : isResult ? "bg-emerald-950/60 text-emerald-300" : "bg-cyan-950/60 text-cyan-300"
                       }`}>
                         {t.kind.replace("tool_", "")}
@@ -453,8 +451,8 @@ export function ChatView({
       )}
 
       {/* Text Area prompt input */}
-      <div className="px-6 py-4 border-t border-[rgba(255,255,255,0.07)] shrink-0">
-        <div className="flex items-center gap-3 bg-zinc-900/40 rounded-xl border border-[rgba(255,255,255,0.07)] px-4 py-2 transition-colors focus-within:border-[rgba(255,255,255,0.15)] focus-within:bg-zinc-900/60">
+      <div className="px-6 py-4 border-t border-[var(--color-glass-border)] shrink-0">
+        <div className="flex items-center gap-3 bg-zinc-900/40 rounded-xl border border-[var(--color-glass-border)] px-4 py-2 transition-colors focus-within:border-[var(--color-glass-border-hover)] focus-within:bg-zinc-900/60">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -467,31 +465,27 @@ export function ChatView({
             rows={1}
             placeholder="Ask Charlie anything..."
             aria-label="Ask Charlie anything"
-            className="flex-1 bg-transparent resize-none outline-none text-xs text-[#f4f6fa] placeholder:text-slate-500 font-sans py-1 max-h-32 scrollbar"
+            className="flex-1 bg-transparent resize-none outline-none text-xs text-[var(--color-text-primary)] placeholder:text-slate-500 font-sans py-1 max-h-32 scrollbar"
           />
           {voiceState !== "idle" ? (
-            <button
+            <Button
+              variant="danger"
               onClick={onStop}
               aria-label="Stop generation"
-              className="shrink-0 rounded-lg px-4 py-1.5 text-[10px] font-bold uppercase tracking-wider bg-red-950/60 text-red-400 border border-red-500/30 cursor-pointer transition hover:bg-red-950/80 active:scale-[0.98]"
+              className="shrink-0 px-4 py-1.5 text-[10px] font-bold uppercase tracking-wider"
             >
               Stop
-            </button>
+            </Button>
           ) : (
-            <button
+            <Button
+              variant="accent"
               onClick={() => submit()}
               disabled={!input.trim() && !loading}
               aria-label="Send message"
-              style={{
-                background: !input.trim() ? "transparent" : accentColor,
-                color: !input.trim() ? "#6b7280" : "#03151a",
-                border: !input.trim() ? "1px solid rgba(255,255,255,0.07)" : "none",
-                opacity: !input.trim() ? 0.4 : 1,
-              }}
-              className="shrink-0 rounded-lg px-4 py-1.5 text-[10px] font-bold uppercase tracking-wider disabled:cursor-not-allowed cursor-pointer transition active:scale-[0.98]"
+              className="shrink-0 px-4 py-1.5 text-[10px] font-bold uppercase tracking-wider"
             >
               Send
-            </button>
+            </Button>
           )}
         </div>
       </div>

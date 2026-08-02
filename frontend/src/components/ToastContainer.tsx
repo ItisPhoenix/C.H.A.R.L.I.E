@@ -47,7 +47,7 @@ export function ToastContainer(): ReactElement {
   return (
     <div className="fixed top-20 right-6 z-50 flex flex-col gap-3 w-80 pointer-events-none select-none">
       {toasts.map((toast) => {
-        let borderClass = "border-[rgba(255,255,255,0.07)]";
+        let borderClass = "border-[var(--color-glass-border)]";
         let textClass = "text-slate-100";
         let icon = <Info className="w-4 h-4 text-cyan-400" />;
 
@@ -60,7 +60,7 @@ export function ToastContainer(): ReactElement {
           textClass = "text-amber-200";
           icon = <AlertTriangle className="w-4 h-4 text-amber-500" />;
         } else {
-          borderClass = `border-[rgba(6,182,212,0.3)]`;
+          borderClass = `border-[var(--color-accent-teal)]/30`;
           icon = <Info className="w-4 h-4 text-[var(--color-accent-teal)]" />;
         }
 
@@ -74,7 +74,7 @@ export function ToastContainer(): ReactElement {
               <p className={`text-xs font-sans leading-relaxed ${textClass} break-words`}>
                 {toast.message}
               </p>
-              <span className="text-[9px] font-mono text-slate-500 mt-1 block">
+              <span className="text-[10px] font-mono text-slate-500 mt-1 block">
                 {toast.timestamp}
               </span>
             </div>

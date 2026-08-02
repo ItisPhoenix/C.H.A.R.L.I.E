@@ -27,10 +27,10 @@ const STATE_LABELS: Record<VoiceState, string> = {
 };
 
 const STATE_COLORS: Record<VoiceState, string> = {
-  idle: "#4b5563",
-  listening: "#06b6d4",
-  thinking: "#a855f7",
-  speaking: "#10b981",
+  idle: "var(--color-status-idle)",
+  listening: "var(--color-status-listening)",
+  thinking: "var(--color-status-thinking)",
+  speaking: "var(--color-status-speaking)",
 };
 
 export function VoiceDock({
@@ -55,7 +55,7 @@ export function VoiceDock({
     []
   );
 
-  const stateColor = STATE_COLORS[state] || "#4b5563";
+  const stateColor = STATE_COLORS[state] || "var(--color-status-idle)";
   const effectiveVolume = audio.muted ? 0 : audio.volume;
   const stateLabel =
     state === "listening" && listeningTrigger === "wake_word" ? "Wake Word" : STATE_LABELS[state];
@@ -66,7 +66,7 @@ export function VoiceDock({
     ? "rgba(75, 85, 99, 0.2)"
     : audio.muted
     ? "rgba(239, 68, 68, 0.25)"
-    : "rgba(255, 255, 255, 0.07)";
+    : "var(--color-glass-border)";
 
   return (
     <div
@@ -76,7 +76,7 @@ export function VoiceDock({
       style={{
         borderColor: voiceDockBorder,
       }}
-      className="flex items-center justify-between gap-6 p-3 bg-zinc-950/40 border border-[rgba(255,255,255,0.07)] rounded-xl z-20 select-none mx-4 mb-4"
+      className="flex items-center justify-between gap-6 p-3 bg-zinc-950/40 border border-[var(--color-glass-border)] rounded-xl z-20 select-none mx-4 mb-4"
     >
       {/* Dynamic Equalizer Visualizer */}
       <div className="flex-1 flex items-center justify-center gap-[3px] h-[26px]">
@@ -120,7 +120,7 @@ export function VoiceDock({
 
       <span
         style={{
-          color: !connected ? "#ef4444" : stateColor,
+          color: !connected ? "var(--color-status-error)" : stateColor,
         }}
         className={`text-[10px] font-bold uppercase tracking-[0.18em] min-w-[80px] text-center font-mono`}
         aria-live="polite"
@@ -165,7 +165,7 @@ export function VoiceDock({
             style={{ accentColor }}
             className="w-20 cursor-pointer accent-[var(--color-accent-teal)]"
           />
-          <span className="text-[9px] font-mono text-slate-500 w-7 text-right">
+          <span className="text-[10px] font-mono text-slate-500 w-7 text-right">
             {Math.round(effectiveVolume * 100)}
           </span>
         </div>
@@ -186,22 +186,22 @@ export function VoiceDock({
                 ? "bg-red-500/10 text-red-400 border border-red-500/20 animate-pulse"
                 : mic.mic_muted
                 ? "bg-zinc-800 text-slate-500 hover:bg-zinc-700/80"
-                : "text-[#06b6d4] bg-cyan-950/20 border border-cyan-500/30 hover:bg-cyan-950/40 hover:text-cyan-300 active:scale-[0.98]"
+                : "text-[var(--color-accent-teal)] bg-cyan-950/20 border border-cyan-500/30 hover:bg-cyan-950/40 hover:text-cyan-300 active:scale-[0.98]"
             }`}
           >
             {mic.mic_muted || !connected ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
           </button>
           <div className="flex flex-col text-right">
-            <span className="text-[8px] font-mono font-bold tracking-widest uppercase text-slate-500">
+            <span className="text-[10px] font-bold tracking-widest uppercase text-slate-500">
               MIC LINK
             </span>
             <span
               style={{
                 color: !connected
-                  ? "#ef4444"
+                  ? "var(--color-status-error)"
                   : mic.mic_muted
-                  ? "#6b7280"
-                  : "#06b6d4",
+                  ? "var(--color-text-muted)"
+                  : "var(--color-accent-teal)",
               }}
               className="text-[10px] font-bold uppercase font-mono"
             >

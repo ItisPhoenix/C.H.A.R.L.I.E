@@ -63,10 +63,10 @@ const GROUP_HELP: Record<string, string> = {
 };
 
 const RESTART_META: Record<string, { label: string; color: string; bg: string }> = {
-  voice: { label: "Voice · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "rgba(6, 182, 212, 0.1)" },
-  mcp: { label: "MCP · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "rgba(6, 182, 212, 0.1)" },
-  plugins: { label: "Plugins · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "rgba(6, 182, 212, 0.1)" },
-  process: { label: "Needs restart", color: "#f59e0b", bg: "rgba(245, 158, 11, 0.1)" },
+  voice: { label: "Voice · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "var(--color-accent-teal-dim)" },
+  mcp: { label: "MCP · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "var(--color-accent-teal-dim)" },
+  plugins: { label: "Plugins · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "var(--color-accent-teal-dim)" },
+  process: { label: "Needs restart", color: "var(--color-status-warning)", bg: "var(--color-status-warning-dim)" },
 };
 
 const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
@@ -226,10 +226,10 @@ export default function SettingsPage(): ReactElement {
   };
 
   return (
-    <div className="h-full w-full bg-black text-[#f4f6fa] flex flex-col overflow-hidden font-sans">
+    <div className="h-full w-full bg-black text-[var(--color-text-primary)] flex flex-col overflow-hidden font-sans">
       
       {/* Header bar */}
-      <header className="px-8 py-4 border-b border-[rgba(255,255,255,0.07)] bg-zinc-950/80 backdrop-blur-md flex items-center justify-between shrink-0 select-none">
+      <header className="px-8 py-4 border-b border-[var(--color-glass-border)] bg-zinc-950/80 backdrop-blur-md flex items-center justify-between shrink-0 select-none">
         <div className="flex items-center gap-4">
           <Link
             href="/"
@@ -276,7 +276,7 @@ export default function SettingsPage(): ReactElement {
       <div className="flex-1 flex overflow-hidden">
         
         {/* Sticky sidebar category navigator */}
-        <nav className="w-60 border-r border-[rgba(255,255,255,0.07)] bg-zinc-950/20 p-4 shrink-0 flex flex-col gap-1 overflow-y-auto scrollbar select-none">
+        <nav className="w-60 border-r border-[var(--color-glass-border)] bg-zinc-950/20 p-4 shrink-0 flex flex-col gap-1 overflow-y-auto scrollbar select-none">
           <div className="relative flex items-center mb-3">
             <Search className="absolute left-2.5 w-3.5 h-3.5 text-slate-500" />
             <input
@@ -284,11 +284,11 @@ export default function SettingsPage(): ReactElement {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search properties..."
-              className="w-full rounded-lg bg-zinc-900/60 border border-[rgba(255,255,255,0.07)] pl-8 pr-2.5 py-1.5 text-xs text-[#f4f6fa] placeholder:text-slate-500 outline-none transition focus:border-[rgba(255,255,255,0.15)]"
+              className="w-full rounded-lg bg-zinc-900/60 border border-[var(--color-glass-border)] pl-8 pr-2.5 py-1.5 text-xs text-[var(--color-text-primary)] placeholder:text-slate-500 outline-none transition focus:border-[var(--color-glass-border-hover)]"
             />
           </div>
 
-          <h3 className="px-2 text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono mb-2">
+          <h3 className="px-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest font-mono mb-2">
             Categories
           </h3>
 
@@ -375,7 +375,7 @@ function FieldRow({
     <div
       className={`${
         wide ? "col-span-1 md:col-span-2" : "col-span-1"
-      } flex flex-col justify-between p-4 bg-zinc-900/30 border border-[rgba(255,255,255,0.07)] rounded-xl transition hover:border-[rgba(255,255,255,0.12)] min-h-[110px]`}
+      } flex flex-col justify-between p-4 bg-zinc-900/30 border border-[var(--color-glass-border)] rounded-xl transition hover:border-[var(--color-glass-border-hover)] min-h-[110px]`}
     >
       <div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -384,10 +384,10 @@ function FieldRow({
           {saveState === "error" && <span className="text-[10px] font-mono text-red-400 uppercase font-bold">Failed</span>}
         </div>
         <div className="flex items-center gap-1.5 flex-wrap mt-1">
-          <span className="text-[9px] font-mono text-slate-500 uppercase">{spec.key}</span>
+          <span className="text-[10px] font-mono text-slate-500 uppercase">{spec.key}</span>
           {restartMeta && (
             <span
-              className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full"
+              className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full"
               style={{ color: restartMeta.color, background: restartMeta.bg }}
             >
               {restartMeta.label}

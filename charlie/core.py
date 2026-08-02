@@ -937,15 +937,17 @@ async def _generate_summary(
 async def _compress_messages(
     messages: List[Dict[str, Any]], config: "Config"
 ) -> List[Dict[str, Any]]:
+    """Two-tier compression (Hermes-style): soft prune at 50% of the context
+    window, hard LLM-summarize safety net at 85%."""
     total = _token_count(messages)
     window = getattr(config, "context_window", 32000)
-    compression_threshold = getattr(config, "compression_threshold", 0.8)
-    threshold = int(compression_threshold * window)
-    if total <= threshold:
+    soft_threshold = int(getattr(config, "compression_soft_threshold", 0.5) * window)
+    hard_threshold = int(getattr(config, "compression_threshold", 0.85) * window)
+    if total <= soft_threshold:
         return messages
 
     pruned = _prune_old_tool_results(messages, keep_last=2)
-    if _token_count(pruned) <= threshold:
+    if _token_count(pruned) <= hard_threshold:
         return pruned
 
     return await _halve_history(pruned, config)
@@ -2465,26 +2467,26 @@ class Brain:
             except json.JSONDecodeError:
                 pass
 
-        # Match TOOL: prefix format (explicit)
+        # Match TOOL: prefix format (explicit). Small local models sometimes
+        # repeat the same TOOL: line verbatim mid-completion (a looping
+        # failure) -- dedupe identical (name, args) pairs so it doesn't
+        # execute the same call twice.
         tool_pattern = re.compile(r"TOOL:\s*(\w+)\(([^)]*)\)")
+        seen_signatures: set[tuple[str, str]] = set()
         for match in tool_pattern.finditer(text):
             tool_name = match.group(1)
             raw_args = match.group(2).strip()
-            calls.append(
-                {
-                    "id": None,
-                    "name": tool_name,
-                    "arguments": self._resolve_tool_arguments(tool_name, raw_args),
-                }
-            )
+            args = self._resolve_tool_arguments(tool_name, raw_args)
+            sig = (tool_name, json.dumps(args, sort_keys=True))
+            if sig in seen_signatures:
+                continue
+            seen_signatures.add(sig)
+            calls.append({"id": None, "name": tool_name, "arguments": args})
         # Fallback: match bare tool calls without TOOL: prefix (text-mode only).
         # Native-tool providers parse structured tool_calls directly;
         # bare-pattern matching on prose causes false tool invocations.
         if not self._use_native_tools:
             known_names = "|".join(re.escape(n) for n in tool_registry.get_tool_names())
-            seen_signatures = {
-                (c["name"], json.dumps(c["arguments"], sort_keys=True)) for c in calls
-            }
             if known_names:
                 bare_pattern = re.compile(r"\b(" + known_names + r")\s*\(([^)]*)\)")
                 for match in bare_pattern.finditer(text):

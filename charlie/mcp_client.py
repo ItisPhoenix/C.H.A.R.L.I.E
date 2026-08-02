@@ -15,6 +15,7 @@ spec -- just enough for Charlie to extend its toolset via MCP servers.
 import json
 import logging
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -359,8 +360,13 @@ class _ManagedServer:
     def start(self) -> None:
         """Launch the server subprocess."""
         env = {**dict(__import__("os").environ), **self.config.env}
+        # shutil.which resolves shims like Windows' npx.cmd -- Popen with
+        # shell=False won't find "npx" on its own since it skips PATHEXT.
+        # Falls back to the raw command so a truly-missing binary still
+        # errors with its own real "not found", not a silently different one.
+        command = shutil.which(self.config.command) or self.config.command
         self._process = subprocess.Popen(
-            [self.config.command] + self.config.args,
+            [command] + self.config.args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

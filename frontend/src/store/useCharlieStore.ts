@@ -80,16 +80,6 @@ export interface DesktopFrame {
   receivedAt: number;
 }
 
-export interface BackgroundTask {
-  id: string;
-  text: string;
-  steps: string[];
-  current_step: number;
-  status: "planning" | "awaiting_approval" | "running" | "paused" | "done" | "failed" | "cancelled";
-  flagged_steps: number[];
-  error: string | null;
-}
-
 interface CharlieState {
   connected: boolean;
   systemStatus: SystemStatus;
@@ -137,8 +127,6 @@ interface CharlieState {
   setLatestDesktopFrame: (f: DesktopFrame | null) => void;
   desktopControlEnabled: boolean;
   setDesktopControlEnabled: (enabled: boolean) => void;
-  backgroundTask: BackgroundTask | null;
-  setBackgroundTask: (t: BackgroundTask | null) => void;
   selectedFileContent: string;
   setSelectedFileContent: (content: string) => void;
 }
@@ -201,6 +189,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setAccentColor: (color) => set(() => {
     if (typeof window !== "undefined") {
       localStorage.setItem("charlie_accent", color);
+      applyAccentColor(color);
     }
     return { accentColor: color };
   }),
@@ -212,8 +201,6 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setLatestDesktopFrame: (latestDesktopFrame) => set({ latestDesktopFrame }),
   desktopControlEnabled: false,
   setDesktopControlEnabled: (desktopControlEnabled) => set({ desktopControlEnabled }),
-  backgroundTask: null,
-  setBackgroundTask: (backgroundTask) => set({ backgroundTask }),
   selectedFileContent: "",
   setSelectedFileContent: (selectedFileContent) => set({ selectedFileContent }),
 }));
@@ -234,4 +221,16 @@ export function lighten(hex: string, amt: number): string {
   const { r, g, b } = hexToRgb(hex);
   const l = (c: number) => Math.min(255, Math.round(c + (255 - c) * amt));
   return `rgb(${l(r)},${l(g)},${l(b)})`;
+}
+
+/** Writes the live accent color onto :root as real CSS custom properties
+ * (globals.css declares matching @theme proxies) so every bg-accent/
+ * text-accent/border-accent utility across the app updates together,
+ * instead of each consumer tracking accentColor state independently. */
+export function applyAccentColor(color: string): void {
+  const root = document.documentElement.style;
+  root.setProperty("--accent", color);
+  root.setProperty("--accent-dim", rgba(color, 0.12));
+  root.setProperty("--accent-border", rgba(color, 0.25));
+  root.setProperty("--accent-soft", lighten(color, 0.35));
 }

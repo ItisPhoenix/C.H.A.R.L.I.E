@@ -1,14 +1,31 @@
 @import "tailwindcss";
 
+/* Runtime-mutable accent tokens -- set on document.documentElement by
+   useCharlieStore.setAccentColor() (see store/useCharlieStore.ts) whenever
+   the user picks a different accent, so every consumer of the --color-accent*
+   utilities below updates together instead of each component tracking
+   accentColor state independently. Defaults match the picker's default. */
+:root {
+  --accent: #a855f7;
+  --accent-dim: rgba(168, 85, 247, 0.12);
+  --accent-border: rgba(168, 85, 247, 0.25);
+  --accent-soft: #c084fc;
+}
+
 @theme {
-  /* Fonts: Space Grotesk is display, Inter is body, JetBrains Mono is reserved for logs and data. */
+  /* Fonts: Space Grotesk is display, Inter is body, JetBrains Mono is loaded for logs and data. */
   --font-sans: var(--font-sans), "Segoe UI", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", monospace;
+  --font-mono: var(--font-mono-loaded), "JetBrains Mono", monospace;
   --font-display: var(--font-display), sans-serif;
 
   /* Pure black canvas theme */
   --color-canvas: #000000;
-  
+
+  --color-accent: var(--accent);
+  --color-accent-dim: var(--accent-dim);
+  --color-accent-border: var(--accent-border);
+  --color-accent-soft: var(--accent-soft);
+
   --color-accent-teal: #06b6d4;
   --color-accent-teal-soft: #22d3ee;
   --color-accent-teal-dim: rgba(6, 182, 212, 0.12);

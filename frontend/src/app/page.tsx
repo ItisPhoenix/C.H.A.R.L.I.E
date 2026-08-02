@@ -4,9 +4,10 @@ import { useCallback, useEffect, useRef, useState, useMemo, type ReactElement } 
 import Link from "next/link";
 import {
   MessageSquare, Monitor, Database, Cpu, Settings, Shield, Bell, Search, Mic, MicOff,
-  FolderGit, Network, RefreshCw, Check, X, Menu, Server
+  FolderGit, Network, RefreshCw, Check, X, Menu, Server, Puzzle
 } from "lucide-react";
-import { useCharlieStore, rgba, lighten, type BackgroundTask, type Session, type Message } from "../store/useCharlieStore";
+import type { LucideIcon } from "lucide-react";
+import { useCharlieStore, rgba, lighten, type Session, type Message } from "../store/useCharlieStore";
 
 interface WSMessage {
   type: string;
@@ -20,12 +21,38 @@ import { ChatView } from "../components/ChatView";
 import { InsightRail } from "../components/InsightRail";
 import { EventLog } from "../components/EventLog";
 import { VoiceDock } from "../components/VoiceDock";
-import { 
-  MemoriesView, HardwareView, FilesView, DockerView, OllamaView 
+import {
+  MemoriesView, HardwareView, FilesView, ServicesView, OllamaView, ExtensionsView
 } from "../components/WipPages";
 
 function getSessionId(msg: WSMessage): string | undefined {
   return msg.session_id || msg.payload?.session_id || undefined;
+}
+
+interface NavButtonProps {
+  icon: LucideIcon;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}
+
+/** Sidebar nav item -- one definition instead of the same block copy-pasted
+ * per page, and wired to the live --accent token so the active-state color
+ * actually follows the user's chosen accent instead of a hardcoded teal. */
+function NavButton({ icon: Icon, label, active, onClick }: NavButtonProps): ReactElement {
+  return (
+    <button
+      onClick={onClick}
+      className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer transition ${
+        active
+          ? "bg-white/5 text-accent font-semibold border-l-2 border-accent"
+          : "text-slate-400 hover:text-slate-200 hover:bg-white/5 active:scale-[0.98]"
+      }`}
+    >
+      <Icon className="w-4 h-4 shrink-0" />
+      {label}
+    </button>
+  );
 }
 
 export default function Page(): ReactElement {
@@ -76,7 +103,6 @@ export default function Page(): ReactElement {
   const setLaunchId = useCharlieStore((s) => s.setLaunchId);
   const setSessionScope = useCharlieStore((s) => s.setSessionScope);
   const setDesktopControlEnabled = useCharlieStore((s) => s.setDesktopControlEnabled);
-  const setBackgroundTask = useCharlieStore((s) => s.setBackgroundTask);
   const setAccentColor = useCharlieStore((s) => s.setAccentColor);
 
   // Router Pages state
@@ -363,8 +389,6 @@ export default function Page(): ReactElement {
           const eventSession = getSessionId(msg);
           if (eventSession && eventSession !== currentSessionIdRef.current) return;
           store.setActiveToolApproval(msg.payload);
-        } else if (msg.type === "background_task") {
-          setBackgroundTask(msg.payload);
         } else if (msg.type === "token") {
           const eventSession = getSessionId(msg);
           if (eventSession && eventSession !== currentSessionIdRef.current) return;
@@ -375,7 +399,7 @@ export default function Page(): ReactElement {
         // ignore
       }
     };
-  }, [setConnected, setSystemStatus, setVoiceState, setListeningTrigger, setAudio, setMic, setAudioLevel, appendToolActivity, addMessage, setSessions, setCurrentSessionId, setBackgroundTask]);
+  }, [setConnected, setSystemStatus, setVoiceState, setListeningTrigger, setAudio, setMic, setAudioLevel, appendToolActivity, addMessage, setSessions, setCurrentSessionId]);
 
   useEffect(() => { connectWSRef.current = connectWS; });
   useEffect(() => { currentSessionIdRef.current = currentSessionId; }, [currentSessionId]);
@@ -422,19 +446,23 @@ export default function Page(): ReactElement {
       setDesktopControlEnabled(Boolean(status?.desktop_control_enabled));
       setSessionScope("this_launch");
 
-      const bootKey = `charlie_boot_session::${lid || "no-launch"}`;
-      const storedBootSid = typeof window !== "undefined" ? window.sessionStorage.getItem(bootKey) : null;
-      const existingSessions = await fetchSessions();
-      const bootSessionStillValid = Boolean(storedBootSid && existingSessions.some((s) => s.id === storedBootSid));
-      
-      if (bootSessionStillValid && storedBootSid) {
-        setCurrentSessionId(storedBootSid);
-      } else {
-        await handleCreateSession("New Chat");
-        if (typeof window !== "undefined") {
-          const created = useCharlieStore.getState().currentSessionId;
-          if (created) window.sessionStorage.setItem(bootKey, created);
+      if (!useCharlieStore.getState().currentSessionId) {
+        const bootKey = `charlie_boot_session::${lid || "no-launch"}`;
+        const storedBootSid = typeof window !== "undefined" ? window.sessionStorage.getItem(bootKey) : null;
+        const existingSessions = await fetchSessions();
+        const bootSessionStillValid = Boolean(storedBootSid && existingSessions.some((s) => s.id === storedBootSid));
+
+        if (bootSessionStillValid && storedBootSid) {
+          setCurrentSessionId(storedBootSid);
+        } else {
+          await handleCreateSession("New Chat");
+          if (typeof window !== "undefined") {
+            const created = useCharlieStore.getState().currentSessionId;
+            if (created) window.sessionStorage.setItem(bootKey, created);
+          }
         }
+      } else {
+        await fetchSessions();
       }
 
       const audioState = await fetchJson("/api/audio") as { muted?: boolean; volume?: number } | null;
@@ -449,17 +477,15 @@ export default function Page(): ReactElement {
         setMic({ mic_muted: micState.mic_muted });
       }
 
-      const bgTask = await fetchJson("/api/background_task");
-      setBackgroundTask((bgTask as { task: BackgroundTask | null } | null)?.task ?? null);
-      
       const rConfig = await fetch("/api/config");
       if (rConfig.ok) {
-        const data = await rConfig.json();
-        if (data.llm_model) setActiveModel(data.llm_model);
+        const data = await rConfig.json() as { fields?: { key: string; value: unknown }[] };
+        const llm = (data.fields || []).find((f) => f.key === "LLM_MODEL");
+        if (llm?.value) setActiveModel(String(llm.value));
       }
     };
     void init();
-  }, [fetchSessions, handleCreateSession, setAudio, setMic, fetchJson, setLaunchId, setSessionScope, setDesktopControlEnabled, setBackgroundTask, setCurrentSessionId]);
+  }, [fetchSessions, handleCreateSession, setAudio, setMic, fetchJson, setLaunchId, setSessionScope, setDesktopControlEnabled, setCurrentSessionId]);
 
   // Sync active sessions
   useEffect(() => {
@@ -536,14 +562,6 @@ export default function Page(): ReactElement {
 
   const handleRejectToolCall = (requestId: string) => {
     sendWS({ type: "tool_reject", payload: { request_id: requestId } });
-  };
-
-  const sendBackgroundTaskStart = (text: string) => {
-    sendWS({ type: "background_task_start", payload: { text } });
-  };
-
-  const sendBackgroundTaskCancel = (taskId: string) => {
-    sendWS({ type: "background_task_cancel", payload: { task_id: taskId } });
   };
 
   const handleExportHistory = useCallback(async () => {
@@ -649,13 +667,13 @@ export default function Page(): ReactElement {
     return sessions.filter((s) => s.title.toLowerCase().includes(debouncedSearch.toLowerCase()));
   }, [sessions, debouncedSearch]);
 
-  const canvasBg = `radial-gradient(1200px 700px at 12% -8%, ${rgba(accentColor, 0.12)}, transparent 60%), radial-gradient(1000px 600px at 105% 10%, ${rgba(accentColor, 0.06)}, transparent 55%), #000000`;
+  const canvasBg = `radial-gradient(1200px 700px at 12% -8%, ${rgba(accentColor, 0.12)}, transparent 60%), radial-gradient(1000px 600px at 105% 10%, ${rgba(accentColor, 0.06)}, transparent 55%), var(--color-canvas)`;
 
   return (
     <ErrorBoundary>
       <div 
         style={{ background: canvasBg }}
-        className="h-screen w-screen flex flex-col overflow-hidden relative font-sans select-none text-[#f4f6fa]"
+        className="h-screen w-screen flex flex-col overflow-hidden relative font-sans select-none text-[var(--color-text-primary)]"
       >
         <ToastContainer />
 
@@ -670,24 +688,24 @@ export default function Page(): ReactElement {
         )}
 
         {/* Top Bar Navigation Dashboard */}
-        <header className="px-6 py-3 bg-zinc-950/80 border-b border-[rgba(255,255,255,0.07)] flex items-center justify-between z-30 shrink-0 select-none">
+        <header className="px-6 py-3 bg-zinc-950/80 border-b border-[var(--color-glass-border)] flex items-center justify-between z-30 shrink-0 select-none">
           <div className="flex items-center gap-6">
             <button
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="md:hidden p-1.5 rounded-lg border border-[rgba(255,255,255,0.07)] text-slate-300 hover:text-slate-100 hover:bg-zinc-900 transition active:scale-[0.98] cursor-pointer"
+              className="md:hidden p-1.5 rounded-lg border border-[var(--color-glass-border)] text-slate-300 hover:text-slate-100 hover:bg-zinc-900 transition active:scale-[0.98] cursor-pointer"
               aria-label={mobileMenuOpen ? "Close session menu" : "Open session menu"}
             >
               {mobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
             </button>
             <div className="flex items-center gap-2">
-              <div className="w-6 h-6 rounded-lg bg-[var(--color-accent-purple,#a855f7)] flex items-center justify-center font-display text-black font-extrabold text-sm shadow-[0_0_12px_rgba(168,85,247,0.2)]">
+              <div className="w-6 h-6 rounded-lg bg-accent flex items-center justify-center font-display text-black font-extrabold text-sm shadow-[0_0_12px_var(--accent-border)]">
                 C
               </div>
               <div>
                 <h1 className="font-display font-bold uppercase tracking-wider text-xs">
                   CHARLIE
                 </h1>
-                <p className="text-[8px] font-mono text-slate-500 tracking-widest uppercase">
+                <p className="text-[10px] font-mono text-slate-500 tracking-widest uppercase">
                   AI OS dashboard
                 </p>
               </div>
@@ -698,18 +716,18 @@ export default function Page(): ReactElement {
               <button
                 onClick={() => setModelOpen(!modelOpen)}
                 disabled={reloadingModel}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[rgba(255,255,255,0.07)] bg-zinc-900/40 text-xs font-semibold text-slate-300 hover:text-slate-100 hover:bg-zinc-900 transition active:scale-[0.98] cursor-pointer"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--color-glass-border)] bg-zinc-900/40 text-xs font-semibold text-slate-300 hover:text-slate-100 hover:bg-zinc-900 transition active:scale-[0.98] cursor-pointer"
               >
                 {reloadingModel ? (
                   <RefreshCw className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
                 ) : (
-                  <Shield className="w-3.5 h-3.5 text-purple-400" />
+                  <Shield className="w-3.5 h-3.5 text-slate-400" />
                 )}
                 <span className="font-mono text-[10px] truncate max-w-[120px]">{activeModel}</span>
               </button>
 
               {modelOpen && (
-                <div className="absolute top-9 left-0 z-50 w-64 rounded-xl bg-zinc-950/95 border border-[rgba(255,255,255,0.07)] p-2 shadow-2xl animate-[rise_0.15s_ease-out] space-y-1.5">
+                <div className="absolute top-9 left-0 z-50 w-64 rounded-xl bg-zinc-950/95 border border-[var(--color-glass-border)] p-2 shadow-2xl animate-[rise_0.15s_ease-out] space-y-1.5">
                   <div className="relative px-1">
                     <Search className="absolute left-3 top-2.5 w-3 h-3 text-slate-500" />
                     <input
@@ -744,7 +762,7 @@ export default function Page(): ReactElement {
             {/* Microphone VAD capsule */}
             <button
               onClick={() => sendMicControl({ mic_muted: !mic.mic_muted })}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[rgba(255,255,255,0.07)] bg-zinc-900/40 text-xs font-semibold text-slate-300 hover:text-slate-100 transition active:scale-[0.98]"
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[var(--color-glass-border)] bg-zinc-900/40 text-xs font-semibold text-slate-300 hover:text-slate-100 transition active:scale-[0.98]"
             >
               {mic.mic_muted ? (
                 <>
@@ -770,7 +788,7 @@ export default function Page(): ReactElement {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Global search (Ctrl+K)"
-                className="w-56 bg-zinc-900/60 border border-[rgba(255,255,255,0.07)] rounded-lg pl-8 pr-3 py-1.5 text-xs text-[#f4f6fa] placeholder:text-slate-500 outline-none transition focus:border-[rgba(255,255,255,0.15)]"
+                className="w-56 bg-zinc-900/60 border border-[var(--color-glass-border)] rounded-lg pl-8 pr-3 py-1.5 text-xs text-[var(--color-text-primary)] placeholder:text-slate-500 outline-none transition focus:border-[var(--color-glass-border-hover)]"
               />
             </div>
 
@@ -783,12 +801,12 @@ export default function Page(): ReactElement {
               >
                 <Bell className="w-4 h-4" />
                 {alerts.length > 0 && (
-                  <span className="absolute top-1 right-1.5 w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                  <span className="absolute top-1 right-1.5 w-2 h-2 rounded-full bg-cyan-400" />
                 )}
               </button>
 
               {bellOpen && (
-                <div className="absolute top-9 right-0 z-50 w-72 rounded-xl bg-zinc-950 border border-[rgba(255,255,255,0.07)] p-3 shadow-2xl animate-[rise_0.15s_ease-out] font-mono text-[10px]">
+                <div className="absolute top-9 right-0 z-50 w-72 rounded-xl bg-zinc-950 border border-[var(--color-glass-border)] p-3 shadow-2xl animate-[rise_0.15s_ease-out] font-mono text-[10px]">
                   <div className="flex items-center justify-between border-b border-white/5 pb-2 mb-2">
                     <span className="font-bold text-slate-400 uppercase tracking-widest">Recent Alerts</span>
                     <button
@@ -807,7 +825,7 @@ export default function Page(): ReactElement {
                           <p className={`font-semibold ${alert.severity === "error" ? "text-red-400" : "text-slate-300"}`}>
                             {alert.message}
                           </p>
-                          <span className="text-[8px] text-slate-500 block mt-1">{alert.timestamp}</span>
+                          <span className="text-[10px] text-slate-500 block mt-1">{alert.timestamp}</span>
                         </div>
                       ))}
                     </div>
@@ -822,110 +840,81 @@ export default function Page(): ReactElement {
         <div className="flex-1 flex overflow-hidden z-10 p-4 pb-2 gap-4 relative">
           
           {/* Column 1: Left Navigation Sidebar */}
-          <nav className="w-52 shrink-0 border-r border-[rgba(255,255,255,0.07)] bg-zinc-950/20 p-4 flex flex-col justify-between select-none">
+          <nav className="w-52 shrink-0 border-r border-[var(--color-glass-border)] bg-zinc-950/20 p-4 flex flex-col justify-between select-none">
             <div className="space-y-6">
               
               {/* Category: MAIN */}
               <div className="space-y-1.5">
-                <h3 className="px-2 text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">
+                <h3 className="px-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
                   Main
                 </h3>
                 <div className="space-y-0.5">
-                  <button
+                  <NavButton
+                    icon={MessageSquare}
+                    label="Chats"
+                    active={activePage === "chats"}
                     onClick={() => setActivePage("chats")}
-                    className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer transition ${
-                      activePage === "chats"
-                        ? "bg-white/5 text-[var(--color-accent-teal,#06b6d4)] font-semibold border-l-2 border-[var(--color-accent-teal)]"
-                        : "text-slate-400 hover:text-slate-200 hover:bg-white/5 active:scale-[0.98]"
-                    }`}
-                  >
-                    <MessageSquare className="w-4 h-4 shrink-0" />
-                    Chats
-                  </button>
-                  <button
+                  />
+                  <NavButton
+                    icon={Database}
+                    label="Memories"
+                    active={activePage === "memories"}
                     onClick={() => setActivePage("memories")}
-                    className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer transition ${
-                      activePage === "memories"
-                        ? "bg-white/5 text-[var(--color-accent-teal,#06b6d4)] font-semibold border-l-2 border-[var(--color-accent-teal)]"
-                        : "text-slate-400 hover:text-slate-200 hover:bg-white/5 active:scale-[0.98]"
-                    }`}
-                  >
-                    <Database className="w-4 h-4 shrink-0" />
-                    Memories
-                  </button>
+                  />
                 </div>
               </div>
 
               {/* Category: TOOLS */}
               <div className="space-y-1.5">
-                <h3 className="px-2 text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">
+                <h3 className="px-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
                   Tools
                 </h3>
                 <div className="space-y-0.5">
-                  <button
+                  <NavButton
+                    icon={Monitor}
+                    label="Desktop"
+                    active={activePage === "desktop"}
                     onClick={() => setActivePage("desktop")}
-                    className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer transition ${
-                      activePage === "desktop"
-                        ? "bg-white/5 text-[var(--color-accent-teal,#06b6d4)] font-semibold border-l-2 border-[var(--color-accent-teal)]"
-                        : "text-slate-400 hover:text-slate-200 hover:bg-white/5 active:scale-[0.98]"
-                    }`}
-                  >
-                    <Monitor className="w-4 h-4 shrink-0" />
-                    Desktop
-                  </button>
-                  <button
+                  />
+                  <NavButton
+                    icon={FolderGit}
+                    label="Files"
+                    active={activePage === "files"}
                     onClick={() => setActivePage("files")}
-                    className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer transition ${
-                      activePage === "files"
-                        ? "bg-white/5 text-[var(--color-accent-teal,#06b6d4)] font-semibold border-l-2 border-[var(--color-accent-teal)]"
-                        : "text-slate-400 hover:text-slate-200 hover:bg-white/5 active:scale-[0.98]"
-                    }`}
-                  >
-                    <FolderGit className="w-4 h-4 shrink-0" />
-                    Files
-                  </button>
-                  <button
+                  />
+                  <NavButton
+                    icon={Server}
+                    label="Services"
+                    active={activePage === "docker"}
                     onClick={() => setActivePage("docker")}
-                    className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer transition ${
-                      activePage === "docker"
-                        ? "bg-white/5 text-[var(--color-accent-teal,#06b6d4)] font-semibold border-l-2 border-[var(--color-accent-teal)]"
-                        : "text-slate-400 hover:text-slate-200 hover:bg-white/5 active:scale-[0.98]"
-                    }`}
-                  >
-                    <Server className="w-4 h-4 shrink-0" />
-                    Services
-                  </button>
-                  <button
+                  />
+                  <NavButton
+                    icon={Network}
+                    label="Local Models"
+                    active={activePage === "ollama"}
                     onClick={() => setActivePage("ollama")}
-                    className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer transition ${
-                      activePage === "ollama"
-                        ? "bg-white/5 text-[var(--color-accent-teal,#06b6d4)] font-semibold border-l-2 border-[var(--color-accent-teal)]"
-                        : "text-slate-400 hover:text-slate-200 hover:bg-white/5 active:scale-[0.98]"
-                    }`}
-                  >
-                    <Network className="w-4 h-4 shrink-0" />
-                    Local Models
-                  </button>
+                  />
+                  <NavButton
+                    icon={Puzzle}
+                    label="Extensions"
+                    active={activePage === "extensions"}
+                    onClick={() => setActivePage("extensions")}
+                  />
                 </div>
               </div>
 
               {/* Category: SYSTEM */}
               <div className="space-y-1.5">
-                <h3 className="px-2 text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">
+                <h3 className="px-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
                   System
                 </h3>
                 <div className="space-y-0.5">
-                  <button
+                  <NavButton
+                    icon={Cpu}
+                    label="Hardware"
+                    active={activePage === "hardware"}
                     onClick={() => setActivePage("hardware")}
-                    className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer transition ${
-                      activePage === "hardware"
-                        ? "bg-white/5 text-[var(--color-accent-teal,#06b6d4)] font-semibold border-l-2 border-[var(--color-accent-teal)]"
-                        : "text-slate-400 hover:text-slate-200 hover:bg-white/5 active:scale-[0.98]"
-                    }`}
-                  >
-                    <Cpu className="w-4 h-4 shrink-0" />
-                    Hardware
-                  </button>
+                  />
                   <Link
                     href="/settings"
                     className="w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer text-slate-400 hover:text-slate-200 hover:bg-white/5 active:scale-[0.98] transition"
@@ -939,7 +928,7 @@ export default function Page(): ReactElement {
 
             {/* Sidebar Footer Accent Dot Pickers */}
             <div className="border-t border-white/5 pt-4 flex flex-col gap-2">
-              <span className="px-2 text-[8px] font-mono font-bold tracking-widest text-slate-500 uppercase">
+              <span className="px-2 text-[10px] font-mono font-bold tracking-widest text-slate-500 uppercase">
                 ACCENT THEME
               </span>
               <div className="flex gap-2 px-2">
@@ -1005,10 +994,7 @@ export default function Page(): ReactElement {
 
                 {/* Right Sidebar widgets */}
                 <div className="hidden xl:flex h-full">
-                  <InsightRail
-                    onStartBackgroundTask={sendBackgroundTaskStart}
-                    onCancelBackgroundTask={sendBackgroundTaskCancel}
-                  />
+                  <InsightRail />
                 </div>
               </>
             )}
@@ -1017,21 +1003,19 @@ export default function Page(): ReactElement {
             {activePage === "memories" && <MemoriesView />}
             {activePage === "hardware" && <HardwareView />}
             {activePage === "files" && <FilesView />}
-            {activePage === "docker" && <DockerView />}
+            {activePage === "docker" && <ServicesView />}
             {activePage === "ollama" && <OllamaView />}
+            {activePage === "extensions" && <ExtensionsView />}
             
             {activePage === "desktop" && (
               <div className="flex-1 bg-zinc-950 p-6 flex flex-col overflow-y-auto scrollbar animate-[rise_0.2s_ease-out]">
                 <div className="border-b border-white/5 pb-3 mb-6">
                   <h2 className="font-display text-xl font-bold uppercase tracking-wide flex items-center gap-2">
-                    <Monitor className="w-5 h-5 text-cyan-400" />
+                    <Monitor className="w-5 h-5 text-slate-400" />
                     Desktop control live feed
                   </h2>
                 </div>
-                <InsightRail
-                  onStartBackgroundTask={sendBackgroundTaskStart}
-                  onCancelBackgroundTask={sendBackgroundTaskCancel}
-                />
+                <InsightRail />
               </div>
             )}
           </div>

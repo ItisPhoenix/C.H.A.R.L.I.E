@@ -78,6 +78,62 @@ from charlie.extensions import ExtensionManager, InstalledExtension  # noqa: E40
 _extension_manager = ExtensionManager()
 
 
+def _save_extensions() -> None:
+    """Persist installed extensions to disk so they survive a web-server
+    restart -- see lifespan()'s startup reload for the counterpart."""
+    try:
+        data = [
+            {
+                "name": e.name,
+                "kind": e.kind,
+                "source": e.source,
+                "raw_text": e.raw_text,
+                "enabled": e.enabled,
+            }
+            for e in _extension_manager.list()
+        ]
+        with open(config.extensions_state_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        logger.warning("Failed to save extensions state", exc_info=True)
+
+
+def _load_extensions() -> None:
+    """Reload previously-installed extensions on web-server startup -- the
+    counterpart to _save_extensions(). Each entry was already approved once
+    (the propose/confirm gate ran at original install time), so a restart
+    restores prior state without re-prompting. One bad entry is logged and
+    skipped rather than blocking the rest or server startup."""
+    from charlie.extensions import build_skill_card
+
+    try:
+        with open(config.extensions_state_path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+    except FileNotFoundError:
+        return
+    except Exception:
+        logger.warning("Failed to read extensions state file", exc_info=True)
+        return
+
+    for entry in entries:
+        name = entry.get("name", "")
+        kind = entry.get("kind", "")
+        source = entry.get("source", "")
+        raw_text = entry.get("raw_text", "")
+        enabled = bool(entry.get("enabled", True))
+        try:
+            tool_names: List[str] = _install_extension(kind, name, source, raw_text) if enabled else []
+            card = build_skill_card(name, source or kind, tool_names, raw_text or name)
+            _extension_manager.record(
+                InstalledExtension(
+                    name=name, kind=kind, source=source, card=card,
+                    enabled=enabled, tool_names=tool_names, raw_text=raw_text,
+                )
+            )
+        except Exception:
+            logger.warning("Failed to reload extension '%s' on startup", name, exc_info=True)
+
+
 def _builtin_plugin(name: str):
     from charlie.extensions.install import builtin_plugin
 
@@ -179,6 +235,8 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Web plugin subsystem failed to initialize: %s", e)
 
+    _load_extensions()
+
     event_bus = EventBus(
         pub_port=DEFAULT_EVENT_PORT,
         pull_port=DEFAULT_COMMAND_PORT,
@@ -279,8 +337,9 @@ async def _event_bridge():
 
         # Keep web server cached state in sync
         if etype == "system_status":
-            global _system_status
+            global _system_status, _system_status_received_at
             _system_status = event.get("payload", {})
+            _system_status_received_at = time.time()
         elif etype == "audio_state":
             global _audio_state
             _audio_state = event.get("payload", {})
@@ -507,6 +566,9 @@ _system_status: dict = {
     "ram": 0.0,
     "gpu": 0.0,
 }
+# Age of _system_status is a real liveness signal for the voice process --
+# it emits this roughly once/sec, so a stale value means that process is down.
+_system_status_received_at: float = 0.0
 _active_frontend_session: str | None = None
 _audio_state: dict = {
     "muted": False,
@@ -552,6 +614,27 @@ async def get_memory_facts():
         except Exception as e:
             logger.error(f"Error fetching facts: {e}", exc_info=True)
     return {"facts": []}
+
+
+@app.get("/api/tools")
+async def get_registered_tools():
+    """Return every tool in the shared registry -- unlike /api/mcp/tools
+    (MCP-prefixed subset only), this is the true total the dashboard's
+    Registered Tools count should reflect.
+
+    Must ensure the MCP client itself first -- the dashboard never calls
+    /api/mcp/tools or /api/mcp/status, so without this the MCP subprocess
+    never boots and mcp_-prefixed tools never join the registry, even with
+    MCP_ENABLED=true and servers configured."""
+    try:
+        from charlie.tools import registry
+
+        if config.mcp_enabled:
+            await _ensure_mcp_client_async()
+        return {"tools": registry.get_tool_definitions()}
+    except Exception as e:
+        logger.error(f"Error fetching registered tools: {e}")
+    return {"tools": []}
 
 
 @app.get("/api/mcp/tools")
@@ -669,9 +752,11 @@ async def confirm_extension(data: dict):
 
     _extension_manager.record(
         InstalledExtension(
-            name=card.name, kind=kind, source=source, card=card, tool_names=tool_names
+            name=card.name, kind=kind, source=source, card=card, tool_names=tool_names,
+            raw_text=raw_text,
         )
     )
+    _save_extensions()
     await _forward_to_voice(
         "extension_installed",
         {"kind": kind, "name": card.name, "source": source, "raw_text": raw_text},
@@ -703,6 +788,7 @@ async def enable_extension(name: str):
 
     ext.enabled = True
     ext.tool_names = tool_names
+    _save_extensions()
     await _forward_to_voice("extension_enabled", {"kind": ext.kind, "name": name})
     return {"status": "ok", "tool_names": tool_names}
 
@@ -731,6 +817,7 @@ async def disable_extension(name: str):
     # doesn't do (see ExtensionManager's docstring).
 
     ext.enabled = False
+    _save_extensions()
     await _forward_to_voice("extension_disabled", {"kind": ext.kind, "name": name})
     return {"status": "ok"}
 
@@ -754,6 +841,7 @@ async def uninstall_extension(name: str):
             registry.unregister_tool(tool_name)
 
     _extension_manager.remove(name)
+    _save_extensions()
     await _forward_to_voice(
         "extension_uninstalled", {"kind": ext.kind, "name": name, "tool_names": ext.tool_names}
     )
@@ -904,24 +992,38 @@ async def delete_memory_fact(subject: str, predicate: str, object: str):
         except Exception as e:
             logger.error(f"Error deleting fact: {e}", exc_info=True)
             return {"status": "error", "message": str(e)}
+_WORKSPACE_IGNORED_DIRS = {"node_modules", "venv", "__pycache__", "dist", "out", ".next"}
+_WORKSPACE_ALLOWED_EXTS = {".py", ".md", ".json", ".css", ".ts", ".tsx", ".js", ".html"}
+
+
+def _scan_workspace_files() -> list[str]:
+    """os.walk with in-place dirname pruning -- never descends into node_modules/
+    .git/venv in the first place, unlike Path.rglob('*') which walks everything
+    and filters after (blocked the whole event loop on this repo's frontend/
+    node_modules tree, since this used to run inline in the async endpoint)."""
+    import os as _os
+    from pathlib import Path
+    root_dir = Path(__file__).parent.parent
+    files_list = []
+    for dirpath, dirnames, filenames in _os.walk(root_dir):
+        dirnames[:] = [
+            d for d in dirnames if not d.startswith(".") and d not in _WORKSPACE_IGNORED_DIRS
+        ]
+        for name in filenames:
+            if Path(name).suffix in _WORKSPACE_ALLOWED_EXTS:
+                rel = (Path(dirpath) / name).relative_to(root_dir).as_posix()
+                files_list.append(rel)
+    return sorted(files_list)
+
+
 @app.get("/api/workspace/files")
 async def list_workspace_files():
     """Return real tree structure of workspace files."""
-    from pathlib import Path
-    root_dir = Path(__file__).parent.parent
-    allowed_exts = {".py", ".md", ".json", ".css", ".ts", ".tsx", ".js", ".html"}
-    files_list = []
     try:
-        for p in root_dir.rglob("*"):
-            if p.is_file() and p.suffix in allowed_exts:
-                rel = p.relative_to(root_dir).as_posix()
-                parts = p.relative_to(root_dir).parts
-                ignored = (".", "node_modules", "venv", "__pycache__", "dist", "out")
-                if not any(part.startswith(".") or part in ignored for part in parts):
-                    files_list.append(rel)
+        return {"files": await asyncio.to_thread(_scan_workspace_files)}
     except Exception as e:
         logger.error(f"Error listing workspace files: {e}", exc_info=True)
-    return {"files": sorted(files_list)}
+    return {"files": []}
 
 
 @app.get("/api/workspace/file")
@@ -936,6 +1038,44 @@ async def get_workspace_file(path: str):
     try:
         content = target.read_text(encoding="utf-8", errors="ignore")
         return {"path": path, "content": content}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/workspace/file")
+async def put_workspace_file(data: dict):
+    """Create or overwrite a workspace file (edit-save and new-file share
+    this endpoint -- PUT is create-or-replace either way)."""
+    from fastapi import HTTPException
+    from pathlib import Path
+    path = data.get("path", "")
+    content = data.get("content", "")
+    if not path or Path(path).suffix not in _WORKSPACE_ALLOWED_EXTS:
+        raise HTTPException(status_code=400, detail="Invalid path or extension")
+    root_dir = Path(__file__).parent.parent
+    target = (root_dir / path).resolve()
+    if not str(target).startswith(str(root_dir)):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return {"path": path, "status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/workspace/file")
+async def delete_workspace_file(path: str):
+    """Delete a workspace file."""
+    from fastapi import HTTPException
+    from pathlib import Path
+    root_dir = Path(__file__).parent.parent
+    target = (root_dir / path).resolve()
+    if not str(target).startswith(str(root_dir)) or not target.exists() or not target.is_file():
+        raise HTTPException(status_code=400, detail="Invalid path")
+    try:
+        target.unlink()
+        return {"path": path, "deleted": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1063,21 +1203,84 @@ async def get_local_models():
     }
 
 
+_OLLAMA_PULL_TIMEOUT = 600.0  # model downloads can take minutes
+
+
+@app.post("/api/local_models/pull")
+async def pull_local_model(data: dict):
+    """Pull a model into local Ollama (POST :11434/api/pull, non-streaming)."""
+    from fastapi import HTTPException
+    import httpx
+
+    name = data.get("name", "")
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    try:
+        async with httpx.AsyncClient(timeout=_OLLAMA_PULL_TIMEOUT) as client:
+            r = await client.post(
+                "http://127.0.0.1:11434/api/pull", json={"name": name, "stream": False}
+            )
+            r.raise_for_status()
+            return {"status": "ok", "name": name}
+    except Exception as e:
+        logger.warning("Ollama pull failed for %s: %s", name, e)
+        raise HTTPException(status_code=502, detail=f"Ollama pull failed: {e}")
+
+
+@app.delete("/api/local_models/{name}")
+async def delete_local_model(name: str):
+    """Delete a model from local Ollama (DELETE :11434/api/delete)."""
+    from fastapi import HTTPException
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.request(
+                "DELETE", "http://127.0.0.1:11434/api/delete", json={"name": name}
+            )
+            r.raise_for_status()
+            return {"status": "ok", "name": name}
+    except Exception as e:
+        logger.warning("Ollama delete failed for %s: %s", name, e)
+        raise HTTPException(status_code=502, detail=f"Ollama delete failed: {e}")
+
+
+_VOICE_PROCESS_STALE_SECONDS = 5.0  # main.py emits system_status ~once/sec
+
+
 @app.get("/api/services/status")
 async def get_services_status():
-    """Return status of real Charlie system processes and services."""
+    """Return status of real Charlie system processes and services -- each
+    entry below is a real check, not a hardcoded literal."""
+    voice_alive = (time.time() - _system_status_received_at) < _VOICE_PROCESS_STALE_SECONDS
+    voice_status = "online" if voice_alive else "offline"
+
+    try:
+        _get_store().get_sessions()
+        session_store_status = "online"
+    except Exception:
+        session_store_status = "offline"
+
+    # ponytail: path-exists check, not a live query -- instantiating
+    # MemoryStore loads an embedding model, too expensive for a status poll.
+    # Upgrade to a real connectivity probe if this ever needs to catch a
+    # corrupt/locked store, not just a missing one.
+    memory_store_status = "online" if os.path.exists(config.memory_db_path) else "offline"
+
     return {
         "services": [
             {
                 "name": "Voice Pipeline Engine",
-                "status": "online",
-                "details": "sounddevice mic capture + Kokoro TTS synthesis",
+                "status": voice_status,
+                "details": "sounddevice mic capture + Kokoro TTS synthesis"
+                if voice_alive else "No recent system_status from the voice process",
                 "type": "audio",
             },
             {
                 "name": "Whisper ASR Worker",
-                "status": "online",
-                "details": "distil-large-v3 CUDA subprocess",
+                "status": voice_status,
+                "details": "distil-large-v3 CUDA subprocess (shares the voice "
+                "process's liveness signal with Voice Pipeline Engine above)",
                 "type": "speech_to_text",
             },
             {
@@ -1088,19 +1291,19 @@ async def get_services_status():
             },
             {
                 "name": "ZeroMQ EventBus Bridge",
-                "status": "online",
+                "status": "online" if event_bus is not None else "offline",
                 "details": f"PUB/SUB IPC ports {DEFAULT_EVENT_PORT}/{DEFAULT_COMMAND_PORT}",
                 "type": "ipc",
             },
             {
                 "name": "SQLite SessionStore",
-                "status": "online",
+                "status": session_store_status,
                 "details": "FTS5 isolated session history database",
                 "type": "database",
             },
             {
                 "name": "ChromaDB MemoryStore",
-                "status": "online",
+                "status": memory_store_status,
                 "details": "Vector memory embedding store",
                 "type": "vector_db",
             },
