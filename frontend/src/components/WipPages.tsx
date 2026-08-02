@@ -2,9 +2,10 @@
 
 import { useEffect, useState, useMemo, useCallback, type ReactElement } from "react";
 import {
-  Database, Cpu, HardDrive, FileCode, AlertCircle, Trash2, Search, Globe, Monitor, RefreshCw, Server, Puzzle, Plus, Power, Save
+  Database, Cpu, HardDrive, FileCode, AlertCircle, Trash2, Search, Globe, Monitor, RefreshCw, Server, Puzzle, Plus, Power, Save,
+  GitBranch, Circle, CheckCircle2, XCircle, Clock, X
 } from "lucide-react";
-import { useCharlieStore } from "../store/useCharlieStore";
+import { useCharlieStore, type AgentRun } from "../store/useCharlieStore";
 import { Button } from "./Button";
 
 interface FactItem {
@@ -389,7 +390,7 @@ export function FilesView(): ReactElement {
   };
 
   return (
-    <div className="flex-1 p-6 space-y-6 overflow-y-auto scrollbar animate-[rise_0.2s_ease-out] select-none">
+    <div className="flex-1 p-6 space-y-6 overflow-y-auto scrollbar animate-[rise_0.2s_ease-out]">
       <div className="border-b border-white/5 pb-3 flex justify-between items-end">
         <div>
           <h2 className="font-display text-xl font-bold uppercase tracking-wide flex items-center gap-2">
@@ -1049,6 +1050,103 @@ export function ExtensionsView(): ReactElement {
           ))
         )}
       </div>
+    </div>
+  );
+}
+
+const AGENT_STATUS_STYLE: Record<AgentRun["status"], { icon: typeof Circle; className: string; label: string }> = {
+  running: { icon: Circle, className: "text-cyan-400 fill-cyan-400/20 animate-pulse", label: "running" },
+  done: { icon: CheckCircle2, className: "text-emerald-400 fill-black", label: "done" },
+  timeout: { icon: Clock, className: "text-amber-400", label: "timed out" },
+  cancelled: { icon: XCircle, className: "text-slate-500", label: "cancelled" },
+};
+
+function AgentRunCard({ run, onCancel }: { run: AgentRun; onCancel: (agentId: string) => void }): ReactElement {
+  const { icon: StatusIcon, className, label } = AGENT_STATUS_STYLE[run.status];
+  const durationMs = run.finishedAt ? run.finishedAt - run.spawnedAt : null;
+  const durationLabel = durationMs === null ? null : durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`;
+
+  return (
+    <div className="p-3 rounded-lg bg-zinc-900/40 border border-white/5 space-y-1.5 font-mono text-xs">
+      <div className="flex items-center justify-between">
+        <span className="flex items-center gap-1.5">
+          <StatusIcon className={`w-3.5 h-3.5 shrink-0 ${className}`} />
+          <span className="uppercase text-[10px] font-bold text-slate-400">{label}</span>
+        </span>
+        {durationLabel && <span className="text-[10px] text-slate-600">{durationLabel}</span>}
+      </div>
+      <p className="text-slate-300 break-words">{run.task}</p>
+      {run.lastTool && run.status === "running" && (
+        <p className="text-[10px] text-slate-500">using: {run.lastTool}</p>
+      )}
+      {run.result && (
+        <p className="text-[10px] text-slate-500 pl-2 border-l border-white/5 break-words">{run.result}</p>
+      )}
+      {run.status === "running" && (
+        <Button size="sm" variant="danger" onClick={() => onCancel(run.agentId)}>
+          <X className="w-3 h-3" /> Cancel
+        </Button>
+      )}
+    </div>
+  );
+}
+
+export function AgentsView(): ReactElement {
+  const agentRuns = useCharlieStore((s) => s.agentRuns);
+
+  const handleCancel = useCallback(async (agentId: string) => {
+    try {
+      await fetch(`/api/agents/${encodeURIComponent(agentId)}/cancel`, { method: "POST" });
+    } catch {
+      // ignore -- the agent_result WS event (or lack thereof) is the real signal
+    }
+  }, []);
+
+  // Group by session so each turn's spawned agents render as a cluster
+  // (a parent-child tree without a fixed pipeline shape -- roles are dynamic).
+  const groups = useMemo(() => {
+    const bySession = new Map<string, AgentRun[]>();
+    for (const run of agentRuns) {
+      const key = run.sessionId || "unknown";
+      const list = bySession.get(key) || [];
+      list.push(run);
+      bySession.set(key, list);
+    }
+    return Array.from(bySession.entries());
+  }, [agentRuns]);
+
+  return (
+    <div className="flex-1 p-6 space-y-6 overflow-y-auto scrollbar animate-[rise_0.2s_ease-out]">
+      <div className="border-b border-white/5 pb-3">
+        <h2 className="font-display text-xl font-bold uppercase tracking-wide flex items-center gap-2">
+          <GitBranch className="w-5 h-5 text-slate-400" />
+          Agents
+        </h2>
+        <p className="text-xs text-slate-500 font-mono mt-1">
+          Sub-agents delegated via spawn_agent, grouped by conversation turn
+        </p>
+      </div>
+
+      {groups.length === 0 ? (
+        <p className="text-slate-500 italic py-4 font-mono text-xs">
+          No agents spawned yet -- most turns handle work directly without delegating.
+        </p>
+      ) : (
+        <div className="space-y-5">
+          {groups.map(([sessionId, runs]) => (
+            <div key={sessionId} className="relative pl-4 border-l border-white/10 space-y-2">
+              <span className="text-[10px] text-slate-500 uppercase tracking-wider font-bold font-mono">
+                Session {sessionId === "unknown" ? "unknown" : sessionId.slice(0, 8)}
+              </span>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {runs.map((run) => (
+                  <AgentRunCard key={run.agentId} run={run} onCancel={handleCancel} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

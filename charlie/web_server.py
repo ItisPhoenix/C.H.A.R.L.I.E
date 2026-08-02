@@ -848,6 +848,15 @@ async def uninstall_extension(name: str):
     return {"status": "ok"}
 
 
+@app.post("/api/agents/{agent_id}/cancel")
+async def cancel_agent(agent_id: str):
+    """Cancel a running sub-agent. Brain.spawn_agent's own on_agent_result
+    callback emits the graceful cancelled result -- no separate emit here."""
+    if event_bus:
+        await event_bus.send_command({"type": "cancel_agent", "payload": {"agent_id": agent_id}})
+    return {"status": "ok"}
+
+
 @app.post("/api/session/active")
 async def set_active_session(data: dict):
     """Frontend signals which session is active (for voice routing)."""

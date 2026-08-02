@@ -21,7 +21,10 @@ interface SessionRailProps {
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
   onExport: () => void;
-  onScopeChange: (target: "all" | "this_launch") => void;
+  /** "column": fixed-width bordered aside (default). "accordion": fills its
+   * parent's width instead, no border/shadow of its own -- for embedding
+   * inline inside another bordered container (e.g. a sidebar dropdown). */
+  variant?: "column" | "accordion";
 }
 
 function relativeTime(iso?: string): string {
@@ -84,13 +87,12 @@ export function SessionRail({
   onRename,
   onDelete,
   onExport,
-  onScopeChange,
+  variant = "column",
 }: SessionRailProps): ReactElement {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [filterQuery, setFilterQuery] = useState("");
 
-  const scope = useCharlieStore((s) => s.sessionScope);
   const accentColor = useCharlieStore((s) => s.accentColor);
 
   const startRename = (s: SessionItem) => {
@@ -171,10 +173,18 @@ export function SessionRail({
     );
   }
 
-  // Full Expanded 240px Rail
+  // Full Expanded 240px Rail (or, in "accordion" variant, an in-flow block
+  // that fills its parent's width -- no border/fixed-width of its own since
+  // the parent (sidebar dropdown) already provides those).
   return (
-    <aside className="w-60 shrink-0 border-r border-[var(--color-glass-border)] bg-zinc-950/40 p-4 flex flex-col justify-between select-none font-sans">
-      <div className="space-y-4">
+    <aside
+      className={
+        variant === "accordion"
+          ? "w-full flex flex-col select-none font-sans"
+          : "w-60 shrink-0 border-r border-[var(--color-glass-border)] bg-zinc-950/40 p-4 flex flex-col justify-between select-none font-sans"
+      }
+    >
+      <div className={variant === "accordion" ? "space-y-3 p-3" : "space-y-4"}>
         {/* Top Header Controls */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -206,30 +216,6 @@ export function SessionRail({
           </div>
         </div>
 
-        {/* Scope selector tabs */}
-        <div className="grid grid-cols-2 p-1 bg-zinc-950/80 border border-white/5 rounded-lg text-[10px] font-mono select-none">
-          <button
-            onClick={() => onScopeChange("this_launch")}
-            className={`py-1 rounded-md transition font-semibold ${
-              scope === "this_launch"
-                ? "bg-white/10 text-slate-100 shadow"
-                : "text-slate-500 hover:text-slate-300"
-            }`}
-          >
-            This Launch
-          </button>
-          <button
-            onClick={() => onScopeChange("all")}
-            className={`py-1 rounded-md transition font-semibold ${
-              scope === "all"
-                ? "bg-white/10 text-slate-100 shadow"
-                : "text-slate-500 hover:text-slate-300"
-            }`}
-          >
-            All History
-          </button>
-        </div>
-
         {/* Local Search input */}
         <div className="relative">
           <Search className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-slate-500 pointer-events-none" />
@@ -243,7 +229,7 @@ export function SessionRail({
         </div>
 
         {/* Sessions List Grouped by Time */}
-        <div className="space-y-4 max-h-[calc(100vh-290px)] overflow-y-auto pr-1 scrollbar">
+        <div className={`space-y-4 overflow-y-auto pr-1 scrollbar ${variant === "accordion" ? "max-h-72" : "max-h-[calc(100vh-290px)]"}`}>
           {Object.entries(grouped).map(([groupName, groupItems]) => {
             if (groupItems.length === 0) return null;
             return (
@@ -339,7 +325,9 @@ export function SessionRail({
       {/* Export Footer button */}
       <button
         onClick={onExport}
-        className="w-full py-2 px-3 rounded-xl border border-white/5 bg-zinc-900/40 hover:bg-white/5 text-xs font-mono text-slate-400 hover:text-slate-200 transition flex items-center justify-center gap-2 cursor-pointer active:scale-98"
+        className={`w-full py-2 px-3 rounded-xl border border-white/5 bg-zinc-900/40 hover:bg-white/5 text-xs font-mono text-slate-400 hover:text-slate-200 transition flex items-center justify-center gap-2 cursor-pointer active:scale-98 ${
+          variant === "accordion" ? "mt-1 mx-3 w-[calc(100%-1.5rem)]" : ""
+        }`}
       >
         <Download className="w-3.5 h-3.5" />
         Export History

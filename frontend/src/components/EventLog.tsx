@@ -163,7 +163,7 @@ export function EventLog(): ReactElement {
 
   // Full Expanded Console View
   return (
-    <div className="flex bg-zinc-950 border border-[var(--color-glass-border)] rounded-xl h-60 overflow-hidden mx-4 mb-2 select-none transition-all">
+    <div className="flex bg-zinc-950 border border-[var(--color-glass-border)] rounded-xl h-60 overflow-hidden mx-4 mb-2 transition-all">
       
       {/* Left: System Overview Dashboard Panel */}
       {showSystemOverview && (

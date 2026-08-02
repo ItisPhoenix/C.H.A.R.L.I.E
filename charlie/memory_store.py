@@ -24,6 +24,9 @@ _FACT_EXTRACT_MODEL = ""
 # Studio is still loading the embedding model when Charlie boots.
 _EMBEDDING_RETRY_ATTEMPTS = 3
 _EMBEDDING_RETRY_DELAY_SEC = 2.0
+# Re-add documents in chunks during dimension-mismatch recovery so one
+# recovery doesn't send a single giant embedding request.
+_REEMBED_BATCH_SIZE = 100
 
 
 class _RemoteEmbeddingFunction:
@@ -158,7 +161,15 @@ class MemoryStore:
             import chromadb
 
             client = chromadb.PersistentClient(path=self.db_path)
-            self._collection = client.get_or_create_collection(
+
+            fresh = None
+            try:
+                active_dim = len(self._ef.embed_query(["dimension probe"])[0])
+                fresh = self._reembed_mismatched_collection(client, active_dim)
+            except Exception:
+                logger.debug("Dimension-mismatch check skipped", exc_info=True)
+
+            self._collection = fresh or client.get_or_create_collection(
                 name=_COLLECTION_NAME,
                 embedding_function=self._ef,
                 metadata={"hnsw:space": "cosine"},
@@ -171,6 +182,58 @@ class MemoryStore:
         except Exception as e:
             logger.error("Failed to initialize ChromaDB: %s", e, exc_info=True)
             self._collection = None
+
+    def _reembed_mismatched_collection(self, client: Any, active_dim: int) -> Optional[Any]:
+        """If the persisted collection's stored embedding dimension differs
+        from the active embedding function's output (e.g. the primary
+        embedding service was swapped for the local fallback, or vice
+        versa), re-embed its existing documents under a fresh collection
+        instead of leaving every future add/search permanently broken.
+        Returns the fresh collection, or None if there was nothing to
+        recover (no existing collection, it's empty, or dims already
+        match)."""
+        try:
+            existing = client.get_collection(name=_COLLECTION_NAME)
+        except Exception:
+            return None
+
+        try:
+            peek = existing.get(limit=1, include=["embeddings"])
+            stored_embeddings = peek.get("embeddings")
+            if stored_embeddings is None or len(stored_embeddings) == 0:
+                return None
+            stored_dim = len(stored_embeddings[0])
+            if stored_dim == active_dim:
+                return None
+        except Exception:
+            logger.debug("Could not check existing memory collection's dimension", exc_info=True)
+            return None
+
+        doc_count = existing.count()
+        logger.warning(
+            "Memory collection embedding dimension mismatch (stored=%d, active=%d) -- "
+            "re-embedding %d existing memories instead of leaving them permanently broken.",
+            stored_dim, active_dim, doc_count,
+        )
+        all_docs = existing.get(include=["documents", "metadatas"])
+        ids = all_docs.get("ids") or []
+        documents = all_docs.get("documents") or []
+        metadatas = all_docs.get("metadatas") or []
+
+        client.delete_collection(name=_COLLECTION_NAME)
+        fresh = client.get_or_create_collection(
+            name=_COLLECTION_NAME,
+            embedding_function=self._ef,
+            metadata={"hnsw:space": "cosine"},
+        )
+        for i in range(0, len(ids), _REEMBED_BATCH_SIZE):
+            fresh.add(
+                ids=ids[i : i + _REEMBED_BATCH_SIZE],
+                documents=documents[i : i + _REEMBED_BATCH_SIZE],
+                metadatas=metadatas[i : i + _REEMBED_BATCH_SIZE],
+            )
+        logger.info("Re-embedded %d memories into a fresh %d-dim collection.", len(ids), active_dim)
+        return fresh
 
     @property
     def is_available(self) -> bool:

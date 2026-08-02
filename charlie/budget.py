@@ -19,6 +19,10 @@ class IterationBudget:
             "shell_execute": 1,
             "file_read": 1,
             "file_write": 1,
+            # Costs more than a single tool call because it runs its own internal
+            # sub-loop of up to 8 tool calls -- keeps repeated failed retries from
+            # quietly burning the whole turn budget before the user hears about it.
+            "spawn_agent": 3,
         }
     )
 

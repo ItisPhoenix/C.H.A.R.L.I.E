@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
 import {
   Check, Copy, AlertTriangle, ShieldAlert, Sparkles,
-  Circle, CheckCircle2, Terminal, ChevronDown, ChevronUp
+  Circle, CheckCircle2, XCircle, Terminal, ChevronDown, ChevronUp
 } from "lucide-react";
 import { useCharlieStore, type ToolActivityEntry, type RecoveryProposal, type ToolApprovalRequest, rgba } from "../store/useCharlieStore";
 import { Button } from "./Button";
@@ -160,7 +160,16 @@ export function ChatView({
 }: ChatViewProps): ReactElement {
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const isSubmittingRef = useRef(false);
+
+  // Grow the textarea with content up to max-h-32 (128px), then let it scroll internally.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
+  }, [input]);
   const connected = useCharlieStore((s) => s.connected);
   const accentColor = useCharlieStore((s) => s.accentColor);
   const [stepperExpanded, setStepperExpanded] = useState(true);
@@ -417,23 +426,46 @@ export function ChatView({
               {toolActivity.map((t, idx) => {
                 const isCall = t.kind === "tool_call";
                 const isResult = t.kind === "tool_result";
-                
+                const isAgentResult = t.kind === "agent_result";
+                const agentFailed = isAgentResult && /error|timed out|cancelled/i.test(t.text);
+
                 // Color dots depending on type
                 let bullet = <Circle className="w-3 h-3 text-purple-400 fill-purple-400/20 animate-pulse absolute -left-[6.5px]" />;
                 if (isResult) {
                   bullet = <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 fill-black absolute -left-[7px]" />;
                 } else if (t.kind === "thinking_update") {
                   bullet = <Circle className="w-3 h-3 text-cyan-400 fill-cyan-400/20 animate-pulse absolute -left-[6.5px]" />;
+                } else if (t.kind === "agent_spawned") {
+                  bullet = <Circle className="w-3 h-3 text-indigo-400 fill-indigo-400/20 animate-pulse absolute -left-[6.5px]" />;
+                } else if (t.kind === "agent_status") {
+                  bullet = <Circle className="w-3 h-3 text-amber-400 fill-amber-400/20 animate-pulse absolute -left-[6.5px]" />;
+                } else if (isAgentResult) {
+                  bullet = agentFailed
+                    ? <XCircle className="w-3.5 h-3.5 text-red-400 fill-black absolute -left-[7px]" />
+                    : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 fill-black absolute -left-[7px]" />;
                 }
+
+                const labelClass = isCall
+                  ? "bg-purple-950/60 text-purple-300"
+                  : isResult
+                    ? "bg-emerald-950/60 text-emerald-300"
+                    : t.kind === "thinking_update"
+                      ? "bg-cyan-950/60 text-cyan-300"
+                      : t.kind === "agent_spawned"
+                        ? "bg-indigo-950/60 text-indigo-300"
+                        : t.kind === "agent_status"
+                          ? "bg-amber-950/60 text-amber-300"
+                          : agentFailed
+                            ? "bg-red-950/60 text-red-300"
+                            : "bg-emerald-950/60 text-emerald-300";
+                const label = t.kind.startsWith("agent_") ? t.kind.replace("agent_", "agent ") : t.kind.replace("tool_", "");
 
                 return (
                   <div key={idx} className="relative flex flex-col text-[11px] font-mono leading-relaxed">
                     {bullet}
                     <div className="flex items-center gap-2">
-                      <span className={`uppercase text-[10px] px-1 rounded ${
-                        isCall ? "bg-purple-950/60 text-purple-300" : isResult ? "bg-emerald-950/60 text-emerald-300" : "bg-cyan-950/60 text-cyan-300"
-                      }`}>
-                        {t.kind.replace("tool_", "")}
+                      <span className={`uppercase text-[10px] px-1 rounded ${labelClass}`}>
+                        {label}
                       </span>
                       <span className="text-slate-300 font-semibold">{t.name}</span>
                     </div>
@@ -454,6 +486,7 @@ export function ChatView({
       <div className="px-6 py-4 border-t border-[var(--color-glass-border)] shrink-0">
         <div className="flex items-center gap-3 bg-zinc-900/40 rounded-xl border border-[var(--color-glass-border)] px-4 py-2 transition-colors focus-within:border-[var(--color-glass-border-hover)] focus-within:bg-zinc-900/60">
           <textarea
+            ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {

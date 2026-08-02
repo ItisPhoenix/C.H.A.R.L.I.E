@@ -221,6 +221,30 @@ class TestBrowserPlugin:
         with pytest.raises(ValueError, match="Unknown tool"):
             plugin.call_tool("nonexistent", {})
 
+    def test_fetch_uses_utf8_encoding_not_locale_default(self, monkeypatch):
+        """Regression: text=True let Windows' cp1252 default choke on real
+        UTF-8 web content -- crashed a subprocess reader thread live."""
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured.update(kwargs)
+
+            class FakeResult:
+                returncode = 0
+                stdout = "ok"
+                stderr = ""
+
+            return FakeResult()
+
+        monkeypatch.setattr("charlie.plugins.subprocess.run", fake_run)
+        plugin = BrowserPlugin()
+        result = plugin.call_tool("browser_fetch", {"url": "https://example.com"})
+
+        assert captured.get("encoding") == "utf-8"
+        assert captured.get("errors") == "replace"
+        assert "text" not in captured
+        assert result["content"] == "ok"
+
 
 class TestCalendarPlugin:
     def test_name_and_description(self):
@@ -265,6 +289,16 @@ class TestCodeExecPlugin:
         plugin = CodeExecPlugin()
         result = plugin.call_tool("code_exec_python", {"code": "raise ValueError('bad')"})
         assert result["returncode"] != 0
+
+    def test_exec_python_non_ascii_output_does_not_crash(self):
+        """Regression: text=True defaulted to cp1252 on Windows, which raises
+        UnicodeDecodeError on real non-cp1252 output instead of decoding it."""
+        plugin = CodeExecPlugin()
+        result = plugin.call_tool(
+            "code_exec_python", {"code": "print('caf\\u00e9 \\u4e2d\\u6587')"}
+        )
+        assert result["returncode"] == 0
+        assert "caf" in result["output"]
 
     def test_exec_rejects_dangerous_code(self):
         plugin = CodeExecPlugin()

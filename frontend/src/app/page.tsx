@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, useMemo, type ReactElement } 
 import Link from "next/link";
 import {
   MessageSquare, Monitor, Database, Cpu, Settings, Shield, Bell, Search, Mic, MicOff,
-  FolderGit, Network, RefreshCw, Check, X, Menu, Server, Puzzle
+  FolderGit, Network, RefreshCw, Check, X, Menu, Server, Puzzle, GitBranch, ChevronDown
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useCharlieStore, rgba, lighten, type Session, type Message } from "../store/useCharlieStore";
@@ -22,7 +22,7 @@ import { InsightRail } from "../components/InsightRail";
 import { EventLog } from "../components/EventLog";
 import { VoiceDock } from "../components/VoiceDock";
 import {
-  MemoriesView, HardwareView, FilesView, ServicesView, OllamaView, ExtensionsView
+  MemoriesView, HardwareView, FilesView, ServicesView, OllamaView, ExtensionsView, AgentsView
 } from "../components/WipPages";
 
 function getSessionId(msg: WSMessage): string | undefined {
@@ -80,12 +80,10 @@ export default function Page(): ReactElement {
   const audio = useCharlieStore((s) => s.audio);
   const mic = useCharlieStore((s) => s.mic);
   const toolActivity = useCharlieStore((s) => s.toolActivity);
-  const sessionScope = useCharlieStore((s) => s.sessionScope);
   const accentColor = useCharlieStore((s) => s.accentColor);
   const activeProposal = useCharlieStore((s) => s.activeProposal);
   const activeToolApproval = useCharlieStore((s) => s.activeToolApproval);
 
-  const [railCollapsed, setRailCollapsed] = useState(false);
   
   const setConnected = useCharlieStore((s) => s.setConnected);
   const setSystemStatus = useCharlieStore((s) => s.setSystemStatus);
@@ -101,7 +99,6 @@ export default function Page(): ReactElement {
   const setAudioLevel = useCharlieStore((s) => s.setAudioLevel);
   const appendToolActivity = useCharlieStore((s) => s.appendToolActivity);
   const setLaunchId = useCharlieStore((s) => s.setLaunchId);
-  const setSessionScope = useCharlieStore((s) => s.setSessionScope);
   const setDesktopControlEnabled = useCharlieStore((s) => s.setDesktopControlEnabled);
   const setAccentColor = useCharlieStore((s) => s.setAccentColor);
 
@@ -172,13 +169,7 @@ export default function Page(): ReactElement {
     const ctrl = new AbortController();
     abortSessionsRef.current = ctrl;
     
-    let url = "/api/sessions";
-    const scope = useCharlieStore.getState().sessionScope;
-    const lid = useCharlieStore.getState().launchId;
-    if (scope === "this_launch" && lid) {
-      url += `?launch_id=${encodeURIComponent(lid)}`;
-    }
-    const data = await fetchJson(url, ctrl.signal);
+    const data = await fetchJson("/api/sessions", ctrl.signal);
     const list = (data as { sessions: Session[] } | null)?.sessions || [];
     setSessions(list);
     return list;
@@ -365,6 +356,39 @@ export default function Page(): ReactElement {
           const eventSession = getSessionId(msg);
           if (eventSession && eventSession !== currentSessionIdRef.current) return;
           appendToolActivity({ kind: "thinking_update", name: "thinking", text: msg.payload?.text || "", sessionId: eventSession });
+        } else if (msg.type === "agent_spawned") {
+          const eventSession = getSessionId(msg);
+          const agentId = msg.payload?.agent_id || "";
+          const task = msg.payload?.task || "";
+          if (!eventSession || eventSession === currentSessionIdRef.current) {
+            appendToolActivity({ kind: "agent_spawned", name: agentId, text: task, sessionId: eventSession });
+          }
+          store.upsertAgentRun({ agentId, task, status: "running", spawnedAt: Date.now(), sessionId: eventSession });
+        } else if (msg.type === "agent_status") {
+          const eventSession = getSessionId(msg);
+          const agentId = msg.payload?.agent_id || "";
+          const toolName = msg.payload?.tool_name || "";
+          if (!eventSession || eventSession === currentSessionIdRef.current) {
+            appendToolActivity({ kind: "agent_status", name: agentId, text: toolName, sessionId: eventSession });
+          }
+          store.upsertAgentRun({ agentId, lastTool: toolName });
+        } else if (msg.type === "agent_result") {
+          const eventSession = getSessionId(msg);
+          const agentId = msg.payload?.agent_id || "";
+          const result = msg.payload?.result || "";
+          if (!eventSession || eventSession === currentSessionIdRef.current) {
+            appendToolActivity({ kind: "agent_result", name: agentId, text: result, sessionId: eventSession });
+          }
+          const status = result.includes("timed out") ? "timeout" : result.includes("cancelled") ? "cancelled" : "done";
+          store.upsertAgentRun({ agentId, result, status, finishedAt: Date.now() });
+        } else if (msg.type === "agent_cancel_ack") {
+          if (!msg.payload?.found) {
+            store.addAlert({
+              severity: "warn",
+              message: "Could not cancel: agent already finished or not found.",
+              timestamp: new Date().toLocaleTimeString(),
+            });
+          }
         } else if (msg.type === "transcript") {
           const eventSession = getSessionId(msg);
           if (eventSession && eventSession !== currentSessionIdRef.current) return;
@@ -444,22 +468,16 @@ export default function Page(): ReactElement {
       const lid = status && typeof status.launch_id === "string" ? status.launch_id : "";
       if (lid) setLaunchId(lid);
       setDesktopControlEnabled(Boolean(status?.desktop_control_enabled));
-      setSessionScope("this_launch");
 
       if (!useCharlieStore.getState().currentSessionId) {
-        const bootKey = `charlie_boot_session::${lid || "no-launch"}`;
-        const storedBootSid = typeof window !== "undefined" ? window.sessionStorage.getItem(bootKey) : null;
+        const storedLastSid = typeof window !== "undefined" ? window.localStorage.getItem("charlie_last_session") : null;
         const existingSessions = await fetchSessions();
-        const bootSessionStillValid = Boolean(storedBootSid && existingSessions.some((s) => s.id === storedBootSid));
+        const lastSessionStillValid = Boolean(storedLastSid && existingSessions.some((s) => s.id === storedLastSid));
 
-        if (bootSessionStillValid && storedBootSid) {
-          setCurrentSessionId(storedBootSid);
+        if (lastSessionStillValid && storedLastSid) {
+          setCurrentSessionId(storedLastSid);
         } else {
           await handleCreateSession("New Chat");
-          if (typeof window !== "undefined") {
-            const created = useCharlieStore.getState().currentSessionId;
-            if (created) window.sessionStorage.setItem(bootKey, created);
-          }
         }
       } else {
         await fetchSessions();
@@ -485,13 +503,17 @@ export default function Page(): ReactElement {
       }
     };
     void init();
-  }, [fetchSessions, handleCreateSession, setAudio, setMic, fetchJson, setLaunchId, setSessionScope, setDesktopControlEnabled, setCurrentSessionId]);
+  }, [fetchSessions, handleCreateSession, setAudio, setMic, fetchJson, setLaunchId, setDesktopControlEnabled, setCurrentSessionId]);
 
   // Sync active sessions
   useEffect(() => {
     if (currentSessionId) {
       fetchMessages(currentSessionId);
       announceActiveSession(currentSessionId);
+      // Persists across restarts (unlike launch_id, which is a fresh UUID
+      // every process start) so the app resumes the last chat like Claude
+      // web does, instead of always landing on a brand new one.
+      window.localStorage.setItem("charlie_last_session", currentSessionId);
     }
   }, [currentSessionId, fetchMessages, announceActiveSession]);
 
@@ -620,12 +642,6 @@ export default function Page(): ReactElement {
     }
   }, [fetchSessions, currentSessionId, setCurrentSessionId]);
 
-  const toggleSessionScope = useCallback((target: "all" | "this_launch") => {
-    if (target === sessionScope) return;
-    setSessionScope(target);
-    setTimeout(() => void fetchSessions(), 0);
-  }, [sessionScope, setSessionScope, fetchSessions]);
-
   // Model switching core API
   const handleModelSelect = async (modelId: string) => {
     setActiveModel(modelId);
@@ -673,7 +689,7 @@ export default function Page(): ReactElement {
     <ErrorBoundary>
       <div 
         style={{ background: canvasBg }}
-        className="h-screen w-screen flex flex-col overflow-hidden relative font-sans select-none text-[var(--color-text-primary)]"
+        className="h-screen w-screen flex flex-col overflow-hidden relative font-sans text-[var(--color-text-primary)]"
       >
         <ToastContainer />
 
@@ -840,7 +856,11 @@ export default function Page(): ReactElement {
         <div className="flex-1 flex overflow-hidden z-10 p-4 pb-2 gap-4 relative">
           
           {/* Column 1: Left Navigation Sidebar */}
-          <nav className="w-52 shrink-0 border-r border-[var(--color-glass-border)] bg-zinc-950/20 p-4 flex flex-col justify-between select-none">
+          <nav
+            className={`shrink-0 border-r border-[var(--color-glass-border)] bg-zinc-950/20 p-4 flex flex-col justify-between select-none overflow-y-auto scrollbar transition-[width] duration-200 ${
+              mobileMenuOpen ? "w-72" : "w-52"
+            }`}
+          >
             <div className="space-y-6">
               
               {/* Category: MAIN */}
@@ -849,12 +869,42 @@ export default function Page(): ReactElement {
                   Main
                 </h3>
                 <div className="space-y-0.5">
-                  <NavButton
-                    icon={MessageSquare}
-                    label="Chats"
-                    active={activePage === "chats"}
-                    onClick={() => setActivePage("chats")}
-                  />
+                  <button
+                    onClick={() => {
+                      setActivePage("chats");
+                      setMobileMenuOpen((open) => !open);
+                    }}
+                    aria-expanded={mobileMenuOpen}
+                    className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center justify-between gap-2.5 font-medium cursor-pointer transition ${
+                      activePage === "chats" ? "bg-white/5 text-slate-100" : "text-slate-400 hover:text-slate-200 hover:bg-white/5"
+                    }`}
+                  >
+                    <span className="flex items-center gap-2.5">
+                      <MessageSquare className="w-4 h-4 shrink-0" />
+                      Chats
+                    </span>
+                    <ChevronDown
+                      className={`w-3.5 h-3.5 shrink-0 transition-transform ${mobileMenuOpen ? "rotate-180" : ""}`}
+                    />
+                  </button>
+                  {mobileMenuOpen && (
+                    <div className="rounded-lg border border-white/5 bg-zinc-900/40 overflow-hidden">
+                      <SessionRail
+                        variant="accordion"
+                        sessions={searchedSessions}
+                        currentId={currentSessionId}
+                        onSelect={(id) => {
+                          // Clear immediately so stale messages never appear in new session
+                          setMessages([]);
+                          setCurrentSessionId(id);
+                        }}
+                        onCreate={() => handleCreateSession("New Chat")}
+                        onRename={handleRenameSession}
+                        onDelete={handleDeleteSession}
+                        onExport={handleExportHistory}
+                      />
+                    </div>
+                  )}
                   <NavButton
                     icon={Database}
                     label="Memories"
@@ -899,6 +949,12 @@ export default function Page(): ReactElement {
                     label="Extensions"
                     active={activePage === "extensions"}
                     onClick={() => setActivePage("extensions")}
+                  />
+                  <NavButton
+                    icon={GitBranch}
+                    label="Agents"
+                    active={activePage === "agents"}
+                    onClick={() => setActivePage("agents")}
                   />
                 </div>
               </div>
@@ -953,26 +1009,7 @@ export default function Page(): ReactElement {
           <div className="flex-1 flex overflow-hidden h-full">
             {activePage === "chats" && (
               <>
-                {/* Column 2: Session sub-rail list of chats */}
-                <div className={`${mobileMenuOpen ? 'flex absolute inset-y-4 left-4 z-20 shadow-2xl' : 'hidden'} md:flex md:static h-full`}>
-                  <SessionRail
-                    collapsed={railCollapsed}
-                    onToggleCollapse={() => setRailCollapsed(!railCollapsed)}
-                    sessions={searchedSessions}
-                    currentId={currentSessionId}
-                    onSelect={(id) => {
-                      // Clear immediately so stale messages never appear in new session
-                      setMessages([]);
-                      setCurrentSessionId(id);
-                      setMobileMenuOpen(false);
-                    }}
-                    onCreate={() => handleCreateSession("New Chat")}
-                    onRename={handleRenameSession}
-                    onDelete={handleDeleteSession}
-                    onExport={handleExportHistory}
-                    onScopeChange={toggleSessionScope}
-                  />
-                </div>
+                {/* Session list now lives as a dropdown off the Chats nav item, see above -- no permanent column here. */}
 
                 {/* Middle: Chat Feed Viewport */}
                 <main className="flex-1 min-w-0 flex flex-col h-full bg-zinc-900/10">
@@ -1006,6 +1043,7 @@ export default function Page(): ReactElement {
             {activePage === "docker" && <ServicesView />}
             {activePage === "ollama" && <OllamaView />}
             {activePage === "extensions" && <ExtensionsView />}
+            {activePage === "agents" && <AgentsView />}
             
             {activePage === "desktop" && (
               <div className="flex-1 bg-zinc-950 p-6 flex flex-col overflow-y-auto scrollbar animate-[rise_0.2s_ease-out]">

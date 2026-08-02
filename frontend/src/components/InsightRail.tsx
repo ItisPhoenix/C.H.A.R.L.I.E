@@ -100,7 +100,7 @@ export function InsightRail(): ReactElement {
   const accentBorder = rgba(accentColor, 0.25);
 
   return (
-    <aside className="w-80 shrink-0 h-full border-l border-[var(--color-glass-border)] bg-zinc-950/40 flex flex-col p-4 space-y-4 overflow-y-auto scrollbar select-none">
+    <aside className="w-80 shrink-0 h-full border-l border-[var(--color-glass-border)] bg-zinc-950/40 flex flex-col p-4 space-y-4 overflow-y-auto scrollbar">
       
       {/* Widget 1: Live Activity -- real tool-call/thinking trace, not fabricated agent roles */}
       <div className="rounded-xl border border-[var(--color-glass-border)] p-3.5 bg-zinc-900/30">

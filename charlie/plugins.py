@@ -411,7 +411,8 @@ class BrowserPlugin(Plugin):
             result = subprocess.run(
                 ["curl", "-sL", "--max-time", "15", url],
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=20,
             )
             if result.returncode == 0:
@@ -604,14 +605,18 @@ class CodeExecPlugin(Plugin):
 
         try:
             wrapped = code + ("\n" if not code.endswith("\n") else "")
-            # Run with an empty environment so the parent's API keys and other
-            # secrets are never inherited by the sandboxed child process.
+            # Empty environment (plus PYTHONIOENCODING) so the parent's API keys
+            # and other secrets are never inherited by the sandboxed child
+            # process -- PYTHONIOENCODING is not a secret, it just keeps the
+            # child's own print() from defaulting to Windows' cp1252 console
+            # codepage and crashing on non-ASCII output.
             result = subprocess.run(
                 [sys.executable, "-c", wrapped],
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self._timeout,
-                env={},
+                env={"PYTHONIOENCODING": "utf-8"},
             )
             output = result.stdout
             if result.stderr:

@@ -901,6 +901,17 @@ async def main():
                 elif cmd_type == "stop":
                     voice.stop_tts()
                     brain.cancel_chat()
+                elif cmd_type == "cancel_agent":
+                    payload = cmd.get("payload", {})
+                    agent_id = payload.get("agent_id")
+                    if agent_id:
+                        found = brain.cancel_agent(agent_id)
+                        # cancel_agent() returning True only means the task was signalled --
+                        # a sub-agent blocked inside a run_in_executor tool call won't
+                        # actually stop until that call returns, asyncio can't interrupt it.
+                        # This ack tells the UI whether cancellation was even possible,
+                        # not that it already happened.
+                        await event_bus.emit("agent_cancel_ack", {"agent_id": agent_id, "found": found})
                 elif cmd_type == "audio_control":
                     payload = cmd.get("payload", {})
                     state = voice.set_audio_state(

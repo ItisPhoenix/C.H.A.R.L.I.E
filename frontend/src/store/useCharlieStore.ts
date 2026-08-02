@@ -55,9 +55,22 @@ export interface MicState {
 }
 
 export interface ToolActivityEntry {
-  kind: "tool_call" | "tool_result" | "thinking_update";
+  kind: "tool_call" | "tool_result" | "thinking_update" | "agent_spawned" | "agent_status" | "agent_result";
   name: string;
   text: string;
+  sessionId?: string;
+}
+
+export type AgentRunStatus = "running" | "done" | "timeout" | "cancelled";
+
+export interface AgentRun {
+  agentId: string;
+  task: string;
+  status: AgentRunStatus;
+  lastTool?: string;
+  result?: string;
+  spawnedAt: number;
+  finishedAt?: number;
   sessionId?: string;
 }
 
@@ -95,8 +108,8 @@ interface CharlieState {
   mic: MicState;
   audioLevel: number;
   toolActivity: ToolActivityEntry[];
+  agentRuns: AgentRun[];
   launchId: string;
-  sessionScope: "all" | "this_launch";
   accentColor: string;
 
   setConnected: (c: boolean) => void;
@@ -116,8 +129,8 @@ interface CharlieState {
   setAudioLevel: (level: number) => void;
   appendToolActivity: (e: ToolActivityEntry) => void;
   clearToolActivity: () => void;
+  upsertAgentRun: (patch: Partial<AgentRun> & { agentId: string }) => void;
   setLaunchId: (id: string) => void;
-  setSessionScope: (scope: "all" | "this_launch") => void;
   setAccentColor: (color: string) => void;
   activeProposal: RecoveryProposal | null;
   setActiveProposal: (p: RecoveryProposal | null) => void;
@@ -146,8 +159,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   mic: { mic_muted: false },
   audioLevel: 0,
   toolActivity: [],
+  agentRuns: [],
   launchId: "",
-  sessionScope: "all",
   // Always starts at the default; the persisted value (if any) is applied after mount
   // (see page.tsx) so the first client render matches the server-rendered HTML.
   accentColor: "#a855f7",
@@ -184,8 +197,24 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setAudioLevel: (audioLevel) => set({ audioLevel }),
   appendToolActivity: (e) => set((st) => ({ toolActivity: [...st.toolActivity, e] })),
   clearToolActivity: () => set({ toolActivity: [] }),
+  // Merge-by-agentId so agent_spawned/agent_status/agent_result updates the same
+  // run entry instead of appending duplicates; caps history like alerts/logs.
+  upsertAgentRun: (patch) => set((st) => {
+    const idx = st.agentRuns.findIndex((r) => r.agentId === patch.agentId);
+    if (idx === -1) {
+      const created: AgentRun = {
+        task: "",
+        status: "running",
+        spawnedAt: Date.now(),
+        ...patch,
+      };
+      return { agentRuns: [created, ...st.agentRuns].slice(0, 100) };
+    }
+    const copy = [...st.agentRuns];
+    copy[idx] = { ...copy[idx], ...patch };
+    return { agentRuns: copy };
+  }),
   setLaunchId: (launchId) => set({ launchId }),
-  setSessionScope: (sessionScope) => set({ sessionScope }),
   setAccentColor: (color) => set(() => {
     if (typeof window !== "undefined") {
       localStorage.setItem("charlie_accent", color);

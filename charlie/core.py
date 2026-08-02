@@ -2416,7 +2416,9 @@ class Brain:
 
             allowed_calls = [c for c in tool_calls if budget.try_spend(c["name"])]
             if not allowed_calls:
-                return "Sub-agent reached its tool budget before finishing."
+                return await self._synthesize_best_effort(
+                    messages, generation, "Sub-agent reached its tool budget before finishing."
+                )
 
             results: List[str] = []
             for call in allowed_calls:
@@ -2469,7 +2471,28 @@ class Brain:
                 )
                 messages.extend(tool_results)
 
-        return "Sub-agent reached its maximum tool-loop turns without finishing."
+        return await self._synthesize_best_effort(
+            messages, generation, "Sub-agent reached its maximum tool-loop turns without finishing."
+        )
+
+    async def _synthesize_best_effort(
+        self, messages: List[Dict[str, Any]], generation: int, fallback: str
+    ) -> str:
+        """One final no-tools completion so a sub-agent reports whatever it
+        already found instead of discarding it when its budget/turns run out."""
+        nudge = messages + [{
+            "role": "user",
+            "content": (
+                "You've used all your available tool calls. Summarize what you found so far, "
+                "even if incomplete. If you found nothing useful, say so plainly."
+            ),
+        }]
+        payload = self._build_payload(nudge, skip_tools=True)
+        accumulated, _ = await self._stream_completion(payload, generation)
+        if not accumulated:
+            return fallback
+        stream_filter = TextStreamFilter()
+        return stream_filter.push(accumulated) + stream_filter.flush()
 
     def _save_to_memory(self, text: str, source: str) -> None:
         """Fire-and-forget: extract and store facts from assistant response."""
