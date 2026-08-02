@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import httpx
 
@@ -134,7 +134,7 @@ class ToolRegistry:
         or is callable via execute_tool(). Returns whether it existed."""
         return self._tools.pop(name, None) is not None
 
-    def get_tool_definitions(self) -> List[Dict[str, Any]]:
+    def get_tool_definitions(self, exclude: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
         return [
             {
                 "type": "function",
@@ -145,6 +145,7 @@ class ToolRegistry:
                 },
             }
             for name, info in self._tools.items()
+            if not exclude or name not in exclude
         ]
 
     def is_interactive(self, name: str) -> bool:
@@ -166,10 +167,12 @@ class ToolRegistry:
             return None
         return list(info["schema"].get("properties", {}).keys())
 
-    def build_tool_prompt(self) -> str:
+    def build_tool_prompt(self, exclude: Optional[Set[str]] = None) -> str:
         """Build a plain-text tool description for the system prompt."""
         lines = []
         for name, info in self._tools.items():
+            if exclude and name in exclude:
+                continue
             params = info["schema"].get("properties", {})
             required = set(info["schema"].get("required", []))
             param_parts = [
@@ -309,6 +312,29 @@ def _merge_search_results(results: List[str]) -> str:
     if len(output) > 2000:
         output = output[:2000] + "..."
     return output
+
+
+@registry.register_tool(
+    name="spawn_agent",
+    description=(
+        "Delegate a self-contained sub-task to an independent sub-agent that runs its own "
+        "tool loop and reports back a result. Use only for genuinely delegable work (e.g. an "
+        "independent research thread, a parallel multi-part job) -- most turns should not use "
+        "this at all and should just answer directly."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": "A clear, self-contained description of the sub-task to delegate.",
+            }
+        },
+        "required": ["task"],
+    },
+)
+def spawn_agent(task: str) -> str:
+    return "Error: spawn_agent must be dispatched through Brain.spawn_agent, not called directly."
 
 
 @registry.register_tool(

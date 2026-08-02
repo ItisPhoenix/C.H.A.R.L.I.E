@@ -125,6 +125,10 @@ _TOOL_RESULT_MAX_CHARS = 2000
 # as declined (matches charlie.recovery.request_recovery_approval's 30s, plus
 # headroom for the voice fallback's speak-prompt-then-listen round trip).
 _TOOL_APPROVAL_TIMEOUT_SEC = 45.0
+# Dynamic agent spawning: no fixed roster, capped depth/concurrency/timeout via spawn_agent tool.
+_MAX_CONCURRENT_AGENTS = 3
+_AGENT_TIMEOUT_SEC = 120.0
+_AGENT_MAX_TOOL_TURNS = 8
 
 # request_id -> Future[bool], resolved by main.py:consume_web_commands (web
 # "tool_approve"/"tool_reject" commands) or by the voice yes/no fallback in
@@ -1362,6 +1366,9 @@ class Brain:
         on_tool_call: Optional[callable] = None,
         on_tool_result: Optional[callable] = None,
         on_thinking_update: Optional[callable] = None,
+        on_agent_spawned: Optional[callable] = None,
+        on_agent_status: Optional[callable] = None,
+        on_agent_result: Optional[callable] = None,
         register_panic_hotkey: bool = True,
         approval_timeout: Optional[float] = _TOOL_APPROVAL_TIMEOUT_SEC,
         is_background: bool = False,
@@ -1374,6 +1381,11 @@ class Brain:
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
         self.on_thinking_update = on_thinking_update
+        self.on_agent_spawned = on_agent_spawned
+        self.on_agent_status = on_agent_status
+        self.on_agent_result = on_agent_result
+        self._agent_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_AGENTS)
+        self._active_agents: Dict[str, asyncio.Task] = {}
         self._approval_timeout = approval_timeout
         llm_headers: Dict[str, str] = build_auth_headers(config.llm_key)
         self.client = httpx.AsyncClient(
@@ -1713,6 +1725,7 @@ class Brain:
         self,
         messages: List[Dict[str, Any]],
         skip_tools: bool = False,
+        exclude_tools: Optional[set] = None,
     ) -> Dict[str, Any]:
         """Build the API payload for chat completions."""
         payload: Dict[str, Any] = {
@@ -1722,7 +1735,7 @@ class Brain:
             "stream": True,
         }
         if self._use_native_tools and not skip_tools:
-            payload["tools"] = tool_registry.get_tool_definitions()
+            payload["tools"] = tool_registry.get_tool_definitions(exclude=exclude_tools)
             payload["tool_choice"] = "auto"
         if getattr(self.config, "llm_disable_reasoning", False):
             payload["reasoning"] = {"effort": "none"}
@@ -2082,7 +2095,7 @@ class Brain:
         async def _exec_one(call: Dict[str, Any]) -> str:
             tool_name = call["name"]
             ck = f"{call['name']}({json.dumps(call['arguments'], sort_keys=True)})"
-            if tool_name not in _DESKTOP_COM_TOOLS and ck in _seen_tool_calls:
+            if tool_name not in _DESKTOP_COM_TOOLS and tool_name != "spawn_agent" and ck in _seen_tool_calls:
                 logger.info("Tool %s already executed, reusing result", call["name"])
                 return _seen_tool_calls[ck]
             timeout = _TOOL_TIMEOUTS.get(tool_name, _TOOL_TIMEOUT_SEC)
@@ -2099,73 +2112,82 @@ class Brain:
             if self.on_tool_call:
                 self.on_tool_call(call["name"], call["arguments"])
 
-            # Only destructive shell keywords require explicit approve/decline
-            # before _run() is ever called -- see charlie.tools.is_shell_command_gated
-            # and Brain.request_tool_approval. File paths and desktop control run
-            # autonomously (hard-blocked shell keywords and the panic hotkey/auto-halt
-            # remain the only stops for those).
-            gate_reason: Optional[str] = None
-            if tool_name == "shell_execute":
-                gate_reason = is_shell_command_gated(call["arguments"].get("command", ""))
-
-            approved = True
-            if gate_reason:
-                approved = await self.request_tool_approval(tool_name, call["arguments"], gate_reason)
-
-            if gate_reason and not approved:
-                r = f"Error: Command declined by user (required approval: {gate_reason})."
-            elif tool_name in _DESKTOP_CONTROL_TOOLS and self._is_desktop_halted():
-                r = "Error: Desktop control is halted (panic or repeated failure). Say 'continue' to resume."
-            elif tool_name in _DESKTOP_CONTROL_TOOLS and _desktop_action_count[0] >= self.config.desktop_max_actions:
-                r = f"Error: Desktop action limit reached ({self.config.desktop_max_actions} for this turn)."
-                self._turn_halted = True
+            if tool_name == "spawn_agent":
+                # Needs Brain's LLM client + tool loop, so it can't go through
+                # tool_registry.execute_tool like every other tool -- dispatched
+                # directly to Brain.spawn_agent instead.
+                r = await self.spawn_agent(call["arguments"].get("task", ""))
             else:
-                if tool_name in _DESKTOP_CONTROL_TOOLS:
-                    _desktop_action_count[0] += 1
-                try:
-                    if tool_registry.is_interactive(tool_name):
-                        async with lock:
-                            r = await asyncio.wait_for(_run(), timeout=timeout)
-                    else:
-                        r = await asyncio.wait_for(_run(), timeout=timeout)
+                # Only destructive shell keywords require explicit approve/decline
+                # before _run() is ever called -- see charlie.tools.is_shell_command_gated
+                # and Brain.request_tool_approval. File paths and desktop control run
+                # autonomously (hard-blocked shell keywords and the panic hotkey/auto-halt
+                # remain the only stops for those).
+                gate_reason: Optional[str] = None
+                if tool_name == "shell_execute":
+                    gate_reason = is_shell_command_gated(call["arguments"].get("command", ""))
 
-                    # Check for standard returned shell/file failures to attempt recovery
-                    if tool_name == "shell_execute" and r.startswith("Error"):
-                        logger.info("Shell execution returned an error. Running recovery pipeline...")
-                        from charlie.recovery import recover_tool
-                        recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
-                        if recovered_res is not None:
-                            r = recovered_res
-                    elif tool_name == "file_write" and r.startswith("Error"):
-                        logger.info("File write returned an error. Running recovery pipeline...")
-                        from charlie.recovery import recover_tool
-                        recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
-                        if recovered_res is not None:
-                            r = recovered_res
-                except asyncio.TimeoutError as te:
-                    if tool_name in ("shell_execute", "file_write"):
-                        logger.info("Tool %s timed out. Running recovery pipeline...", tool_name)
-                        from charlie.recovery import recover_tool
-                        recovered_res = await recover_tool(self, tool_name, call["arguments"], te)
-                        if recovered_res is not None:
-                            r = recovered_res
+                approved = True
+                if gate_reason:
+                    approved = await self.request_tool_approval(tool_name, call["arguments"], gate_reason)
+
+                if gate_reason and not approved:
+                    r = f"Error: Command declined by user (required approval: {gate_reason})."
+                elif tool_name in _DESKTOP_CONTROL_TOOLS and self._is_desktop_halted():
+                    r = "Error: Desktop control is halted (panic or repeated failure). Say 'continue' to resume."
+                elif (
+                    tool_name in _DESKTOP_CONTROL_TOOLS
+                    and _desktop_action_count[0] >= self.config.desktop_max_actions
+                ):
+                    r = f"Error: Desktop action limit reached ({self.config.desktop_max_actions} for this turn)."
+                    self._turn_halted = True
+                else:
+                    if tool_name in _DESKTOP_CONTROL_TOOLS:
+                        _desktop_action_count[0] += 1
+                    try:
+                        if tool_registry.is_interactive(tool_name):
+                            async with lock:
+                                r = await asyncio.wait_for(_run(), timeout=timeout)
+                        else:
+                            r = await asyncio.wait_for(_run(), timeout=timeout)
+
+                        # Check for standard returned shell/file failures to attempt recovery
+                        if tool_name == "shell_execute" and r.startswith("Error"):
+                            logger.info("Shell execution returned an error. Running recovery pipeline...")
+                            from charlie.recovery import recover_tool
+                            recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
+                            if recovered_res is not None:
+                                r = recovered_res
+                        elif tool_name == "file_write" and r.startswith("Error"):
+                            logger.info("File write returned an error. Running recovery pipeline...")
+                            from charlie.recovery import recover_tool
+                            recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
+                            if recovered_res is not None:
+                                r = recovered_res
+                    except asyncio.TimeoutError as te:
+                        if tool_name in ("shell_execute", "file_write"):
+                            logger.info("Tool %s timed out. Running recovery pipeline...", tool_name)
+                            from charlie.recovery import recover_tool
+                            recovered_res = await recover_tool(self, tool_name, call["arguments"], te)
+                            if recovered_res is not None:
+                                r = recovered_res
+                            else:
+                                r = f"Error: Tool '{tool_name}' timed out after {timeout}s"
                         else:
                             r = f"Error: Tool '{tool_name}' timed out after {timeout}s"
-                    else:
-                        r = f"Error: Tool '{tool_name}' timed out after {timeout}s"
-                    logger.warning("Tool %s timed out", tool_name)
-                except Exception as e:
-                    if tool_name in ("shell_execute", "file_write"):
-                        logger.info("Tool %s raised exception. Running recovery pipeline...", tool_name)
-                        from charlie.recovery import recover_tool
-                        recovered_res = await recover_tool(self, tool_name, call["arguments"], e)
-                        if recovered_res is not None:
-                            r = recovered_res
+                        logger.warning("Tool %s timed out", tool_name)
+                    except Exception as e:
+                        if tool_name in ("shell_execute", "file_write"):
+                            logger.info("Tool %s raised exception. Running recovery pipeline...", tool_name)
+                            from charlie.recovery import recover_tool
+                            recovered_res = await recover_tool(self, tool_name, call["arguments"], e)
+                            if recovered_res is not None:
+                                r = recovered_res
+                            else:
+                                r = f"Error executing tool '{tool_name}': {e}"
                         else:
                             r = f"Error executing tool '{tool_name}': {e}"
-                    else:
-                        r = f"Error executing tool '{tool_name}': {e}"
-                    logger.warning("Tool %s raised an exception: %s", tool_name, e)
+                        logger.warning("Tool %s raised an exception: %s", tool_name, e)
 
             # Anomaly auto-halt: repeated failure of the same call means looping, not progress.
             if tool_name in _DESKTOP_CONTROL_TOOLS:
@@ -2201,7 +2223,7 @@ class Brain:
                 except Exception as persist_exc:
                     logger.debug("Tool result persist skipped: %s", persist_exc)
 
-            if tool_name not in _DESKTOP_COM_TOOLS:
+            if tool_name not in _DESKTOP_COM_TOOLS and tool_name != "spawn_agent":
                 _seen_tool_calls[ck] = r
             return r
 
@@ -2323,6 +2345,131 @@ class Brain:
             max_messages = self._history_max_turns * 2
             if len(self.history) > max_messages:
                 self.history = self.history[-max_messages:]
+
+    async def spawn_agent(self, task: str) -> str:
+        """Delegate `task` to an isolated sub-agent: fresh history, full tool
+        registry minus spawn_agent itself (no nested spawning), capped at
+        _MAX_CONCURRENT_AGENTS concurrent runs and _AGENT_TIMEOUT_SEC each.
+        Runs as a real cancellable asyncio.Task (see cancel_agent)."""
+        agent_id = make_id()
+        if self.on_agent_spawned:
+            self.on_agent_spawned(agent_id, task)
+
+        async def _bounded_run() -> str:
+            async with self._agent_semaphore:
+                return await self._run_subagent(agent_id, task)
+
+        agent_task = asyncio.create_task(_bounded_run())
+        self._active_agents[agent_id] = agent_task
+        try:
+            result = await asyncio.wait_for(agent_task, timeout=_AGENT_TIMEOUT_SEC)
+        except asyncio.TimeoutError:
+            result = f"Error: Sub-agent timed out after {_AGENT_TIMEOUT_SEC:.0f}s"
+            logger.warning("Sub-agent %s timed out on task: %s", agent_id, task)
+        except asyncio.CancelledError:
+            result = "Error: Sub-agent was cancelled"
+            logger.info("Sub-agent %s cancelled", agent_id)
+        finally:
+            self._active_agents.pop(agent_id, None)
+        if self.on_agent_result:
+            self.on_agent_result(agent_id, result)
+        return result
+
+    def cancel_agent(self, agent_id: str) -> bool:
+        """Cancel a running sub-agent task. Returns whether one was found."""
+        agent_task = self._active_agents.get(agent_id)
+        if agent_task is None:
+            return False
+        agent_task.cancel()
+        return True
+
+    async def _run_subagent(self, agent_id: str, task: str) -> str:
+        """Bounded tool-loop for one sub-agent turn. Own history slice (never
+        touches self.history), no streaming (returns the final text once).
+        ponytail: gate/timeout/dispatch here is a scoped-down copy of the main
+        loop's _exec_one, not shared with it -- the main loop's desktop-COM
+        locking and shell-recovery pipeline don't apply to typical delegated
+        sub-tasks. Unify if sub-agents start needing that machinery too."""
+        generation = self._chat_generation
+        exclude = {"spawn_agent"}
+        tool_catalog = "" if self._use_native_tools else tool_registry.build_tool_prompt(exclude=exclude)
+        system_content = self._stable_tier
+        if tool_catalog:
+            system_content += f"\n\n[TOOLS AVAILABLE]\n{tool_catalog}"
+        system_content += (
+            "\n\nYou are a sub-agent delegated a single task by the main assistant. "
+            "Complete it using the tools available, then report your result concisely."
+        )
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": task},
+        ]
+        budget = IterationBudget(max_turns=_AGENT_MAX_TOOL_TURNS)
+
+        for _ in range(_AGENT_MAX_TOOL_TURNS):
+            payload = self._build_payload(messages, exclude_tools=exclude)
+            accumulated, tool_calls = await self._stream_completion(payload, generation)
+
+            if not tool_calls:
+                stream_filter = TextStreamFilter()
+                return stream_filter.push(accumulated) + stream_filter.flush()
+
+            allowed_calls = [c for c in tool_calls if budget.try_spend(c["name"])]
+            if not allowed_calls:
+                return "Sub-agent reached its tool budget before finishing."
+
+            results: List[str] = []
+            for call in allowed_calls:
+                if self.on_agent_status:
+                    self.on_agent_status(agent_id, call["name"])
+                gate_reason: Optional[str] = None
+                if call["name"] == "shell_execute":
+                    gate_reason = is_shell_command_gated(call["arguments"].get("command", ""))
+                if gate_reason and not await self.request_tool_approval(
+                    call["name"], call["arguments"], gate_reason
+                ):
+                    results.append(f"Error: Command declined by user (required approval: {gate_reason}).")
+                    continue
+                timeout = _TOOL_TIMEOUTS.get(call["name"], _TOOL_TIMEOUT_SEC)
+                try:
+                    r = await asyncio.wait_for(
+                        asyncio.get_running_loop().run_in_executor(
+                            None, tool_registry.execute_tool, call["name"], call["arguments"]
+                        ),
+                        timeout=timeout,
+                    )
+                except asyncio.TimeoutError:
+                    r = f"Error: Tool '{call['name']}' timed out after {timeout}s"
+                except Exception as e:
+                    logger.warning("Sub-agent tool %s raised: %s", call["name"], e)
+                    r = f"Error executing tool '{call['name']}': {e}"
+                results.append(r)
+
+            tool_results = _build_native_tool_results(allowed_calls, results)
+            is_text_based = any(c.get("id") is None for c in allowed_calls)
+            if is_text_based:
+                messages.append({"role": "assistant", "content": accumulated})
+                messages.append(
+                    {"role": "tool", "content": _format_text_tool_summary(allowed_calls, results)}
+                )
+            else:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": r["tool_call_id"],
+                                "type": "function",
+                                "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])},
+                            }
+                            for c, r in zip(allowed_calls, tool_results)
+                        ],
+                    }
+                )
+                messages.extend(tool_results)
+
+        return "Sub-agent reached its maximum tool-loop turns without finishing."
 
     def _save_to_memory(self, text: str, source: str) -> None:
         """Fire-and-forget: extract and store facts from assistant response."""

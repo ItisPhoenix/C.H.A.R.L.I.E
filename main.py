@@ -270,6 +270,36 @@ async def main():
                 event_bus.emit("thinking_update", {"text": desc, "session_id": current_web_session_id}), loop
             )
 
+    def on_agent_spawned(agent_id, task):
+        if event_bus:
+            asyncio.run_coroutine_threadsafe(
+                event_bus.emit(
+                    "agent_spawned",
+                    {"agent_id": agent_id, "task": task, "session_id": current_web_session_id},
+                ),
+                loop,
+            )
+
+    def on_agent_status(agent_id, tool_name):
+        if event_bus:
+            asyncio.run_coroutine_threadsafe(
+                event_bus.emit(
+                    "agent_status",
+                    {"agent_id": agent_id, "tool_name": tool_name, "session_id": current_web_session_id},
+                ),
+                loop,
+            )
+
+    def on_agent_result(agent_id, result):
+        if event_bus:
+            asyncio.run_coroutine_threadsafe(
+                event_bus.emit(
+                    "agent_result",
+                    {"agent_id": agent_id, "result": result, "session_id": current_web_session_id},
+                ),
+                loop,
+            )
+
     try:
         brain = Brain(
             config,
@@ -279,6 +309,9 @@ async def main():
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_thinking_update=on_thinking_update,
+            on_agent_spawned=on_agent_spawned,
+            on_agent_status=on_agent_status,
+            on_agent_result=on_agent_result,
         )
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")
