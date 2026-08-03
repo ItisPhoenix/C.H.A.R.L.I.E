@@ -135,6 +135,16 @@ class SessionStore:
                     except sqlite3.OperationalError:
                         pass  # Column already exists
 
+                # Migration: pre-fix DBs have non-ISO timestamps (no T/Z), misparsed by browsers as local time.
+                self.conn.execute(
+                    "UPDATE sessions SET created_at = REPLACE(created_at, ' ', 'T') || 'Z' "
+                    "WHERE created_at IS NOT NULL AND created_at NOT LIKE '%Z'"
+                )
+                self.conn.execute(
+                    "UPDATE sessions SET updated_at = REPLACE(updated_at, ' ', 'T') || 'Z' "
+                    "WHERE updated_at IS NOT NULL AND updated_at NOT LIKE '%Z'"
+                )
+
                 # Check for FTS5 support before creating virtual table
                 fts5_supported = True
                 try:
@@ -348,9 +358,9 @@ class SessionStore:
             with self.conn:
                 self.conn.execute(
                     "INSERT OR IGNORE INTO sessions "
-                    "(session_id, title, source, launch_id, parent_session_id) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (session_id, title, source, launch_id, parent_session_id),
+                    "(session_id, title, source, launch_id, parent_session_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (session_id, title, source, launch_id, parent_session_id, utc_now_iso()),
                 )
                 # If the row already exists but source/launch_id were NULL,
                 # backfill them so filtering works for sessions created before this migration.
