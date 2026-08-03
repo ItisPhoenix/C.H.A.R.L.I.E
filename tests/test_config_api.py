@@ -44,6 +44,27 @@ def test_desktop_idle_threshold_default(monkeypatch):
         importlib.reload(config_module)
 
 
+def test_vad_threshold_and_asr_vad_threshold_are_independent(monkeypatch):
+    """Regression: voice.py's mic-amplitude VAD_THRESHOLD and faster-whisper's
+    Silero speech-probability threshold used to share one config value --
+    tuning the mic gate low (as .env does) silently disabled the neural VAD."""
+    import importlib
+    import sys
+
+    config_module = sys.modules["charlie.config"]
+    monkeypatch.setenv("VAD_THRESHOLD", "0.08")
+    monkeypatch.setenv("ASR_VAD_THRESHOLD", "0.5")
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: None)
+    importlib.reload(config_module)
+    try:
+        cfg = config_module.Config()
+        assert cfg.vad_threshold == 0.08
+        assert cfg.asr_vad_threshold == 0.5
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config_module)
+
+
 @pytest.mark.asyncio
 async def test_get_dashboard_config_masks_secrets():
     res = await web_server.get_dashboard_config()

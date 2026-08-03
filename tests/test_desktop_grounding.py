@@ -4,6 +4,7 @@ Reuses the existing VISION_LLM_URL/KEY/MODEL config -- no new dependency,
 no torch. Runs on any platform; the network call is always mocked.
 """
 
+import base64
 from unittest.mock import MagicMock
 
 from charlie.config import Config
@@ -11,6 +12,12 @@ from charlie.desktop import grounding
 from charlie.desktop.uia import Element
 from charlie.tools import _grounding_marks
 from charlie.tools import config as tools_config
+
+# Real 1x1 PNG -- to_data_url now opens the bytes with Pillow to downscale
+# oversized screenshots, so a fake placeholder string no longer round-trips.
+_FAKE_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
 
 
 def _vision_config(**overrides):
@@ -91,7 +98,7 @@ def test_detect_calls_vision_endpoint_and_parses_response(monkeypatch):
     monkeypatch.setattr(grounding.httpx, "post", mock_post)
     monkeypatch.setattr(grounding, "_image_size", lambda png_bytes: (100, 100))
 
-    elements = grounding.detect(b"fake-png-bytes", config)
+    elements = grounding.detect(_FAKE_PNG, config)
 
     assert len(elements) == 1
     assert elements[0].bounds == (0, 0, 100, 100)
@@ -106,7 +113,7 @@ def test_detect_returns_empty_on_request_failure(monkeypatch):
         raise OSError("connection refused")
 
     monkeypatch.setattr(grounding.httpx, "post", _raise)
-    assert grounding.detect(b"fake-png-bytes", config) == []
+    assert grounding.detect(_FAKE_PNG, config) == []
 
 
 def test_grounding_marks_skips_call_when_elements_plentiful(monkeypatch):

@@ -8,7 +8,6 @@ from charlie.core import (
     _assess_tool_result_relevance,
     _build_volatile_tier,
     _detect_correction,
-    _detect_operator_persona,
     _detect_set_goal,
     _detect_verbosity_feedback,
     _is_followup,
@@ -179,6 +178,15 @@ class TestConfidenceGate:
             "web_search", "Error: Tool 'web_search' timed out after 15s"
         ) is False
 
+    def test_short_non_search_result_accepted(self):
+        """The length/junk heuristic is tuned for search noise; a short but
+        legitimate result from a non-search tool (e.g. a skill script's
+        whoami output) must not be discarded."""
+        assert _assess_tool_result_relevance("skill_qa_whoami_whoami", "DESKTOP\\user") is True
+
+    def test_short_query_tool_result_still_gated(self):
+        assert _assess_tool_result_relevance("graph_query", "Error") is False
+
 
 # ---------------------------------------------------------------------------
 # Step 2: Proactive Memory Recall (already implemented; test dedup logic)
@@ -286,46 +294,3 @@ class TestVolatilityTierGoal:
         )
         assert "Current goal: plan vacation" in tier
         assert "Stay focused" in tier
-
-
-# ---------------------------------------------------------------------------
-# Phase 4: Helm desktop-control operator persona
-# ---------------------------------------------------------------------------
-
-class TestOperatorPersonaDetection:
-    """Verify _detect_operator_persona catches Helm address."""
-
-    def test_helm_with_comma(self):
-        assert _detect_operator_persona("Helm, open my email") is True
-
-    def test_helm_lowercase_no_punctuation(self):
-        assert _detect_operator_persona("helm open my email") is True
-
-    def test_helm_not_at_start(self):
-        assert _detect_operator_persona("ask helm to open my email") is False
-
-    def test_no_match(self):
-        assert _detect_operator_persona("what's the weather") is False
-
-
-class TestVolatileTierOperatorPersona:
-    """Verify _build_volatile_tier injects the Helm persona block.
-
-    A bare "Helm" mention is no longer sufficient to prove the (token-
-    heavy) narration persona is active -- these tests check for the persona
-    block's own marker ("[Helm MODE]") instead of the bare name.
-    """
-
-    def test_no_persona(self):
-        from datetime import datetime
-        tier = _build_volatile_tier("voice", datetime.now(), 5)
-        assert "[Helm MODE]" not in tier
-
-    def test_with_persona(self):
-        from datetime import datetime
-        tier = _build_volatile_tier(
-            "voice", datetime.now(), 5, operator_persona=True
-        )
-        assert "[Helm MODE]" in tier
-        assert "desktop_observe" in tier
-        assert "desktop_observe" in tier

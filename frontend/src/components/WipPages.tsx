@@ -22,6 +22,26 @@ function factText(f: FactItem): string {
 interface LocalModelItem {
   name: string;
   source: string;
+  active: boolean;
+  size_bytes: number | null;
+  parameter_size: string | null;
+  quantization: string | null;
+  context_length: number | null;
+  loaded_in_vram: boolean | null;
+  vram_bytes: number | null;
+}
+
+interface LocalEndpointItem {
+  name: string;
+  url: string;
+  reachable: boolean;
+  latency_ms: number | null;
+}
+
+function formatBytes(bytes: number | null | undefined): string {
+  if (!bytes) return "";
+  const gb = bytes / (1024 * 1024 * 1024);
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
 }
 
 export function MemoriesView(): ReactElement {
@@ -92,7 +112,7 @@ export function MemoriesView(): ReactElement {
         <div className="p-4 rounded-xl bg-zinc-900/40 border border-white/5 space-y-2">
           <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">Consolidated Facts Count</span>
           <p className="text-2xl font-bold text-slate-100 font-mono">{facts.length}</p>
-          <span className="text-[10px] text-emerald-400 block font-mono">Live ChromaDB triples</span>
+          <span className="text-[10px] text-emerald-400 block font-mono">Live SQLite knowledge-graph triples</span>
         </div>
         <div className="p-4 rounded-xl bg-zinc-900/40 border border-white/5 space-y-2">
           <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">Vector Storage Engine</span>
@@ -647,7 +667,9 @@ export function ServicesView(): ReactElement {
 }
 
 export function OllamaView(): ReactElement {
-  const [data, setData] = useState<{ count: number; models: LocalModelItem[] }>({ count: 0, models: [] });
+  const [data, setData] = useState<{ count: number; models: LocalModelItem[]; activeModel: string; activeIsLocal: boolean; endpoints: LocalEndpointItem[] }>({
+    count: 0, models: [], activeModel: "", activeIsLocal: false, endpoints: [],
+  });
   const [loading, setLoading] = useState(true);
   const [pullName, setPullName] = useState("");
   const [pulling, setPulling] = useState(false);
@@ -663,6 +685,9 @@ export function OllamaView(): ReactElement {
         setData({
           count: json.count || 0,
           models: json.models || [],
+          activeModel: json.active_model || "",
+          activeIsLocal: Boolean(json.active_is_local),
+          endpoints: json.endpoints || [],
         });
       }
     } catch {
@@ -736,6 +761,19 @@ export function OllamaView(): ReactElement {
         </Button>
       </div>
 
+      <div className={`rounded-xl border p-4 space-y-1 font-mono text-xs ${data.activeIsLocal ? "border-emerald-500/30 bg-emerald-500/5" : "border-amber-500/30 bg-amber-500/5"}`}>
+        <span className="text-[10px] uppercase tracking-wider block font-bold text-slate-500">Charlie&apos;s Active LLM</span>
+        {data.activeIsLocal ? (
+          <p className="text-emerald-400">
+            <span className="font-bold">{data.activeModel}</span> -- serving from a local endpoint below.
+          </p>
+        ) : (
+          <p className="text-amber-400">
+            <span className="font-bold">{data.activeModel || "(not configured)"}</span> -- not one of the local endpoints below (cloud/remote LLM_URL, or no local server matches this name).
+          </p>
+        )}
+      </div>
+
       <div className="rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-3 font-mono text-xs">
         <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-bold">Pull Ollama Model</span>
         <div className="flex gap-2">
@@ -754,15 +792,18 @@ export function OllamaView(): ReactElement {
       </div>
 
       <div className="rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-4 font-mono text-xs text-slate-400">
-        <div className="flex justify-between">
-          <span>LOCAL ENDPOINTS</span>
-          <span className="text-slate-200 font-bold">Ollama (:11434), LM Studio (:1234)</span>
-        </div>
-        <div className="flex justify-between">
-          <span>DISCOVERY STATE</span>
-          <span className={loading ? "text-slate-500 font-bold uppercase animate-pulse" : data.count > 0 ? "text-emerald-400 font-bold uppercase" : "text-amber-400 font-bold uppercase"}>
-            {loading ? "QUERYING..." : data.count > 0 ? "ACTIVE LOCAL MODELS" : "NO LOCAL SERVERS RUNNING"}
-          </span>
+        <div className="space-y-1.5">
+          <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-bold">Local Endpoints</span>
+          {data.endpoints.map((ep) => (
+            <div key={ep.name} className="flex justify-between items-center">
+              <span className="text-slate-300">{ep.name} <span className="text-slate-500">({ep.url})</span></span>
+              {ep.reachable ? (
+                <span className="text-emerald-400 font-bold">REACHABLE -- {ep.latency_ms}ms</span>
+              ) : (
+                <span className="text-amber-400 font-bold">UNREACHABLE</span>
+              )}
+            </div>
+          ))}
         </div>
         <div className="space-y-2 border-t border-white/5 pt-3">
           <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-bold">
@@ -777,9 +818,32 @@ export function OllamaView(): ReactElement {
           ) : (
             <div className="flex flex-wrap gap-2 pt-1">
               {data.models.map((m, i) => (
-                <div key={i} className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-white/10 flex items-center gap-2">
+                <div
+                  key={i}
+                  className={`px-3 py-1.5 rounded-lg border flex items-center gap-2 ${m.active ? "bg-emerald-500/10 border-emerald-500/40" : "bg-zinc-900 border-white/10"}`}
+                >
+                  {m.active && (
+                    <span className="text-[9px] text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded font-mono font-bold uppercase">In use</span>
+                  )}
                   <span className="text-cyan-300 font-bold text-xs">{m.name}</span>
                   <span className="text-[10px] text-slate-500 bg-white/5 px-1.5 py-0.5 rounded font-mono">{m.source}</span>
+                  {m.parameter_size && (
+                    <span className="text-[10px] text-slate-400">{m.parameter_size}</span>
+                  )}
+                  {m.quantization && (
+                    <span className="text-[10px] text-slate-400 bg-white/5 px-1.5 py-0.5 rounded">{m.quantization}</span>
+                  )}
+                  {m.context_length && (
+                    <span className="text-[10px] text-slate-400">{m.context_length.toLocaleString()} ctx</span>
+                  )}
+                  {formatBytes(m.size_bytes) && (
+                    <span className="text-[10px] text-slate-500">{formatBytes(m.size_bytes)}</span>
+                  )}
+                  {m.loaded_in_vram && (
+                    <span className="text-[9px] text-purple-300 bg-purple-500/10 px-1.5 py-0.5 rounded font-bold uppercase" title={m.vram_bytes ? `${formatBytes(m.vram_bytes)} VRAM` : undefined}>
+                      Loaded{m.vram_bytes ? ` -- ${formatBytes(m.vram_bytes)}` : ""}
+                    </span>
+                  )}
                   {m.source.startsWith("Ollama") && (
                     <button
                       onClick={() => handleDeleteModel(m.name)}

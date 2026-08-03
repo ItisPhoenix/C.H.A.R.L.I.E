@@ -1,4 +1,4 @@
-"""OpenAPI / GPT Actions adapter (Phase 5, adapter #3).
+"""OpenAPI / GPT Actions adapter.
 
 Parses an OpenAPI 3.x spec (the same format GPT Actions and the legacy
 OpenAI plugin manifest use) and registers one charlie.tools.registry tool

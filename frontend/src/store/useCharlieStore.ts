@@ -130,6 +130,7 @@ interface CharlieState {
   appendToolActivity: (e: ToolActivityEntry) => void;
   clearToolActivity: () => void;
   upsertAgentRun: (patch: Partial<AgentRun> & { agentId: string }) => void;
+  setAgentRuns: (runs: AgentRun[]) => void;
   setLaunchId: (id: string) => void;
   setAccentColor: (color: string) => void;
   activeProposal: RecoveryProposal | null;
@@ -214,6 +215,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
     copy[idx] = { ...copy[idx], ...patch };
     return { agentRuns: copy };
   }),
+  // Bulk replace on hydrate from /api/agents; upsertAgentRun handles live WS updates.
+  setAgentRuns: (agentRuns) => set({ agentRuns }),
   setLaunchId: (launchId) => set({ launchId }),
   setAccentColor: (color) => set(() => {
     if (typeof window !== "undefined") {

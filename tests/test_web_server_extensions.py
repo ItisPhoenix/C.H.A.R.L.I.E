@@ -1,4 +1,4 @@
-"""Tests for the /api/extensions REST layer (Phase 5 propose/confirm gate)."""
+"""Tests for the /api/extensions REST layer (propose/confirm gate)."""
 
 import pytest
 

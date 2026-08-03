@@ -569,7 +569,7 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
     launched_commands = []
     remaining_text = " " + target_text + " "
 
-    # 1. Scan for explicit URLs/domains first
+    # Scan for explicit URLs/domains first
     for match in _URL_RE.findall(remaining_text):
         if _is_probable_domain(match):
             matched_apps.append(match)
@@ -585,7 +585,7 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
                 r"\b" + re.escape(match) + r"\b", " ", remaining_text
             )
 
-    # 2. Scan remaining text for popular apps/websites
+    # Scan remaining text for popular apps/websites
     sorted_keys = sorted(_OPEN_APP_MAP.keys(), key=len, reverse=True)
     for key in sorted_keys:
         pattern = r"\b" + re.escape(key) + r"\b"
@@ -968,9 +968,9 @@ async def _prep_messages(
 # Tiered Prompt Assembly (for API prompt caching)
 #
 # Prompt order optimizes cache prefix stability:
-#   1. STABLE  -- identity, skills, security, tool rules (byte-identical across turns)
-#   2. CONTEXT -- memory, user prefs (frozen per session)
-#   3. VOLATILE -- date/time, platform, budget (changes each turn)
+#   STABLE (identity, skills, security, tool rules -- byte-identical across turns), then
+#   CONTEXT (memory, user prefs -- frozen per session), then
+#   VOLATILE (date/time, platform, budget -- changes each turn)
 # =====================================================================
 
 # --- Platform-aware output rules ---
@@ -1176,45 +1176,6 @@ def _detect_set_goal(query: str) -> Optional[str]:
     return m.group(1).strip().rstrip(".") if m else None
 
 
-# --- Helm operator persona (Phase 4 desktop-control identity) ---
-_HELM_ADDRESS_RE = re.compile(r"^\s*helm\b[,:]?\s*", re.IGNORECASE)
-_HELM_ACTION_RE = re.compile(
-    r"\b(click|double.?click|drag(?!\s+(queen|racing|race|on\b))|scroll|type in(to)?|on (the |my )?screen)\b",
-    re.IGNORECASE,
-)
-_HELM_PERSONA_TEXT = (
-    "[Helm MODE] You are speaking as Helm (Hands-on Executive Logic "
-    "Module), Charlie's desktop-control operator persona. Narrate each step "
-    "briefly before acting -- one short clause per step, not a paragraph. "
-    "Prefer desktop_observe, desktop_click, desktop_type, desktop_invoke, "
-    "desktop_key, desktop_read_screen, desktop_screenshot, desktop_click_at, "
-    "desktop_move, desktop_drag, and desktop_scroll over other tools for this "
-    "request. After every action (click, type, drag, scroll, key), call "
-    "desktop_observe again to re-observe and verify the expected change "
-    "happened before doing the next action -- marks (element ids) go stale "
-    "after any UI change, so a mark id from before an action may no longer "
-    "point at the right thing afterward. If a target has no mark (a canvas, "
-    "an icon, an image-only control, game content), call desktop_screenshot "
-    "to get an annotated image, then use desktop_click_at or desktop_drag "
-    "with the pixel coordinates read off that annotated screenshot -- not "
-    "desktop_click with a mark id, since there is no mark for these targets. "
-    "If 3 consecutive verification checks fail (the expected change didn't "
-    "happen), stop attempting and report the failure to the user rather than "
-    "continuing to retry blindly. All existing approval gates, the panic "
-    "hotkey, and the credential hard-stop still apply unchanged. If the "
-    "request involves multiple apps/windows, or names a window that isn't "
-    "already in focus, call desktop_windows to see what's open and "
-    "desktop_focus to switch to the right one before observing or acting on "
-    "it -- then re-observe after every focus change, since marks from the "
-    "previous window are no longer valid once focus moves elsewhere."
-)
-
-
-def _detect_operator_persona(query: str) -> bool:
-    """True if the user addressed Helm by name, or the query implies
-    direct desktop-action intent (click/drag/scroll/type on screen)."""
-    stripped = query.strip()
-    return bool(_HELM_ADDRESS_RE.match(stripped)) or bool(_HELM_ACTION_RE.search(stripped))
 
 
 _UNINFORMATIVE_PATTERNS = re.compile(
@@ -1225,7 +1186,17 @@ _TOOL_RESULT_MIN_CHARS = 50
 
 
 def _assess_tool_result_relevance(tool_name: str, tool_result: str) -> bool:
-    """Heuristic: is this tool result useful? Returns True if relevant."""
+    """Heuristic: is this tool result useful? Returns True if relevant.
+
+    Only applies to search/query-style tools (web_search, session_search,
+    graph_query, plugin_fs_search, ...) -- the length/junk-pattern checks
+    below are tuned for "no real content found" search noise. Every other
+    tool (skill scripts, plugin actions, MCP calls) is exempt: a short but
+    legitimate result like a whoami output or a single number would
+    otherwise get silently discarded and replaced with a misleading
+    "Search returned no useful results" message."""
+    if "search" not in tool_name.lower() and "query" not in tool_name.lower():
+        return True
     if not tool_result or len(tool_result.strip()) < _TOOL_RESULT_MIN_CHARS:
         return False
     if _UNINFORMATIVE_PATTERNS.match(tool_result.strip()):
@@ -1271,7 +1242,6 @@ def _build_volatile_tier(
     has_user: bool = False, has_opinions: bool = False,
     verbosity_hint: Optional[str] = None,
     active_goal: Optional[str] = None,
-    operator_persona: bool = False,
     tool_catalog: str = "",
     idle_seconds: Optional[float] = None,
 ) -> str:
@@ -1301,8 +1271,6 @@ def _build_volatile_tier(
         parts.append(f"Answer style: {verbosity_hint}.")
     if active_goal:
         parts.append(f"Current goal: {active_goal}. Stay focused on this.")
-    if operator_persona:
-        parts.append(_HELM_PERSONA_TEXT)
     if tool_catalog:
         # Rebuilt fresh every turn from the live registry (see
         # ToolRegistry.build_tool_prompt), so MCP/plugin/extension tools and
@@ -1347,6 +1315,16 @@ def _with_vision_image(messages: List[Dict[str, Any]], image_url: str) -> List[D
 def _payload_is_vision(payload: Dict[str, Any]) -> bool:
     """True if _build_payload injected an image block into this payload."""
     return any(isinstance(m.get("content"), list) for m in payload.get("messages", []))
+
+
+def _strip_tools_for_vision(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """A local vision model given an image alongside the full tool schema
+    hallucinates a bogus tool call instead of describing the image -- the
+    vision follow-up route must never receive tools/tool_choice."""
+    payload = dict(payload)
+    payload.pop("tools", None)
+    payload.pop("tool_choice", None)
+    return payload
 
 
 # =====================================================================
@@ -1461,7 +1439,7 @@ class Brain:
             self._vision_client = httpx.AsyncClient(
                 base_url=config.vision_llm_url,
                 headers=build_auth_headers(config.vision_llm_key),
-                timeout=60.0,
+                timeout=config.vision_llm_timeout_s,
             )
             self._vision_model = config.vision_llm_model
             logger.info("Vision LLM configured: %s", config.vision_llm_url)
@@ -1991,7 +1969,6 @@ class Brain:
             has_user=has_user, has_opinions=has_opinions,
             verbosity_hint=verbosity_hint,
             active_goal=self._active_goal,
-            operator_persona=_detect_operator_persona(user_input),
             tool_catalog="" if self._use_native_tools else tool_registry.build_tool_prompt(),
             idle_seconds=(
                 desktop_session.user_idle_seconds()
@@ -2259,9 +2236,20 @@ class Brain:
 
             tool_calls = allowed_calls
             results_map: Dict[int, str] = {}
-            for idx, call in enumerate(tool_calls):
-                if not tool_registry.is_interactive(call["name"]):
-                    results_map[idx] = await _exec_one(call)
+            # Concurrent, not sequential -- serial awaiting defeated spawn_agent's own semaphore concurrency.
+            concurrent_calls = [
+                (idx, call) for idx, call in enumerate(tool_calls)
+                if not tool_registry.is_interactive(call["name"])
+            ]
+            if concurrent_calls:
+                results = await asyncio.gather(
+                    *(_exec_one(call) for _, call in concurrent_calls),
+                    return_exceptions=True,
+                )
+                for (idx, call), r in zip(concurrent_calls, results):
+                    results_map[idx] = (
+                        f"Error executing tool '{call['name']}': {r}" if isinstance(r, Exception) else r
+                    )
 
             # Interactive tools run sequentially after read-only tools complete.
             for idx, call in enumerate(tool_calls):
@@ -2310,6 +2298,8 @@ class Brain:
             followup_client, followup_model, is_vision = self._select_followup_route(
                 followup_payload
             )
+            if is_vision:
+                followup_payload = _strip_tools_for_vision(followup_payload)
 
             state = FollowupStreamState()
             try:

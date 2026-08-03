@@ -293,42 +293,10 @@ class TestCancelGeneration:
         assert brain._chat_generation != generation_at_loop_top
 
 
-class TestHelmPersona:
-    """Helm persona text and auto-detect (Task A4 see-act-verify hardening)."""
-
-    def test_helm_persona_mentions_verify_and_raw_input(self):
-        from charlie.core import _HELM_PERSONA_TEXT
-        for phrase in ("desktop_click_at", "re-observe", "verify"):
-            assert phrase in _HELM_PERSONA_TEXT
-
-    def test_helm_persona_mentions_window_management(self):
-        from charlie.core import _HELM_PERSONA_TEXT
-        for phrase in ("desktop_windows", "desktop_focus"):
-            assert phrase in _HELM_PERSONA_TEXT
-
-    def test_operator_persona_auto_activates_on_desktop_intent(self):
-        from charlie.core import _detect_operator_persona
-        assert _detect_operator_persona("helm, open my editor")
-        assert _detect_operator_persona("click the save button on screen")
-        assert not _detect_operator_persona("what's the weather")
-
-    def test_operator_persona_avoids_drag_idiom_false_positives(self):
-        from charlie.core import _detect_operator_persona
-        assert not _detect_operator_persona("what's a good drag queen show")
-        assert not _detect_operator_persona("drag racing is fun")
-        assert not _detect_operator_persona("the meeting will drag on forever")
-
-    def test_operator_persona_still_detects_real_drag_intent(self):
-        from charlie.core import _detect_operator_persona
-        assert _detect_operator_persona("drag the file to the trash")
-        assert _detect_operator_persona("drag this to the folder")
-        assert _detect_operator_persona("drag and drop this icon")
-
-
 class TestCapabilitiesBlock:
-    """Stable-tier capability roster (Task A4b): stop Charlie from falsely
-    refusing when a tool/agent for the request already exists, and make a
-    live capability roster override any stale claim (e.g. in SOUL.md)."""
+    """Stable-tier capability roster: stop Charlie from falsely refusing
+    when a tool/agent for the request already exists, and make a live
+    capability roster override any stale claim (e.g. in SOUL.md)."""
 
     def test_capabilities_block_overrides_stale_claims(self):
         from charlie.config import Config
@@ -376,9 +344,9 @@ class TestCapabilitiesBlock:
 
 
 class TestRebuildStableTier:
-    """Task A4b fix 2: the dashboard's system_restart reload flow mutates
-    config in place but only rebuilt _context_tier -- capability claims baked
-    into _stable_tier kept describing the OLD config until process restart."""
+    """The dashboard's system_restart reload flow mutates config in place
+    but only rebuilt _context_tier -- capability claims baked into
+    _stable_tier kept describing the OLD config until process restart."""
 
     def test_rebuild_stable_tier_reflects_new_config(self):
         import charlie.core as core_module
@@ -400,8 +368,8 @@ class TestRebuildStableTier:
 
 
 class TestVisualContentQueryFastPath:
-    """Task D1: ambient "what am I looking at" fast-path queues a vision
-    screenshot for graphical content OCR/UIA marks can't describe.
+    """Ambient "what am I looking at" fast-path queues a vision screenshot
+    for graphical content OCR/UIA marks can't describe.
     _should_queue_visual_screenshot now also fires for _SCREEN_QUERY_RE's
     broader "what's on my screen" phrasing -- a real screenshot beats the
     UIA/OCR text summary whenever a vision model is actually configured."""

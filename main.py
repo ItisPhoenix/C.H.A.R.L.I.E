@@ -21,7 +21,6 @@ from charlie.text_utils import normalize_app_list as _normalize_app_list
 from pathlib import Path
 
 
-# 1. SETUP ENVIRONMENT FIRST
 class SafeStreamWrapper:
     def __init__(self, stream):
         self.stream = stream
@@ -66,7 +65,6 @@ else:
 os.makedirs("logs", exist_ok=True)
 LOG_FILE = "logs/charlie.log"
 
-# 2. CONFIGURE SPLIT LOGGING
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)
 
@@ -87,7 +85,6 @@ root_logger.handlers = []
 root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
 
-# 3. NOW IMPORT CHARLIE MODULES
 from charlie.config import Config, config
 from charlie.core import Brain
 from charlie.ipc import EventBus
@@ -373,6 +370,55 @@ async def main():
 
     mcp_start_task = asyncio.create_task(_start_mcp_task())
 
+    async def _reload_extensions_task():
+        """Boot-time counterpart to charlie/web_server.py's _load_extensions():
+        that function only restores the web-server process's own registry, so
+        without this the voice process's Brain -- where the real chat
+        tool-calling loop runs -- starts every restart with zero previously
+        installed extensions until each one is reinstalled by hand. Awaits
+        mcp_start_task first so a config-driven MCP client (if any) is already
+        in place before mcp-kind entries potentially replace it."""
+        nonlocal mcp_client
+        await mcp_start_task
+        import json
+
+        try:
+            with open(config.extensions_state_path, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+        except FileNotFoundError:
+            return
+        except Exception:
+            logger.warning("Failed to read extensions state file", exc_info=True)
+            return
+
+        from charlie.extensions.install import install_extension
+        from charlie.tools import registry as _ext_registry
+
+        for entry in entries:
+            if not entry.get("enabled", True):
+                continue
+            kind = entry.get("kind", "")
+            name = entry.get("name", "")
+            source = entry.get("source", "")
+            raw_text = entry.get("raw_text", "")
+            try:
+                tool_names, mcp_client = install_extension(
+                    kind, name, source, raw_text,
+                    registry=_ext_registry, plugin_manager=plugin_manager, mcp_client=mcp_client,
+                    plugin_allow_dirs=config.plugin_allow_dirs,
+                )
+                if kind == "skill":
+                    from charlie.extensions.skills import format_skill_block, parse_skill_md
+                    manifest = parse_skill_md(raw_text)
+                    brain.add_installed_skill_block(name, format_skill_block(manifest))
+                logger.info(
+                    "Reloaded extension '%s' (%s) into voice process on boot: %s", name, kind, tool_names,
+                )
+            except Exception:
+                logger.warning("Failed to reload extension '%s' on boot", name, exc_info=True)
+
+    extensions_reload_task = asyncio.create_task(_reload_extensions_task())
+
     # Placeholder for event_bus (set later in async context)
     event_bus = None
     # Per-launch fallback, not the old shared "default" bucket across all launches.
@@ -480,6 +526,10 @@ async def main():
             return
 
         print(f"\rHeard: {text}", flush=True)
+        # Unconditional so is_echo()'s post-speech grace window actually fires, not just mid-speech.
+        if voice.is_echo(text):
+            logger.info(f"Echo suppressed: {text}")
+            return
         if config.enable_barge_in and voice.is_speaking.is_set():
             # Barge-in detection: command words always interrupt immediately
             _BARGE_COMMANDS = {
@@ -498,10 +548,6 @@ async def main():
                 brain.cancel_chat()
                 speech_echo_cooldown = time.time() + 1.5
             else:
-                # Echo detection: is this a subset of what Charlie is currently saying?
-                if voice.is_echo(text):
-                    logger.info(f"Echo suppressed (during TTS): {text}")
-                    return
                 # New content during TTS -- barge in (cancel current turn)
                 logger.info("Barge-in: New user input during TTS. Canceling.")
                 voice.stop_tts()
@@ -1245,6 +1291,7 @@ async def main():
                     consume_web_commands(bus, brain),
                     _emit_system_status(bus),
                     mcp_start_task,
+                    extensions_reload_task,
                 )
             finally:
                 logging.getLogger().removeHandler(zmq_handler)

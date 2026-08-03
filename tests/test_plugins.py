@@ -384,7 +384,7 @@ class TestPluginToolBridge:
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 adapter #4: per-plugin runtime enable/disable
+# Per-plugin runtime enable/disable
 # ---------------------------------------------------------------------------
 
 class TestPluginRuntimeControl:

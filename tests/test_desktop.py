@@ -15,6 +15,7 @@ from charlie.core import (
     _SCREEN_QUERY_RE,
     Brain,
     _payload_is_vision,
+    _strip_tools_for_vision,
     _with_vision_image,
 )
 from charlie.desktop import DESKTOP_AVAILABLE, UIA_EXECUTOR
@@ -223,6 +224,28 @@ def test_select_followup_route_uses_llm_without_image(brain_config):
     assert (client, model, is_vision) == (brain.client, brain_config.llm_model, False)
 
 
+def test_strip_tools_for_vision_removes_tool_schema():
+    """Regression: a local vision model given an image alongside the full
+    tool schema hallucinated a bogus tool call (e.g. desktop_click with a
+    fabricated mark_id) instead of describing the image -- confirmed live
+    against LM Studio. The vision follow-up route must never see tools."""
+    payload = {
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "x"}]}],
+        "tools": [{"type": "function", "function": {"name": "desktop_click"}}],
+        "tool_choice": "auto",
+    }
+    stripped = _strip_tools_for_vision(payload)
+    assert "tools" not in stripped
+    assert "tool_choice" not in stripped
+    assert stripped["messages"] == payload["messages"]
+
+
+def test_strip_tools_for_vision_does_not_mutate_original_payload():
+    payload = {"messages": [], "tools": [{"name": "x"}]}
+    _strip_tools_for_vision(payload)
+    assert "tools" in payload
+
+
 def test_screen_query_phrase_matches():
     assert _SCREEN_QUERY_RE.search("what's on my screen")
     assert _SCREEN_QUERY_RE.search("what do you see right now")
@@ -270,6 +293,41 @@ def test_vision_annotate_handles_negative_and_swapped_bounds():
     ]
     annotated = desktop_vision.annotate_som(buf.getvalue(), elements)
     assert annotated
+
+
+def test_to_data_url_downscales_oversized_screenshot():
+    """Regression: an unscaled full-resolution screenshot (~1.2MB base64)
+    silently produced empty responses from a local vision model instead of
+    a clean error -- almost certainly exceeding its practical image-size
+    handling. Downscaling on the long edge is the fix."""
+    if not desktop_vision.VISION_AVAILABLE:
+        pytest.skip("Pillow not installed in this environment")
+    import base64
+    import io as _io
+
+    from PIL import Image
+    img = Image.new("RGB", (1920, 1080), color="red")
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+
+    url = desktop_vision.to_data_url(buf.getvalue())
+    decoded = base64.b64decode(url.split(",", 1)[1])
+    resized = Image.open(_io.BytesIO(decoded))
+    assert max(resized.size) <= desktop_vision._MAX_VISION_DIMENSION
+
+
+def test_to_data_url_leaves_small_image_unscaled():
+    if not desktop_vision.VISION_AVAILABLE:
+        pytest.skip("Pillow not installed in this environment")
+    import io as _io
+
+    from PIL import Image
+    img = Image.new("RGB", (100, 100), color="blue")
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+
+    url = desktop_vision.to_data_url(buf.getvalue())
+    assert url.startswith("data:image/png;base64,")
 
 
 if __name__ == "__main__":

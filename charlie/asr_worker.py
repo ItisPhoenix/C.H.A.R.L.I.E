@@ -50,18 +50,35 @@ def _filter_hallucinated_segments(segments) -> list:
     """Drop segments Whisper itself flags as likely non-speech, a repetition
     loop, or low-confidence -- silence/noise can otherwise decode into a
     plausible-looking sentence (e.g. "thank you for watching", "stop stop
-    stop...", or echoing the hotwords list) instead of being dropped."""
-    return [
-        s
-        for s in segments
-        if s.no_speech_prob < _NO_SPEECH_PROB_THRESHOLD
-        and s.compression_ratio < _COMPRESSION_RATIO_THRESHOLD
-        and s.avg_logprob > _AVG_LOGPROB_THRESHOLD
-        and not (
+    stop...", or echoing the hotwords list) instead of being dropped.
+
+    Logs every dropped segment with the reason -- without this, a segment
+    that was real speech but tripped a threshold vanishes with zero trace,
+    indistinguishable from Charlie simply not hearing anything."""
+    kept = []
+    for s in segments:
+        if s.no_speech_prob >= _NO_SPEECH_PROB_THRESHOLD:
+            logger.info(f"asr_segment_dropped | reason=no_speech_prob | value={s.no_speech_prob:.3f} | text={s.text!r}")
+            continue
+        if s.compression_ratio >= _COMPRESSION_RATIO_THRESHOLD:
+            logger.info(
+                f"asr_segment_dropped | reason=compression_ratio | value={s.compression_ratio:.3f} | text={s.text!r}"
+            )
+            continue
+        if s.avg_logprob <= _AVG_LOGPROB_THRESHOLD:
+            logger.info(f"asr_segment_dropped | reason=avg_logprob | value={s.avg_logprob:.3f} | text={s.text!r}")
+            continue
+        if (
             s.no_speech_prob >= _HALLUCINATION_PHRASE_NO_SPEECH_THRESHOLD
             and s.text.strip().lower().rstrip(".") in _HALLUCINATION_PHRASES
-        )
-    ]
+        ):
+            logger.info(
+                f"asr_segment_dropped | reason=hallucination_phrase | "
+                f"no_speech_prob={s.no_speech_prob:.3f} | text={s.text!r}"
+            )
+            continue
+        kept.append(s)
+    return kept
 
 
 def _build_transcribe_kwargs(

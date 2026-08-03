@@ -69,7 +69,7 @@ async def _ensure_mcp_client_async():
     """Runs the lazy MCP start on a thread so it doesn't freeze this process's event loop."""
     return await asyncio.to_thread(_ensure_mcp_client)
 
-# In-process registry of installed extensions (Phase 5) -- see
+# In-process registry of installed extensions -- see
 # charlie/extensions/__init__.py's ExtensionManager docstring for the
 # propose()/confirm() gate this drives and the no-cross-restart-persistence
 # caveat.
@@ -246,7 +246,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_event_bridge())
     logger.info("Web server started, event bridge active")
 
-    # ZMQ guard — suppress CancelledError traceback on Windows shutdown
+    # ZMQ guard -- suppress CancelledError traceback on Windows shutdown
     loop = asyncio.get_event_loop()
     _orig_call = loop.call_exception_handler
     def _guarded_call(context):
@@ -350,6 +350,19 @@ async def _event_bridge():
         elif etype == "mic_state":
             global _mic_state
             _mic_state = event.get("payload", {})
+        elif etype == "agent_spawned":
+            payload = event.get("payload", {})
+            _get_store().create_agent_run(
+                payload.get("agent_id", ""), payload.get("task", ""), payload.get("session_id") or "default"
+            )
+        elif etype == "agent_status":
+            payload = event.get("payload", {})
+            _get_store().update_agent_run(payload.get("agent_id", ""), last_tool=payload.get("tool_name"))
+        elif etype == "agent_result":
+            payload = event.get("payload", {})
+            result = payload.get("result", "")
+            status = "timeout" if "timed out" in result else "cancelled" if "cancelled" in result else "done"
+            _get_store().update_agent_run(payload.get("agent_id", ""), status=status, result=result)
 
         await broadcast(event)
 
@@ -546,15 +559,15 @@ async def delete_session(session_id: str):
 async def session_chat(session_id: str, data: dict):
     """HTTP fallback for chat when WebSocket is down.
 
-    Persists the user turn and forwards it to the voice process as a `chat`
-    command so the brain generates a reply and streams `token` events back
-    over the WebSocket, exactly like the live path.
+    Forwards the message to the voice process as a `chat` command, exactly
+    like the WS path -- main.py's _process() is the single place that
+    persists the user turn (touch_session, title update, then the append).
+    Persisting here too used to double-write every REST-originated message,
+    same bug the WS path never had since it never pre-persists either.
     """
     text = data.get("text", "").strip()
     if not text:
         return {"status": "error", "detail": "empty message"}
-    store = _get_store()
-    store.append("user", text, session_id=session_id)
     if event_bus:
         await event_bus.send_command(
             {"type": "chat", "session_id": session_id, "text": text}
@@ -682,7 +695,7 @@ async def get_mcp_status():
 
 @app.get("/api/extensions")
 async def list_extensions():
-    """List installed extensions across all four Phase 5 adapters."""
+    """List installed extensions across all four adapters."""
     return {
         "extensions": [
             {
@@ -846,6 +859,28 @@ async def uninstall_extension(name: str):
         "extension_uninstalled", {"kind": ext.kind, "name": name, "tool_names": ext.tool_names}
     )
     return {"status": "ok"}
+
+
+@app.get("/api/agents")
+async def list_agents(session_id: str | None = None, limit: int = 100):
+    """List persisted sub-agent runs, most recent first."""
+    store = _get_store()
+    rows = store.get_agent_runs(session_id=session_id, limit=limit)
+    return {
+        "agents": [
+            {
+                "agentId": r[0],
+                "sessionId": r[1],
+                "task": r[2],
+                "status": r[3],
+                "lastTool": r[4],
+                "result": r[5],
+                "spawnedAt": r[6],
+                "finishedAt": r[7] if r[3] != "running" else None,
+            }
+            for r in rows
+        ]
+    }
 
 
 @app.post("/api/agents/{agent_id}/cancel")
@@ -1133,7 +1168,7 @@ async def get_available_models():
     # Only seed the currently configured model - no phantom defaults
     models_set: set[str] = {current_model} if current_model else set()
 
-    # 1. Query configured LLM provider endpoint if API key is set
+    # Query configured LLM provider endpoint if API key is set
     if config.llm_key and config.llm_key not in ("no-key", "no_key") and config.llm_url:
         try:
             headers = build_auth_headers(config.llm_key)
@@ -1149,7 +1184,7 @@ async def get_available_models():
         except Exception as e:
             logger.warning(f"Could not fetch models from provider endpoint: {e}")
 
-    # 2. Discover local Ollama models (port 11434)
+    # Discover local Ollama models (port 11434)
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
             r = await client.get("http://127.0.0.1:11434/api/tags")
@@ -1160,7 +1195,7 @@ async def get_available_models():
     except Exception:
         pass
 
-    # 3. Discover local LM Studio models (port 1234)
+    # Discover local LM Studio models (port 1234)
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
             r = await client.get("http://127.0.0.1:1234/v1/models")
@@ -1180,35 +1215,113 @@ async def get_available_models():
 
 @app.get("/api/local_models")
 async def get_local_models():
-    """Return ONLY locally hosted models (Ollama :11434, LM Studio :1234)."""
+    """Return ONLY locally hosted models (Ollama :11434, LM Studio :1234),
+    each flagged with whether it's the model Charlie's LLM_MODEL config
+    currently points at, plus per-endpoint reachability/latency and
+    per-model specs (size, quantization, context length, VRAM-loaded
+    state where the server exposes it) -- real telemetry, not just a
+    static "here's what's installed" list."""
+    import time
+
     import httpx
 
+    active_name = config.llm_model.strip().lower()
     local_models = []
-    # 1. Discover local Ollama models (port 11434)
-    try:
-        async with httpx.AsyncClient(timeout=1.5) as client:
-            r = await client.get("http://127.0.0.1:11434/api/tags")
-            if r.status_code == 200:
-                for m in r.json().get("models", []):
-                    if m.get("name"):
-                        local_models.append({"name": m["name"], "source": "Ollama (:11434)"})
-    except Exception:
-        pass
+    endpoints = []
 
-    # 2. Discover local LM Studio models (port 1234)
+    # /api/ps reports what's actually loaded into VRAM right now, distinct from /api/tags' full catalog.
+    ollama_loaded: dict[str, int] = {}
+    t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
-            r = await client.get("http://127.0.0.1:1234/v1/models")
-            if r.status_code == 200:
-                for item in r.json().get("data", []):
-                    if isinstance(item, dict) and item.get("id"):
-                        local_models.append({"name": item["id"], "source": "LM Studio (:1234)"})
+            tags_resp = await client.get("http://127.0.0.1:11434/api/tags")
+            latency_ms = round((time.monotonic() - t0) * 1000)
+            if tags_resp.status_code == 200:
+                try:
+                    ps_resp = await client.get("http://127.0.0.1:11434/api/ps")
+                    if ps_resp.status_code == 200:
+                        for m in ps_resp.json().get("models", []):
+                            if m.get("name"):
+                                ollama_loaded[m["name"]] = m.get("size_vram", 0)
+                except Exception:
+                    pass
+                endpoints.append({"name": "Ollama", "url": ":11434", "reachable": True, "latency_ms": latency_ms})
+                for m in tags_resp.json().get("models", []):
+                    if not m.get("name"):
+                        continue
+                    details = m.get("details", {})
+                    local_models.append({
+                        "name": m["name"],
+                        "source": "Ollama (:11434)",
+                        "active": m["name"].strip().lower() == active_name,
+                        "size_bytes": m.get("size"),
+                        "parameter_size": details.get("parameter_size"),
+                        "quantization": details.get("quantization_level"),
+                        "context_length": None,
+                        "loaded_in_vram": m["name"] in ollama_loaded,
+                        "vram_bytes": ollama_loaded.get(m["name"], 0),
+                    })
+            else:
+                endpoints.append({"name": "Ollama", "url": ":11434", "reachable": False, "latency_ms": None})
     except Exception:
-        pass
+        endpoints.append({"name": "Ollama", "url": ":11434", "reachable": False, "latency_ms": None})
+
+    # Try LM Studio's richer /api/v0/models first, fall back to plain OpenAI-shaped /v1/models for older versions.
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            r = await client.get("http://127.0.0.1:1234/api/v0/models")
+            latency_ms = round((time.monotonic() - t0) * 1000)
+            if r.status_code == 200:
+                endpoints.append({"name": "LM Studio", "url": ":1234", "reachable": True, "latency_ms": latency_ms})
+                for item in r.json().get("data", []):
+                    if not (isinstance(item, dict) and item.get("id")):
+                        continue
+                    local_models.append({
+                        "name": item["id"],
+                        "source": "LM Studio (:1234)",
+                        "active": item["id"].strip().lower() == active_name,
+                        "size_bytes": item.get("size_bytes") or item.get("size"),
+                        "parameter_size": None,
+                        "quantization": item.get("quantization"),
+                        "context_length": item.get("max_context_length") or item.get("loaded_context_length"),
+                        "loaded_in_vram": item.get("state") == "loaded",
+                        "vram_bytes": None,
+                    })
+            else:
+                raise httpx.HTTPStatusError("v0 unavailable", request=r.request, response=r)
+    except Exception:
+        try:
+            t0 = time.monotonic()
+            async with httpx.AsyncClient(timeout=1.5) as client:
+                r = await client.get("http://127.0.0.1:1234/v1/models")
+                latency_ms = round((time.monotonic() - t0) * 1000)
+                if r.status_code == 200:
+                    endpoints.append({"name": "LM Studio", "url": ":1234", "reachable": True, "latency_ms": latency_ms})
+                    for item in r.json().get("data", []):
+                        if isinstance(item, dict) and item.get("id"):
+                            local_models.append({
+                                "name": item["id"],
+                                "source": "LM Studio (:1234)",
+                                "active": item["id"].strip().lower() == active_name,
+                                "size_bytes": None,
+                                "parameter_size": None,
+                                "quantization": None,
+                                "context_length": None,
+                                "loaded_in_vram": None,
+                                "vram_bytes": None,
+                            })
+                else:
+                    endpoints.append({"name": "LM Studio", "url": ":1234", "reachable": False, "latency_ms": None})
+        except Exception:
+            endpoints.append({"name": "LM Studio", "url": ":1234", "reachable": False, "latency_ms": None})
 
     return {
         "count": len(local_models),
         "models": local_models,
+        "active_model": config.llm_model,
+        "active_is_local": any(m["active"] for m in local_models),
+        "endpoints": endpoints,
     }
 
 

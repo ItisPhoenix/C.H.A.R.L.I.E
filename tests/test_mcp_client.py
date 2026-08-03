@@ -182,7 +182,7 @@ class _FakeServer:
 
 
 class TestMCPRuntimeControl:
-    """Phase 5 adapter #1: add/enable/disable/unregister without restart."""
+    """MCP runtime control adapter: add/enable/disable/unregister without restart."""
 
     def _client_with_server(self, monkeypatch, name: str = "s1") -> MCPClient:
         import charlie.mcp_client as mcp_mod

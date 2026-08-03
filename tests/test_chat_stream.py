@@ -142,17 +142,17 @@ def test_detect_close_app(monkeypatch):
     monkeypatch.setattr(subprocess, "run", mock_run)
     monkeypatch.setattr("sys.platform", "win32")
 
-    # 1. Test match and successful taskkill (single)
+    # Test match and successful taskkill (single)
     res = _detect_close_app("close chrome")
     assert res == "Chrome has been closed for you."
     assert "taskkill /IM chrome.exe /F" in called_cmds
 
-    # 2. Test direct .exe usage
+    # Test direct .exe usage
     res = _detect_close_app("charlie, close notepad.exe")
     assert res == "Notepad has been closed for you."
     assert "taskkill /IM notepad.exe /F" in called_cmds
 
-    # 3. Test closing multiple apps
+    # Test closing multiple apps
     called_cmds.clear()
     res = _detect_close_app("close chrome and notepad")
     assert "Notepad and Chrome" in res
@@ -160,7 +160,7 @@ def test_detect_close_app(monkeypatch):
     assert "taskkill /IM chrome.exe /F" in called_cmds
     assert "taskkill /IM notepad.exe /F" in called_cmds
 
-    # 4. Test closing running and not running mix
+    # Test closing running and not running mix
     called_cmds.clear()
 
     def mock_run_mix(cmd, *args, **kwargs):
@@ -178,7 +178,7 @@ def test_detect_close_app(monkeypatch):
     assert "Notepad has been closed for you." in res
     assert "Chrome is not currently running." in res
 
-    # 5. Test unknown app
+    # Test unknown app
     res = _detect_close_app("close unknownapp")
     assert res is None
 
@@ -419,7 +419,7 @@ def test_detect_open_app(monkeypatch):
     monkeypatch.setattr("sys.platform", "win32")
     monkeypatch.setattr("charlie.core.is_process_running", lambda name: False)
 
-    # 1. Test opening single app
+    # Test opening single app
     res = _detect_open_app("open calculator")
     msg, remaining = res
     assert msg == "I've opened Calculator for you."
@@ -433,7 +433,7 @@ def test_detect_open_app(monkeypatch):
     assert 'start "" chrome' in called_cmds
     assert 'start "" calc' in called_cmds
 
-    # 3. Test opening whitelisted websites by name
+    # Test opening whitelisted websites by name
     called_cmds.clear()
     res = _detect_open_app("open youtube and github")
     msg, remaining = res
@@ -442,7 +442,7 @@ def test_detect_open_app(monkeypatch):
     assert 'start "" https://youtube.com' in called_cmds
     assert 'start "" https://github.com' in called_cmds
 
-    # 4. Test opening generic domains/URLs
+    # Test opening generic domains/URLs
     called_cmds.clear()
     res = _detect_open_app("open reddit.com, wikipedia.org and https://neon.tech")
     msg, remaining = res
@@ -454,17 +454,17 @@ def test_detect_open_app(monkeypatch):
     assert 'start "" https://wikipedia.org' in called_cmds
     assert 'start "" https://neon.tech' in called_cmds
 
-    # 5. Test float/version number exclusion (must not match as domain)
+    # Test float/version number exclusion (must not match as domain)
     res = _detect_open_app("open version 3.5")
     assert res is None
 
-    # 6. Test unknown app
+    # Test unknown app
     res = _detect_open_app("open unknownapp")
     assert res is None
 
-    # 7. Compound instruction: the app still opens as a side effect (no more
-    # full bypass), and the leftover instruction comes back for the caller
-    # to hand to the LLM instead of the fast-path silently doing nothing extra.
+    # Compound instruction: the app still opens as a side effect (no more full
+    # bypass), and the leftover instruction comes back for the caller to hand
+    # to the LLM instead of the fast-path silently doing nothing extra.
     called_cmds.clear()
     res = _detect_open_app("open notepad and write hello")
     assert res is not None
@@ -552,7 +552,7 @@ def test_detect_open_app_focuses_already_running_instead_of_relaunching(monkeypa
     """Regression: several apps (Windows 11's modern Notepad included) allow
     multiple simultaneous instances, so a blind relaunch piles up duplicate
     windows instead of erroring like a single-instance app would -- found
-    live during Phase 3 background-task testing (4+ Notepad windows from
+    live during background-task testing (4+ Notepad windows from
     repeated "open notepad" calls). An already-running app gets focused via
     the same native focus_window() the desktop_focus tool uses, not relaunched."""
     import subprocess

@@ -210,6 +210,23 @@ class SessionStore:
                         created_at TEXT NOT NULL
                     )"""
                 )
+                # Sub-agent run status, one row per agent_id, survives web_server restart
+                self.conn.execute(
+                    """CREATE TABLE IF NOT EXISTS agent_runs (
+                        agent_id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        task TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'running',
+                        last_tool TEXT,
+                        result TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )"""
+                )
+                self.conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_agent_runs_session_id "
+                    "ON agent_runs(session_id, created_at)"
+                )
         except sqlite3.Error as e:
             logger.error(f"Database initialization failed: {e}")
             raise
@@ -470,6 +487,73 @@ class SessionStore:
             return [(r[0], r[1], r[2]) for r in rows]
         except sqlite3.Error as e:
             logger.error(f"get_tool_events failed: {e}")
+            return []
+
+    def create_agent_run(self, agent_id: str, task: str, session_id: str) -> None:
+        """Records a newly spawned sub-agent as 'running'."""
+        try:
+            with self.conn:
+                now = utc_now_iso()
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO agent_runs "
+                    "(agent_id, session_id, task, status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'running', ?, ?)",
+                    (agent_id, session_id, task, now, now),
+                )
+        except sqlite3.Error as e:
+            logger.error(f"create_agent_run failed: {e}")
+
+    def update_agent_run(
+        self,
+        agent_id: str,
+        last_tool: Optional[str] = None,
+        status: Optional[str] = None,
+        result: Optional[str] = None,
+    ) -> None:
+        """Updates an existing agent run's last-seen tool, status, and/or result."""
+        fields = ["updated_at = ?"]
+        params: List[object] = [utc_now_iso()]
+        if last_tool is not None:
+            fields.append("last_tool = ?")
+            params.append(last_tool)
+        if status is not None:
+            fields.append("status = ?")
+            params.append(status)
+        if result is not None:
+            fields.append("result = ?")
+            params.append(result)
+        params.append(agent_id)
+        try:
+            with self.conn:
+                self.conn.execute(
+                    f"UPDATE agent_runs SET {', '.join(fields)} WHERE agent_id = ?",
+                    params,
+                )
+        except sqlite3.Error as e:
+            logger.error(f"update_agent_run failed: {e}")
+
+    def get_agent_runs(
+        self, session_id: Optional[str] = None, limit: int = 100
+    ) -> List[Tuple[str, str, str, str, Optional[str], Optional[str], str, str]]:
+        """Returns (agent_id, session_id, task, status, last_tool, result, created_at,
+        updated_at) rows, most recently created first."""
+        try:
+            if session_id:
+                rows = self.conn.execute(
+                    "SELECT agent_id, session_id, task, status, last_tool, result, "
+                    "created_at, updated_at FROM agent_runs WHERE session_id = ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (session_id, limit),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT agent_id, session_id, task, status, last_tool, result, "
+                    "created_at, updated_at FROM agent_runs ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [tuple(r) for r in rows]
+        except sqlite3.Error as e:
+            logger.error(f"get_agent_runs failed: {e}")
             return []
 
     def close(self) -> None:

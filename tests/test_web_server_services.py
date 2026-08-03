@@ -98,3 +98,33 @@ class TestServicesStatus:
         result = await web_server.get_services_status()
         by_name = {s["name"]: s for s in result["services"]}
         assert by_name["ChromaDB MemoryStore"]["status"] == "offline"
+
+
+@pytest.mark.asyncio
+class TestSessionChatFallback:
+    """The REST /chat fallback used to persist the user turn AND forward it
+    as a `chat` command -- main.py's _process() also persists on receiving
+    that command, so every REST-originated message got stored twice."""
+
+    async def test_does_not_persist_directly_only_forwards(self, monkeypatch):
+        appended = []
+
+        class _FakeStore:
+            def append(self, *args, **kwargs):
+                appended.append((args, kwargs))
+
+        monkeypatch.setattr(web_server, "_get_store", lambda: _FakeStore())
+
+        sent_commands = []
+
+        class _FakeEventBus:
+            async def send_command(self, cmd):
+                sent_commands.append(cmd)
+
+        monkeypatch.setattr(web_server, "event_bus", _FakeEventBus())
+
+        result = await web_server.session_chat("sess_1", {"text": "hello"})
+
+        assert result == {"status": "ok"}
+        assert appended == []
+        assert sent_commands == [{"type": "chat", "session_id": "sess_1", "text": "hello"}]

@@ -68,6 +68,30 @@ class TestHumanizeText:
         assert "Title" in result
         assert "##" not in result
 
+    def test_list_items_get_a_pause_between_them(self):
+        """Regression: list-item newlines used to vanish into the final
+        whitespace collapse with zero punctuation, running every item
+        together as one unbroken clause instead of a pause per item."""
+        result = VoiceEngine._humanize_text("- Spain\n- Morocco\n- Dodgers")
+        assert result == "Spain. Morocco. Dodgers."
+
+    def test_numbered_list_items_get_a_pause_between_them(self):
+        result = VoiceEngine._humanize_text("1. First step\n2. Second step")
+        assert result == "First step. Second step."
+
+    def test_header_separated_from_following_text(self):
+        result = VoiceEngine._humanize_text("## Summary\nToday is sunny")
+        assert result == "Summary. Today is sunny."
+
+    def test_markdown_table_is_dropped_entirely(self):
+        """Reading a table cell-by-cell aloud is nonsense -- drop it, matching
+        established voice-AI text filters (e.g. Pipecat's MarkdownTextFilter)."""
+        text = "Prices:\n| City | Price |\n|------|-------|\n| Delhi | 102 |\n"
+        result = VoiceEngine._humanize_text(text)
+        assert "|" not in result
+        assert "Delhi" not in result
+        assert "Prices" in result
+
     def test_strips_wrapper_quotes_and_adds_period(self):
         """_humanize_text strips wrapping quotes but adds sentence-ending period."""
         result = VoiceEngine._humanize_text('"Hello world"')

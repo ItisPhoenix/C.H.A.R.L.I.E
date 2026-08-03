@@ -85,6 +85,9 @@ async def parse_sse_stream(
             break
         try:
             chunk = json.loads(line[6:])
+            if "error" in chunk:
+                logger.warning("parse_sse_stream: upstream error: %s", chunk["error"])
+                continue
             delta = chunk.get("choices", [{}])[0].get("delta", {})
             content = delta.get("content", "")
             if content:
@@ -93,7 +96,8 @@ async def parse_sse_stream(
                     on_content(content)
             for tc in delta.get("tool_calls", []):
                 _merge_tool_call_delta(tc, tc_by_index)
-        except Exception:
+        except Exception as exc:
+            logger.warning("parse_sse_stream: failed to parse SSE line %r: %s", line[:200], exc)
             continue
 
     return accumulated, tc_by_index, cancelled
@@ -138,6 +142,9 @@ async def stream_followup_content(
             return
         try:
             chunk = json.loads(line[6:])
+            if "error" in chunk:
+                logger.warning("stream_followup_content: upstream error: %s", chunk["error"])
+                continue
             delta = chunk.get("choices", [{}])[0].get("delta", {})
             content = delta.get("content", "")
             if content:
@@ -145,7 +152,8 @@ async def stream_followup_content(
                 yield content
             for tc in delta.get("tool_calls", []):
                 _merge_tool_call_delta(tc, state.tc_by_index)
-        except Exception:
+        except Exception as exc:
+            logger.warning("stream_followup_content: failed to parse SSE line %r: %s", line[:200], exc)
             continue
 
 

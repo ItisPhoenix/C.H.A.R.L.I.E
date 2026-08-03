@@ -93,6 +93,11 @@ class Config:
         default=float(os.getenv("VAD_THRESHOLD", "0.25")),
         metadata=_meta("VAD_THRESHOLD", "VAD & ASR Tuning", restart="voice"),
     )
+    # Silero VAD speech-probability cutoff -- distinct scale from VAD_THRESHOLD's raw mic amplitude.
+    asr_vad_threshold: float = field(
+        default=float(os.getenv("ASR_VAD_THRESHOLD", "0.5")),
+        metadata=_meta("ASR_VAD_THRESHOLD", "VAD & ASR Tuning", restart="voice"),
+    )
     vad_silence_timeout: float = field(
         default=float(os.getenv("VAD_SILENCE_TIMEOUT", "1.5")),
         metadata=_meta("VAD_SILENCE_TIMEOUT", "VAD & ASR Tuning", restart="voice"),
@@ -292,7 +297,7 @@ class Config:
         default=int(os.getenv("DESKTOP_MAX_ACTIONS", "40")),
         metadata=_meta("DESKTOP_MAX_ACTIONS", "Desktop Control"),
     )
-    # Seconds of no real user input required before Helm may start/continue
+    # Seconds of no real user input required before Charlie may start/continue
     # an unattended background desktop task (charlie.desktop.session.user_idle_seconds).
     desktop_idle_threshold_s: float = field(
         default=float(os.getenv("DESKTOP_IDLE_THRESHOLD_S", "120.0")),
@@ -328,6 +333,10 @@ class Config:
     vision_llm_model: str = field(
         default=os.getenv("VISION_LLM_MODEL", ""),
         metadata=_meta("VISION_LLM_MODEL", "Vision"),
+    )
+    vision_llm_timeout_s: float = field(
+        default=float(os.getenv("VISION_LLM_TIMEOUT_S", "120.0")),
+        metadata=_meta("VISION_LLM_TIMEOUT_S", "Vision"),
     )
     plugins_enabled: bool = field(
         default=os.getenv("PLUGINS_ENABLED", "false").lower() == "true",
@@ -457,9 +466,7 @@ def _coerce(raw: Any, ftype: Any) -> Any:
 
 config = Config()
 
-# onnxruntime reads ORT_LOG_LEVEL from the process environment at import time.
-# Propagate the configured value once, here, as the single sanctioned env-write
-# site (AGENTS.md §4). This replaces the prior os.environ write in voice.py.
+# onnxruntime reads ORT_LOG_LEVEL from the env at import time -- the one sanctioned env-write site.
 os.environ.setdefault("ORT_LOG_LEVEL", config.ort_log_level)
 
 # Load SOUL.md into config.soul at startup

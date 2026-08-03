@@ -56,10 +56,20 @@ _RE_DOUBLE_HYPHEN = re.compile(r"\s*--\s*")
 _RE_LIST_BULLET = re.compile(r"^[\s]*[-*+]\s+", re.MULTILINE)  # "- item" or "* item"
 _RE_NUMBERED_LIST = re.compile(r"^[\s]*\d+[.)]\s+", re.MULTILINE)  # "1. item"
 _RE_HASH_HEADER = re.compile(r"^#{1,6}\s+", re.MULTILINE)  # "## Header"
+_RE_TABLE_LINE = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)  # "| col | col |" row
 _RE_BOLD_ITALIC = re.compile(r"[*_]{1,3}(\S.*?\S)[*_]{1,3}")  # *bold* or _italic_
 _RE_INLINE_CODE = re.compile(r"`([^`]+)`")
 _RE_BACKTICK_WRAP = re.compile(r"^`|`$")
 _RE_TRAILING_PUNCT_NO_SPACE = re.compile(r"([.!?])([A-Z])")
+
+
+def _terminate_structural_line(line: str) -> str:
+    """Add a period to a list-item/header line missing terminal punctuation."""
+    is_structural = _RE_LIST_BULLET.match(line) or _RE_NUMBERED_LIST.match(line) or _RE_HASH_HEADER.match(line)
+    if is_structural and line.strip() and line.rstrip()[-1] not in ".!?:":
+        return line + "."
+    return line
+
 
 # Wrapper quotes from LLM output: "Hello world" -> Hello world
 _RE_WRAPPER_QUOTES = re.compile(r'^\s*["\u201c\u201d]\s*(.+?)\s*["\u201c\u201d]\s*$')
@@ -395,7 +405,10 @@ class VoiceEngine:
         text = _RE_EN_DASH.sub(", ", text)
         text = _RE_DOUBLE_HYPHEN.sub(", ", text)
 
-        # 4. Strip LLM formatting artifacts
+        # 4. Strip LLM formatting artifacts. Tables read cell-by-cell aloud are nonsense, so drop them.
+        text = _RE_TABLE_LINE.sub("", text)
+        # Terminal punctuation per structural line first, so its pause survives the newline-collapse below.
+        text = "\n".join(_terminate_structural_line(line) for line in text.split("\n"))
         text = _RE_LIST_BULLET.sub("", text)
         text = _RE_NUMBERED_LIST.sub("", text)
         text = _RE_HASH_HEADER.sub("", text)
@@ -1021,7 +1034,7 @@ class VoiceEngine:
             "beam_size": self.config.asr_beam_size,
             "best_of": self.config.asr_best_of,
             "repetition_penalty": self.config.asr_repetition_penalty,
-            "vad_threshold": self.config.vad_threshold,
+            "vad_threshold": self.config.asr_vad_threshold,
             "min_speech_duration_ms": self.config.vad_min_speech_duration_ms,
             "max_speech_duration_s": self.config.vad_max_speech_duration_s,
             "min_silence_duration_ms": self.config.vad_min_silence_duration_ms,

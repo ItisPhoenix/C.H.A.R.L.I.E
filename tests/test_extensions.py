@@ -1,4 +1,4 @@
-"""Tests for the Phase 5 extension-install safety gate (charlie/extensions)."""
+"""Tests for the extension-install safety gate (charlie/extensions)."""
 
 import pytest
 

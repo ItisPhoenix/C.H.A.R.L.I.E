@@ -351,7 +351,7 @@ def test_shell_execute_blocks_metacharacters_and_keywords():
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 dashboard "desktop_frame" event -- downscale + throttle + emit bridge
+# Dashboard "desktop_frame" event -- downscale + throttle + emit bridge
 # ---------------------------------------------------------------------------
 
 def test_downscale_png_caps_long_edge_and_preserves_aspect():

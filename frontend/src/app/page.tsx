@@ -7,7 +7,7 @@ import {
   FolderGit, Network, RefreshCw, Check, X, Menu, Server, Puzzle, GitBranch, ChevronDown
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useCharlieStore, rgba, lighten, type Session, type Message } from "../store/useCharlieStore";
+import { useCharlieStore, rgba, lighten, type Session, type Message, type AgentRun } from "../store/useCharlieStore";
 
 interface WSMessage {
   type: string;
@@ -88,6 +88,7 @@ export default function Page(): ReactElement {
   const setConnected = useCharlieStore((s) => s.setConnected);
   const setSystemStatus = useCharlieStore((s) => s.setSystemStatus);
   const setSessions = useCharlieStore((s) => s.setSessions);
+  const setAgentRuns = useCharlieStore((s) => s.setAgentRuns);
   const setCurrentSessionId = useCharlieStore((s) => s.setCurrentSessionId);
   const setMessages = useCharlieStore((s) => s.setMessages);
   const addMessage = useCharlieStore((s) => s.addMessage);
@@ -178,6 +179,17 @@ export default function Page(): ReactElement {
   useEffect(() => {
     fetchSessionsRef.current = fetchSessions;
   }, [fetchSessions]);
+
+  // Hydrate persisted sub-agent runs so the Agents page survives a refresh/restart.
+  const fetchAgents = useCallback(async () => {
+    const data = await fetchJson("/api/agents?limit=100") as { agents: (Omit<AgentRun, "spawnedAt" | "finishedAt"> & { spawnedAt: string; finishedAt: string | null })[] } | null;
+    const list = (data?.agents || []).map((a) => ({
+      ...a,
+      spawnedAt: new Date(a.spawnedAt).getTime(),
+      finishedAt: a.finishedAt ? new Date(a.finishedAt).getTime() : undefined,
+    }));
+    setAgentRuns(list);
+  }, [fetchJson, setAgentRuns]);
 
   const handleCreateSession = useCallback(async (title: string = "New Chat") => {
     try {
@@ -483,6 +495,8 @@ export default function Page(): ReactElement {
         await fetchSessions();
       }
 
+      await fetchAgents();
+
       const audioState = await fetchJson("/api/audio") as { muted?: boolean; volume?: number } | null;
       if (audioState) {
         setAudio({
@@ -503,7 +517,7 @@ export default function Page(): ReactElement {
       }
     };
     void init();
-  }, [fetchSessions, handleCreateSession, setAudio, setMic, fetchJson, setLaunchId, setDesktopControlEnabled, setCurrentSessionId]);
+  }, [fetchSessions, fetchAgents, handleCreateSession, setAudio, setMic, fetchJson, setLaunchId, setDesktopControlEnabled, setCurrentSessionId]);
 
   // Sync active sessions
   useEffect(() => {
@@ -894,7 +908,13 @@ export default function Page(): ReactElement {
                         sessions={searchedSessions}
                         currentId={currentSessionId}
                         onSelect={(id) => {
-                          // Clear immediately so stale messages never appear in new session
+                          // Re-selecting the already-active session is a no-op for React's
+                          // state (same primitive), so the currentSessionId effect never
+                          // re-fires -- force the refetch directly instead of relying on it.
+                          if (id === currentSessionId) {
+                            fetchMessages(id);
+                            return;
+                          }
                           setMessages([]);
                           setCurrentSessionId(id);
                         }}
