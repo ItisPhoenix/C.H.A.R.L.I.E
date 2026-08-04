@@ -699,7 +699,7 @@ async def get_mcp_tools():
         await _ensure_mcp_client_async()
         defs = [
             d for d in registry.get_tool_definitions()
-            if d.get("name", "").startswith("mcp_")
+            if d.get("function", {}).get("name", "").startswith("mcp_")
         ]
         return {"tools": defs}
     except Exception as e:
@@ -717,7 +717,7 @@ async def get_mcp_status():
         if enabled:
             await _ensure_mcp_client_async()
         connected = enabled and any(
-            d.get("name", "").startswith("mcp_")
+            d.get("function", {}).get("name", "").startswith("mcp_")
             for d in registry.get_tool_definitions()
         )
         return {"enabled": enabled, "connected": connected}

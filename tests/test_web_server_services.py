@@ -24,11 +24,57 @@ def _fake_tool():
 
 @pytest.mark.asyncio
 class TestGetRegisteredTools:
-    async def test_returns_full_registry_not_just_mcp_prefixed(self, _fake_tool):
+    async def test_returns_full_registry_not_just_mcp_prefixed(self, monkeypatch, _fake_tool):
+        # Isolate from ambient MCP_ENABLED -- must not spawn a real MCP
+        # subprocess (and leak its registrations into the shared registry
+        # for later tests) just because the local .env happens to enable it.
+        monkeypatch.setattr(web_server.config, "mcp_enabled", False)
+
         result = await web_server.get_registered_tools()
 
         names = {t["function"]["name"] for t in result["tools"]}
         assert "test_fake_tool" in names
+
+
+@pytest.fixture
+def _fake_mcp_tool():
+    registry.register_tool(
+        name="mcp_filesystem_read_file",
+        description="test-only mcp tool",
+        schema={"type": "object", "properties": {}},
+    )(lambda **_: "ok")
+    yield
+    registry.unregister_tool("mcp_filesystem_read_file")
+
+
+@pytest.mark.asyncio
+class TestMcpStatusAndTools:
+    """get_tool_definitions() returns OpenAI-format {"function": {"name": ...}}
+    dicts, not a top-level "name" key -- these endpoints used to check
+    d.get("name") directly, which always missed, so /api/mcp/status reported
+    connected: false and /api/mcp/tools returned [] even with MCP fully
+    connected and tools registered."""
+
+    async def test_status_reports_connected_when_mcp_tools_registered(self, monkeypatch, _fake_mcp_tool):
+        monkeypatch.setattr(web_server.config, "mcp_enabled", True)
+        monkeypatch.setattr(web_server, "_ensure_mcp_client_async", lambda: _noop())
+
+        result = await web_server.get_mcp_status()
+
+        assert result == {"enabled": True, "connected": True}
+
+    async def test_tools_filters_to_mcp_prefixed_only(self, monkeypatch, _fake_tool, _fake_mcp_tool):
+        monkeypatch.setattr(web_server.config, "mcp_enabled", True)
+        monkeypatch.setattr(web_server, "_ensure_mcp_client_async", lambda: _noop())
+
+        result = await web_server.get_mcp_tools()
+
+        names = {t["function"]["name"] for t in result["tools"]}
+        assert names == {"mcp_filesystem_read_file"}
+
+
+async def _noop():
+    return None
 
 
 @pytest.mark.asyncio

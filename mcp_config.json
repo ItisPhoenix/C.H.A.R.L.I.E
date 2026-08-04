@@ -1,3 +1,12 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "D:\\C.H.A.R.L.I.E. (Completely Helpful And Rather Local Intelligent Engine)"
+      ]
+    }
+  }
 }
