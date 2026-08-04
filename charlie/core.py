@@ -2089,7 +2089,7 @@ class Brain:
             if self.on_thinking_update:
                 self.on_thinking_update(call["name"], call["arguments"])
             if self.on_tool_call:
-                self.on_tool_call(call["name"], call["arguments"])
+                self.on_tool_call(call["name"], call["arguments"], turn_id=turn_id, session_id=session_id)
 
             if tool_name == "spawn_agent":
                 # Needs Brain's LLM client + tool loop, so it can't go through
@@ -2187,7 +2187,7 @@ class Brain:
                 self._pending_vision_image_url = pop_pending_vision_image()
 
             if self.on_tool_result:
-                self.on_tool_result(call["name"], r)
+                self.on_tool_result(call["name"], r, turn_id=turn_id, session_id=session_id)
 
             # Persist tool result to session store (truncated)
             if self.session_store:

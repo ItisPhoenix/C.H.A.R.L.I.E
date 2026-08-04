@@ -18,6 +18,7 @@ export interface Message {
   id?: string;
   role: "user" | "assistant" | "system";
   content: string;
+  turnId?: string;
 }
 
 export interface RecoveryProposal {
@@ -109,6 +110,11 @@ interface CharlieState {
   audioLevel: number;
   toolActivity: ToolActivityEntry[];
   agentRuns: AgentRun[];
+  // Persisted per-turn execution trace, keyed by turnId -- backs the "Show
+  // Execution" expander on past messages (toolActivity/clearToolActivity is
+  // the live in-flight version only, wiped on response_done).
+  executionTraces: Record<string, ToolActivityEntry[]>;
+  setExecutionTraces: (traces: Record<string, ToolActivityEntry[]>) => void;
   launchId: string;
   accentColor: string;
 
@@ -161,6 +167,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   audioLevel: 0,
   toolActivity: [],
   agentRuns: [],
+  executionTraces: {},
   launchId: "",
   // Always starts at the default; the persisted value (if any) is applied after mount
   // (see page.tsx) so the first client render matches the server-rendered HTML.
@@ -217,6 +224,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   }),
   // Bulk replace on hydrate from /api/agents; upsertAgentRun handles live WS updates.
   setAgentRuns: (agentRuns) => set({ agentRuns }),
+  setExecutionTraces: (executionTraces) => set({ executionTraces }),
   setLaunchId: (launchId) => set({ launchId }),
   setAccentColor: (color) => set(() => {
     if (typeof window !== "undefined") {

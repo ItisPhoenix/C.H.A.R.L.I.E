@@ -204,11 +204,21 @@ class SessionStore:
                     """CREATE TABLE IF NOT EXISTS tool_events (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         session_id TEXT NOT NULL,
+                        turn_id TEXT,
                         kind TEXT NOT NULL,
                         name TEXT NOT NULL,
                         text TEXT,
                         created_at TEXT NOT NULL
                     )"""
+                )
+                # Migration: add turn_id to pre-existing tool_events tables
+                try:
+                    self.conn.execute("ALTER TABLE tool_events ADD COLUMN turn_id TEXT")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+                self.conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_tool_events_turn_id "
+                    "ON tool_events(turn_id)"
                 )
                 # Sub-agent run status, one row per agent_id, survives web_server restart
                 self.conn.execute(
@@ -462,31 +472,51 @@ class SessionStore:
     def append_tool_event(
         self,
         session_id: str,
+        turn_id: Optional[str],
         kind: str,
         name: str,
         text: Optional[str] = None,
     ) -> None:
-        """Records a structured tool activity (call/result) for a session."""
+        """Records a structured tool activity (call/result) for a session/turn."""
         try:
             with self.conn:
                 self.conn.execute(
-                    "INSERT INTO tool_events (session_id, kind, name, text, created_at) "
-                    "VALUES (?,?,?,?,?)",
-                    (session_id, kind, name, text, utc_now_iso()),
+                    "INSERT INTO tool_events (session_id, turn_id, kind, name, text, created_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (session_id, turn_id, kind, name, text, utc_now_iso()),
                 )
         except sqlite3.Error as e:
             logger.error(f"append_tool_event failed: {e}")
 
-    def get_tool_events(self, session_id: str) -> List[Tuple[str, str, Optional[str]]]:
-        """Returns (kind, name, text) tool events for a session, oldest first."""
+    def get_tool_events(self, session_id: str) -> List[Tuple[Optional[str], str, str, Optional[str]]]:
+        """Returns (turn_id, kind, name, text) tool events for a session, oldest first."""
         try:
             rows = self.conn.execute(
-                "SELECT kind, name, text FROM tool_events WHERE session_id = ? ORDER BY id ASC",
+                "SELECT turn_id, kind, name, text FROM tool_events WHERE session_id = ? ORDER BY id ASC",
                 (session_id,),
             ).fetchall()
-            return [(r[0], r[1], r[2]) for r in rows]
+            return [(r[0], r[1], r[2], r[3]) for r in rows]
         except sqlite3.Error as e:
             logger.error(f"get_tool_events failed: {e}")
+            return []
+
+    def get_session_messages_with_turn_id(
+        self, session_id: str, limit: int = 50
+    ) -> List[Tuple[str, str, Optional[int]]]:
+        """Returns (role, content, turn_id) for a session, oldest first.
+
+        Separate from get_session_messages/get_recent so Brain's history-loading
+        hot path (which unpacks 2-tuples) stays untouched -- this is REST-only.
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT role, content, turn_id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                (session_id, limit),
+            )
+            return list(reversed(cursor.fetchall()))
+        except sqlite3.Error as e:
+            logger.error(f"get_session_messages_with_turn_id failed: {e}")
             return []
 
     def create_agent_run(self, agent_id: str, task: str, session_id: str) -> None:

@@ -8,7 +8,7 @@ import {
   FolderGit, Network, RefreshCw, Check, X, Menu, Server, Puzzle, GitBranch, ChevronDown
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useCharlieStore, rgba, lighten, type Session, type Message, type AgentRun } from "../store/useCharlieStore";
+import { useCharlieStore, rgba, lighten, type Session, type Message, type AgentRun, type ToolActivityEntry } from "../store/useCharlieStore";
 
 interface WSMessage {
   type: string;
@@ -83,6 +83,7 @@ export default function Page(): ReactElement {
   const audio = useCharlieStore((s) => s.audio);
   const mic = useCharlieStore((s) => s.mic);
   const toolActivity = useCharlieStore((s) => s.toolActivity);
+  const executionTraces = useCharlieStore((s) => s.executionTraces);
   const accentColor = useCharlieStore((s) => s.accentColor);
   const activeProposal = useCharlieStore((s) => s.activeProposal);
   const activeToolApproval = useCharlieStore((s) => s.activeToolApproval);
@@ -96,6 +97,7 @@ export default function Page(): ReactElement {
   const setMessages = useCharlieStore((s) => s.setMessages);
   const addMessage = useCharlieStore((s) => s.addMessage);
   const setMessagesLoading = useCharlieStore((s) => s.setMessagesLoading);
+  const setExecutionTraces = useCharlieStore((s) => s.setExecutionTraces);
   const setVoiceState = useCharlieStore((s) => s.setVoiceState);
   const setListeningTrigger = useCharlieStore((s) => s.setListeningTrigger);
   const setAudio = useCharlieStore((s) => s.setAudio);
@@ -225,12 +227,22 @@ export default function Page(): ReactElement {
     const ctrl = new AbortController();
     abortMessagesRef.current = ctrl;
     
-    const data = await fetchJson(`/api/sessions/${sid}/messages`, ctrl.signal);
+    const [data, eventsData] = await Promise.all([
+      fetchJson(`/api/sessions/${sid}/messages`, ctrl.signal),
+      fetchJson(`/api/sessions/${sid}/tool_events`, ctrl.signal),
+    ]);
     // Only commit if this session is still the active one
     if (useCharlieStore.getState().currentSessionId !== sid) return;
     setMessages((data as { messages: Message[] } | null)?.messages || []);
+    const events = (eventsData as { events: (ToolActivityEntry & { turnId: string | null })[] } | null)?.events || [];
+    const traces: Record<string, ToolActivityEntry[]> = {};
+    for (const { turnId, ...entry } of events) {
+      if (!turnId) continue;
+      (traces[turnId] ??= []).push(entry);
+    }
+    setExecutionTraces(traces);
     setMessagesLoading(false);
-  }, [fetchJson, setMessages, setMessagesLoading]);
+  }, [fetchJson, setMessages, setMessagesLoading, setExecutionTraces]);
 
   useEffect(() => {
     fetchMessagesRef.current = fetchMessages;
@@ -1046,6 +1058,7 @@ export default function Page(): ReactElement {
                     loading={messagesLoading}
                     voiceState={voiceState}
                     toolActivity={toolActivity}
+                    executionTraces={executionTraces}
                     activeProposal={activeProposal}
                     onApproveRecovery={handleApproveRecovery}
                     onRejectRecovery={handleRejectRecovery}

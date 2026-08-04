@@ -108,6 +108,86 @@ function formatMessageContent(content: string): React.ReactNode {
   );
 }
 
+function StepperEntries({ entries }: { entries: ToolActivityEntry[] }): ReactElement {
+  return (
+    <>
+      {entries.map((t, idx) => {
+        const isCall = t.kind === "tool_call";
+        const isResult = t.kind === "tool_result";
+        const isAgentResult = t.kind === "agent_result";
+        const agentFailed = isAgentResult && /error|timed out|cancelled/i.test(t.text);
+
+        let bullet = <Circle className="w-3 h-3 text-purple-400 fill-purple-400/20 animate-pulse absolute -left-[6.5px]" />;
+        if (isResult) {
+          bullet = <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 fill-black absolute -left-[7px]" />;
+        } else if (t.kind === "thinking_update") {
+          bullet = <Circle className="w-3 h-3 text-cyan-400 fill-cyan-400/20 animate-pulse absolute -left-[6.5px]" />;
+        } else if (t.kind === "agent_spawned") {
+          bullet = <Circle className="w-3 h-3 text-indigo-400 fill-indigo-400/20 animate-pulse absolute -left-[6.5px]" />;
+        } else if (t.kind === "agent_status") {
+          bullet = <Circle className="w-3 h-3 text-amber-400 fill-amber-400/20 animate-pulse absolute -left-[6.5px]" />;
+        } else if (isAgentResult) {
+          bullet = agentFailed
+            ? <XCircle className="w-3.5 h-3.5 text-red-400 fill-black absolute -left-[7px]" />
+            : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 fill-black absolute -left-[7px]" />;
+        }
+
+        const labelClass = isCall
+          ? "bg-purple-950/60 text-purple-300"
+          : isResult
+            ? "bg-emerald-950/60 text-emerald-300"
+            : t.kind === "thinking_update"
+              ? "bg-cyan-950/60 text-cyan-300"
+              : t.kind === "agent_spawned"
+                ? "bg-indigo-950/60 text-indigo-300"
+                : t.kind === "agent_status"
+                  ? "bg-amber-950/60 text-amber-300"
+                  : agentFailed
+                    ? "bg-red-950/60 text-red-300"
+                    : "bg-emerald-950/60 text-emerald-300";
+        const label = t.kind.startsWith("agent_") ? t.kind.replace("agent_", "agent ") : t.kind.replace("tool_", "");
+
+        return (
+          <div key={idx} className="relative flex flex-col text-[11px] font-mono leading-relaxed">
+            {bullet}
+            <div className="flex items-center gap-2">
+              <span className={`uppercase text-[10px] px-1 rounded ${labelClass}`}>
+                {label}
+              </span>
+              <span className="text-slate-300 font-semibold">{t.name}</span>
+            </div>
+            {t.text && (
+              <span className="text-slate-500 mt-0.5 pl-2 break-all text-[10px] border-l border-white/5">
+                {t.text}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+function MessageExecutionTrace({ entries }: { entries: ToolActivityEntry[] }): ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="mt-1.5 max-w-[82%]">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 font-mono uppercase tracking-wider cursor-pointer transition"
+      >
+        {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+        Show Execution ({entries.length})
+      </button>
+      {expanded && (
+        <div className="mt-2 relative pl-4 border-l border-white/10 space-y-3 max-h-36 overflow-y-auto scrollbar py-1">
+          <StepperEntries entries={entries} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TypingDots(): ReactElement {
   const accentColor = useCharlieStore((s) => s.accentColor);
   return (
@@ -127,13 +207,14 @@ function TypingDots(): ReactElement {
 }
 
 interface ChatViewProps {
-  messages: { id?: string; role: string; content: string }[];
+  messages: { id?: string; role: string; content: string; turnId?: string }[];
   onSend: (text: string) => void;
   onStop?: () => void;
   loading: boolean;
   voiceState?: string;
   toolActivity?: ToolActivityEntry[];
-  
+  executionTraces?: Record<string, ToolActivityEntry[]>;
+
   // Inline dialog handlers
   activeProposal?: RecoveryProposal | null;
   onApproveRecovery?: (id: string) => void;
@@ -151,6 +232,7 @@ export function ChatView({
   loading,
   voiceState = "idle",
   toolActivity,
+  executionTraces,
   activeProposal,
   onApproveRecovery,
   onRejectRecovery,
@@ -262,10 +344,11 @@ export function ChatView({
 
         {messages.map((m, i) => {
           const isUser = m.role === "user";
+          const trace = !isUser && m.turnId ? executionTraces?.[m.turnId] : undefined;
           return (
             <div
               key={m.id ?? `${m.role}-${i}`}
-              className={`flex ${isUser ? "justify-end" : "justify-start"} animate-[rise_0.2s_ease-out]`}
+              className={`flex flex-col ${isUser ? "items-end" : "items-start"} animate-[rise_0.2s_ease-out]`}
             >
               <div
                 style={{
@@ -276,6 +359,7 @@ export function ChatView({
               >
                 {m.content ? formatMessageContent(m.content) : (isUser ? "" : <TypingDots />)}
               </div>
+              {trace && trace.length > 0 && <MessageExecutionTrace entries={trace} />}
             </div>
           );
         })}
@@ -423,60 +507,7 @@ export function ChatView({
           
           {stepperExpanded && (
             <div className="mt-3 relative pl-4 border-l border-white/10 space-y-3 max-h-36 overflow-y-auto scrollbar py-1">
-              {toolActivity.map((t, idx) => {
-                const isCall = t.kind === "tool_call";
-                const isResult = t.kind === "tool_result";
-                const isAgentResult = t.kind === "agent_result";
-                const agentFailed = isAgentResult && /error|timed out|cancelled/i.test(t.text);
-
-                // Color dots depending on type
-                let bullet = <Circle className="w-3 h-3 text-purple-400 fill-purple-400/20 animate-pulse absolute -left-[6.5px]" />;
-                if (isResult) {
-                  bullet = <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 fill-black absolute -left-[7px]" />;
-                } else if (t.kind === "thinking_update") {
-                  bullet = <Circle className="w-3 h-3 text-cyan-400 fill-cyan-400/20 animate-pulse absolute -left-[6.5px]" />;
-                } else if (t.kind === "agent_spawned") {
-                  bullet = <Circle className="w-3 h-3 text-indigo-400 fill-indigo-400/20 animate-pulse absolute -left-[6.5px]" />;
-                } else if (t.kind === "agent_status") {
-                  bullet = <Circle className="w-3 h-3 text-amber-400 fill-amber-400/20 animate-pulse absolute -left-[6.5px]" />;
-                } else if (isAgentResult) {
-                  bullet = agentFailed
-                    ? <XCircle className="w-3.5 h-3.5 text-red-400 fill-black absolute -left-[7px]" />
-                    : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 fill-black absolute -left-[7px]" />;
-                }
-
-                const labelClass = isCall
-                  ? "bg-purple-950/60 text-purple-300"
-                  : isResult
-                    ? "bg-emerald-950/60 text-emerald-300"
-                    : t.kind === "thinking_update"
-                      ? "bg-cyan-950/60 text-cyan-300"
-                      : t.kind === "agent_spawned"
-                        ? "bg-indigo-950/60 text-indigo-300"
-                        : t.kind === "agent_status"
-                          ? "bg-amber-950/60 text-amber-300"
-                          : agentFailed
-                            ? "bg-red-950/60 text-red-300"
-                            : "bg-emerald-950/60 text-emerald-300";
-                const label = t.kind.startsWith("agent_") ? t.kind.replace("agent_", "agent ") : t.kind.replace("tool_", "");
-
-                return (
-                  <div key={idx} className="relative flex flex-col text-[11px] font-mono leading-relaxed">
-                    {bullet}
-                    <div className="flex items-center gap-2">
-                      <span className={`uppercase text-[10px] px-1 rounded ${labelClass}`}>
-                        {label}
-                      </span>
-                      <span className="text-slate-300 font-semibold">{t.name}</span>
-                    </div>
-                    {t.text && (
-                      <span className="text-slate-500 mt-0.5 pl-2 break-all text-[10px] border-l border-white/5">
-                        {t.text}
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
+              <StepperEntries entries={toolActivity} />
             </div>
           )}
         </div>

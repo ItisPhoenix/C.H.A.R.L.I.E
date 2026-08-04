@@ -202,9 +202,9 @@ def _cleanup_db(db_path: str) -> None:
 def test_tool_events_roundtrip(tmp_path):
     store = SessionStore(db_path=str(tmp_path / "s.db"))
     store.create_session("s1", "t")
-    store.append_tool_event("s1", "tool_call", "web_search", "ran")
+    store.append_tool_event("s1", "turn-1", "tool_call", "web_search", "ran")
     rows = store.get_tool_events("s1")
-    assert rows == [("tool_call", "web_search", "ran")], rows
+    assert rows == [("turn-1", "tool_call", "web_search", "ran")], rows
     store.close()
 
 

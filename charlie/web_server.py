@@ -192,6 +192,7 @@ async def _forward_to_voice(command_type: str, payload: dict) -> None:
 
 # Events that carry a session_id and must only reach clients subscribed to it.
 _SESSION_SCOPED_EVENTS = ("token", "transcript", "desktop_frame")
+_TOOL_EVENT_MAX_CHARS = 500  # cap persisted tool_event text, matches session_store's _TOOL_PERSIST_MAX_CHARS
 event_bus: EventBus | None = None
 LAUNCH_ID: str = config.charlie_launch_id
 _store: SessionStore | None = None
@@ -350,6 +351,24 @@ async def _event_bridge():
         elif etype == "mic_state":
             global _mic_state
             _mic_state = event.get("payload", {})
+        elif etype == "tool_call":
+            payload = event.get("payload", {})
+            _get_store().append_tool_event(
+                payload.get("session_id") or "default",
+                payload.get("turn_id"),
+                "tool_call",
+                payload.get("name", ""),
+                json.dumps(payload.get("args", {}), ensure_ascii=False)[:_TOOL_EVENT_MAX_CHARS],
+            )
+        elif etype == "tool_result":
+            payload = event.get("payload", {})
+            _get_store().append_tool_event(
+                payload.get("session_id") or "default",
+                payload.get("turn_id"),
+                "tool_result",
+                payload.get("name", ""),
+                (payload.get("text") or "")[:_TOOL_EVENT_MAX_CHARS],
+            )
         elif etype == "agent_spawned":
             payload = event.get("payload", {})
             _get_store().create_agent_run(
@@ -517,12 +536,26 @@ async def session_messages(session_id: str, limit: int = 50):
     """
     _HIDDEN_ROLES = {"tool", "system"}
     store = _get_store()
-    messages = store.get_session_messages(session_id, limit=limit)
+    messages = store.get_session_messages_with_turn_id(session_id, limit=limit)
     return {
         "messages": [
-            {"role": r, "content": c}
-            for r, c in messages
+            {"role": r, "content": c, "turnId": t}
+            for r, c, t in messages
             if r not in _HIDDEN_ROLES
+        ]
+    }
+
+
+@app.get("/api/sessions/{session_id}/tool_events")
+async def session_tool_events(session_id: str):
+    """Structured execution trace (tool calls/results) for a session, grouped
+    by turnId so the frontend can attach a 'Show Execution' trace per message."""
+    store = _get_store()
+    events = store.get_tool_events(session_id)
+    return {
+        "events": [
+            {"turnId": turn_id, "kind": kind, "name": name, "text": text}
+            for turn_id, kind, name, text in events
         ]
     }
 

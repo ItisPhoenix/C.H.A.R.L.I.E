@@ -241,18 +241,28 @@ async def main():
 
     loop = asyncio.get_running_loop()
 
-    def on_tool_call(name, args):
+    def on_tool_call(name, args, turn_id=None, session_id=None):
         if event_bus:
             asyncio.run_coroutine_threadsafe(
-                event_bus.emit("tool_call", {"name": name, "args": args, "session_id": current_web_session_id}), loop
+                event_bus.emit(
+                    "tool_call",
+                    {
+                        "name": name, "args": args, "turn_id": turn_id,
+                        "session_id": session_id or current_web_session_id,
+                    },
+                ),
+                loop,
             )
 
-    def on_tool_result(name, result):
+    def on_tool_result(name, result, turn_id=None, session_id=None):
         if event_bus:
             asyncio.run_coroutine_threadsafe(
                 event_bus.emit(
                     "tool_result",
-                    {"name": name, "text": result, "session_id": current_web_session_id},
+                    {
+                        "name": name, "text": result, "turn_id": turn_id,
+                        "session_id": session_id or current_web_session_id,
+                    },
                 ),
                 loop,
             )
