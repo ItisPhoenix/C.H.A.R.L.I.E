@@ -146,6 +146,47 @@ class TestHumanizeText:
 
 
 
+class TestUnitPronunciation:
+    """Regression: '30 C' spoken as the letter 'C', and '2.5 m/s' spoken as
+    'million' -- degree symbol was silently ASCII-stripped, and the B/M/T/K
+    magnitude-suffix regex misread the 'm' in 'm/s' as a million suffix."""
+
+    def _make_engine(self):
+        with patch("charlie.voice.Kokoro"), \
+             patch("charlie.voice.sd"), \
+             patch("charlie.voice.mp.Queue"):
+            return VoiceEngine(FakeConfig(), on_speech=lambda _: None)
+
+    def test_degrees_celsius(self):
+        engine = self._make_engine()
+        result = engine._symbols_to_words(engine._numbers_to_words("30°C"))
+        assert "degrees Celsius" in result
+        assert "°" not in result
+
+    def test_degrees_fahrenheit(self):
+        engine = self._make_engine()
+        result = engine._symbols_to_words(engine._numbers_to_words("86°F"))
+        assert "degrees Fahrenheit" in result
+
+    def test_meters_per_second_not_million(self):
+        engine = self._make_engine()
+        result = engine._symbols_to_words(engine._numbers_to_words("2.5 m/s"))
+        assert "million" not in result
+        assert "meters per second" in result
+
+    def test_kilometers_per_hour_not_thousand(self):
+        engine = self._make_engine()
+        result = engine._symbols_to_words(engine._numbers_to_words("30 km/h"))
+        assert "thousand" not in result
+        assert "kilometers per hour" in result
+
+    def test_plain_million_suffix_still_works(self):
+        """The (?!/) fix must not break real magnitude suffixes."""
+        engine = self._make_engine()
+        result = engine._numbers_to_words("2.5M users")
+        assert "million" in result
+
+
 class TestHumanizeContractions:
     """_humanize_text expansion of _CONTRACTIONS for natural speech."""
 

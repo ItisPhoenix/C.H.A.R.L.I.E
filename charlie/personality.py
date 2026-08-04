@@ -13,7 +13,8 @@ _ENERGETIC_RE = re.compile(
     # "help" deliberately excluded: it's the single most common word in
     # completely neutral requests ("can you help me write an email"), so it
     # produced false-positive "energetic" tone on ordinary asks.
-    r"\b(?:urgent|emergency|crash|asap|now|broken|happy|amazing|awesome|yay|love|great news|excited)\b",
+    # "now" deliberately excluded too: too common in plain time-relative questions to signal excitement.
+    r"\b(?:urgent|emergency|crash|asap|broken|happy|amazing|awesome|yay|love|great news|excited)\b",
     re.IGNORECASE,
 )
 

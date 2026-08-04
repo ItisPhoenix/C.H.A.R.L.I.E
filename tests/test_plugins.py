@@ -221,29 +221,64 @@ class TestBrowserPlugin:
         with pytest.raises(ValueError, match="Unknown tool"):
             plugin.call_tool("nonexistent", {})
 
-    def test_fetch_uses_utf8_encoding_not_locale_default(self, monkeypatch):
-        """Regression: text=True let Windows' cp1252 default choke on real
-        UTF-8 web content -- crashed a subprocess reader thread live."""
-        captured = {}
+    def test_fetch_uses_trafilatura_extraction(self, monkeypatch):
+        class FakeResponse:
+            text = "<html><body><p>real article text</p></body></html>"
 
-        def fake_run(*args, **kwargs):
-            captured.update(kwargs)
+            def raise_for_status(self):
+                pass
 
-            class FakeResult:
-                returncode = 0
-                stdout = "ok"
-                stderr = ""
+        monkeypatch.setattr("charlie.plugins.httpx.get", lambda *a, **k: FakeResponse())
+        monkeypatch.setattr("charlie.plugins.trafilatura.extract", lambda html: "x" * 300)
 
-            return FakeResult()
-
-        monkeypatch.setattr("charlie.plugins.subprocess.run", fake_run)
         plugin = BrowserPlugin()
         result = plugin.call_tool("browser_fetch", {"url": "https://example.com"})
 
-        assert captured.get("encoding") == "utf-8"
-        assert captured.get("errors") == "replace"
-        assert "text" not in captured
-        assert result["content"] == "ok"
+        assert result["content"] == "x" * 300
+
+    def test_fetch_falls_back_to_jina_when_extraction_thin(self, monkeypatch):
+        """Regression: curl-based raw HTML fetch returned near-empty JS-rendered
+        shells for sites like weather.com -- trafilatura extraction below
+        _MIN_EXTRACTED_CHARS now falls back to Jina Reader's server-rendered text."""
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, text, status_code=200):
+                self.text = text
+                self.status_code = status_code
+
+            def raise_for_status(self):
+                pass
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            if "r.jina.ai" in url:
+                return FakeResponse("full rendered article " * 20)
+            return FakeResponse("<html><body><div id='root'></div></body></html>")
+
+        monkeypatch.setattr("charlie.plugins.httpx.get", fake_get)
+        monkeypatch.setattr("charlie.plugins.trafilatura.extract", lambda html: "")
+
+        plugin = BrowserPlugin()
+        result = plugin.call_tool("browser_fetch", {"url": "https://weather.com/x"})
+
+        assert any("r.jina.ai" in c for c in calls)
+        assert "full rendered article" in result["content"]
+
+    def test_fetch_returns_error_when_both_sources_empty(self, monkeypatch):
+        class FakeResponse:
+            text = ""
+
+            def raise_for_status(self):
+                pass
+
+        monkeypatch.setattr("charlie.plugins.httpx.get", lambda *a, **k: FakeResponse())
+        monkeypatch.setattr("charlie.plugins.trafilatura.extract", lambda html: "")
+
+        plugin = BrowserPlugin()
+        result = plugin.call_tool("browser_fetch", {"url": "https://example.com"})
+
+        assert "error" in result
 
 
 class TestCalendarPlugin:

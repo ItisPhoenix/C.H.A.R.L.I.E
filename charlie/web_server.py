@@ -461,7 +461,7 @@ async def websocket_endpoint(ws: WebSocket):
 @app.get("/api/history")
 async def history(limit: int = 50):
     store = _get_store()
-    messages = store.get_recent(limit=limit)
+    messages = await asyncio.to_thread(store.get_recent, limit=limit)
     return {"messages": [{"role": r, "content": c} for r, c in messages]}
 
 
@@ -493,7 +493,7 @@ async def list_sessions(request: Request):
     store = _get_store()
     launch_id = request.query_params.get("launch_id")
     source = request.query_params.get("source")
-    sessions = store.get_sessions(source=source, launch_id=launch_id)
+    sessions = await asyncio.to_thread(store.get_sessions, source=source, launch_id=launch_id)
     return {
         "sessions": [
             {
@@ -518,7 +518,7 @@ async def create_session(data: dict):
     # captured by the "This Launch" sidebar filter.
     launch_id = data.get("launch_id") or config.charlie_launch_id or None
     store = _get_store()
-    store.create_session(session_id, title, source=source, launch_id=launch_id)
+    await asyncio.to_thread(store.create_session, session_id, title, source=source, launch_id=launch_id)
     return {
         "session_id": session_id,
         "title": title,
@@ -536,7 +536,7 @@ async def session_messages(session_id: str, limit: int = 50):
     """
     _HIDDEN_ROLES = {"tool", "system"}
     store = _get_store()
-    messages = store.get_session_messages_with_turn_id(session_id, limit=limit)
+    messages = await asyncio.to_thread(store.get_session_messages_with_turn_id, session_id, limit=limit)
     return {
         "messages": [
             {"role": r, "content": c, "turnId": t}
@@ -551,7 +551,7 @@ async def session_tool_events(session_id: str):
     """Structured execution trace (tool calls/results) for a session, grouped
     by turnId so the frontend can attach a 'Show Execution' trace per message."""
     store = _get_store()
-    events = store.get_tool_events(session_id)
+    events = await asyncio.to_thread(store.get_tool_events, session_id)
     return {
         "events": [
             {"turnId": turn_id, "kind": kind, "name": name, "text": text}
@@ -565,7 +565,7 @@ async def update_session(session_id: str, data: dict):
     """Update session title."""
     title = data.get("title", "New Chat")
     store = _get_store()
-    store.update_session_title(session_id, title)
+    await asyncio.to_thread(store.update_session_title, session_id, title)
     # Broadcast title update to all connected WebSocket clients
     await broadcast({
         "type": "session_updated",
@@ -579,7 +579,7 @@ async def update_session(session_id: str, data: dict):
 async def delete_session(session_id: str):
     """Delete a session and all its messages."""
     store = _get_store()
-    store.delete_session(session_id)
+    await asyncio.to_thread(store.delete_session, session_id)
     await broadcast(
         {
             "type": "session_updated",
@@ -898,7 +898,7 @@ async def uninstall_extension(name: str):
 async def list_agents(session_id: str | None = None, limit: int = 100):
     """List persisted sub-agent runs, most recent first."""
     store = _get_store()
-    rows = store.get_agent_runs(session_id=session_id, limit=limit)
+    rows = await asyncio.to_thread(store.get_agent_runs, session_id=session_id, limit=limit)
     return {
         "agents": [
             {

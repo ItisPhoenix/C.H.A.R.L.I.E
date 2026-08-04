@@ -35,7 +35,8 @@ class FakeEventBus:
 
 
 async def _fake_plan_chat_stream(
-    self, user_input, platform="voice", skip_pre_search=False, session_id="default", skip_tools=False
+    self, user_input, platform="voice", skip_pre_search=False, session_id="default",
+    skip_tools=False, skip_fast_paths=False,
 ):
     if "Break the following task" in user_input:
         yield "1. Step one\n2. Step two\n"

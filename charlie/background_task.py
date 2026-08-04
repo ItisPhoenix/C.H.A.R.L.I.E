@@ -193,7 +193,9 @@ async def start(
         f"Task: {text}"
     )
     plan_text = ""
-    async for chunk in task.brain.chat_stream(plan_prompt, session_id=task.session_id, skip_tools=True):
+    async for chunk in task.brain.chat_stream(
+        plan_prompt, session_id=task.session_id, skip_tools=True, skip_fast_paths=True
+    ):
         plan_text += chunk
     task.steps = _parse_steps(plan_text) or [text]
     task.flagged_steps = _scan_gated_steps(task.steps)
@@ -264,7 +266,9 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
                 desktop_session.acquire_desktop(_OWNER_ID)
             try:
                 step_text = task.steps[task.current_step]
-                async for _ in task.brain.chat_stream(step_text, session_id=task.session_id):
+                async for _ in task.brain.chat_stream(
+                    step_text, session_id=task.session_id, skip_fast_paths=True
+                ):
                     pass
             finally:
                 if _DESKTOP_AVAILABLE:

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -49,6 +50,8 @@ if TYPE_CHECKING:
 # --- LLM tuning ---
 _LLM_TEMPERATURE = 0.3
 _VISION_MAX_TOKENS = 4096  # hard ceiling on unconstrained vision generation (no tools => no stop-on-tool-call)
+# Keeps the LLM connection warm between turns, avoiding ~85ms of TCP+TLS per turn.
+_HTTP_KEEPALIVE_EXPIRY_SEC = 60.0
 _TOOL_TIMEOUT_SEC = 15.0
 _DESKTOP_CONTROL_TOOLS = frozenset({
     "desktop_click", "desktop_type", "desktop_invoke", "desktop_key",
@@ -88,6 +91,12 @@ _VISUAL_CONTENT_QUERY_RE = re.compile(
     r"|\bhelp me (understand|fix) (this|what)\b",
     re.IGNORECASE,
 )
+# Explicit request to see every monitor, not just the active one (default since the
+# multi-monitor capture slowdown fix -- see charlie/desktop/ocr.py:_foreground_monitor_bounds).
+_BOTH_SCREENS_RE = re.compile(
+    r"\b(both|all|other|second|another|across (my|the)) (my |the |your )?(screens?|monitors?|displays?)\b",
+    re.IGNORECASE,
+)
 # Live background-task progress query -- only fires if a task is actually running (see below).
 _BACKGROUND_TASK_STATUS_RE = re.compile(
     r"\bwhat are you doing\b"
@@ -121,6 +130,18 @@ _TOOL_TIMEOUTS = {
     # tree routinely takes longer than that.
     "plugin_fs_search": 120.0,
 }
+# Dynamically-registered mcp_* tools inherited the 15s default and timed out on slow ops.
+_MCP_TOOL_TIMEOUT_SEC = 120.0
+
+
+def _tool_timeout(tool_name: str) -> float:
+    if tool_name in _TOOL_TIMEOUTS:
+        return _TOOL_TIMEOUTS[tool_name]
+    if tool_name.startswith("mcp_"):
+        return _MCP_TOOL_TIMEOUT_SEC
+    return _TOOL_TIMEOUT_SEC
+
+
 _TOOL_RESULT_MAX_CHARS = 2000
 # How long a gated tool call waits for an approve/decline before it's treated
 # as declined (matches charlie.recovery.request_recovery_approval's 30s, plus
@@ -335,6 +356,40 @@ def _detect_opinion_teaching(query: str) -> Optional[str]:
     return opinion
 
 
+# --- Standing instruction detection ("when I ask X, do Y", "from now on...") ---
+# Separate from opinion teaching above (personality/preference statements) --
+# this catches forward-looking behavioral rules, a different sentence shape
+# that _OPINION_TEACH_RE was never designed to match.
+_STANDING_INSTRUCTION_RE = re.compile(
+    r"^\s*(?:when(?:ever)?\s+i\s+ask|from\s+now\s+on|going\s+forward|always\s+(?:answer|respond|reply))\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_standing_instruction(query: str) -> Optional[str]:
+    """Detect a forward-looking behavioral directive; returns it verbatim or None."""
+    if not _STANDING_INSTRUCTION_RE.search(query):
+        return None
+    return query.strip()
+
+
+def _is_deterministic_reply(query: str) -> bool:
+    """True if `query` would be answered by a side-effect-free fast-path in chat_stream.
+
+    Deliberately excludes _detect_open_app/_detect_close_app (they launch/kill
+    processes) -- only checked here to skip background preference-learning on
+    template replies, never to re-run an action.
+    """
+    return (
+        _answer_time_date(query) is not None
+        or _detect_opinion_teaching(query) is not None
+        or _detect_standing_instruction(query) is not None
+        or _detect_set_goal(query) is not None
+        or _detect_verbosity_feedback(query) is not None
+        or _detect_background_task_status(query) is not None
+    )
+
+
 def _detect_correction(query: str) -> bool:
     """Detect if the user is correcting a previous response."""
     return bool(_CORRECTION_RE.search(query.strip()))
@@ -343,7 +398,7 @@ def _detect_correction(query: str) -> bool:
 def _apply_correction_to_memory(
     query: str, assistant_response: str, opinions_path: str = "OPINIONS.md"
 ) -> Optional[str]:
-    """Write a correction entry to OPINIONS.md. Returns the entry or None."""
+    """Write a correction entry to OPINIONS.md, respecting the same capacity cap as the memory tool."""
     if not _detect_correction(query):
         return None
     short_resp = assistant_response[:120].strip()
@@ -353,11 +408,17 @@ def _apply_correction_to_memory(
     try:
         from pathlib import Path as _P
 
-        from charlie.tools import _MEMORY_SEP
+        from charlie.tools import _MEMORY_MAX_CHARS, _MEMORY_SEP, _parse_memory_entries
         p = _P(opinions_path)
         existing = p.read_text(encoding="utf-8") if p.exists() else ""
         if entry in existing:
             logger.debug("Correction already in opinions, skipping")
+            return None
+        entries = _parse_memory_entries(existing)
+        current_len = sum(len(e) for e in entries) + (len(entries) - 1 if entries else 0)
+        new_len = len(entry) + (1 if entries else 0)
+        if current_len + new_len > _MEMORY_MAX_CHARS["opinions"]:
+            logger.warning("Opinions memory full -- dropping correction: %s", entry[:80])
             return None
         with open(opinions_path, "a", encoding="utf-8") as f:
             if existing:
@@ -1222,7 +1283,7 @@ def _should_queue_visual_screenshot(user_input: str, config: "Config") -> bool:
 
 
 def _maybe_inject_visual_screenshot_call(
-    tool_calls: List[Dict[str, Any]], queue_visual_screenshot: bool
+    tool_calls: List[Dict[str, Any]], queue_visual_screenshot: bool, all_monitors: bool = False
 ) -> List[Dict[str, Any]]:
     """Append a synthetic desktop_screenshot call when queue_visual_screenshot
     is True and the model's own tool_calls don't already include one. This is
@@ -1235,7 +1296,8 @@ def _maybe_inject_visual_screenshot_call(
         return tool_calls
     if any(c.get("name") == "desktop_screenshot" for c in tool_calls):
         return tool_calls
-    return tool_calls + [{"id": make_id(), "name": "desktop_screenshot", "arguments": {}}]
+    args = {"all_monitors": True} if all_monitors else {}
+    return tool_calls + [{"id": make_id(), "name": "desktop_screenshot", "arguments": args}]
 
 
 
@@ -1334,12 +1396,7 @@ class Brain:
         self._agent_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_AGENTS)
         self._active_agents: Dict[str, asyncio.Task] = {}
         self._approval_timeout = approval_timeout
-        llm_headers: Dict[str, str] = build_auth_headers(config.llm_key)
-        self.client = httpx.AsyncClient(
-            base_url=config.llm_url,
-            headers=llm_headers,
-            timeout=60.0,
-        )
+        self._build_llm_client()
         self._chat_generation = 0
         # Per-turn halt; module-global _HALT is reserved for the physical panic hotkey.
         self._turn_halted: bool = False
@@ -1367,15 +1424,7 @@ class Brain:
         self._reflect_turn_counter: int = 0
         self._reflect_interval: int = 5  # reflect every N turns
 
-        # --- Hybrid tool calling: detect native support ---
-        # Auto-detect local model servers -- they ignore the native tools payload
-        _url = config.llm_url.lower()
-        _is_local = any(h in _url for h in ("127.0.0.1", "localhost"))
-        if _is_local:
-            self._use_native_tools = False
-            logger.info("Local model detected - using text-based tool calling")
-        else:
-            self._use_native_tools: bool = getattr(config, "native_tool_calling", True)
+        self._detect_native_tools()
 
         # --- Frozen tiers (cached once at init for prompt cache stability) ---
         soul_text = config.soul or "You are Charlie. Be concise and warm."
@@ -1397,6 +1446,48 @@ class Brain:
 
         # --- Vision LLM client (separate, opt-in endpoint for desktop_screenshot) ---
         self._vision_client = None
+        self._build_vision_client()
+
+        # --- Knowledge graph memory ---
+        from charlie.memory_graph import MemoryGraph
+        self.memory_graph = MemoryGraph(db_path=config.memory_graph_db)
+
+    async def prewarm(self) -> None:
+        """Open the TCP+TLS connection to the LLM host now, not on the first turn."""
+        try:
+            await self.client.get("/", timeout=5.0)
+        except Exception:
+            logger.debug("LLM prewarm request failed (non-fatal)", exc_info=True)
+
+    def _detect_native_tools(self) -> None:
+        """Local model servers ignore the native tools payload -- detect and use text-based calling instead."""
+        url = self.config.llm_url.lower()
+        if any(h in url for h in ("127.0.0.1", "localhost")):
+            self._use_native_tools = False
+            logger.info("Local model detected - using text-based tool calling")
+        else:
+            self._use_native_tools = getattr(self.config, "native_tool_calling", True)
+
+    def _build_llm_client(self) -> None:
+        """(Re)build self.client from the current self.config."""
+        self.client = httpx.AsyncClient(
+            base_url=self.config.llm_url,
+            headers=build_auth_headers(self.config.llm_key),
+            timeout=60.0,
+            limits=httpx.Limits(keepalive_expiry=_HTTP_KEEPALIVE_EXPIRY_SEC),
+        )
+
+    async def refresh_llm_client(self) -> None:
+        """Rebuild self.client; old client closes in the background (inline aclose() hung the reload live)."""
+        old_client = self.client
+        self._build_llm_client()
+        self._detect_native_tools()
+        asyncio.create_task(old_client.aclose())
+
+    def _build_vision_client(self) -> None:
+        """(Re)build self._vision_client/_vision_model from the current self.config."""
+        config = self.config
+        self._vision_client = None
         if (
             config.vision_enabled
             and config.vision_llm_url
@@ -1407,13 +1498,17 @@ class Brain:
                 base_url=config.vision_llm_url,
                 headers=build_auth_headers(config.vision_llm_key),
                 timeout=config.vision_llm_timeout_s,
+                limits=httpx.Limits(keepalive_expiry=_HTTP_KEEPALIVE_EXPIRY_SEC),
             )
             self._vision_model = config.vision_llm_model
             logger.info("Vision LLM configured: %s", config.vision_llm_url)
 
-        # --- Knowledge graph memory ---
-        from charlie.memory_graph import MemoryGraph
-        self.memory_graph = MemoryGraph(db_path=config.memory_graph_db)
+    async def refresh_vision_client(self) -> None:
+        """Rebuild self._vision_client; old client (if any) closes in the background."""
+        old_client = self._vision_client
+        self._build_vision_client()
+        if old_client is not None:
+            asyncio.create_task(old_client.aclose())
 
     @staticmethod
     def _read_file_safe(path: str, max_chars: int) -> str:
@@ -1700,9 +1795,15 @@ class Brain:
             return "Vision is not configured."
         payload = {
             "model": self._vision_model,
+            # Image-only user turn stalled Qwen3-VL's prompt processing; text+image together, no system role, fixes it.
             "messages": [
-                {"role": "system", "content": "Describe what is visible in this image factually and concisely."},
-                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_url}}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe what is visible in this image factually and concisely."},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                },
             ],
             "temperature": _LLM_TEMPERATURE,
             "max_tokens": _VISION_MAX_TOKENS,
@@ -1762,13 +1863,16 @@ class Brain:
         skip_pre_search: bool = False,
         session_id: str = "default",
         skip_tools: bool = False,
+        skip_fast_paths: bool = False,
     ) -> AsyncGenerator[str, None]:
         from datetime import datetime
 
         # Load session-specific history from SQLite store at the start of the turn
         if self.session_store:
             try:
-                raw_messages = self.session_store.get_session_messages(session_id, limit=self._history_max_turns)
+                raw_messages = self.session_store.get_session_messages(
+                    session_id, limit=self._history_max_turns * 2
+                )
                 self.history = []
                 for role, content in raw_messages:
                     self.history.append({"role": role, "content": content})
@@ -1776,7 +1880,7 @@ class Brain:
             except Exception as e:
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
         # --- Auto-learn: detect corrections and store in opinions memory ---
-        if _detect_correction(user_input) and self.history:
+        if not skip_fast_paths and _detect_correction(user_input) and self.history:
             last_assistant = ""
             for msg in reversed(self.history):
                 if msg.get("role") == "assistant":
@@ -1798,13 +1902,13 @@ class Brain:
         # Preserved for history/memory even if a fast-path below rebinds user_input
         # to a compound instruction's leftover text (see the open-app fast-path).
         original_user_input = user_input
-        fast = _answer_time_date(user_input)
+        fast = None if skip_fast_paths else _answer_time_date(user_input)
         if fast is not None:
             logger.info("Fast-path time/date: %s -> %s", user_input, fast)
             yield fast
             return
         # --- Fast-path: opinion teaching (deterministic, no LLM needed) ---
-        opinion = _detect_opinion_teaching(user_input)
+        opinion = None if skip_fast_paths else _detect_opinion_teaching(user_input)
         if opinion is not None:
             logger.info("Opinion teaching detected: %s -> %s", user_input, opinion)
             try:
@@ -1818,13 +1922,39 @@ class Brain:
                     },
                 )
                 logger.info("Opinion stored: %s", result)
-                yield "Got it, I'll remember that."
+                if result.startswith(("Error", "Memory full")):
+                    yield "I couldn't save that -- my opinions memory is full and needs consolidating."
+                else:
+                    yield "Got it, I'll remember that."
             except Exception as e:
                 logger.error("Failed to store opinion: %s", e, exc_info=True)
                 yield "I tried to remember that, but something went wrong."
             return
+        # --- Fast-path: standing instruction (deterministic, no LLM needed) ---
+        instruction = None if skip_fast_paths else _detect_standing_instruction(user_input)
+        if instruction is not None:
+            logger.info("Standing instruction detected: %s", instruction)
+            try:
+                result = await asyncio.to_thread(
+                    tool_registry.execute_tool,
+                    "memory",
+                    {
+                        "action": "add",
+                        "target": "opinions",
+                        "content": f"Rule: {instruction}",
+                    },
+                )
+                logger.info("Standing instruction stored: %s", result)
+                if result.startswith(("Error", "Memory full")):
+                    yield "I couldn't save that -- my opinions memory is full and needs consolidating."
+                else:
+                    yield "Got it, I'll remember that."
+            except Exception as e:
+                logger.error("Failed to store standing instruction: %s", e, exc_info=True)
+                yield "I tried to remember that, but something went wrong."
+            return
         # --- Fast-path: set goal (deterministic, no LLM needed) ---
-        goal_text = _detect_set_goal(user_input)
+        goal_text = None if skip_fast_paths else _detect_set_goal(user_input)
         if goal_text is not None:
             self._active_goal = goal_text
             self._goal_turns_remaining = 5
@@ -1833,39 +1963,41 @@ class Brain:
             return
 
         # --- Verbosity preference update ---
-        verbosity = _detect_verbosity_feedback(user_input)
+        verbosity = None if skip_fast_paths else _detect_verbosity_feedback(user_input)
         if verbosity is not None:
             try:
                 from pathlib import Path as _VP
+
+                from charlie.tools import _parse_memory_entries
                 up = _VP(self.config.user_file)
                 existing = up.read_text(encoding="utf-8") if up.exists() else ""
-                # Replace or append verbosity line
-                new_lines = []
-                found = False
-                for line in existing.splitlines():
-                    if line.strip().startswith("verbosity:"):
-                        new_lines.append(f"verbosity: {verbosity}")
-                        found = True
-                    else:
-                        new_lines.append(line)
-                if not found:
-                    new_lines.append(f"verbosity: {verbosity}")
-                up.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+                old_entry = next(
+                    (e for e in _parse_memory_entries(existing) if e.strip().startswith("verbosity:")),
+                    None,
+                )
+                args = {
+                    "action": "replace" if old_entry else "add",
+                    "target": "user",
+                    "content": f"verbosity: {verbosity}",
+                }
+                if old_entry:
+                    args["old_text"] = old_entry
+                result = await asyncio.to_thread(tool_registry.execute_tool, "memory", args)
                 self.reload_context()
-                logger.info("Verbosity preference set to: %s", verbosity)
+                logger.info("Verbosity preference set to: %s (%s)", verbosity, result)
             except Exception as ve:
                 logger.warning("Failed to update verbosity: %s", ve)
 
 
         # --- Fast-path: close app (deterministic, no LLM needed) ---
-        close_res = await asyncio.to_thread(_detect_close_app, user_input)
+        close_res = None if skip_fast_paths else await asyncio.to_thread(_detect_close_app, user_input)
         if close_res is not None:
             logger.info("Fast-path close app result: %s -> %s", user_input, close_res)
             yield close_res
             return
 
         # --- Fast-path: open app (deterministic, no LLM needed) ---
-        open_res = await asyncio.to_thread(_detect_open_app, user_input)
+        open_res = None if skip_fast_paths else await asyncio.to_thread(_detect_open_app, user_input)
         if open_res is not None:
             open_msg, open_remaining = open_res
             if open_remaining is None:
@@ -1884,7 +2016,7 @@ class Brain:
             user_input = open_remaining
 
         # --- Fast-path: live background-task progress query (deterministic, no LLM needed) ---
-        task_status_res = _detect_background_task_status(user_input)
+        task_status_res = None if skip_fast_paths else _detect_background_task_status(user_input)
         if task_status_res is not None:
             logger.info("Fast-path background-task status: %s -> %s", user_input, task_status_res)
             yield task_status_res
@@ -2024,7 +2156,8 @@ class Brain:
             tool_calls = []
 
         tool_calls = _maybe_inject_visual_screenshot_call(
-            tool_calls, queue_visual_screenshot and not skip_tools
+            tool_calls, queue_visual_screenshot and not skip_tools,
+            all_monitors=bool(_BOTH_SCREENS_RE.search(user_input)),
         )
 
         if not tool_calls:
@@ -2062,7 +2195,7 @@ class Brain:
             if tool_name not in _DESKTOP_COM_TOOLS and tool_name != "spawn_agent" and ck in _seen_tool_calls:
                 logger.info("Tool %s already executed, reusing result", call["name"])
                 return _seen_tool_calls[ck]
-            timeout = _TOOL_TIMEOUTS.get(tool_name, _TOOL_TIMEOUT_SEC)
+            timeout = _tool_timeout(tool_name)
             lock = self._tool_locks.setdefault(tool_name, asyncio.Lock())
 
             async def _run() -> str:
@@ -2076,6 +2209,7 @@ class Brain:
             if self.on_tool_call:
                 self.on_tool_call(call["name"], call["arguments"], turn_id=turn_id, session_id=session_id)
 
+            _tool_start = time.time()
             if tool_name == "spawn_agent":
                 # Needs Brain's LLM client + tool loop, so it can't go through
                 # tool_registry.execute_tool like every other tool -- dispatched
@@ -2152,6 +2286,10 @@ class Brain:
                         else:
                             r = f"Error executing tool '{tool_name}': {e}"
                         logger.warning("Tool %s raised an exception: %s", tool_name, e)
+            logger.info(
+                "pipeline_stage | stage=tool | name=%s | latency_ms=%.1f",
+                tool_name, (time.time() - _tool_start) * 1000,
+            )
 
             # Anomaly auto-halt: repeated failure of the same call means looping, not progress.
             if tool_name in _DESKTOP_CONTROL_TOOLS:
@@ -2407,7 +2545,7 @@ class Brain:
                 ):
                     results.append(f"Error: Command declined by user (required approval: {gate_reason}).")
                     continue
-                timeout = _TOOL_TIMEOUTS.get(call["name"], _TOOL_TIMEOUT_SEC)
+                timeout = _tool_timeout(call["name"])
                 try:
                     r = await asyncio.wait_for(
                         asyncio.get_running_loop().run_in_executor(

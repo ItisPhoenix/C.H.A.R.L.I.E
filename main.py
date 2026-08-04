@@ -63,7 +63,8 @@ else:
     sys.stderr = SafeStreamWrapper(sys.stderr)
 
 os.makedirs("logs", exist_ok=True)
-LOG_FILE = "logs/charlie.log"
+# pytest importing this module must not attach a FileHandler to the real log.
+LOG_FILE = "logs/test_charlie.log" if "pytest" in sys.modules else "logs/charlie.log"
 
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)
@@ -106,6 +107,9 @@ _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
 _CLAUSE_BOUNDARY = re.compile(r"(?<=[,;])\s+")
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _MAX_FLUSH_CHARS = 200  # Force-flush at word boundary if no sentence boundary seen
+# First-flush gate: clause boundary or this many chars, whichever comes first.
+# 20 chars outran this deployment's slow remote LLM, causing an audible gap.
+_FIRST_FLUSH_MAX_CHARS = 60
 
 
 def _flush_complete_sentences(
@@ -325,6 +329,8 @@ async def main():
         if store:
             store.close()
         return
+
+    asyncio.create_task(brain.prewarm())
 
     # Wire vector memory store into tool registry
     from charlie.tools import registry as tool_registry
@@ -704,21 +710,35 @@ async def main():
                 # Progressive flush: sentence boundary > clause boundary > force-flush.
                 flushed = False
 
-                # Early first-flush: wait for first sentence boundary, or force at 150 chars
+                # Early first-flush: sentence > clause > force at _FIRST_FLUSH_MAX_CHARS.
                 if is_first_flush:
+                    def _speak_first(part: str) -> None:
+                        nonlocal sparkle
+                        _safe_speak(voice, sparkle + part, detected_emotion, "first-flush")
+                        sparkle = ""
+
                     sentence_buffer, flushed = _flush_complete_sentences(
-                        sentence_buffer,
-                        lambda part: _safe_speak(voice, part, detected_emotion, "first-flush"),
+                        sentence_buffer, _speak_first
                     )
                     if flushed:
                         is_first_flush = False
-                    elif len(sentence_buffer) >= 150:
-                        idx = sentence_buffer.rfind(" ", 0, 150)
-                        if idx > 0:
-                            _safe_speak(voice, sentence_buffer[:idx], detected_emotion, "first-force")
-                            sentence_buffer = sentence_buffer[idx:].lstrip()
-                        is_first_flush = False
-                        flushed = True
+                    else:
+                        clause_idx = _CLAUSE_BOUNDARY.search(sentence_buffer)
+                        if clause_idx:
+                            flush_end = clause_idx.end()
+                            _safe_speak(voice, sparkle + sentence_buffer[:flush_end], detected_emotion, "first-clause")
+                            sparkle = ""
+                            sentence_buffer = sentence_buffer[flush_end:].lstrip()
+                            is_first_flush = False
+                            flushed = True
+                        elif len(sentence_buffer) >= _FIRST_FLUSH_MAX_CHARS:
+                            idx = sentence_buffer.rfind(" ", 0, _FIRST_FLUSH_MAX_CHARS)
+                            if idx > 0:
+                                _safe_speak(voice, sparkle + sentence_buffer[:idx], detected_emotion, "first-force")
+                                sparkle = ""
+                                sentence_buffer = sentence_buffer[idx:].lstrip()
+                            is_first_flush = False
+                            flushed = True
 
                 if not flushed:
                     sentence_buffer, flushed = _flush_complete_sentences(
@@ -806,8 +826,13 @@ async def main():
         # whatever's on screen at that moment, never a genuine user preference,
         # and storing it as one pollutes memory with stale screen snapshots that
         # resurface on later "what's on my screen" queries.
+        from charlie.core import _is_deterministic_reply
         from charlie.core import _SCREEN_QUERY_RE as _screen_query_re
-        if full_reply_buffer.strip() and text.strip() and not _screen_query_re.search(text):
+        if (
+            full_reply_buffer.strip() and text.strip()
+            and not _screen_query_re.search(text)
+            and not _is_deterministic_reply(text)
+        ):
 
             async def _background_learn(user_text: str, reply_text: str):
                 try:
@@ -819,7 +844,7 @@ async def main():
                     )
                     learning = ""
                     async for chunk in brain.chat_stream(
-                        learning_prompt, skip_pre_search=True, skip_tools=True
+                        learning_prompt, skip_pre_search=True, skip_tools=True, skip_fast_paths=True
                     ):
                         learning += chunk
                     learning = learning.strip()
@@ -861,11 +886,13 @@ async def main():
         change alone never reaches them -- only recreating the engine does.
         """
         nonlocal voice
-        try:
-            voice.stop()
-        except Exception as ex:
-            logger.warning(f"Error stopping voice engine on reload: {ex}")
-        try:
+
+        def _rebuild():
+            nonlocal voice
+            try:
+                voice.stop()
+            except Exception as ex:
+                logger.warning(f"Error stopping voice engine on reload: {ex}")
             voice = VoiceEngine(
                 config,
                 on_speech=on_speech,
@@ -874,6 +901,10 @@ async def main():
             )
             voice.start()
             voice.set_wake_word_callback(on_wake_word)
+
+        try:
+            # Off-thread: VoiceEngine.__init__ loading the ONNX model inline froze the event loop live.
+            await asyncio.to_thread(_rebuild)
             logger.info("VoiceEngine reloaded.")
         except Exception as ex:
             logger.error(f"Error reloading VoiceEngine: {ex}", exc_info=True)
@@ -901,6 +932,47 @@ async def main():
                 register_plugin_tools(config)
             except Exception as ex:
                 logger.warning(f"Error registering plugins on reload: {ex}")
+
+    async def _do_system_restart():
+        """Reload off the command queue -- an inline hung reload step froze chat behind it live."""
+        try:
+            async with asyncio.timeout(90.0):
+                from dotenv import load_dotenv
+                load_dotenv(override=True)
+
+                env_values = {
+                    spec["key"]: os.getenv(spec["key"])
+                    for spec in Config.editable_field_specs()
+                    if os.getenv(spec["key"]) is not None
+                }
+                config.apply_env_updates(env_values)
+
+                await _reload_mcp_client()
+                await asyncio.to_thread(_reload_plugin_tools)
+                await _reload_voice_engine()
+                await brain.refresh_llm_client()
+                await brain.refresh_vision_client()
+                brain.rebuild_stable_tier()
+
+            if event_bus:
+                await event_bus.emit("alert", {
+                    "severity": "success",
+                    "message": "System configuration successfully reloaded and engine restarted.",
+                })
+        except asyncio.TimeoutError:
+            logger.error("System restart timed out after 90s -- one reload step hung.")
+            if event_bus:
+                await event_bus.emit("alert", {
+                    "severity": "error",
+                    "message": "Reload timed out after 90s. Restart Charlie to be safe.",
+                })
+        except Exception:
+            logger.error("System restart failed", exc_info=True)
+            if event_bus:
+                await event_bus.emit("alert", {
+                    "severity": "error",
+                    "message": "Reload failed. Check logs.",
+                })
 
     async def consume_web_commands(event_bus, brain):
         """Read commands from the web UI and dispatch them."""
@@ -1063,26 +1135,7 @@ async def main():
                         logger.warning(f"Failed to mirror extension uninstall '{ext_name}': {ex}", exc_info=True)
                 elif cmd_type == "system_restart":
                     logger.info("System restart command received. Reloading configuration and engine...")
-
-                    from dotenv import load_dotenv
-                    load_dotenv(override=True)
-
-                    env_values = {
-                        spec["key"]: os.getenv(spec["key"])
-                        for spec in Config.editable_field_specs()
-                        if os.getenv(spec["key"]) is not None
-                    }
-                    config.apply_env_updates(env_values)
-
-                    await _reload_mcp_client()
-                    await asyncio.to_thread(_reload_plugin_tools)
-                    await _reload_voice_engine()
-                    brain.rebuild_stable_tier()
-
-                    await event_bus.emit("alert", {
-                        "severity": "success",
-                        "message": "System configuration successfully reloaded and engine restarted.",
-                    })
+                    asyncio.create_task(_do_system_restart())
                 elif cmd_type == "background_task_start":
                     payload = cmd.get("payload", {})
                     from charlie import background_task
@@ -1159,7 +1212,7 @@ async def main():
                     "Give me a very brief, one-sentence startup welcome. Be warm, natural, "
                     "and speak like a human colleague (not an AI assistant). "
                     "Do NOT say 'How can I help you' or 'How can I assist'. Speak only in English.",
-                    skip_tools=True
+                    skip_tools=True, skip_fast_paths=True
                 ):
                     welcome_msg += chunk
         except asyncio.TimeoutError:

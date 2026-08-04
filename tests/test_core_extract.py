@@ -513,3 +513,28 @@ class TestMaybeInjectVisualScreenshotCall:
         result = _maybe_inject_visual_screenshot_call(real_calls, True)
         assert result == real_calls
         assert len(result) == 1
+
+    def test_injects_all_monitors_arg_when_requested(self):
+        from charlie.core import _maybe_inject_visual_screenshot_call
+        result = _maybe_inject_visual_screenshot_call([], True, all_monitors=True)
+        assert result[0]["arguments"] == {"all_monitors": True}
+
+
+class TestBothScreensDetection:
+    """_BOTH_SCREENS_RE gates all_monitors=True on the injected desktop_screenshot call."""
+
+    def test_both_screens_matches(self):
+        from charlie.core import _BOTH_SCREENS_RE
+        assert _BOTH_SCREENS_RE.search("what's on both my screens")
+
+    def test_all_monitors_matches(self):
+        from charlie.core import _BOTH_SCREENS_RE
+        assert _BOTH_SCREENS_RE.search("describe all monitors")
+
+    def test_other_screen_matches(self):
+        from charlie.core import _BOTH_SCREENS_RE
+        assert _BOTH_SCREENS_RE.search("what's on the other screen")
+
+    def test_single_screen_query_does_not_match(self):
+        from charlie.core import _BOTH_SCREENS_RE
+        assert not _BOTH_SCREENS_RE.search("what's on my screen right now")

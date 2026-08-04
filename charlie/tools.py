@@ -1842,11 +1842,22 @@ def desktop_scroll(notches: int) -> str:
         "Capture the foreground window as an annotated screenshot for the vision model, "
         "for graphical targets desktop_observe can't describe (icons, canvases, images). "
         "Always returns the current set-of-marks text; also queues the image for the next "
-        "reply if a vision model is configured."
+        "reply if a vision model is configured. On a multi-monitor setup this captures only "
+        "the monitor showing the foreground window by default -- pass all_monitors=true when "
+        "the user explicitly asks about another/other/both/all screens."
     ),
-    schema={"type": "object", "properties": {}, "required": []},
+    schema={
+        "type": "object",
+        "properties": {
+            "all_monitors": {
+                "type": "boolean",
+                "description": "Capture every monitor instead of just the active one.",
+            },
+        },
+        "required": [],
+    },
 )
-def desktop_screenshot() -> str:
+def desktop_screenshot(all_monitors: bool = False) -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
     from charlie.desktop.uia import serialize_marks, snapshot_tree
@@ -1860,7 +1871,7 @@ def desktop_screenshot() -> str:
     if not desktop_ocr.OCR_AVAILABLE or not desktop_vision.VISION_AVAILABLE:
         return text_result
     try:
-        png = desktop_ocr.capture()
+        png = desktop_ocr.capture(monitor=0) if all_monitors else desktop_ocr.capture()
         annotated = desktop_vision.annotate_som(png, elements)
         set_pending_vision_image(desktop_vision.to_data_url(annotated))
         _emit_desktop_frame(annotated, elements)

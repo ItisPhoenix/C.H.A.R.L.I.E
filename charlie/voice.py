@@ -633,9 +633,17 @@ class VoiceEngine:
         span multiple chunks) is fully drained, rather than clearing
         is_speaking on the momentary gaps between chunks.
         """
+        _tts_start = time.time()
+        _first_chunk = True
         async for samples, sr in self._synth_stream(text, speed):
             if self.stop_tts_event.is_set():
                 break
+            if _first_chunk:
+                _first_chunk = False
+                logger.info(
+                    "pipeline_stage | stage=tts | latency_ms=%.1f",
+                    (time.time() - _tts_start) * 1000,
+                )
             self.playback_queue.put((samples, sr, []))
         if not self.stop_tts_event.is_set():
             self.playback_queue.put(_TTS_RUN_END)
@@ -893,8 +901,9 @@ class VoiceEngine:
         text = re.sub(
             r"\$(\d[\d,]*\.?\d*)\s*([BbMmTtKk])?(?!\w)", _replace_currency, text
         )
+        # (?!/) excludes unit slashes like "2.5 m/s" -- that "m" means meters, not million.
         text = re.sub(
-            r"(?<!\w)(\d[\d,]*\.?\d*)\s*([BbMmTtKk])(?!\w)", _replace_number, text
+            r"(?<!\w)(\d[\d,]*\.?\d*)\s*([BbMmTtKk])(?!\w)(?!/)", _replace_number, text
         )
         text = re.sub(r"(?<!\w)(\d{1,3}(?:,\d{3})+)(?!\w)", _replace_number, text)
 
@@ -935,6 +944,13 @@ class VoiceEngine:
     )
 
     def _symbols_to_words(self, text: str) -> str:
+        # ASCII-stripped later, so "30°C" silently lost the degree mark and read as bare "C" -- convert first.
+        text = re.sub(r"°\s*C\b", " degrees Celsius", text, flags=re.IGNORECASE)
+        text = re.sub(r"°\s*F\b", " degrees Fahrenheit", text, flags=re.IGNORECASE)
+        text = re.sub(r"°", " degrees", text)
+        # Numbers are already spelled out as words by this point, so no digit precedes "m/s" here.
+        text = re.sub(r"\bm/s\b", "meters per second", text)
+        text = re.sub(r"\bkm/h\b", "kilometers per hour", text)
         text = text.translate(self._SYMBOL_MAP)
         text = re.sub(r"(\d)\s+degrees\s+", r"\1 degrees ", text)
         return text

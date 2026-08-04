@@ -35,12 +35,18 @@ def _meta(
 
 @dataclass
 class Config:
-    llm_url: str = field(default=os.getenv("LLM_URL", ""), metadata=_meta("LLM_URL", "LLM"))
+    llm_url: str = field(
+        default=os.getenv("LLM_URL", ""),
+        metadata=_meta("LLM_URL", "LLM", restart="reload"),
+    )
     llm_key: str = field(
         default=os.getenv("LLM_API_KEY", "no-key"),
-        metadata=_meta("LLM_API_KEY", "LLM", secret=True),
+        metadata=_meta("LLM_API_KEY", "LLM", secret=True, restart="reload"),
     )
-    llm_model: str = field(default=os.getenv("LLM_MODEL", ""), metadata=_meta("LLM_MODEL", "LLM"))
+    llm_model: str = field(
+        default=os.getenv("LLM_MODEL", ""),
+        metadata=_meta("LLM_MODEL", "LLM", restart="reload"),
+    )
 
     # -1 = system default input device; >=0 = specific device index
     mic_index: int = field(
@@ -63,7 +69,7 @@ class Config:
     )
     kokoro_voice: str = field(
         default=os.getenv("KOKORO_VOICE", "af_heart"),
-        metadata=_meta("KOKORO_VOICE", "Voice & Speech"),
+        metadata=_meta("KOKORO_VOICE", "Voice & Speech", restart="voice"),
     )
     kokoro_model_dir: str = field(
         default=os.getenv("KOKORO_MODEL_DIR", "models"),
@@ -73,7 +79,10 @@ class Config:
         default=os.getenv("GPU_DEVICE", "cuda"),
         metadata=_meta("GPU_DEVICE", "Voice & Speech", restart="voice"),
     )
-    kokoro_lang: str = field(default=os.getenv("KOKORO_LANG", "en-us"), metadata=_meta("KOKORO_LANG", "Voice & Speech"))
+    kokoro_lang: str = field(
+        default=os.getenv("KOKORO_LANG", "en-us"),
+        metadata=_meta("KOKORO_LANG", "Voice & Speech", restart="voice"),
+    )
     default_language: str = field(
         default=os.getenv("DEFAULT_LANGUAGE", "en"),
         metadata=_meta("DEFAULT_LANGUAGE", "Voice & Speech", restart="voice"),
@@ -119,11 +128,11 @@ class Config:
         metadata=_meta("VAD_SPEECH_PAD_MS", "VAD & ASR Tuning", restart="voice"),
     )
     asr_beam_size: int = field(
-        default=int(os.getenv("ASR_BEAM_SIZE", "6")),
+        default=int(os.getenv("ASR_BEAM_SIZE", "1")),
         metadata=_meta("ASR_BEAM_SIZE", "VAD & ASR Tuning", restart="voice"),
     )
     asr_best_of: int = field(
-        default=int(os.getenv("ASR_BEST_OF", "6")),
+        default=int(os.getenv("ASR_BEST_OF", "1")),
         metadata=_meta("ASR_BEST_OF", "VAD & ASR Tuning", restart="voice"),
     )
     asr_repetition_penalty: float = field(
@@ -134,57 +143,60 @@ class Config:
     # Barge-in Configuration
     enable_barge_in: bool = field(
         default=os.getenv("ENABLE_BARGE_IN", "true").lower() == "true",
-        metadata=_meta("ENABLE_BARGE_IN", "Chat Behavior"),
+        metadata=_meta("ENABLE_BARGE_IN", "Chat Behavior", restart="reload"),
     )
 
     llm_disable_reasoning: bool = field(
         default=os.getenv("LLM_DISABLE_REASONING", "true").lower() == "true",
-        metadata=_meta("LLM_DISABLE_REASONING", "Chat Behavior"),
+        metadata=_meta("LLM_DISABLE_REASONING", "Chat Behavior", restart="reload"),
     )
     # Enable native JSON tool calling for compatible remote APIs (OpenAI, Anthropic).
     # When False, falls back to text-based TOOL: parsing for local models.
     native_tool_calling: bool = field(
         default=os.getenv("NATIVE_TOOL_CALLING", "true").lower() == "true",
-        metadata=_meta("NATIVE_TOOL_CALLING", "Chat Behavior"),
+        metadata=_meta("NATIVE_TOOL_CALLING", "Chat Behavior", restart="reload"),
     )
 
     # Iteration Budget & Context Compression
     iteration_budget_max: int = field(
         default=int(os.getenv("ITERATION_BUDGET_MAX", "12")),
-        metadata=_meta("ITERATION_BUDGET_MAX", "Chat Behavior"),
+        metadata=_meta("ITERATION_BUDGET_MAX", "Chat Behavior", restart="reload"),
     )
     context_window: int = field(
         default=int(os.getenv("CONTEXT_WINDOW", "32000")),
-        metadata=_meta("CONTEXT_WINDOW", "Chat Behavior"),
+        metadata=_meta("CONTEXT_WINDOW", "Chat Behavior", restart="reload"),
     )
     compression_soft_threshold: float = field(
         default=float(os.getenv("COMPRESSION_SOFT_THRESHOLD", "0.5")),
-        metadata=_meta("COMPRESSION_SOFT_THRESHOLD", "Chat Behavior"),
+        metadata=_meta("COMPRESSION_SOFT_THRESHOLD", "Chat Behavior", restart="reload"),
     )
     compression_threshold: float = field(
         default=float(os.getenv("COMPRESSION_THRESHOLD", "0.85")),
-        metadata=_meta("COMPRESSION_THRESHOLD", "Chat Behavior"),
+        metadata=_meta("COMPRESSION_THRESHOLD", "Chat Behavior", restart="reload"),
     )
     history_keep_recent: int = field(
         default=int(os.getenv("HISTORY_KEEP_RECENT", "6")),
-        metadata=_meta("HISTORY_KEEP_RECENT", "Chat Behavior"),
+        metadata=_meta("HISTORY_KEEP_RECENT", "Chat Behavior", restart="reload"),
     )
     history_summary_max_chars: int = field(
         default=int(os.getenv("HISTORY_SUMMARY_MAX_CHARS", "400")),
-        metadata=_meta("HISTORY_SUMMARY_MAX_CHARS", "Chat Behavior"),
+        metadata=_meta("HISTORY_SUMMARY_MAX_CHARS", "Chat Behavior", restart="reload"),
     )
     memory_file: str = field(
         default=os.getenv("MEMORY_FILE", "MEMORY.md"),
-        metadata=_meta("MEMORY_FILE", "Memory Files"),
+        metadata=_meta("MEMORY_FILE", "Memory Files", restart="reload"),
     )
-    user_file: str = field(default=os.getenv("USER_FILE", "USER.md"), metadata=_meta("USER_FILE", "Memory Files"))
+    user_file: str = field(
+        default=os.getenv("USER_FILE", "USER.md"),
+        metadata=_meta("USER_FILE", "Memory Files", restart="reload"),
+    )
     opinions_file: str = field(
         default=os.getenv("OPINIONS_FILE", "OPINIONS.md"),
-        metadata=_meta("OPINIONS_FILE", "Memory Files"),
+        metadata=_meta("OPINIONS_FILE", "Memory Files", restart="reload"),
     )
     prompt_memory_max: int = field(
         default=int(os.getenv("PROMPT_MEMORY_MAX", "2200")),
-        metadata=_meta("PROMPT_MEMORY_MAX", "Memory Files"),
+        metadata=_meta("PROMPT_MEMORY_MAX", "Memory Files", restart="reload"),
     )
     session_db_path: str = field(
         default=os.getenv("SESSION_DB_PATH", "sessions.db"),
@@ -195,14 +207,17 @@ class Config:
         metadata=_meta("EXTENSIONS_STATE_PATH", "Server", restart="process"),
     )
     # Search provider (SearXNG self-hosted)
-    searxng_url: str = field(default=os.getenv("SEARXNG_URL", ""), metadata=_meta("SEARXNG_URL", "Search Providers"))
+    searxng_url: str = field(
+        default=os.getenv("SEARXNG_URL", ""),
+        metadata=_meta("SEARXNG_URL", "Search Providers", restart="reload"),
+    )
     exa_api_key: str = field(
         default=os.getenv("EXA_API_KEY", ""),
-        metadata=_meta("EXA_API_KEY", "Search Providers", secret=True),
+        metadata=_meta("EXA_API_KEY", "Search Providers", secret=True, restart="reload"),
     )
     tavily_api_key: str = field(
         default=os.getenv("TAVILY_API_KEY", ""),
-        metadata=_meta("TAVILY_API_KEY", "Search Providers", secret=True),
+        metadata=_meta("TAVILY_API_KEY", "Search Providers", secret=True, restart="reload"),
     )
 
     # Wake Word Configuration -- classifier is loaded once when VoiceEngine starts.
@@ -237,24 +252,24 @@ class Config:
     )
     memory_embedding_model: str = field(
         default=os.getenv("MEMORY_EMBEDDING_MODEL", "text-embedding-nomic-embed-text-v1.5"),
-        metadata=_meta("MEMORY_EMBEDDING_MODEL", "Vector Memory"),
+        metadata=_meta("MEMORY_EMBEDDING_MODEL", "Vector Memory", restart="process"),
     )
     memory_embedding_url: str = field(
         default=os.getenv("MEMORY_EMBEDDING_URL", ""),
-        metadata=_meta("MEMORY_EMBEDDING_URL", "Vector Memory"),
+        metadata=_meta("MEMORY_EMBEDDING_URL", "Vector Memory", restart="process"),
     )
     memory_auto_extract: bool = field(
         default=os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true",
-        metadata=_meta("MEMORY_AUTO_EXTRACT", "Vector Memory"),
+        metadata=_meta("MEMORY_AUTO_EXTRACT", "Vector Memory", restart="reload"),
     )
     # Memory capacity management
     memory_nudge_interval: int = field(
         default=int(os.getenv("MEMORY_NUDGE_INTERVAL", "5")),
-        metadata=_meta("MEMORY_NUDGE_INTERVAL", "Vector Memory"),
+        metadata=_meta("MEMORY_NUDGE_INTERVAL", "Vector Memory", restart="reload"),
     )
     memory_capacity_threshold: float = field(
         default=float(os.getenv("MEMORY_CAPACITY_THRESHOLD", "0.8")),
-        metadata=_meta("MEMORY_CAPACITY_THRESHOLD", "Vector Memory"),
+        metadata=_meta("MEMORY_CAPACITY_THRESHOLD", "Vector Memory", restart="reload"),
     )
     # Knowledge graph (SQLite)
     memory_graph_db: str = field(
@@ -286,7 +301,7 @@ class Config:
     # --- Desktop control (UI Automation) ---
     desktop_control_enabled: bool = field(
         default=os.getenv("DESKTOP_CONTROL_ENABLED", "false").lower() == "true",
-        metadata=_meta("DESKTOP_CONTROL_ENABLED", "Desktop Control"),
+        metadata=_meta("DESKTOP_CONTROL_ENABLED", "Desktop Control", restart="reload"),
     )
     # Read once into a pynput GlobalHotKeys listener at Brain construction -- needs a full restart to re-arm.
     desktop_panic_hotkey: str = field(
@@ -295,48 +310,51 @@ class Config:
     )
     desktop_max_actions: int = field(
         default=int(os.getenv("DESKTOP_MAX_ACTIONS", "40")),
-        metadata=_meta("DESKTOP_MAX_ACTIONS", "Desktop Control"),
+        metadata=_meta("DESKTOP_MAX_ACTIONS", "Desktop Control", restart="reload"),
     )
     # Seconds of no real user input required before Charlie may start/continue
     # an unattended background desktop task (charlie.desktop.session.user_idle_seconds).
     desktop_idle_threshold_s: float = field(
         default=float(os.getenv("DESKTOP_IDLE_THRESHOLD_S", "120.0")),
-        metadata=_meta("DESKTOP_IDLE_THRESHOLD_S", "Desktop Control"),
+        metadata=_meta("DESKTOP_IDLE_THRESHOLD_S", "Desktop Control", restart="reload"),
     )
     desktop_ocr_enabled: bool = field(
         default=os.getenv("DESKTOP_OCR_ENABLED", "true").lower() == "true",
-        metadata=_meta("DESKTOP_OCR_ENABLED", "Desktop Control"),
+        metadata=_meta("DESKTOP_OCR_ENABLED", "Desktop Control", restart="reload"),
     )
     # Per-turn caps for background tasks -- see charlie.background_task's dataclasses.replace(config, ...).
     background_iteration_budget_max: int = field(
         default=int(os.getenv("BACKGROUND_ITERATION_BUDGET_MAX", "40")),
-        metadata=_meta("BACKGROUND_ITERATION_BUDGET_MAX", "Desktop Control"),
+        metadata=_meta("BACKGROUND_ITERATION_BUDGET_MAX", "Desktop Control", restart="reload"),
     )
     background_max_actions: int = field(
         default=int(os.getenv("BACKGROUND_MAX_ACTIONS", "100")),
-        metadata=_meta("BACKGROUND_MAX_ACTIONS", "Desktop Control"),
+        metadata=_meta("BACKGROUND_MAX_ACTIONS", "Desktop Control", restart="reload"),
     )
     tesseract_cmd: str = field(
         default=os.getenv("TESSERACT_CMD", ""),
-        metadata=_meta("TESSERACT_CMD", "Desktop Control"),
+        metadata=_meta("TESSERACT_CMD", "Desktop Control", restart="reload"),
     )
     # Separate, independently-configured vision endpoint -- small/big LLMs stay text-only.
     vision_enabled: bool = field(
         default=os.getenv("VISION_ENABLED", "false").lower() == "true",
-        metadata=_meta("VISION_ENABLED", "Vision"),
+        metadata=_meta("VISION_ENABLED", "Vision", restart="reload"),
     )
-    vision_llm_url: str = field(default=os.getenv("VISION_LLM_URL", ""), metadata=_meta("VISION_LLM_URL", "Vision"))
+    vision_llm_url: str = field(
+        default=os.getenv("VISION_LLM_URL", ""),
+        metadata=_meta("VISION_LLM_URL", "Vision", restart="reload"),
+    )
     vision_llm_key: str = field(
         default=os.getenv("VISION_LLM_KEY", "no-key"),
-        metadata=_meta("VISION_LLM_KEY", "Vision", secret=True),
+        metadata=_meta("VISION_LLM_KEY", "Vision", secret=True, restart="reload"),
     )
     vision_llm_model: str = field(
         default=os.getenv("VISION_LLM_MODEL", ""),
-        metadata=_meta("VISION_LLM_MODEL", "Vision"),
+        metadata=_meta("VISION_LLM_MODEL", "Vision", restart="reload"),
     )
     vision_llm_timeout_s: float = field(
         default=float(os.getenv("VISION_LLM_TIMEOUT_S", "120.0")),
-        metadata=_meta("VISION_LLM_TIMEOUT_S", "Vision"),
+        metadata=_meta("VISION_LLM_TIMEOUT_S", "Vision", restart="reload"),
     )
     plugins_enabled: bool = field(
         default=os.getenv("PLUGINS_ENABLED", "false").lower() == "true",
@@ -356,11 +374,11 @@ class Config:
     # CPU/RAM percent thresholds for proactive alerts (sustained 3 samples before alerting)
     alert_cpu_pct: float = field(
         default=float(os.getenv("ALERT_CPU_PCT", "95")),
-        metadata=_meta("ALERT_CPU_PCT", "Monitoring"),
+        metadata=_meta("ALERT_CPU_PCT", "Monitoring", restart="reload"),
     )
     alert_ram_pct: float = field(
         default=float(os.getenv("ALERT_RAM_PCT", "92")),
-        metadata=_meta("ALERT_RAM_PCT", "Monitoring"),
+        metadata=_meta("ALERT_RAM_PCT", "Monitoring", restart="reload"),
     )
 
     charlie_host: str = field(

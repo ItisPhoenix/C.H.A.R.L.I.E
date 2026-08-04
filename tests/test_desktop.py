@@ -189,8 +189,13 @@ async def test_describe_image_sends_no_history_or_tools(brain_config, monkeypatc
     assert payload["stream"] is False
     assert payload["max_tokens"] == _VISION_MAX_TOKENS
     assert payload["messages"] == [
-        {"role": "system", "content": "Describe what is visible in this image factually and concisely."},
-        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe what is visible in this image factually and concisely."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+            ],
+        },
     ]
 
 

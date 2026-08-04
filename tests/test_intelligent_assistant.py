@@ -9,6 +9,7 @@ from charlie.core import (
     _build_volatile_tier,
     _detect_correction,
     _detect_set_goal,
+    _detect_standing_instruction,
     _detect_verbosity_feedback,
     _is_followup,
     _strip_vocatives,
@@ -53,6 +54,33 @@ class TestCorrectionDetection:
 
     def test_positive_feedback(self):
         assert _detect_correction("that's great") is False
+
+
+class TestStandingInstructionDetection:
+    """Verify _detect_standing_instruction catches forward-looking directives
+    that _detect_opinion_teaching's narrower pattern doesn't cover."""
+
+    def test_when_i_ask(self):
+        text = (
+            "when i ask for weather, temperature, time, day, date and anything "
+            "related with this answer in 10 words unless i ask you to describe or go in detail."
+        )
+        assert _detect_standing_instruction(text) == text
+
+    def test_from_now_on(self):
+        assert _detect_standing_instruction("from now on keep replies short") is not None
+
+    def test_always_answer(self):
+        assert _detect_standing_instruction("always answer in one sentence") is not None
+
+    def test_going_forward(self):
+        assert _detect_standing_instruction("going forward, skip the small talk") is not None
+
+    def test_normal_question_not_matched(self):
+        assert _detect_standing_instruction("what's the weather in Paris") is None
+
+    def test_normal_greeting_not_matched(self):
+        assert _detect_standing_instruction("hey Charlie, how are you") is None
 
 
 class TestApplyCorrectionToMemory:

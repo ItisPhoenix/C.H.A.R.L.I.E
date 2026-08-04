@@ -17,6 +17,31 @@ def brain_config():
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_loads_full_turn_pairs_not_half(brain_config):
+    """Regression: history load passed limit=_history_max_turns (a message
+    count) to get_session_messages, but _history_max_turns means turns
+    (user+assistant pairs) everywhere else in this file -- silently loading
+    half the intended context on every turn."""
+    captured = {}
+
+    class FakeStore:
+        def get_session_messages(self, session_id, limit=50):
+            captured["limit"] = limit
+            return []
+
+    brain = Brain(brain_config)
+    brain.session_store = FakeStore()
+
+    try:
+        async for _ in brain.chat_stream("hi", skip_tools=True, skip_fast_paths=True):
+            break
+    except Exception:
+        pass
+
+    assert captured["limit"] == brain._history_max_turns * 2
+
+
+@pytest.mark.asyncio
 async def test_budget_exhaustion(monkeypatch, brain_config):
     brain = Brain(brain_config)
 
