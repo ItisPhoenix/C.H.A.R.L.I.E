@@ -10,7 +10,7 @@ interface FieldSpec {
   label: string;
   type: "bool" | "int" | "float" | "str" | "list";
   secret: boolean;
-  restart: "voice" | "mcp" | "plugins" | "process" | null;
+  restart: "voice" | "mcp" | "plugins" | "process" | "reload" | null;
   value: unknown;
   is_set: boolean | null;
 }
@@ -66,6 +66,7 @@ const RESTART_META: Record<string, { label: string; color: string; bg: string }>
   voice: { label: "Voice · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "var(--color-accent-teal-dim)" },
   mcp: { label: "MCP · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "var(--color-accent-teal-dim)" },
   plugins: { label: "Plugins · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "var(--color-accent-teal-dim)" },
+  reload: { label: "Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "var(--color-accent-teal-dim)" },
   process: { label: "Needs restart", color: "var(--color-status-warning)", bg: "var(--color-status-warning-dim)" },
 };
 
@@ -81,12 +82,36 @@ const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
     { value: "small", label: "small" },
     { value: "base", label: "base" },
   ],
+  // All English-language Kokoro voices (lang prefix a=American, b=British).
   KOKORO_VOICE: [
-    { value: "af_heart", label: "af_heart (warm female, default)" },
-    { value: "af_bella", label: "af_bella" },
-    { value: "af_nicole", label: "af_nicole" },
-    { value: "am_adam", label: "am_adam (warm male)" },
-    { value: "am_michael", label: "am_michael" },
+    { value: "af_heart", label: "af_heart (American female, default)" },
+    { value: "af_alloy", label: "af_alloy (American female)" },
+    { value: "af_aoede", label: "af_aoede (American female)" },
+    { value: "af_bella", label: "af_bella (American female)" },
+    { value: "af_jessica", label: "af_jessica (American female)" },
+    { value: "af_kore", label: "af_kore (American female)" },
+    { value: "af_nicole", label: "af_nicole (American female)" },
+    { value: "af_nova", label: "af_nova (American female)" },
+    { value: "af_river", label: "af_river (American female)" },
+    { value: "af_sarah", label: "af_sarah (American female)" },
+    { value: "af_sky", label: "af_sky (American female)" },
+    { value: "am_adam", label: "am_adam (American male)" },
+    { value: "am_echo", label: "am_echo (American male)" },
+    { value: "am_eric", label: "am_eric (American male)" },
+    { value: "am_fenrir", label: "am_fenrir (American male)" },
+    { value: "am_liam", label: "am_liam (American male)" },
+    { value: "am_michael", label: "am_michael (American male)" },
+    { value: "am_onyx", label: "am_onyx (American male)" },
+    { value: "am_puck", label: "am_puck (American male)" },
+    { value: "am_santa", label: "am_santa (American male)" },
+    { value: "bf_alice", label: "bf_alice (British female)" },
+    { value: "bf_emma", label: "bf_emma (British female)" },
+    { value: "bf_isabella", label: "bf_isabella (British female)" },
+    { value: "bf_lily", label: "bf_lily (British female)" },
+    { value: "bm_daniel", label: "bm_daniel (British male)" },
+    { value: "bm_fable", label: "bm_fable (British male)" },
+    { value: "bm_george", label: "bm_george (British male)" },
+    { value: "bm_lewis", label: "bm_lewis (British male)" },
   ],
 };
 

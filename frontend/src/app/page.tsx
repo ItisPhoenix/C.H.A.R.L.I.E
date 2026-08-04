@@ -275,7 +275,7 @@ export default function Page(): ReactElement {
 
   // Connect WebSocket connection
   const connectWS = useCallback(() => {
-    if (wsRef.current) return;
+    if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) return;
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
@@ -301,7 +301,7 @@ export default function Page(): ReactElement {
 
     socket.onclose = () => {
       setConnected(false);
-      wsRef.current = null;
+      if (wsRef.current === socket) wsRef.current = null;
       const attempt = reconnectAttemptsRef.current++;
       const delay = Math.min(3000 * 2 ** attempt, 30000);
       reconnectTimeoutRef.current = setTimeout(() => connectWSRef.current?.(), delay);
@@ -566,7 +566,11 @@ export default function Page(): ReactElement {
   useEffect(() => {
     connectWS();
     return () => {
-      if (wsRef.current) wsRef.current.close();
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+        wsRef.current = null;
+      }
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
     };
   }, [connectWS]);
