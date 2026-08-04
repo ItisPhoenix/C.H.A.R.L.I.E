@@ -246,7 +246,7 @@ export function ChatView({
                 <button
                   key={i}
                   onClick={() => submit(p.text)}
-                  className="p-3 text-left rounded-xl bg-zinc-900/40 border border-[rgba(255,255,255,0.05)] transition hover:border-[var(--color-glass-border-hover)] hover:bg-zinc-900/80 group cursor-pointer"
+                  className="p-3 text-left rounded-xl bg-zinc-900/40 border border-[var(--color-glass-border)] transition hover:border-[var(--color-glass-border-hover)] hover:bg-zinc-900/80 group cursor-pointer"
                 >
                   <p className="text-xs font-semibold text-slate-300 group-hover:text-slate-100 transition truncate">
                     {p.label}
@@ -269,8 +269,8 @@ export function ChatView({
             >
               <div
                 style={{
-                  background: isUser ? accentDim : "rgba(255,255,255,0.02)",
-                  borderColor: isUser ? accentBorder : "rgba(255,255,255,0.05)",
+                  background: isUser ? accentDim : "var(--color-surface-hover)",
+                  borderColor: isUser ? accentBorder : "var(--color-glass-border)",
                 }}
                 className={`max-w-[82%] px-4 py-3 rounded-xl border text-[14px] leading-relaxed text-slate-100`}
               >

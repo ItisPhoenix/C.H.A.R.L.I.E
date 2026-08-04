@@ -61,11 +61,11 @@ export function VoiceDock({
     state === "listening" && listeningTrigger === "wake_word" ? "Wake Word" : STATE_LABELS[state];
 
   const voiceDockBorder = !connected
-    ? "rgba(239, 68, 68, 0.3)"
+    ? "color-mix(in srgb, var(--color-status-error) 30%, transparent)"
     : mic.mic_muted
-    ? "rgba(75, 85, 99, 0.2)"
+    ? "color-mix(in srgb, var(--color-status-idle) 20%, transparent)"
     : audio.muted
-    ? "rgba(239, 68, 68, 0.25)"
+    ? "color-mix(in srgb, var(--color-status-error) 25%, transparent)"
     : "var(--color-glass-border)";
 
   return (
