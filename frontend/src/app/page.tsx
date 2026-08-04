@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, useMemo, type ReactElement } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   MessageSquare, Monitor, Database, Cpu, Settings, Shield, Bell, Search, Mic, MicOff,
   FolderGit, Network, RefreshCw, Check, X, Menu, Server, Puzzle, GitBranch, ChevronDown
@@ -17,6 +18,7 @@ interface WSMessage {
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { ToastContainer } from "../components/ToastContainer";
 import { SessionRail } from "../components/SessionRail";
+import { CommandPalette } from "../components/CommandPalette";
 import { ChatView } from "../components/ChatView";
 import { InsightRail } from "../components/InsightRail";
 import { EventLog } from "../components/EventLog";
@@ -56,6 +58,7 @@ function NavButton({ icon: Icon, label, active, onClick }: NavButtonProps): Reac
 }
 
 export default function Page(): ReactElement {
+  const router = useRouter();
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -145,6 +148,9 @@ export default function Page(): ReactElement {
 
   // Notification bell popover state
   const [bellOpen, setBellOpen] = useState(false);
+
+  // Command palette (Ctrl+K) state
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   // Debounced search logic
   useEffect(() => {
@@ -451,8 +457,7 @@ export default function Page(): ReactElement {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
-        const searchInput = document.getElementById("global-search-input");
-        if (searchInput) searchInput.focus();
+        setPaletteOpen(true);
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "n") {
         e.preventDefault();
@@ -599,6 +604,17 @@ export default function Page(): ReactElement {
   const handleRejectToolCall = (requestId: string) => {
     sendWS({ type: "tool_reject", payload: { request_id: requestId } });
   };
+
+  const handleSelectSession = useCallback((id: string) => {
+    // Re-selecting the already-active session is a no-op for React's state (same
+    // primitive), so the currentSessionId effect never re-fires -- force the refetch.
+    if (id === currentSessionId) {
+      fetchMessages(id);
+      return;
+    }
+    setMessages([]);
+    setCurrentSessionId(id);
+  }, [currentSessionId, fetchMessages, setMessages, setCurrentSessionId]);
 
   const handleExportHistory = useCallback(async () => {
     try {
@@ -907,17 +923,7 @@ export default function Page(): ReactElement {
                         variant="accordion"
                         sessions={searchedSessions}
                         currentId={currentSessionId}
-                        onSelect={(id) => {
-                          // Re-selecting the already-active session is a no-op for React's
-                          // state (same primitive), so the currentSessionId effect never
-                          // re-fires -- force the refetch directly instead of relying on it.
-                          if (id === currentSessionId) {
-                            fetchMessages(id);
-                            return;
-                          }
-                          setMessages([]);
-                          setCurrentSessionId(id);
-                        }}
+                        onSelect={handleSelectSession}
                         onCreate={() => handleCreateSession("New Chat")}
                         onRename={handleRenameSession}
                         onDelete={handleDeleteSession}
@@ -1095,6 +1101,25 @@ export default function Page(): ReactElement {
           onAudioControl={sendAudioControl}
           onMicControl={sendMicControl}
         />
+
+        {paletteOpen && (
+          <CommandPalette
+            onClose={() => setPaletteOpen(false)}
+            sessions={sessions}
+            currentSessionId={currentSessionId}
+            onJumpToSession={handleSelectSession}
+            models={availableModels}
+            activeModel={activeModel}
+            onSwitchModel={handleModelSelect}
+            micMuted={mic.mic_muted}
+            onToggleMic={() => sendMicControl({ mic_muted: !mic.mic_muted })}
+            audioMuted={audio.muted}
+            onToggleAudio={() => sendAudioControl({ muted: !audio.muted })}
+            onOpenSettings={() => router.push("/settings")}
+            onExportHistory={handleExportHistory}
+            onStartBackgroundTask={(text) => sendWS({ type: "background_task_start", payload: { text } })}
+          />
+        )}
       </div>
     </ErrorBoundary>
   );
