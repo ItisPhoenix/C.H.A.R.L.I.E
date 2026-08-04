@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
 # --- LLM tuning ---
 _LLM_TEMPERATURE = 0.3
+_VISION_MAX_TOKENS = 4096  # hard ceiling on unconstrained vision generation (no tools => no stop-on-tool-call)
 _TOOL_TIMEOUT_SEC = 15.0
 _DESKTOP_CONTROL_TOOLS = frozenset({
     "desktop_click", "desktop_type", "desktop_invoke", "desktop_key",
@@ -71,9 +72,9 @@ _SCREEN_QUERY_RE = re.compile(
 # Narrower sibling of _SCREEN_QUERY_RE: phrasing that implies the user wants
 # graphical/visual understanding (an icon, photo, game frame) that OCR/UIA
 # marks can't describe. When this matches and a vision model is configured,
-# desktop_screenshot is pre-called so the vision-routed follow-up (see
-# _select_followup_route) has a real image queued -- see
-# _should_queue_visual_screenshot below and its call site in chat_stream.
+# desktop_screenshot is pre-called so it has a real image to describe (see
+# Brain._describe_image) -- see _should_queue_visual_screenshot below and
+# its call site in chat_stream.
 _VISUAL_CONTENT_QUERY_RE = re.compile(
     r"\bwhat am i looking at\b"
     r"|\bdescribe (this|the) (image|photo|picture|screen|window|page)\b"
@@ -1226,9 +1227,10 @@ def _maybe_inject_visual_screenshot_call(
     """Append a synthetic desktop_screenshot call when queue_visual_screenshot
     is True and the model's own tool_calls don't already include one. This is
     what makes a queued visual-content query flow through the same
-    tool-execution loop (_exec_one) and follow-up routing (_select_followup_route)
-    as a model-initiated desktop_screenshot call, instead of queuing the image
-    before the initial payload -- see the chat_stream call site."""
+    tool-execution loop (_exec_one, which describes the image and returns it
+    as the tool result -- see Brain._describe_image) as a model-initiated
+    desktop_screenshot call, instead of queuing the image before the initial
+    payload -- see the chat_stream call site."""
     if not queue_visual_screenshot:
         return tool_calls
     if any(c.get("name") == "desktop_screenshot" for c in tool_calls):
@@ -1292,41 +1294,6 @@ def _assemble_system_prompt(stable: str, context: str, volatile: str) -> str:
     return f"{stable}\n\n{context}\n\n{volatile}"
 
 
-def _with_vision_image(messages: List[Dict[str, Any]], image_url: str) -> List[Dict[str, Any]]:
-    """Return a copy of `messages` with the last user message's content turned
-    multimodal, for this one outgoing payload only. Never mutates `messages`
-    or its dicts in place -- history persistence (string-only) stays untouched."""
-    last_user_idx = next(
-        (i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"),
-        None,
-    )
-    if last_user_idx is None:
-        return messages
-    out = list(messages)
-    original = out[last_user_idx]
-    out[last_user_idx] = {
-        **original,
-        "content": [
-            {"type": "text", "text": original.get("content", "")},
-            {"type": "image_url", "image_url": {"url": image_url}},
-        ],
-    }
-    return out
-
-
-def _payload_is_vision(payload: Dict[str, Any]) -> bool:
-    """True if _build_payload injected an image block into this payload."""
-    return any(isinstance(m.get("content"), list) for m in payload.get("messages", []))
-
-
-def _strip_tools_for_vision(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """A local vision model given an image alongside the full tool schema
-    hallucinates a bogus tool call instead of describing the image -- the
-    vision follow-up route must never receive tools/tool_choice."""
-    payload = dict(payload)
-    payload.pop("tools", None)
-    payload.pop("tool_choice", None)
-    return payload
 
 
 # =====================================================================
@@ -1376,8 +1343,6 @@ class Brain:
         self._chat_generation = 0
         # Per-turn halt; module-global _HALT is reserved for the physical panic hotkey.
         self._turn_halted: bool = False
-        # Per-instance, not the shared tools.py global -- see _exec_one's immediate pop.
-        self._pending_vision_image_url: Optional[str] = None
         self._panic_hotkey_listener = None
         if register_panic_hotkey and self.config.desktop_control_enabled and _DESKTOP_AVAILABLE:
             try:
@@ -1719,21 +1684,44 @@ class Brain:
             payload["tool_choice"] = "auto"
         if getattr(self.config, "llm_disable_reasoning", False):
             payload["reasoning"] = {"effort": "none"}
-        if self.config.vision_enabled and self._use_native_tools:
-            image_url, self._pending_vision_image_url = self._pending_vision_image_url, None
-            if image_url:
-                payload["messages"] = _with_vision_image(messages, image_url)
         return payload
 
-    def _select_followup_route(
-        self, payload: Dict[str, Any]
-    ) -> Tuple[httpx.AsyncClient, str, bool]:
-        """Pick which endpoint serves a follow-up completion: vision (if this
-        payload carries an image block from desktop_screenshot), else small.
-        Returns (client, model, is_vision)."""
-        if self._vision_client is not None and _payload_is_vision(payload):
-            return self._vision_client, self._vision_model, True
-        return self.client, self.config.llm_model, False
+    async def _describe_image(self, image_url: str) -> str:
+        """Single stateless vision call: image in, plain-text description out.
+
+        No conversation history, no tool schema -- the vision model never
+        participates in the main conversation, so it has nothing to
+        misinterpret or get stuck trying to continue (see the history-stub
+        hallucination pattern documented in CLAUDE.md 11.1). The description
+        flows back as an ordinary tool result; the main LLM (full history,
+        full tools) decides what to do next, same as any other tool.
+        """
+        if self._vision_client is None:
+            return "Vision is not configured."
+        payload = {
+            "model": self._vision_model,
+            "messages": [
+                {"role": "system", "content": "Describe what is visible in this image factually and concisely."},
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_url}}]},
+            ],
+            "temperature": _LLM_TEMPERATURE,
+            "max_tokens": _VISION_MAX_TOKENS,
+            "stream": False,
+        }
+        try:
+            response = await asyncio.wait_for(
+                self._vision_client.post("chat/completions", json=payload),
+                timeout=self.config.vision_llm_timeout_s,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data["choices"][0]["message"]["content"] or "(vision model returned no description)"
+        except asyncio.TimeoutError:
+            logger.warning("Vision description timed out after %.0fs", self.config.vision_llm_timeout_s)
+            return "Vision description timed out."
+        except Exception as e:
+            logger.warning("Vision description failed: %s", e)
+            return f"Vision description failed: {e}"
 
     async def _stream_followup_once(
         self,
@@ -1911,10 +1899,10 @@ class Brain:
         # told, in its own prompt, not to answer from training data / memory --
         # relying on the model to decide to call desktop_observe itself isn't
         # reliable enough: it has repeated a stale answer from history instead.
-        # Uses desktop_observe (UIA + OCR text), not desktop_screenshot -- the
-        # initial completion isn't vision-routed (only follow-ups are, via
-        # _select_followup_route), so queuing an image here would just send
-        # it to the wrong, text-only client.
+        # Uses desktop_observe (UIA + OCR text), not desktop_screenshot -- all
+        # completions go to the main LLM now (see Brain._describe_image for
+        # the only place the vision client is ever called), so there's no
+        # "vision-routed" client to queue an image for here.
         if self.config.desktop_control_enabled and _SCREEN_QUERY_RE.search(user_input):
             try:
                 screen_observation = await asyncio.get_running_loop().run_in_executor(
@@ -1930,12 +1918,9 @@ class Brain:
         # --- Flag ambiguous visual-content queries for a queued screenshot ---
         # Separate mechanism from the desktop_observe block above: this later
         # injects a synthetic desktop_screenshot tool call (see
-        # _maybe_inject_visual_screenshot_call below) so the image is queued
-        # by the SAME tool-execution-loop machinery that handles a model-
-        # initiated desktop_screenshot call -- queuing it here, before the
-        # initial payload is built, would have _build_payload's
-        # pop_pending_vision_image() immediately consume it into the
-        # non-vision-routed initial request instead of the follow-up.
+        # _maybe_inject_visual_screenshot_call below) so the image is
+        # captured and described by the SAME tool-execution-loop machinery
+        # (_exec_one) that handles a model-initiated desktop_screenshot call.
         queue_visual_screenshot = _should_queue_visual_screenshot(user_input, self.config)
         if queue_visual_screenshot:
             logger.info("Visual-content query detected -- will queue desktop_screenshot for follow-up")
@@ -2182,9 +2167,14 @@ class Brain:
                 else:
                     _desktop_fail_counts[ck] = 0
 
-            # Pop immediately (no await above) so a concurrent Brain can't overwrite it first.
+            # Pop and describe immediately, in this same call -- no cross-call
+            # handoff via shared state, so concurrent desktop_screenshot calls
+            # (asyncio.gather) can't race on or lose each other's image.
             if tool_name == "desktop_screenshot":
-                self._pending_vision_image_url = pop_pending_vision_image()
+                image_url = pop_pending_vision_image()
+                if image_url is not None:
+                    vision_description = await self._describe_image(image_url)
+                    r = f"{r}\n\n[Vision] {vision_description}"
 
             if self.on_tool_result:
                 self.on_tool_result(call["name"], r, turn_id=turn_id, session_id=session_id)
@@ -2297,22 +2287,15 @@ class Brain:
             messages = await _prep_messages(messages, self.config)
 
             followup_payload = self._build_payload(messages)
-            followup_client, followup_model, is_vision = self._select_followup_route(
-                followup_payload
-            )
-            if is_vision:
-                followup_payload = _strip_tools_for_vision(followup_payload)
 
             state = FollowupStreamState()
             try:
                 async for filtered in self._stream_followup_once(
-                    followup_client, followup_model, followup_payload, generation, state
+                    self.client, self.config.llm_model, followup_payload, generation, state
                 ):
                     yield filtered
             except Exception as tool_exc:
-                logger.warning(
-                    "%s follow-up LLM error: %s", "Vision" if is_vision else "Tool", tool_exc
-                )
+                logger.warning("Tool follow-up LLM error: %s", tool_exc)
                 break
 
             if state.cancelled:

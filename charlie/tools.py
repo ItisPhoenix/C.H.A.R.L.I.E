@@ -33,7 +33,9 @@ _memory_store = None  # type: Optional[Any]
 _memory_graph = None  # type: Optional[Any]
 # --- Pending vision-tier screenshot: written by desktop_screenshot, consumed
 # --- once by Brain._build_payload for the very next outgoing payload. ---
-_pending_vision_image = None  # type: Optional[str]
+# FIFO -- concurrent desktop_screenshot calls (asyncio.gather in one turn, or a
+# sub-agent's own call) must not silently overwrite each other
+_pending_vision_images: List[str] = []
 # --- Search tuning ---
 SEARCH_RESULT_LIMIT = 5
 CONTENT_MAX_CHARS = 800
@@ -1976,16 +1978,14 @@ def system_control(action: str) -> str:
 
 
 def set_pending_vision_image(url: Optional[str]) -> None:
-    """Queue an image data URL for the very next outgoing LLM payload."""
-    global _pending_vision_image
-    _pending_vision_image = url
+    """Queue an image data URL for an upcoming outgoing LLM payload."""
+    if url is not None:
+        _pending_vision_images.append(url)
 
 
 def pop_pending_vision_image() -> Optional[str]:
-    """Read and clear the queued vision image -- consumed exactly once."""
-    global _pending_vision_image
-    url, _pending_vision_image = _pending_vision_image, None
-    return url
+    """Read and remove the oldest queued vision image -- FIFO, each consumed exactly once."""
+    return _pending_vision_images.pop(0) if _pending_vision_images else None
 
 
 def register_plugin_tools(cfg: Any = None) -> Optional[Any]:

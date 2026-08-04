@@ -894,3 +894,4 @@ def test_plugin_fs_search_has_extended_timeout():
     from charlie.core import _TOOL_TIMEOUT_SEC, _TOOL_TIMEOUTS
 
     assert _TOOL_TIMEOUTS["plugin_fs_search"] > _TOOL_TIMEOUT_SEC
+
