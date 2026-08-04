@@ -351,15 +351,17 @@ def _apply_correction_to_memory(
     entry = f"Correction by user: {query.strip()}. Previous answer: '{short_resp}'."
     try:
         from pathlib import Path as _P
+
+        from charlie.tools import _MEMORY_SEP
         p = _P(opinions_path)
         existing = p.read_text(encoding="utf-8") if p.exists() else ""
         if entry in existing:
             logger.debug("Correction already in opinions, skipping")
             return None
         with open(opinions_path, "a", encoding="utf-8") as f:
-            if existing and not existing.endswith("\n"):
-                f.write("\n")
-            f.write(f"{entry}\n")
+            if existing:
+                f.write(_MEMORY_SEP)
+            f.write(entry)
         logger.info("Correction stored: %s", entry[:80])
         return entry
     except Exception as exc:
