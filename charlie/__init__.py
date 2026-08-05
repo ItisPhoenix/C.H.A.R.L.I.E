@@ -16,10 +16,6 @@ def __getattr__(name: str):
         from .session_store import SessionStore
 
         return SessionStore
-    if name == "MemoryGraph":
-        from .memory_graph import MemoryGraph
-
-        return MemoryGraph
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -28,7 +24,6 @@ __all__ = [
     "Brain",
     "VoiceEngine",
     "SessionStore",
-    "MemoryGraph",
     "registry",
 ]
 

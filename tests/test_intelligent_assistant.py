@@ -213,7 +213,7 @@ class TestConfidenceGate:
         assert _assess_tool_result_relevance("skill_qa_whoami_whoami", "DESKTOP\\user") is True
 
     def test_short_query_tool_result_still_gated(self):
-        assert _assess_tool_result_relevance("graph_query", "Error") is False
+        assert _assess_tool_result_relevance("session_search", "Error") is False
 
 
 # ---------------------------------------------------------------------------

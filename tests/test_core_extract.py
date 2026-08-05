@@ -106,24 +106,24 @@ class TestBarePatternGating:
         assert calls[0]["name"] == "desktop_click"
         assert calls[0]["arguments"] == {"mark_id": "3"}
 
-    def test_graph_add_fact_multi_param_no_longer_drift(self):
+    def test_memory_multi_param_no_longer_drift(self):
         brain = _make_brain(use_native_tools=False)
         calls = brain._extract_tool_calls(
-            'TOOL: graph_add_fact("user", "prefers", "dark mode")'
+            'TOOL: memory("add", "user", "prefers dark mode")'
         )
-        assert calls[0]["name"] == "graph_add_fact"
+        assert calls[0]["name"] == "memory"
         assert calls[0]["arguments"] == {
-            "subject": "user",
-            "predicate": "prefers",
-            "object": "dark mode",
+            "action": "add",
+            "target": "user",
+            "content": "prefers dark mode",
         }
 
     def test_zero_arg_tool_gets_empty_arguments(self):
-        """graph_consolidate takes no parameters -- an empty-parens call must
+        """desktop_observe takes no parameters -- an empty-parens call must
         not synthesize a bogus `query` kwarg that would crash the call."""
         brain = _make_brain(use_native_tools=False)
-        calls = brain._extract_tool_calls("TOOL: graph_consolidate()")
-        assert calls[0]["name"] == "graph_consolidate"
+        calls = brain._extract_tool_calls("TOOL: desktop_observe()")
+        assert calls[0]["name"] == "desktop_observe"
         assert calls[0]["arguments"] == {}
 
     def test_unknown_tool_name_falls_back_to_query(self):
@@ -214,7 +214,7 @@ class TestGroundingRules:
     def test_volatile_tier_includes_tool_catalog_when_provided(self):
         """Text-mode (local model) turns pass the live registry's tool
         catalog here every turn -- this is what makes Charlie aware of
-        desktop control, memory/graph tools, MCP, and plugins in text mode,
+        desktop control, memory tools, MCP, and plugins in text mode,
         instead of only the 3 tools _TEXT_TOOL_INSTRUCTIONS shows examples
         for."""
         from datetime import datetime
@@ -227,7 +227,7 @@ class TestGroundingRules:
         )
         assert "AVAILABLE TOOLS" in tier
         assert "desktop_click" in tier
-        assert "graph_add_fact" in tier
+        assert "vector_memory" in tier
 
     def test_volatile_tier_omits_idle_time_by_default(self):
         from datetime import datetime

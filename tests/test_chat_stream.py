@@ -1,3 +1,4 @@
+import json
 import sys
 
 import pytest
@@ -57,7 +58,17 @@ async def test_budget_exhaustion(monkeypatch, brain_config):
 
             async def aiter_lines(self):
                 if followup_count <= 4:
-                    yield 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"123","function":{"name":"web_search","arguments":"{\\"query\\":\\"test\\"}"}}]}}]}'  # noqa: E501
+                    # Distinct query per round -- identical calls are free and wouldn't exhaust budget.
+                    chunk = {
+                        "choices": [{"delta": {"tool_calls": [{
+                            "index": 0, "id": "123",
+                            "function": {
+                                "name": "web_search",
+                                "arguments": json.dumps({"query": f"test{followup_count}"}),
+                            },
+                        }]}}]
+                    }
+                    yield f"data: {json.dumps(chunk)}"
                 else:
                     yield 'data: {"choices":[{"delta":{"content":"done"}}]}'
                 yield "data: [DONE]"

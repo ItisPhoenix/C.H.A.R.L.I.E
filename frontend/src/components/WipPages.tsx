@@ -2,22 +2,11 @@
 
 import { useEffect, useState, useMemo, useCallback, type ReactElement } from "react";
 import {
-  Database, Cpu, HardDrive, FileCode, AlertCircle, Trash2, Search, Globe, Monitor, RefreshCw, Server, Puzzle, Plus, Power, Save,
-  GitBranch, Circle, CheckCircle2, XCircle, Clock, X
+  Database, Cpu, HardDrive, FileCode, AlertCircle, Trash2, Globe, Monitor, RefreshCw, Server, Puzzle, Plus, Power, Save,
+  GitBranch, Circle, CheckCircle2, XCircle, Clock, X, Cable
 } from "lucide-react";
-import { useCharlieStore, type AgentRun } from "../store/useCharlieStore";
+import { useCharlieStore, type AgentRun, type McpToolLike, groupMcpTools } from "../store/useCharlieStore";
 import { Button } from "./Button";
-
-interface FactItem {
-  subject?: string;
-  predicate?: string;
-  object?: string;
-  created_at?: string;
-}
-
-function factText(f: FactItem): string {
-  return [f.subject, f.predicate, f.object].filter(Boolean).join(" ");
-}
 
 interface LocalModelItem {
   name: string;
@@ -44,21 +33,32 @@ function formatBytes(bytes: number | null | undefined): string {
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
 }
 
-export function MemoriesView(): ReactElement {
-  const [facts, setFacts] = useState<FactItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
+const MEMORY_FILES = [
+  { path: "MEMORY.md", label: "Memory" },
+  { path: "USER.md", label: "User" },
+  { path: "OPINIONS.md", label: "Opinions" },
+  { path: "PROJECT.md", label: "Project" },
+] as const;
 
-  const fetchFacts = useCallback(async () => {
+export function MemoriesView(): ReactElement {
+  const [contents, setContents] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+
+  const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/memory/facts");
-      if (res.ok) {
-        const data = await res.json();
-        setFacts(data.facts || []);
-      }
-    } catch {
-      // ignore
+      const results = await Promise.all(
+        MEMORY_FILES.map(async ({ path }) => {
+          try {
+            const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`);
+            if (res.ok) return [path, (await res.json()).content as string] as const;
+          } catch {
+            // ignore
+          }
+          return [path, ""] as const;
+        })
+      );
+      setContents(Object.fromEntries(results));
     } finally {
       setLoading(false);
     }
@@ -66,31 +66,8 @@ export function MemoriesView(): ReactElement {
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data fetch on mount
-    fetchFacts();
-  }, [fetchFacts]);
-
-  const handleDeleteFact = async (factItem: FactItem) => {
-    try {
-      // /api/memory/facts DELETE takes subject/predicate/object as query params
-      // (FastAPI infers them from plain str args, not a JSON body).
-      const params = new URLSearchParams({
-        subject: factItem.subject || "",
-        predicate: factItem.predicate || "",
-        object: factItem.object || "",
-      });
-      const res = await fetch(`/api/memory/facts?${params}`, { method: "DELETE" });
-      if (res.ok) {
-        fetchFacts();
-      }
-    } catch {
-      // ignore
-    }
-  };
-
-  const filteredFacts = useMemo(() => {
-    if (!search) return facts;
-    return facts.filter((f) => factText(f).toLowerCase().includes(search.toLowerCase()));
-  }, [facts, search]);
+    fetchAll();
+  }, [fetchAll]);
 
   return (
     <div className="flex-1 p-6 space-y-6 overflow-y-auto scrollbar animate-[rise_0.2s_ease-out]">
@@ -98,81 +75,33 @@ export function MemoriesView(): ReactElement {
         <div>
           <h2 className="font-display text-xl font-bold uppercase tracking-wide flex items-center gap-2">
             <Database className="w-5 h-5 text-slate-400" />
-            Memories & Fact Consolidation
+            Memories
           </h2>
+          <p className="text-xs text-slate-500 font-mono mt-1">
+            Markdown memory files -- edit via the Files page, updated live by the `memory` tool
+          </p>
         </div>
-
-        <Button onClick={fetchFacts} className="font-mono">
+        <Button onClick={fetchAll} className="font-mono">
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-cyan-400" : ""}`} />
           Refresh
         </Button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="p-4 rounded-xl bg-zinc-900/40 border border-white/5 space-y-2">
-          <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">Consolidated Facts Count</span>
-          <p className="text-2xl font-bold text-slate-100 font-mono">{facts.length}</p>
-          <span className="text-[10px] text-emerald-400 block font-mono">Live SQLite knowledge-graph triples</span>
-        </div>
-        <div className="p-4 rounded-xl bg-zinc-900/40 border border-white/5 space-y-2">
-          <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">Vector Storage Engine</span>
-          <p className="text-2xl font-bold text-slate-100 font-mono">ChromaDB + SQLite</p>
-          <span className="text-[10px] text-slate-500 block font-mono">FTS5 Full-Text Indexing</span>
-        </div>
-        <div className="p-4 rounded-xl bg-zinc-900/40 border border-white/5 space-y-2">
-          <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">Sync Schedule</span>
-          <p className="text-2xl font-bold text-slate-100 font-mono">Every ~5 turns</p>
-          <span className="text-[10px] text-cyan-400 block font-mono">Automatic memory consolidation</span>
-        </div>
-      </div>
-
-      {/* Memory facts list */}
-      <div className="rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-4">
-        <div className="flex items-center justify-between">
-          <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider font-mono">
-            Active Consolidated Memory Facts ({filteredFacts.length})
-          </h3>
-          <div className="relative w-64">
-            <Search className="absolute left-2.5 top-2 w-3.5 h-3.5 text-slate-500" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search facts..."
-              className="w-full bg-zinc-900 border border-white/10 rounded-lg pl-8 pr-3 py-1 text-xs text-slate-200 placeholder:text-slate-500 outline-none"
-            />
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        {MEMORY_FILES.map(({ path, label }) => (
+          <div key={path} className="rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-2">
+            <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">{label} ({path})</span>
+            {loading ? (
+              <p className="text-xs font-mono text-slate-500 animate-pulse py-4">Loading...</p>
+            ) : contents[path] ? (
+              <pre className="text-[10px] font-mono text-slate-300 whitespace-pre-wrap max-h-80 overflow-y-auto scrollbar">
+                {contents[path]}
+              </pre>
+            ) : (
+              <p className="text-[10px] font-mono text-slate-500 italic py-4">Empty.</p>
+            )}
           </div>
-        </div>
-
-        {loading ? (
-          <div className="py-8 text-center text-xs font-mono text-slate-500 animate-pulse">
-            Fetching facts from memory store...
-          </div>
-        ) : filteredFacts.length === 0 ? (
-          <div className="py-8 text-center text-xs font-mono text-slate-500 italic border border-dashed border-white/5 rounded-xl">
-            No consolidated memory facts found. Facts are automatically saved every ~5 conversation turns.
-          </div>
-        ) : (
-          <div className="space-y-2 max-h-80 overflow-y-auto pr-1 scrollbar font-mono text-xs">
-            {filteredFacts.map((item, idx) => (
-              <div key={idx} className="p-3 rounded-lg bg-zinc-950/60 border border-white/5 flex items-start justify-between gap-4">
-                <div className="space-y-1">
-                  <p className="text-slate-200 leading-relaxed">{factText(item)}</p>
-                  {item.created_at && (
-                    <span className="text-[10px] text-slate-500 block">{item.created_at}</span>
-                  )}
-                </div>
-                <button
-                  onClick={() => handleDeleteFact(item)}
-                  className="p-1 rounded text-slate-500 hover:text-red-400 hover:bg-white/5 transition"
-                  title="Delete fact"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
+        ))}
       </div>
     </div>
   );
@@ -1209,6 +1138,92 @@ export function AgentsView(): ReactElement {
               </div>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function MCPCenterView(): ReactElement {
+  const [status, setStatus] = useState<{ enabled: boolean; connected: boolean } | null>(null);
+  const [tools, setTools] = useState<McpToolLike[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [rStatus, rTools] = await Promise.all([fetch("/api/mcp/status"), fetch("/api/mcp/tools")]);
+      if (rStatus.ok) setStatus(await rStatus.json());
+      if (rTools.ok) setTools((await rTools.json()).tools || []);
+    } catch {
+      // ignore -- next poll retries
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data fetch on mount
+    fetchData();
+    const interval = setInterval(fetchData, 10000);
+    return () => clearInterval(interval);
+  }, [fetchData]);
+
+  const servers = useMemo(() => groupMcpTools(tools), [tools]);
+
+  return (
+    <div className="flex-1 p-6 space-y-6 overflow-y-auto scrollbar animate-[rise_0.2s_ease-out]">
+      <div className="border-b border-white/5 pb-3 flex justify-between items-end">
+        <div>
+          <h2 className="font-display text-xl font-bold uppercase tracking-wide flex items-center gap-2">
+            <Cable className="w-5 h-5 text-slate-400" />
+            MCP Servers
+          </h2>
+          <p className="text-xs text-slate-500 font-mono mt-1">
+            Model Context Protocol servers configured in mcp_config.json
+          </p>
+        </div>
+        <Button onClick={fetchData} className="font-mono">
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-purple-400" : ""}`} />
+          Refresh
+        </Button>
+      </div>
+
+      {status && !status.enabled && (
+        <p className="text-slate-500 italic py-4 font-mono text-xs">
+          MCP is disabled (MCP_ENABLED=false). No servers loaded.
+        </p>
+      )}
+
+      {status?.enabled && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 font-mono text-xs">
+          {loading && servers.length === 0 ? (
+            <p className="text-slate-500 italic py-4 md:col-span-2 animate-pulse">Querying MCP client...</p>
+          ) : servers.length === 0 ? (
+            <p className="text-slate-500 italic py-4 md:col-span-2">
+              No MCP tools discovered -- check mcp_config.json and server logs.
+            </p>
+          ) : (
+            servers.map((server) => (
+              <div key={server.name} className="p-4 rounded-xl bg-zinc-900/40 border border-white/5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-200 capitalize">{server.name}</span>
+                  <span
+                    className={`text-[10px] uppercase font-bold font-mono px-1.5 py-0.5 rounded border ${
+                      status.connected
+                        ? "text-emerald-400 bg-emerald-950/40 border-emerald-500/20"
+                        : "text-slate-500 bg-zinc-950/60 border-white/10"
+                    }`}
+                  >
+                    {status.connected ? "connected" : "disconnected"}
+                  </span>
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  {server.count} tool{server.count === 1 ? "" : "s"}: {server.tools.join(", ")}
+                </p>
+              </div>
+            ))
+          )}
         </div>
       )}
     </div>

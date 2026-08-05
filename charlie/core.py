@@ -49,6 +49,9 @@ if TYPE_CHECKING:
 
 # --- LLM tuning ---
 _LLM_TEMPERATURE = 0.3
+_LLM_CONNECT_RETRIES = 1  # retries after the first attempt, for transient DNS/connect failures
+_LLM_CONNECT_RETRY_DELAY_SEC = 1.0
+_TOOL_LOOP_CONTEXT_STOP_RATIO = 0.8  # stop the tool loop once messages hit this fraction of context_window
 _VISION_MAX_TOKENS = 4096  # hard ceiling on unconstrained vision generation (no tools => no stop-on-tool-call)
 # Keeps the LLM connection warm between turns, avoiding ~85ms of TCP+TLS per turn.
 _HTTP_KEEPALIVE_EXPIRY_SEC = 60.0
@@ -63,6 +66,16 @@ _DESKTOP_CONTROL_TOOLS = frozenset({
 _DESKTOP_COM_TOOLS = _DESKTOP_CONTROL_TOOLS | frozenset(
     {"desktop_observe", "desktop_read_screen", "desktop_screenshot"}
 )
+
+
+def _tool_call_key(name: str, arguments: Dict[str, Any]) -> str:
+    return f"{name}({json.dumps(arguments, sort_keys=True)})"
+
+
+def _is_cacheable_tool(name: str) -> bool:
+    """Desktop-COM calls aren't idempotent (real actions/live screen state) and
+    spawn_agent must run every time it's called -- see _exec_one's docstring."""
+    return name not in _DESKTOP_COM_TOOLS and name != "spawn_agent"
 # Screen-content questions must always be answered from a fresh observation,
 # never from history -- the model has shown it will otherwise repeat an old
 # answer verbatim instead of re-observing.
@@ -151,6 +164,7 @@ _TOOL_APPROVAL_TIMEOUT_SEC = 45.0
 _MAX_CONCURRENT_AGENTS = 3
 _AGENT_TIMEOUT_SEC = 120.0
 _AGENT_MAX_TOOL_TURNS = 8
+_AUTO_SKILL_MIN_TOOL_CALLS = 5
 
 # request_id -> Future[bool], resolved by main.py:consume_web_commands (web
 # "tool_approve"/"tool_reject" commands) or by the voice yes/no fallback in
@@ -1208,15 +1222,17 @@ def _build_stable_tier(soul_text: str, capabilities_block: str = "") -> str:
 
 def _build_context_tier(
     memory_content: str, user_content: str, opinions_content: str = "",
-    installed_skill_blocks: Optional[Dict[str, str]] = None,
+    installed_skill_blocks: Optional[Dict[str, str]] = None, project_content: str = "",
 ) -> str:
     """Build the context tier: session memory, user preferences, opinions,
-    and any runtime-installed SKILL.md blocks. Frozen at session init for
-    cache stability; rebuilt on demand via reload_context()/
-    add_installed_skill_block()/remove_installed_skill_block()."""
+    project-scoped facts, and any runtime-installed SKILL.md blocks. Frozen
+    at session init for cache stability; rebuilt on demand via
+    reload_context()/add_installed_skill_block()/remove_installed_skill_block()."""
     parts = [f"[MEMORY]\n{memory_content}", f"[USER]\n{user_content}"]
     if opinions_content:
         parts.append(f"[OPINIONS]\n{opinions_content}")
+    if project_content:
+        parts.append(f"[PROJECT]\n{project_content}")
     if installed_skill_blocks:
         parts.extend(installed_skill_blocks.values())
     return "\n\n".join(parts)
@@ -1268,7 +1284,7 @@ def _assess_tool_result_relevance(tool_name: str, tool_result: str) -> bool:
     """Heuristic: is this tool result useful? Returns True if relevant.
 
     Only applies to search/query-style tools (web_search, session_search,
-    graph_query, plugin_fs_search, ...) -- the length/junk-pattern checks
+    plugin_fs_search, ...) -- the length/junk-pattern checks
     below are tuned for "no real content found" search noise. Every other
     tool (skill scripts, plugin actions, MCP calls) is exempt: a short but
     legitimate result like a whoami output or a single number would
@@ -1393,6 +1409,7 @@ class Brain:
         on_agent_spawned: Optional[callable] = None,
         on_agent_status: Optional[callable] = None,
         on_agent_result: Optional[callable] = None,
+        on_skill_installed: Optional[callable] = None,
         register_panic_hotkey: bool = True,
         approval_timeout: Optional[float] = _TOOL_APPROVAL_TIMEOUT_SEC,
         is_background: bool = False,
@@ -1408,6 +1425,8 @@ class Brain:
         self.on_agent_spawned = on_agent_spawned
         self.on_agent_status = on_agent_status
         self.on_agent_result = on_agent_result
+        self.on_skill_installed = on_skill_installed
+        self._agent_tool_counts: Dict[str, int] = {}
         self._agent_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_AGENTS)
         self._active_agents: Dict[str, asyncio.Task] = {}
         self._approval_timeout = approval_timeout
@@ -1436,8 +1455,6 @@ class Brain:
         self._turns_since_nudge: int = 0
         self._active_goal: Optional[str] = None
         self._goal_turns_remaining: int = 0
-        self._reflect_turn_counter: int = 0
-        self._reflect_interval: int = 5  # reflect every N turns
 
         self._detect_native_tools()
 
@@ -1455,17 +1472,14 @@ class Brain:
         memory_content = self._read_file_safe(config.memory_file, max_chars)
         user_content = self._read_file_safe(config.user_file, max_chars)
         opinions_content = self._read_file_safe(config.opinions_file, max_chars)
+        project_content = self._read_file_safe(config.project_file, max_chars)
         self._context_tier: str = _build_context_tier(
-            memory_content, user_content, opinions_content, self._installed_skill_blocks
+            memory_content, user_content, opinions_content, self._installed_skill_blocks, project_content
         )
 
         # --- Vision LLM client (separate, opt-in endpoint for desktop_screenshot) ---
         self._vision_client = None
         self._build_vision_client()
-
-        # --- Knowledge graph memory ---
-        from charlie.memory_graph import MemoryGraph
-        self.memory_graph = MemoryGraph(db_path=config.memory_graph_db)
 
     async def prewarm(self) -> None:
         """Open the TCP+TLS connection to the LLM host now, not on the first turn."""
@@ -1540,13 +1554,14 @@ class Brain:
             return ""
 
     def reload_context(self) -> None:
-        """Re-read memory/user/opinions files into the context tier. Call after writes."""
+        """Re-read memory/user/opinions/project files into the context tier. Call after writes."""
         max_chars = self.config.prompt_memory_max // 2
         memory_content = self._read_file_safe(self.config.memory_file, max_chars)
         user_content = self._read_file_safe(self.config.user_file, max_chars)
         opinions_content = self._read_file_safe(self.config.opinions_file, max_chars)
+        project_content = self._read_file_safe(self.config.project_file, max_chars)
         self._context_tier = _build_context_tier(
-            memory_content, user_content, opinions_content, self._installed_skill_blocks
+            memory_content, user_content, opinions_content, self._installed_skill_blocks, project_content
         )
 
     def rebuild_stable_tier(self) -> None:
@@ -1596,6 +1611,7 @@ class Brain:
                 "memory": (self.config.memory_file, 2200),
                 "user": (self.config.user_file, 1375),
                 "opinions": (self.config.opinions_file, 800),
+                "project": (self.config.project_file, 1600),
             }
             needs_review = False
             for target, (path_val, max_chars) in files.items():
@@ -1627,6 +1643,7 @@ class Brain:
             "memory": (self.config.memory_file, 2200),
             "user": (self.config.user_file, 1375),
             "opinions": (self.config.opinions_file, 800),
+            "project": (self.config.project_file, 1600),
         }
         for target, (path_val, max_chars) in files.items():
             if not os.path.exists(path_val):
@@ -1757,24 +1774,52 @@ class Brain:
         if self._panic_hotkey_listener is not None:
             self._panic_hotkey_listener.stop()
 
+    def _discard_orphaned_user_turn(self) -> None:
+        """A barge-in cancellation leaves the user message appended at the top of
+        chat_stream with no assistant reply -- pop it so the next turn's history
+        doesn't show two consecutive user messages, which confuses the model
+        about which question it's answering."""
+        if self.history and self.history[-1]["role"] == "user":
+            self.history.pop()
+
+    def _context_budget_exceeded(self, messages: List[Dict[str, Any]]) -> bool:
+        """True once messages hit _TOOL_LOOP_CONTEXT_STOP_RATIO of context_window -- the
+        real ceiling (Claude Code has no fixed tool-call count, just a context bound)."""
+        return _token_count(messages) >= _TOOL_LOOP_CONTEXT_STOP_RATIO * self.config.context_window
+
     async def _stream_completion(
         self,
         payload: Dict[str, Any],
         generation: int,
     ) -> tuple:
-        """Stream a chat completion. Returns (accumulated_text, tool_calls_list)."""
-        async with self.client.stream(
-            "POST", "chat/completions", json=payload
-        ) as response:
-            response.raise_for_status()
-            accumulated, tc_by_index, cancelled = await parse_sse_stream(
-                response, generation, lambda: self._chat_generation
-            )
-            if cancelled:
-                logger.info("Chat generation cancelled (barge-in)")
-                return ("", [])
-            tool_calls = collect_tool_calls(tc_by_index)
-            return (accumulated, tool_calls)
+        """Stream a chat completion. Returns (accumulated_text, tool_calls_list).
+
+        Retries once on a transient connect failure (DNS hiccup, connection
+        refused) before giving up -- a bare ConnectError previously killed
+        the whole turn on the first blip with no recovery."""
+        for attempt in range(_LLM_CONNECT_RETRIES + 1):
+            try:
+                async with self.client.stream(
+                    "POST", "chat/completions", json=payload
+                ) as response:
+                    response.raise_for_status()
+                    accumulated, tc_by_index, cancelled = await parse_sse_stream(
+                        response, generation, lambda: self._chat_generation
+                    )
+                    if cancelled:
+                        logger.info("Chat generation cancelled (barge-in)")
+                        return ("", [])
+                    tool_calls = collect_tool_calls(tc_by_index)
+                    return (accumulated, tool_calls)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                if attempt < _LLM_CONNECT_RETRIES:
+                    logger.warning(
+                        "LLM connect failed (attempt %d/%d): %s -- retrying in %.1fs",
+                        attempt + 1, _LLM_CONNECT_RETRIES + 1, e, _LLM_CONNECT_RETRY_DELAY_SEC,
+                    )
+                    await asyncio.sleep(_LLM_CONNECT_RETRY_DELAY_SEC)
+                    continue
+                raise
 
     def _build_payload(
         self,
@@ -1852,10 +1897,8 @@ class Brain:
         Yields filtered content chunks live (low Time-To-First-Audio); writes
         accumulated text / tool-call deltas / cancellation onto `state` since
         an async generator can't return extra values through `async for`.
-        Raises on HTTP/connection errors so the caller can retry against the
-        fallback client -- this is the one piece shared by all three
-        follow-up attempts (primary, on-error fallback, empty-response retry).
-        """
+        Raises on HTTP/connection errors so the caller can retry (see the
+        _LLM_CONNECT_RETRIES loop around the call site)."""
         payload = dict(payload, model=model)
         stream_filter = TextStreamFilter()
         async with client.stream("POST", "chat/completions", json=payload) as response:
@@ -2189,6 +2232,8 @@ class Brain:
                     yield filtered
                 # Save to vector memory (fire-and-forget)
                 self._save_to_memory(filtered, "assistant")
+            elif self._chat_generation != generation:
+                self._discard_orphaned_user_turn()
             await self._check_memory_capacity()
             return
 
@@ -2206,8 +2251,8 @@ class Brain:
 
         async def _exec_one(call: Dict[str, Any]) -> str:
             tool_name = call["name"]
-            ck = f"{call['name']}({json.dumps(call['arguments'], sort_keys=True)})"
-            if tool_name not in _DESKTOP_COM_TOOLS and tool_name != "spawn_agent" and ck in _seen_tool_calls:
+            ck = _tool_call_key(tool_name, call["arguments"])
+            if _is_cacheable_tool(tool_name) and ck in _seen_tool_calls:
                 logger.info("Tool %s already executed, reusing result", call["name"])
                 return _seen_tool_calls[ck]
             timeout = _tool_timeout(tool_name)
@@ -2359,6 +2404,7 @@ class Brain:
                     self._chat_generation,
                     generation,
                 )
+                self._discard_orphaned_user_turn()
                 break
             if self._is_desktop_halted():
                 logger.info("Desktop control halted -- stopping tool loop.")
@@ -2370,10 +2416,18 @@ class Brain:
             if not tool_calls:
                 break
 
-            # Enforce iteration budget
+            # Context-window is the real ceiling (like Claude Code has no fixed tool-call
+            # count, just a context bound) -- stop before a reply has no room to fit.
+            if self._context_budget_exceeded(messages):
+                yield "I'm running low on context for this turn. Let me know if you want me to continue."
+                return
+
+            # Enforce iteration budget -- a call _exec_one will serve from _seen_tool_calls is free.
             allowed_calls = []
             for call in tool_calls:
-                if budget.try_spend(call["name"]):
+                ck = _tool_call_key(call["name"], call["arguments"])
+                is_cached_repeat = _is_cacheable_tool(call["name"]) and ck in _seen_tool_calls
+                if is_cached_repeat or budget.try_spend(call["name"]):
                     allowed_calls.append(call)
                 else:
                     yield "I've reached my tool limit for this turn. Let me know if you want me to continue."
@@ -2442,17 +2496,32 @@ class Brain:
             followup_payload = self._build_payload(messages)
 
             state = FollowupStreamState()
-            try:
-                async for filtered in self._stream_followup_once(
-                    self.client, self.config.llm_model, followup_payload, generation, state
-                ):
-                    yield filtered
-            except Exception as tool_exc:
-                logger.warning("Tool follow-up LLM error: %s", tool_exc)
-                break
+            for attempt in range(_LLM_CONNECT_RETRIES + 1):
+                try:
+                    async for filtered in self._stream_followup_once(
+                        self.client, self.config.llm_model, followup_payload, generation, state
+                    ):
+                        yield filtered
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout) as tool_exc:
+                    if attempt < _LLM_CONNECT_RETRIES:
+                        logger.warning(
+                            "Tool follow-up LLM connect failed (attempt %d/%d): %s -- retrying in %.1fs",
+                            attempt + 1, _LLM_CONNECT_RETRIES + 1, tool_exc, _LLM_CONNECT_RETRY_DELAY_SEC,
+                        )
+                        await asyncio.sleep(_LLM_CONNECT_RETRY_DELAY_SEC)
+                        continue
+                    logger.warning("Tool follow-up LLM error: %s", tool_exc)
+                    return
+                except Exception as tool_exc:
+                    logger.warning("Tool follow-up LLM error: %s", tool_exc)
+                    return
+            else:
+                return
 
             if state.cancelled:
                 logger.info("Tool follow-up cancelled (barge-in)")
+                self._discard_orphaned_user_turn()
                 return
 
             accumulated = state.accumulated
@@ -2465,10 +2534,6 @@ class Brain:
                 # Save to vector memory (fire-and-forget)
                 self._save_to_memory(clean_accumulated, "assistant")
             await self._check_memory_capacity()
-            # --- Periodic reflection and knowledge graph update ---
-            self._reflect_turn_counter += 1
-            if self._reflect_turn_counter % self._reflect_interval == 0:
-                asyncio.ensure_future(self._reflect_and_consolidate())
             # Trim history to max turns (keep pairs: user + assistant)
             max_messages = self._history_max_turns * 2
             if len(self.history) > max_messages:
@@ -2501,7 +2566,51 @@ class Brain:
             self._active_agents.pop(agent_id, None)
         if self.on_agent_result:
             self.on_agent_result(agent_id, result)
+        tool_count = self._agent_tool_counts.pop(agent_id, 0)
+        if tool_count >= _AUTO_SKILL_MIN_TOOL_CALLS and not result.startswith("Error"):
+            asyncio.create_task(self._maybe_auto_draft_skill(task, result))
         return result
+
+    async def _maybe_auto_draft_skill(self, task: str, result: str) -> None:
+        """A sub-agent that needed several tool calls to succeed did real,
+        reusable work -- draft it as a SKILL.md and route through the normal
+        install-approval gate so nothing activates without a human saying yes."""
+        try:
+            prompt = (
+                "A sub-agent just completed this task using several tools:\n"
+                f"Task: {task}\nResult: {result[:500]}\n\n"
+                "Draft a SKILL.md file (YAML frontmatter with name/description, then a "
+                "Markdown body describing the approach) documenting how to solve tasks "
+                "like this one, so it can be reused later. Output only the SKILL.md content."
+            )
+            payload = self._build_payload([{"role": "user", "content": prompt}], skip_tools=True)
+            draft, _ = await self._stream_completion(payload, self._chat_generation)
+            if not draft.strip():
+                return
+
+            from charlie.extensions import build_skill_card
+            from charlie.extensions.skills import parse_skill_md
+
+            manifest = parse_skill_md(draft)
+            card = build_skill_card(manifest.name, "auto-generated (spawn_agent)", manifest.scripts, draft)
+            approved = await self.request_tool_approval(
+                "install_extension",
+                {"command": f"{card.name} (auto-drafted skill)", "skill_card": card.describe()},
+                f"save '{card.name}' as a reusable skill",
+            )
+            if not approved:
+                return
+
+            from charlie.extensions.install import install_extension
+
+            install_extension(
+                "skill", manifest.name, "auto-generated (spawn_agent)", draft,
+                tool_registry, None, None, [],
+            )
+            if self.on_skill_installed:
+                self.on_skill_installed(manifest.name, draft)
+        except Exception as e:
+            logger.warning("Auto-skill-draft failed: %s", e, exc_info=True)
 
     def cancel_agent(self, agent_id: str) -> bool:
         """Cancel a running sub-agent task. Returns whether one was found."""
@@ -2517,7 +2626,8 @@ class Brain:
         ponytail: gate/timeout/dispatch here is a scoped-down copy of the main
         loop's _exec_one, not shared with it -- the main loop's desktop-COM
         locking and shell-recovery pipeline don't apply to typical delegated
-        sub-tasks. Unify if sub-agents start needing that machinery too."""
+        sub-tasks. Shares the main loop's dedup cache and context-window stop
+        (unified 2026-08-06); connect-retry comes free via _stream_completion."""
         generation = self._chat_generation
         exclude = {"spawn_agent"}
         tool_catalog = "" if self._use_native_tools else tool_registry.build_tool_prompt(exclude=exclude)
@@ -2533,8 +2643,14 @@ class Brain:
             {"role": "user", "content": task},
         ]
         budget = IterationBudget(max_turns=_AGENT_MAX_TOOL_TURNS)
+        seen_tool_calls: Dict[str, str] = {}
 
         for _ in range(_AGENT_MAX_TOOL_TURNS):
+            if self._context_budget_exceeded(messages):
+                return await self._synthesize_best_effort(
+                    messages, generation, "Sub-agent ran low on context before finishing."
+                )
+
             payload = self._build_payload(messages, exclude_tools=exclude)
             accumulated, tool_calls = await self._stream_completion(payload, generation)
 
@@ -2542,14 +2658,23 @@ class Brain:
                 stream_filter = TextStreamFilter()
                 return stream_filter.push(accumulated) + stream_filter.flush()
 
-            allowed_calls = [c for c in tool_calls if budget.try_spend(c["name"])]
+            allowed_calls = []
+            for c in tool_calls:
+                ck = _tool_call_key(c["name"], c["arguments"])
+                if (_is_cacheable_tool(c["name"]) and ck in seen_tool_calls) or budget.try_spend(c["name"]):
+                    allowed_calls.append(c)
             if not allowed_calls:
                 return await self._synthesize_best_effort(
                     messages, generation, "Sub-agent reached its tool budget before finishing."
                 )
+            self._agent_tool_counts[agent_id] = self._agent_tool_counts.get(agent_id, 0) + len(allowed_calls)
 
             results: List[str] = []
             for call in allowed_calls:
+                ck = _tool_call_key(call["name"], call["arguments"])
+                if _is_cacheable_tool(call["name"]) and ck in seen_tool_calls:
+                    results.append(seen_tool_calls[ck])
+                    continue
                 if self.on_agent_status:
                     self.on_agent_status(agent_id, call["name"])
                 gate_reason: Optional[str] = None
@@ -2558,7 +2683,10 @@ class Brain:
                 if gate_reason and not await self.request_tool_approval(
                     call["name"], call["arguments"], gate_reason
                 ):
-                    results.append(f"Error: Command declined by user (required approval: {gate_reason}).")
+                    r = f"Error: Command declined by user (required approval: {gate_reason})."
+                    results.append(r)
+                    if _is_cacheable_tool(call["name"]):
+                        seen_tool_calls[ck] = r
                     continue
                 timeout = _tool_timeout(call["name"])
                 try:
@@ -2574,6 +2702,8 @@ class Brain:
                     logger.warning("Sub-agent tool %s raised: %s", call["name"], e)
                     r = f"Error executing tool '{call['name']}': {e}"
                 results.append(r)
+                if _is_cacheable_tool(call["name"]):
+                    seen_tool_calls[ck] = r
 
             tool_results = _build_native_tool_results(allowed_calls, results)
             is_text_based = any(c.get("id") is None for c in allowed_calls)
@@ -2640,84 +2770,19 @@ class Brain:
         except Exception as e:
             logger.debug("Memory save skipped: %s", e)
 
-
-    async def _reflect_and_consolidate(self) -> None:
-        """Periodically reflect on recent conversation and consolidate the knowledge graph."""
-        try:
-            # Get recent conversation context
-            recent = self.history[-6:] if len(self.history) >= 6 else self.history
-            if len(recent) < 2:
-                return
-
-            conversation_text = "\n".join(
-                f"{m['role']}: {m['content'][:200]}" for m in recent
-            )
-
-            client = self.client
-            model = self.config.llm_model
-
-            prompt = (
-                "Review this recent conversation and extract key facts. "
-                "For each fact, output a line in the format:\n"
-                "SUBJECT | PREDICATE | OBJECT\n\n"
-                "Focus on: user preferences, environment facts, corrections, goals.\n"
-                "Skip trivial/chit-chat. Max 10 facts.\n\n"
-                f"Conversation:\n{conversation_text}\n\n"
-                "Facts (one per line, format: S | P | O):"
-            )
-
-            response = await client.post(
-                "chat/completions",
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 500,
-                    "temperature": 0.3,
-                },
-            )
-            if response.status_code != 200:
-                logger.debug("Reflection LLM call failed: %s", response.status_code)
-                return
-
-            content = response.json()["choices"][0]["message"]["content"]
-
-            # Parse facts and add to graph
-            added = 0
-            for line in content.strip().splitlines():
-                line = line.strip()
-                if "|" in line and not line.startswith("#"):
-                    parts = [p.strip() for p in line.split("|")]
-                    if len(parts) == 3 and all(parts):
-                        try:
-                            self.memory_graph.add_fact(parts[0], parts[1], parts[2])
-                            added += 1
-                        except Exception:
-                            logger.debug("Failed to add fact: %s", line)
-
-            if added > 0:
-                logger.info("Reflection: added %d facts to knowledge graph", added)
-
-            # Periodically consolidate
-            if self._reflect_turn_counter % (self._reflect_interval * 3) == 0:
-                removed = self.memory_graph.consolidate()
-                if removed:
-                    logger.info("Reflection: consolidated graph, removed %d stale facts", removed)
-
-        except Exception as e:
-            logger.debug("Reflection failed: %s", e, exc_info=True)
     @staticmethod
     def _resolve_tool_arguments(tool_name: str, raw_args: str) -> Dict[str, Any]:
         """Map a text-mode TOOL: call's raw argument string onto `tool_name`'s
         real parameter names, read live from the registry (see
         ToolRegistry.get_tool_param_names) instead of a hand-maintained dict.
         That dict previously covered only 6 of the 19+ registered tools --
-        every other tool (all desktop_* tools, the graph/vector-memory tools,
+        every other tool (all desktop_* tools, the vector-memory tools,
         any MCP/plugin/extension tool) fell through to a generic `query`
         kwarg and crashed with a TypeError at call time."""
         params_list = tool_registry.get_tool_param_names(tool_name)
         if not params_list:
             # Unknown tool name, or a registered tool that takes no
-            # arguments (e.g. graph_consolidate) -- nothing to map onto.
+            # arguments (e.g. desktop_observe) -- nothing to map onto.
             if params_list is None and raw_args:
                 return {"query": raw_args.strip("'\"")}
             return {}

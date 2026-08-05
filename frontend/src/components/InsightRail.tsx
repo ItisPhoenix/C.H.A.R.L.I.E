@@ -2,17 +2,9 @@
 
 import { useEffect, useState, useMemo, type ReactElement } from "react";
 import {
-  Activity, Terminal, Shield, ChevronDown, ChevronUp
+  Activity, Terminal, Shield, ChevronDown, ChevronUp, ListOrdered
 } from "lucide-react";
-import { useCharlieStore, rgba } from "../store/useCharlieStore";
-
-interface McpTool {
-  type: string;
-  function?: {
-    name: string;
-    description?: string;
-  };
-}
+import { useCharlieStore, rgba, groupMcpTools, type McpToolLike } from "../store/useCharlieStore";
 
 interface ConfigField {
   key: string;
@@ -22,6 +14,7 @@ interface ConfigField {
 export function InsightRail(): ReactElement {
   const accentColor = useCharlieStore((s) => s.accentColor);
   const toolActivity = useCharlieStore((s) => s.toolActivity);
+  const queue = useCharlieStore((s) => s.queue);
 
   // Active Model config representation
   const [configModel, setConfigModel] = useState("");
@@ -29,7 +22,7 @@ export function InsightRail(): ReactElement {
   
   // Registered tools list -- toolsLoaded distinguishes "not fetched yet" from
   // "fetched, zero tools" so the panel doesn't render (0) while still loading.
-  const [mcpTools, setMcpTools] = useState<McpTool[]>([]);
+  const [mcpTools, setMcpTools] = useState<McpToolLike[]>([]);
   const [toolsLoaded, setToolsLoaded] = useState(false);
 
   // Collapsible card sections state
@@ -77,24 +70,7 @@ export function InsightRail(): ReactElement {
   const recentActivity = useMemo(() => toolActivity.slice(-8).reverse(), [toolActivity]);
 
   // Dynamic MCP server grouping & counts
-  const mcpServers = useMemo(() => {
-    const servers: Record<string, number> = {};
-    mcpTools.forEach((tool) => {
-      const name = tool.function?.name ?? tool.type;
-      if (name.startsWith("mcp_")) {
-        const parts = name.split("_");
-        const server = parts[1];
-        servers[server] = (servers[server] || 0) + 1;
-      } else {
-        servers["local"] = (servers["local"] || 0) + 1;
-      }
-    });
-    return Object.entries(servers).map(([name, count]) => ({
-      name,
-      count,
-      status: "active",
-    }));
-  }, [mcpTools]);
+  const mcpServers = useMemo(() => groupMcpTools(mcpTools), [mcpTools]);
 
   const accentDim = rgba(accentColor, 0.08);
   const accentBorder = rgba(accentColor, 0.25);
@@ -102,6 +78,21 @@ export function InsightRail(): ReactElement {
   return (
     <aside className="w-80 shrink-0 h-full border-l border-[var(--color-glass-border)] bg-zinc-950/40 flex flex-col p-4 space-y-4 overflow-y-auto scrollbar">
       
+      {/* Queue: main.py's pending_turns -- utterances waiting behind an already-running turn */}
+      {queue.count > 0 && (
+        <div className="rounded-xl border border-amber-500/25 p-3.5 bg-amber-500/5">
+          <span className="w-full flex items-center gap-1.5 text-[10px] font-bold text-amber-400 uppercase tracking-widest">
+            <ListOrdered className="w-3.5 h-3.5" />
+            Queued ({queue.count})
+          </span>
+          <div className="space-y-1 pt-2">
+            {queue.texts.map((t, idx) => (
+              <p key={idx} className="text-[10px] text-slate-400 font-mono truncate">{t}</p>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Widget 1: Live Activity -- real tool-call/thinking trace, not fabricated agent roles */}
       <div className="rounded-xl border border-[var(--color-glass-border)] p-3.5 bg-zinc-900/30">
         <button

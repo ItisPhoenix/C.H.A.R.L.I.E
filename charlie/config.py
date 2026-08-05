@@ -159,7 +159,7 @@ class Config:
 
     # Iteration Budget & Context Compression
     iteration_budget_max: int = field(
-        default=int(os.getenv("ITERATION_BUDGET_MAX", "12")),
+        default=int(os.getenv("ITERATION_BUDGET_MAX", "50")),
         metadata=_meta("ITERATION_BUDGET_MAX", "Chat Behavior", restart="reload"),
     )
     context_window: int = field(
@@ -193,6 +193,10 @@ class Config:
     opinions_file: str = field(
         default=os.getenv("OPINIONS_FILE", "OPINIONS.md"),
         metadata=_meta("OPINIONS_FILE", "Memory Files", restart="reload"),
+    )
+    project_file: str = field(
+        default=os.getenv("PROJECT_FILE", "PROJECT.md"),
+        metadata=_meta("PROJECT_FILE", "Memory Files", restart="reload"),
     )
     prompt_memory_max: int = field(
         default=int(os.getenv("PROMPT_MEMORY_MAX", "2200")),
@@ -270,11 +274,6 @@ class Config:
     memory_capacity_threshold: float = field(
         default=float(os.getenv("MEMORY_CAPACITY_THRESHOLD", "0.8")),
         metadata=_meta("MEMORY_CAPACITY_THRESHOLD", "Vector Memory", restart="reload"),
-    )
-    # Knowledge graph (SQLite)
-    memory_graph_db: str = field(
-        default=os.getenv("MEMORY_GRAPH_DB", "charlie_memory_graph.db"),
-        metadata=_meta("MEMORY_GRAPH_DB", "Vector Memory", restart="process"),
     )
     # --- Agentic OS Toggles ---
     mcp_enabled: bool = field(

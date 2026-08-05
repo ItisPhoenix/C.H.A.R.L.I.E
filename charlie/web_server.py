@@ -26,7 +26,6 @@ from fastapi.staticfiles import StaticFiles
 
 from charlie.config import Config, config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
-from charlie.memory_graph import MemoryGraph
 from charlie.session_store import SessionStore
 from charlie.utils import build_auth_headers
 
@@ -196,7 +195,6 @@ _TOOL_EVENT_MAX_CHARS = 500  # cap persisted tool_event text, matches session_st
 event_bus: EventBus | None = None
 LAUNCH_ID: str = config.charlie_launch_id
 _store: SessionStore | None = None
-_memory_graph_cache: "MemoryGraph | None" = None
 
 
 def _get_store() -> SessionStore:
@@ -204,18 +202,6 @@ def _get_store() -> SessionStore:
     if _store is None:
         _store = SessionStore(config.session_db_path)
     return _store
-
-
-def _get_memory_graph() -> "MemoryGraph | None":
-    """Open the knowledge graph in this process (the web server runs in a child subprocess)."""
-    global _memory_graph_cache
-    if _memory_graph_cache is None:
-        try:
-            _memory_graph_cache = MemoryGraph(config.memory_graph_db)
-        except Exception as e:
-            logger.error(f"Failed to open MemoryGraph: {e}", exc_info=True)
-            return None
-    return _memory_graph_cache
 
 
 pipeline_state: str = "idle"
@@ -302,7 +288,7 @@ async def broadcast(data: dict):
     event_session = data.get("session_id") or (data.get("payload") or {}).get("session_id")
     scoped = etype in _SESSION_SCOPED_EVENTS and event_session is not None
     disconnected: list[WebSocket] = []
-    for ws in active_connections:
+    for ws in list(active_connections):
         if scoped and ws_sessions.get(ws) != event_session:
             continue
         try:
@@ -382,11 +368,33 @@ async def _event_bridge():
             result = payload.get("result", "")
             status = "timeout" if "timed out" in result else "cancelled" if "cancelled" in result else "done"
             _get_store().update_agent_run(payload.get("agent_id", ""), status=status, result=result)
+        elif etype == "skill_installed":
+            from charlie.extensions import build_skill_card
+
+            payload = event.get("payload", {})
+            name, raw_text = payload.get("name", ""), payload.get("raw_text", "")
+            source = "auto-generated (spawn_agent)"
+            try:
+                tool_names = _install_extension("skill", name, source, raw_text)
+                card = build_skill_card(name, source, tool_names, raw_text)
+                _extension_manager.record(
+                    InstalledExtension(name=name, kind="skill", source=source, card=card,
+                                        tool_names=tool_names, raw_text=raw_text)
+                )
+                _save_extensions()
+            except Exception as e:
+                logger.error(f"Failed to mirror auto-drafted skill '{name}': {e}", exc_info=True)
 
         await broadcast(event)
 
+    async def on_event_guarded(event: dict) -> None:
+        try:
+            await on_event(event)
+        except Exception as e:
+            logger.error(f"Event bridge: error handling event {event.get('type')}: {e}", exc_info=True)
+
     try:
-        await event_bus.consume_events(on_event)
+        await event_bus.consume_events(on_event_guarded)
     except asyncio.CancelledError:
         pass
     except Exception as e:
@@ -643,23 +651,6 @@ async def get_mic_state():
 async def get_audio_level():
     """Return the latest real-time audio amplitude (0.0-1.0)."""
     return {"level": _audio_level}
-
-
-@app.get("/api/memory/facts")
-async def get_memory_facts():
-    """Retrieve all known facts (subject/predicate/object triples) from the
-    knowledge graph's edges, as stored by MemoryGraph.add_fact."""
-    graph = _get_memory_graph()
-    if graph:
-        try:
-            facts = [
-                {"subject": s, "predicate": p, "object": o}
-                for s, p, o in graph.get_all_facts()
-            ]
-            return {"facts": facts}
-        except Exception as e:
-            logger.error(f"Error fetching facts: {e}", exc_info=True)
-    return {"facts": []}
 
 
 @app.get("/api/tools")
@@ -1055,20 +1046,6 @@ async def reload_engine_config():
     return {"status": "ok"}
 
 
-@app.delete("/api/memory/facts")
-async def delete_memory_fact(subject: str, predicate: str, object: str):
-    """Delete a fact from the memory graph SQLite database."""
-    graph = _get_memory_graph()
-    if graph:
-        try:
-            success = graph.remove_fact(subject, predicate, object)
-            if success:
-                return {"status": "ok"}
-            else:
-                return {"status": "error", "message": "Failed to remove fact"}
-        except Exception as e:
-            logger.error(f"Error deleting fact: {e}", exc_info=True)
-            return {"status": "error", "message": str(e)}
 _WORKSPACE_IGNORED_DIRS = {"node_modules", "venv", "__pycache__", "dist", "out", ".next"}
 _WORKSPACE_ALLOWED_EXTS = {".py", ".md", ".json", ".css", ".ts", ".tsx", ".js", ".html"}
 

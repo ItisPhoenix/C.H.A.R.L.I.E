@@ -55,6 +55,11 @@ export interface MicState {
   mic_muted: boolean;
 }
 
+export interface QueueState {
+  count: number;
+  texts: string[];
+}
+
 export interface ToolActivityEntry {
   kind: "tool_call" | "tool_result" | "thinking_update" | "agent_spawned" | "agent_status" | "agent_result";
   name: string;
@@ -107,6 +112,7 @@ interface CharlieState {
   listeningTrigger: ListeningTrigger;
   audio: AudioState;
   mic: MicState;
+  queue: QueueState;
   audioLevel: number;
   toolActivity: ToolActivityEntry[];
   agentRuns: AgentRun[];
@@ -132,6 +138,7 @@ interface CharlieState {
   setListeningTrigger: (t: ListeningTrigger) => void;
   setAudio: (a: AudioState) => void;
   setMic: (m: MicState) => void;
+  setQueue: (q: QueueState) => void;
   setAudioLevel: (level: number) => void;
   appendToolActivity: (e: ToolActivityEntry) => void;
   clearToolActivity: () => void;
@@ -164,6 +171,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   listeningTrigger: null,
   audio: { muted: false, volume: 1.0 },
   mic: { mic_muted: false },
+  queue: { count: 0, texts: [] },
   audioLevel: 0,
   toolActivity: [],
   agentRuns: [],
@@ -202,6 +210,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setListeningTrigger: (listeningTrigger: ListeningTrigger) => set({ listeningTrigger }),
   setAudio: (audio) => set({ audio }),
   setMic: (mic) => set({ mic }),
+  setQueue: (queue) => set({ queue }),
   setAudioLevel: (audioLevel) => set({ audioLevel }),
   appendToolActivity: (e) => set((st) => ({ toolActivity: [...st.toolActivity, e] })),
   clearToolActivity: () => set({ toolActivity: [] }),
@@ -261,6 +270,28 @@ export function lighten(hex: string, amt: number): string {
   const { r, g, b } = hexToRgb(hex);
   const l = (c: number) => Math.min(255, Math.round(c + (255 - c) * amt));
   return `rgb(${l(r)},${l(g)},${l(b)})`;
+}
+
+export interface McpToolLike {
+  type: string;
+  function?: { name: string; description?: string };
+}
+
+export interface McpServerGroup {
+  name: string;
+  count: number;
+  tools: string[];
+}
+
+/** Groups /api/mcp/tools results by server, parsed from the "mcp_<server>_<tool>" name prefix. */
+export function groupMcpTools(tools: McpToolLike[]): McpServerGroup[] {
+  const servers: Record<string, string[]> = {};
+  tools.forEach((tool) => {
+    const name = tool.function?.name ?? tool.type;
+    const server = name.startsWith("mcp_") ? name.split("_")[1] : "local";
+    (servers[server] ||= []).push(name);
+  });
+  return Object.entries(servers).map(([name, names]) => ({ name, count: names.length, tools: names }));
 }
 
 /** Writes the live accent color onto :root as real CSS custom properties

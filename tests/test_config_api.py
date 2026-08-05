@@ -1,21 +1,7 @@
-import os
-import tempfile
-from pathlib import Path
-
 import pytest
 
 import charlie.web_server as web_server
 from charlie.config import config
-from charlie.memory_graph import MemoryGraph
-
-
-def _remove_db(db_path: str) -> None:
-    for path in (db_path, f"{db_path}-wal", f"{db_path}-shm"):
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
 
 
 @pytest.mark.asyncio
@@ -146,26 +132,3 @@ async def test_reload_engine_config_without_voice_process(monkeypatch):
     assert res["status"] == "error"
 
 
-@pytest.mark.asyncio
-async def test_delete_memory_fact(monkeypatch):
-    with tempfile.TemporaryDirectory(suffix="-web-facts-delete") as d:
-        db_path = str(Path(d) / "graph.db")
-        graph = MemoryGraph(db_path)
-        try:
-            graph.add_fact("Alice", "works_on", "graphs")
-            monkeypatch.setattr(web_server, "_get_memory_graph", lambda: graph)
-
-            # Confirm fact is added
-            facts_before = graph.get_all_facts()
-            assert len(facts_before) == 1
-
-            # Delete the fact
-            del_res = await web_server.delete_memory_fact("Alice", "works_on", "graphs")
-            assert del_res["status"] == "ok"
-
-            # Verify it is deleted from sqlite
-            facts_after = graph.get_all_facts()
-            assert len(facts_after) == 0
-        finally:
-            graph.close()
-            _remove_db(db_path)

@@ -29,8 +29,6 @@ logger = logging.getLogger("charlie.tools")
 
 # --- Vector memory store (set via set_memory_store at init) ---
 _memory_store = None  # type: Optional[Any]
-# --- Knowledge graph store (set via set_memory_graph at init) ---
-_memory_graph = None  # type: Optional[Any]
 # --- Pending vision-tier screenshot: written by desktop_screenshot, consumed
 # --- once by Brain._build_payload for the very next outgoing payload. ---
 # FIFO -- concurrent desktop_screenshot calls (asyncio.gather in one turn, or a
@@ -224,10 +222,6 @@ class ToolRegistry:
         """Inject vector memory store for vector_memory tool."""
         global _memory_store
         _memory_store = store
-    def set_memory_graph(self, graph: Any) -> None:
-        """Inject knowledge graph store for graph tools."""
-        global _memory_graph
-        _memory_graph = graph
 
 
 # Global tool registry
@@ -1017,6 +1011,7 @@ _MEMORY_MAX_CHARS = {
     "memory": 2200,
     "user": 1375,
     "opinions": 800,
+    "project": 1600,
 }
 _MEMORY_SEP = "\u00a7"  # section sign - unambiguous entry delimiter
 
@@ -1070,8 +1065,12 @@ def _memory_capacity_error(target: str, entries: list, max_chars: int, new_len: 
             },
             "target": {
                 "type": "string",
-                "enum": ["memory", "user", "opinions"],
-                "description": "memory (max 2200), user (max 1375), opinions (max 800 chars).",
+                "enum": ["memory", "user", "opinions", "project"],
+                "description": (
+                    "memory (max 2200, global facts), user (max 1375, about the user), "
+                    "opinions (max 800), project (max 1600, facts scoped to the current "
+                    "working directory/repo, not global)."
+                ),
             },
             "content": {
                 "type": "string",
@@ -1085,18 +1084,13 @@ def _memory_capacity_error(target: str, entries: list, max_chars: int, new_len: 
         "required": ["action", "target"],
     },
 )
-def memory(action: str, target: str, content: str = "", old_text: str = "") -> str:
+def memory(action: str, target: str, content: str = "", old_text: str = "", **kwargs: str) -> str:
+    content = content or kwargs.get("new_text", "")
     if target not in _MEMORY_MAX_CHARS:
-        return f"Error: target must be 'memory', 'user', or 'opinions', got '{target}'."
+        return f"Error: target must be one of {sorted(_MEMORY_MAX_CHARS)}, got '{target}'."
 
     max_chars = _MEMORY_MAX_CHARS[target]
-    path = (
-        config.memory_file
-        if target == "memory"
-        else config.opinions_file
-        if target == "opinions"
-        else config.user_file
-    )
+    path = getattr(config, f"{target}_file")
 
     try:
         existing = ""
@@ -1252,94 +1246,6 @@ def session_search(query: str) -> str:
         lines.append(f"- [{role}]: {message}")
     return "\n".join(lines)
 
-
-
-# ---------------------------------------------------------------------------
-# Knowledge graph tools
-# ---------------------------------------------------------------------------
-
-
-def _graph_available() -> bool:
-    """Check if the memory graph is loaded."""
-    return _memory_graph is not None
-
-
-@registry.register_tool(
-    name="graph_add_fact",
-    description=(
-        "Add a fact to the knowledge graph. "
-        "A fact is a relationship: subject -> predicate -> object."
-    ),
-    schema={
-        "type": "object",
-        "properties": {
-            "subject": {"type": "string", "description": "The subject entity (e.g. 'user')"},
-            "predicate": {"type": "string", "description": "The relationship (e.g. 'prefers')"},
-            "object": {"type": "string", "description": "The object entity (e.g. 'dark mode')"},
-        },
-        "required": ["subject", "predicate", "object"],
-    },
-)
-def graph_add_fact(subject: str, predicate: str, object: str) -> str:
-    if not _graph_available():
-        return "Knowledge graph is not available."
-    try:
-        _memory_graph.add_fact(subject, predicate, object)
-        return f"Added: {subject} -> {predicate} -> {object}"
-    except Exception as e:
-        logger.exception("graph_add_fact error")
-        return f"Error adding fact: {e}"
-
-
-@registry.register_tool(
-    name="graph_query",
-    description="Query the knowledge graph. Find facts related to a subject, object, or pattern.",
-    schema={
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "Search term to find in facts"},
-            "subject_filter": {"type": "string", "description": "Optional: filter by subject"},
-        },
-        "required": ["query"],
-    },
-)
-def graph_query(query: str, subject_filter: str = "") -> str:
-    if not _graph_available():
-        return "Knowledge graph is not available."
-    try:
-        results = _memory_graph.search_facts(query, subject_filter=subject_filter or None)
-        if not results:
-            return "No matching facts found."
-        lines = []
-        for s, p, o, score in results:
-            lines.append(f"- {s} -> {p} -> {o} (relevance: {score:.2f})")
-        return "\n".join(lines)
-    except Exception as e:
-        logger.exception("graph_query error")
-        return f"Error querying graph: {e}"
-
-
-@registry.register_tool(
-    name="graph_consolidate",
-    description=(
-        "Consolidate the knowledge graph: merge duplicates, "
-        "remove stale facts, and update importance scores."
-    ),
-    schema={
-        "type": "object",
-        "properties": {},
-        "required": [],
-    },
-)
-def graph_consolidate() -> str:
-    if not _graph_available():
-        return "Knowledge graph is not available."
-    try:
-        removed = _memory_graph.consolidate()
-        return f"Consolidated graph. Removed {removed} stale/duplicate facts."
-    except Exception as e:
-        logger.exception("graph_consolidate error")
-        return f"Error consolidating graph: {e}"
 
 
 # ---------------------------------------------------------------------------

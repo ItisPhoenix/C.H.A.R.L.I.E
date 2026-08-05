@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   MessageSquare, Monitor, Database, Cpu, Settings, Shield, Bell, Search, Mic, MicOff,
-  FolderGit, Network, RefreshCw, Check, X, Menu, Server, Puzzle, GitBranch, ChevronDown
+  FolderGit, Network, RefreshCw, Check, X, Menu, Server, Puzzle, GitBranch, ChevronDown, Cable
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useCharlieStore, rgba, lighten, type Session, type Message, type AgentRun, type ToolActivityEntry } from "../store/useCharlieStore";
@@ -24,7 +24,7 @@ import { InsightRail } from "../components/InsightRail";
 import { EventLog } from "../components/EventLog";
 import { VoiceDock } from "../components/VoiceDock";
 import {
-  MemoriesView, HardwareView, FilesView, ServicesView, OllamaView, ExtensionsView, AgentsView
+  MemoriesView, HardwareView, FilesView, ServicesView, OllamaView, ExtensionsView, AgentsView, MCPCenterView
 } from "../components/WipPages";
 
 function getSessionId(msg: WSMessage): string | undefined {
@@ -102,6 +102,7 @@ export default function Page(): ReactElement {
   const setListeningTrigger = useCharlieStore((s) => s.setListeningTrigger);
   const setAudio = useCharlieStore((s) => s.setAudio);
   const setMic = useCharlieStore((s) => s.setMic);
+  const setQueue = useCharlieStore((s) => s.setQueue);
   const setAudioLevel = useCharlieStore((s) => s.setAudioLevel);
   const appendToolActivity = useCharlieStore((s) => s.appendToolActivity);
   const setLaunchId = useCharlieStore((s) => s.setLaunchId);
@@ -348,6 +349,11 @@ export default function Page(): ReactElement {
           });
         } else if (msg.type === "mic_state") {
           setMic({ mic_muted: Boolean(msg.payload?.mic_muted) });
+        } else if (msg.type === "queue_update") {
+          setQueue({
+            count: typeof msg.payload?.count === "number" ? msg.payload.count : 0,
+            texts: Array.isArray(msg.payload?.texts) ? msg.payload.texts : [],
+          });
         } else if (msg.type === "session_updated") {
           const sid = getSessionId(msg);
           const title = msg.title || msg.payload?.title;
@@ -453,7 +459,7 @@ export default function Page(): ReactElement {
         // ignore
       }
     };
-  }, [setConnected, setSystemStatus, setVoiceState, setListeningTrigger, setAudio, setMic, setAudioLevel, appendToolActivity, addMessage, setSessions, setCurrentSessionId]);
+  }, [setConnected, setSystemStatus, setVoiceState, setListeningTrigger, setAudio, setMic, setQueue, setAudioLevel, appendToolActivity, addMessage, setSessions, setCurrentSessionId]);
 
   useEffect(() => { connectWSRef.current = connectWS; });
   useEffect(() => { currentSessionIdRef.current = currentSessionId; }, [currentSessionId]);
@@ -998,6 +1004,12 @@ export default function Page(): ReactElement {
                     active={activePage === "agents"}
                     onClick={() => setActivePage("agents")}
                   />
+                  <NavButton
+                    icon={Cable}
+                    label="MCP Servers"
+                    active={activePage === "mcp"}
+                    onClick={() => setActivePage("mcp")}
+                  />
                 </div>
               </div>
 
@@ -1087,6 +1099,7 @@ export default function Page(): ReactElement {
             {activePage === "ollama" && <OllamaView />}
             {activePage === "extensions" && <ExtensionsView />}
             {activePage === "agents" && <AgentsView />}
+            {activePage === "mcp" && <MCPCenterView />}
             
             {activePage === "desktop" && (
               <div className="flex-1 bg-zinc-950 p-6 flex flex-col overflow-y-auto scrollbar animate-[rise_0.2s_ease-out]">

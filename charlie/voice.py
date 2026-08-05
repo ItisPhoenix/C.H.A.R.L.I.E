@@ -35,6 +35,8 @@ _ECHO_WINDOW_SEC = 2.0
 _TTS_RUN_END = object()
 # Tags a chime item in playback_queue so it skips TTS state bookkeeping.
 _CHIME_ITEM = object()
+# Silence after a barge-in stop so the cut and the next reply aren't audibly spliced together.
+_BARGE_IN_PAUSE_S = 0.25
 _LONG_SENTENCE_CHARS = 250
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?,;])\s+")
 
@@ -651,6 +653,7 @@ class VoiceEngine:
     def _playback_worker(self):
         """Dedicated playback thread."""
         tts_started_fired = False
+        just_interrupted = False
         while not self.stop_event.is_set():
             try:
                 if self.stop_tts_event.is_set():
@@ -670,6 +673,7 @@ class VoiceEngine:
                     self.is_speaking.clear()
                     self.tts_active.clear()
                     tts_started_fired = False
+                    just_interrupted = True
                     continue
 
                 try:
@@ -709,6 +713,9 @@ class VoiceEngine:
 
                 # First chunk of a new TTS run
                 if not tts_started_fired:
+                    if just_interrupted:
+                        time.sleep(_BARGE_IN_PAUSE_S)
+                        just_interrupted = False
                     tts_started_fired = True
                     self.is_speaking.set()
                     self.tts_active.set()

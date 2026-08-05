@@ -253,6 +253,7 @@ export function ChatView({
     el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
   }, [input]);
   const connected = useCharlieStore((s) => s.connected);
+  const queuedTexts = useCharlieStore((s) => s.queue.texts);
   const accentColor = useCharlieStore((s) => s.accentColor);
   const [stepperExpanded, setStepperExpanded] = useState(true);
 
@@ -345,6 +346,7 @@ export function ChatView({
         {messages.map((m, i) => {
           const isUser = m.role === "user";
           const trace = !isUser && m.turnId ? executionTraces?.[m.turnId] : undefined;
+          const isQueued = isUser && queuedTexts.includes(m.content);
           return (
             <div
               key={m.id ?? `${m.role}-${i}`}
@@ -354,11 +356,18 @@ export function ChatView({
                 style={{
                   background: isUser ? accentDim : "var(--color-surface-hover)",
                   borderColor: isUser ? accentBorder : "var(--color-glass-border)",
+                  opacity: isQueued ? 0.6 : 1,
                 }}
                 className={`max-w-[82%] px-4 py-3 rounded-xl border text-[14px] leading-relaxed text-slate-100`}
               >
                 {m.content ? formatMessageContent(m.content) : (isUser ? "" : <TypingDots />)}
               </div>
+              {isQueued && (
+                <span className="text-[10px] text-amber-400 font-mono mt-1 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                  Queued -- waiting for current reply to finish
+                </span>
+              )}
               {trace && trace.length > 0 && <MessageExecutionTrace entries={trace} />}
             </div>
           );

@@ -273,6 +273,16 @@ async def main():
                 loop,
             )
 
+    def on_queue_update():
+        if event_bus:
+            asyncio.run_coroutine_threadsafe(
+                event_bus.emit(
+                    "queue_update",
+                    {"count": len(pending_turns), "texts": [t for t, _, _ in pending_turns][:5]},
+                ),
+                loop,
+            )
+
     def on_thinking_update(name, args):
         if event_bus:
             desc = f"I'll use the {name} tool"
@@ -313,6 +323,13 @@ async def main():
                 loop,
             )
 
+    def on_skill_installed(name, raw_text):
+        if event_bus:
+            asyncio.run_coroutine_threadsafe(
+                event_bus.emit("skill_installed", {"name": name, "raw_text": raw_text}),
+                loop,
+            )
+
     try:
         brain = Brain(
             config,
@@ -325,6 +342,7 @@ async def main():
             on_agent_spawned=on_agent_spawned,
             on_agent_status=on_agent_status,
             on_agent_result=on_agent_result,
+            on_skill_installed=on_skill_installed,
         )
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")
@@ -338,9 +356,6 @@ async def main():
     from charlie.tools import registry as tool_registry
     if memory_store is not None:
         tool_registry.set_memory_store(memory_store)
-    # Wire knowledge graph into tool registry
-    if brain is not None and hasattr(brain, "memory_graph"):
-        tool_registry.set_memory_graph(brain.memory_graph)
 
     # Wire the plugin system into the tool registry (no-op unless enabled).
     # The SAME registry the LLM calls, so when PLUGINS_ENABLED=true the
@@ -515,9 +530,13 @@ async def main():
         # spoken yes/no -- that answer must reach _process() immediately
         # (it routes to resolve_tool_approval), never queued behind the
         # very turn it's meant to unblock.
-        if turn_active and not voice.is_speaking.is_set() and not get_active_voice_approval():
+        # is_speaking gates voice barge-in only -- a web user has no TTS to
+        # interrupt, so their follow-up must queue purely on turn_active.
+        not_speaking_or_web = platform != "voice" or not voice.is_speaking.is_set()
+        if turn_active and not_speaking_or_web and not get_active_voice_approval():
             pending_turns.append((text, session_id, platform))
             logger.info(f"Queued utterance (a turn is already running tool calls): {text}")
+            on_queue_update()
             return
         await _process(text, brain, voice, session_id=session_id, platform=platform)
 
@@ -584,30 +603,6 @@ async def main():
                 for role, content in results:
                     truncated = content[:120] + "..." if len(content) > 120 else content
                     response_str += f"- [{role}]: {truncated}\n"
-            print(f"\n{response_str}", flush=True)
-            voice.speak(response_str, last_emotion)
-            return
-        # Route /memory-review command
-        if text.strip().lower() in ("/memory-review", "!memory-review"):
-            if brain is None:
-                response_str = "Brain not initialized."
-            else:
-                graph = brain.memory_graph
-                facts = graph.get_all_facts()
-                if not facts:
-                    response_str = "Knowledge graph is empty."
-                else:
-                    # Build summary
-                    subjects = {}
-                    for s, p, o in facts:
-                        subjects.setdefault(s, []).append(f"{p} -> {o}")
-                    response_str = f"Knowledge graph: {len(facts)} facts.\n"
-                    for subj, preds in sorted(subjects.items()):
-                        response_str += f"  {subj}:\n"
-                        for pred in preds[:3]:
-                            response_str += f"    {pred}\n"
-                        if len(preds) > 3:
-                            response_str += f"    ... +{len(preds)-3} more\n"
             print(f"\n{response_str}", flush=True)
             voice.speak(response_str, last_emotion)
             return
@@ -819,6 +814,7 @@ async def main():
             if pending_turns:
                 next_text, next_session, next_platform = pending_turns.pop(0)
                 logger.info(f"Dequeuing pending turn: {next_text}")
+                on_queue_update()
                 _schedule_process(
                     _dispatch_or_queue(next_text, next_session, next_platform), loop
                 )
