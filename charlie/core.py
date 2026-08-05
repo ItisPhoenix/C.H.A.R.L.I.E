@@ -658,6 +658,21 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
             launched_commands.append(_OPEN_APP_MAP[key])
             remaining_text = re.sub(pattern, " ", remaining_text)
 
+    # Fuzzy fallback for ASR mis-transcriptions ("noteped" -> "notepad") -- only
+    # tried when no exact match fired, so it never overrides a real match.
+    if not matched_apps:
+        import difflib
+        for word in re.findall(r"[a-z0-9]+", remaining_text):
+            if len(word) < 4:
+                continue
+            close = difflib.get_close_matches(word, _OPEN_APP_MAP.keys(), n=1, cutoff=0.8)
+            if close:
+                key = close[0]
+                matched_apps.append(key)
+                launched_commands.append(_OPEN_APP_MAP[key])
+                remaining_text = remaining_text.replace(word, " ", 1)
+                logger.info("Fuzzy-matched app name '%s' -> '%s'", word, key)
+
     if not matched_apps:
         return None
 

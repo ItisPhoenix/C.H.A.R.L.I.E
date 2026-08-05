@@ -189,9 +189,29 @@ class ToolRegistry:
     def execute_tool(self, name: str, arguments: Dict[str, Any]) -> str:
         if name not in self._tools:
             logger.error("Tool '%s' not found.", name)
-            return f"Error: Tool '{name}' is not registered."
+            valid = ", ".join(sorted(self._tools.keys()))
+            return f"Error: Tool '{name}' is not registered. Available tools: {valid}."
 
         func = self._tools[name]["func"]
+        schema = self._tools[name]["schema"]
+        missing = [p for p in schema.get("required", []) if p not in arguments]
+        if missing:
+            logger.warning("Tool '%s' called without required args: %s", name, missing)
+            params = ", ".join(schema.get("properties", {}).keys())
+            return (
+                f"Error: tool '{name}' is missing required argument(s) {missing}. "
+                f"Its parameters are: {params}."
+            )
+        for pname, value in arguments.items():
+            enum = schema.get("properties", {}).get(pname, {}).get("enum")
+            if enum and value not in enum:
+                logger.warning("Tool '%s' called with invalid %s=%r", name, pname, value)
+                return (
+                    f"Error: tool '{name}' argument '{pname}' must be one of {enum}, got {value!r}. "
+                    f"If you meant to search/recall a stored fact, use the 'vector_memory' tool instead."
+                    if name == "memory"
+                    else f"Error: tool '{name}' argument '{pname}' must be one of {enum}, got {value!r}."
+                )
         try:
             logger.info("Executing tool '%s' with arguments: %s", name, arguments)
             result = func(**arguments)

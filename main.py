@@ -103,7 +103,9 @@ _LAUNCH_ID: str = str(uuid.uuid4())
 
 # Streaming TTS flush thresholds (chars, not words)
 # First sentence: speak after first sentence boundary. Force-flush at 200 chars if no boundary.
-_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+# Also split before a new list item's newline (numbered "\n2. " or bulleted "\n- ")
+# so items get Kokoro's natural inter-utterance gap instead of running together.
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+|\n+(?=\s*(?:\d+[.)]|[-*•])\s)")
 _CLAUSE_BOUNDARY = re.compile(r"(?<=[,;])\s+")
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _MAX_FLUSH_CHARS = 200  # Force-flush at word boundary if no sentence boundary seen

@@ -1169,11 +1169,11 @@ async def get_docker_status():
             for line in lines:
                 try:
                     containers.append(json.loads(line))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Skipping unparseable docker ps line: {e}")
             return {"available": True, "containers": containers}
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Docker daemon unreachable: {e}")
     return {"available": False, "containers": []}
 
 
@@ -1187,8 +1187,8 @@ async def get_ollama_status():
             if r.status_code == 200:
                 models = r.json().get("models", [])
                 return {"available": True, "models": [m.get("name") for m in models]}
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Ollama daemon unreachable: {e}")
     return {"available": False, "models": []}
 
 
@@ -1225,8 +1225,8 @@ async def get_available_models():
                 for m in r.json().get("models", []):
                     if m.get("name"):
                         models_set.add(m["name"])
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Ollama model discovery unreachable: {e}")
 
     # Discover local LM Studio models (port 1234)
     try:
@@ -1236,8 +1236,8 @@ async def get_available_models():
                 for item in r.json().get("data", []):
                     if isinstance(item, dict) and item.get("id"):
                         models_set.add(item["id"])
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"LM Studio model discovery unreachable: {e}")
 
     return {
         "active_model": current_model,
@@ -1276,8 +1276,8 @@ async def get_local_models():
                         for m in ps_resp.json().get("models", []):
                             if m.get("name"):
                                 ollama_loaded[m["name"]] = m.get("size_vram", 0)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Ollama /api/ps unavailable: {e}")
                 endpoints.append({"name": "Ollama", "url": ":11434", "reachable": True, "latency_ms": latency_ms})
                 for m in tags_resp.json().get("models", []):
                     if not m.get("name"):

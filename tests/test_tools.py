@@ -610,10 +610,8 @@ def test_get_path_gate_reason(tmp_path):
 
 def test_tool_registry_unknown_tool_returns_error():
     local_registry = ToolRegistry()
-    assert (
-        local_registry.execute_tool("not-registered", {})
-        == "Error: Tool 'not-registered' is not registered."
-    )
+    result = local_registry.execute_tool("not-registered", {})
+    assert result.startswith("Error: Tool 'not-registered' is not registered.")
 
 
 def test_unregister_tool_removes_it():

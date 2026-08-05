@@ -467,6 +467,13 @@ def test_detect_open_app(monkeypatch):
     assert 'start "" https://youtube.com' in called_cmds
     assert 'start "" https://github.com' in called_cmds
 
+    # Fuzzy fallback for ASR mis-transcriptions (e.g. "notepad" heard as "noteped")
+    called_cmds.clear()
+    res = _detect_open_app("open noteped")
+    msg, remaining = res
+    assert msg == "I've opened Notepad for you."
+    assert remaining is None
+
     # Test opening generic domains/URLs
     called_cmds.clear()
     res = _detect_open_app("open reddit.com, wikipedia.org and https://neon.tech")
