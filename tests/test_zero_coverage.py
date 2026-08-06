@@ -172,6 +172,24 @@ class TestTextStreamFilter:
         assert "hi" in combined
         assert "bye" in combined
 
+    def test_think_block_with_id_suffix_stripped(self):
+        # Some models tag each reasoning block with a per-turn id instead of
+        # plain <think></think> -- this used to leak straight through raw.
+        from charlie.streaming import TextStreamFilter
+        f = TextStreamFilter()
+        result = f.push("before<think:6124c78e>reasoning</think:6124c78e>after")
+        assert result == "beforeafter"
+
+    def test_think_block_with_id_suffix_across_chunks(self):
+        from charlie.streaming import TextStreamFilter
+        f = TextStreamFilter()
+        out1 = f.push("hello <think:ab")
+        out2 = f.push("12>hidden</think:ab12>world")
+        combined = out1 + out2
+        assert "hidden" not in combined
+        assert "hello" in combined
+        assert "world" in combined
+
     def test_think_block_multiple(self):
         from charlie.streaming import TextStreamFilter
         f = TextStreamFilter()

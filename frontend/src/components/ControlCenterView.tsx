@@ -43,6 +43,14 @@ const STATE_RGB: Record<VoiceState, [number, number, number]> = {
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
+// Draw-call batching: quantize each point/edge's alpha into one of these
+// tiers so the whole tier paints as a single path instead of one canvas
+// call per item. Depth ordering is approximate within a tier -- fine for a
+// decorative orb, and the real cost saving that fixes the frame lag.
+const ALPHA_BUCKETS = 6;
+const bucketIndex = (alpha: number, max: number): number =>
+  Math.min(ALPHA_BUCKETS - 1, Math.max(0, Math.floor((alpha / max) * ALPHA_BUCKETS)));
+
 /** Fibonacci-spiral sphere -- evenly distributed points via the golden angle,
  * cheaper and more uniform than random spherical sampling. */
 function buildSphere(count: number): Point3[] {
@@ -168,7 +176,10 @@ function Orb(): ReactElement {
 
       const idleBreath = state === "idle" ? Math.sin(time * 0.6) * 0.02 : 0;
       const targetSpeed = state === "thinking" ? 0.024 : state === "idle" ? 0.003 : 0.01;
-      const targetTurbulence = state === "thinking" ? 0.22 + Math.sin(time * 2.2) * 0.06 : 0;
+      // Small on purpose -- this perturbs each point's individual depth, so it
+      // must stay well under the ~1.6 baseline or the projected sphere warps
+      // into a bell/diamond shape instead of shimmering.
+      const targetTurbulence = state === "thinking" ? 0.05 + Math.sin(time * 2.2) * 0.015 : 0;
       // Speaking breathes bigger and faster than listening's tighter attentive pulse.
       const targetPulse =
         state === "speaking" ? level * 0.55 + Math.sin(time * 8) * 0.03 * level
@@ -216,8 +227,13 @@ function Orb(): ReactElement {
       ctx.restore();
 
       // Project every point once so both the edge mesh and the particles share it.
+      // Turbulence phase is decorrelated per-point (uses x/y/z, not just y) so
+      // it reads as shimmer, not a synchronized wave dragging whole latitude
+      // bands out of shape.
       const projected = SPHERE.map((p) => {
-        const wobble = curTurbulence ? Math.sin(angle * 3 + p.y * 6 + time) * curTurbulence : 0;
+        const wobble = curTurbulence
+          ? Math.sin(time * 3 + p.x * 8 + p.y * 5 + p.z * 6) * curTurbulence
+          : 0;
         const rx = p.x * Math.cos(angle) - p.z * Math.sin(angle);
         const rz = p.x * Math.sin(angle) + p.z * Math.cos(angle);
         const depth = rz + 1.6 + wobble;
@@ -225,34 +241,51 @@ function Orb(): ReactElement {
         return { px: cx + rx * radius * scale, py: cy + p.y * radius * scale, scale };
       });
 
-      // Constellation mesh -- thin lines between nearest-neighbor points.
+      // Bucket into a handful of alpha tiers and draw each tier as ONE path
+      // instead of one stroke()/fill() call per edge/particle -- ~2000
+      // individual canvas calls per frame was the actual lag source (draw-call
+      // overhead dominates over geometry cost on canvas).
       ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = color;
       ctx.lineWidth = 0.6;
+      const edgeBuckets: Array<Array<[number, number, number, number]>> = Array.from({ length: ALPHA_BUCKETS }, () => []);
       for (const [i, j] of EDGES) {
         const a = projected[i];
         const b = projected[j];
         const avgScale = (a.scale + b.scale) / 2;
         const alpha = Math.max(0, Math.min(0.35, avgScale * 0.22));
         if (alpha <= 0.01) continue;
-        ctx.strokeStyle = color;
-        ctx.globalAlpha = alpha;
-        ctx.beginPath();
-        ctx.moveTo(a.px, a.py);
-        ctx.lineTo(b.px, b.py);
-        ctx.stroke();
+        edgeBuckets[bucketIndex(alpha, 0.35)].push([a.px, a.py, b.px, b.py]);
+      }
+      for (let bi = 0; bi < ALPHA_BUCKETS; bi++) {
+        const segs = edgeBuckets[bi];
+        if (segs.length === 0) continue;
+        ctx.globalAlpha = ((bi + 0.5) / ALPHA_BUCKETS) * 0.35;
+        const path = new Path2D();
+        for (const [ax, ay, bx, by] of segs) {
+          path.moveTo(ax, ay);
+          path.lineTo(bx, by);
+        }
+        ctx.stroke(path);
       }
 
-      const order = projected.map((_, i) => i).sort((a, b) => projected[a].scale - projected[b].scale);
-      for (const i of order) {
-        const { px, py, scale } = projected[i];
+      ctx.fillStyle = color;
+      const particleBuckets: Array<Array<[number, number, number]>> = Array.from({ length: ALPHA_BUCKETS }, () => []);
+      for (const { px, py, scale } of projected) {
         const alpha = Math.max(0.08, Math.min(0.9, scale * 0.55));
         const size = Math.max(0.6, scale * 1.8);
-
-        ctx.beginPath();
-        ctx.fillStyle = color;
-        ctx.globalAlpha = alpha;
-        ctx.arc(px, py, size, 0, Math.PI * 2);
-        ctx.fill();
+        particleBuckets[bucketIndex(alpha, 0.9)].push([px, py, size]);
+      }
+      for (let bi = 0; bi < ALPHA_BUCKETS; bi++) {
+        const pts = particleBuckets[bi];
+        if (pts.length === 0) continue;
+        ctx.globalAlpha = ((bi + 0.5) / ALPHA_BUCKETS) * 0.9;
+        const path = new Path2D();
+        for (const [px, py, size] of pts) {
+          path.moveTo(px + size, py);
+          path.arc(px, py, size, 0, Math.PI * 2);
+        }
+        ctx.fill(path);
       }
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = "source-over";
@@ -307,15 +340,33 @@ function Orb(): ReactElement {
 
 /** Floating live caption -- replaces the bottom VoiceDock bar on this page.
  * Video-subtitle behavior: only visible while something is actually being
- * said (listening/speaking), not a permanent last-message readout. Reuses
- * the same `messages` the chat view already keeps live -- no new
- * transcript/caption plumbing needed. */
+ * said, not a permanent last-message readout. Reuses the same `messages`
+ * the chat view already keeps live -- no new transcript/caption plumbing
+ * needed.
+ *
+ * "listening" is a resting armed-mic state that can persist for minutes
+ * between turns (WAKE_WORD_ACTIVITY_TIMEOUT), not just the moment of an
+ * utterance -- gating on voiceState alone left the last reply's caption
+ * stuck on screen long after Charlie finished speaking. Also require live
+ * audioLevel while listening so it hides once actual sound drops. */
+// YouTube-style live caption: only the most recent words, not the whole
+// accumulated reply -- a rolling window, not a fixed-width truncation that
+// always shows the beginning and chops off whatever's currently being said.
+const CAPTION_WORD_WINDOW = 12;
+
 function Caption(): ReactElement | null {
   const voiceState = useCharlieStore((s) => s.voiceState);
+  const audioLevel = useCharlieStore((s) => s.audioLevel);
   const messages = useCharlieStore((s) => s.messages);
   const last = messages[messages.length - 1];
-  if (voiceState !== "listening" && voiceState !== "speaking") return null;
+  const visible = voiceState === "speaking" || (voiceState === "listening" && audioLevel > 0.04);
+  if (!visible) return null;
   if (!last || !last.content) return null;
+
+  const words = last.content.trim().split(/\s+/);
+  const recentText = words.length > CAPTION_WORD_WINDOW
+    ? words.slice(-CAPTION_WORD_WINDOW).join(" ")
+    : words.join(" ");
 
   return (
     <div
@@ -326,7 +377,7 @@ function Caption(): ReactElement | null {
         <span className="text-slate-500 uppercase font-mono text-[10px] mr-2">
           {last.role === "user" ? "You" : "Charlie"}
         </span>
-        {last.content}
+        {recentText}
       </p>
     </div>
   );

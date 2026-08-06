@@ -308,6 +308,12 @@ class Config:
         default=os.getenv("DESKTOP_FRAME_CAPTURE_ENABLED", "true").lower() == "true",
         metadata=_meta("DESKTOP_FRAME_CAPTURE_ENABLED", "Desktop Control", restart="reload"),
     )
+    # Off by default (2026-08-07) -- the tool-call-count trigger drafted a skill out
+    # of routine multi-search research tasks, not just genuinely reusable procedures.
+    auto_skill_gen_enabled: bool = field(
+        default=os.getenv("AUTO_SKILL_GEN_ENABLED", "false").lower() == "true",
+        metadata=_meta("AUTO_SKILL_GEN_ENABLED", "Agentic OS", restart="reload"),
+    )
     # Read once into a pynput GlobalHotKeys listener at Brain construction -- needs a full restart to re-arm.
     desktop_panic_hotkey: str = field(
         default=os.getenv("DESKTOP_PANIC_HOTKEY", "ctrl+alt+q"),

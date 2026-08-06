@@ -2622,7 +2622,11 @@ class Brain:
         if self.on_agent_result:
             self.on_agent_result(agent_id, result)
         tool_count = self._agent_tool_counts.pop(agent_id, 0)
-        if tool_count >= _AUTO_SKILL_MIN_TOOL_CALLS and not result.startswith("Error"):
+        if (
+            self.config.auto_skill_gen_enabled
+            and tool_count >= _AUTO_SKILL_MIN_TOOL_CALLS
+            and not result.startswith("Error")
+        ):
             asyncio.create_task(self._maybe_auto_draft_skill(task, result))
         return result
 

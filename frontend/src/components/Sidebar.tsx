@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactElement } from "react";
+import { useState, type ReactElement } from "react";
 import Link from "next/link";
 import {
   MessageSquare, Monitor, Database, Cpu, Settings, FolderGit, Network,
@@ -70,8 +70,22 @@ export function Sidebar(props: SidebarProps): ReactElement {
     onExportHistory, accentColor, onSetAccentColor,
   } = props;
 
+  // The Chats accordion's content assumes a full-width sidebar. autoCollapse's
+  // hover-to-expand is pure CSS, so if the mouse leaves before React knows,
+  // the accordion can stay "open" (mobileMenuOpen=true) while the nav is
+  // back at icon-only width -- rendering the session list garbled into 56px.
+  // Track real hover in JS so the accordion only ever renders when there's
+  // room, and auto-close it when the mouse leaves a collapsed sidebar.
+  const [isHovering, setIsHovering] = useState(false);
+  const accordionHasRoom = !autoCollapse || isHovering;
+
   return (
     <nav
+      onMouseEnter={() => setIsHovering(true)}
+      onMouseLeave={() => {
+        setIsHovering(false);
+        if (autoCollapse && mobileMenuOpen) onToggleMobileMenu();
+      }}
       className={`group shrink-0 border-r border-[var(--color-glass-border)] bg-zinc-950/20 p-4 flex flex-col justify-between select-none overflow-y-auto overflow-x-hidden scrollbar transition-[width] duration-200 ${
         autoCollapse ? "w-14 hover:w-56" : mobileMenuOpen ? "w-72" : "w-52"
       }`}
@@ -108,7 +122,7 @@ export function Sidebar(props: SidebarProps): ReactElement {
                 className={`w-3.5 h-3.5 shrink-0 transition-transform ${mobileMenuOpen ? "rotate-180" : ""} ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}
               />
             </button>
-            {mobileMenuOpen && (
+            {mobileMenuOpen && accordionHasRoom && (
               <div className="rounded-lg border border-white/5 bg-zinc-900/40 overflow-hidden">
                 <SessionRail
                   variant="accordion"
@@ -172,7 +186,7 @@ export function Sidebar(props: SidebarProps): ReactElement {
         <span className={`px-2 text-[10px] font-mono font-bold tracking-widest text-slate-500 uppercase whitespace-nowrap overflow-hidden block ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}>
           ACCENT THEME
         </span>
-        <div className="flex gap-2 px-2">
+        <div className={`flex gap-2 px-2 ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}>
           {ACCENT_SWATCHES.map((color) => (
             <button
               key={color}

@@ -158,10 +158,24 @@ async def stream_followup_content(
 
 
 class TextStreamFilter:
-    """Filter stream to block <think>...</think> blocks and lines starting with TOOL:."""
+    """Filter stream to block <think>...</think> blocks and lines starting with TOOL:.
+
+    Some models tag each reasoning block with a per-turn id --
+    <think:6124c78e>...</think:6124c78e> -- instead of the plain <think>...</think>
+    pair. An exact-string match on "<think>" doesn't catch that variant, so the
+    whole reasoning block used to leak straight into the visible reply. The
+    opening-tag regex below matches both forms and remembers which closing tag
+    to look for.
+    """
+    _THINK_OPEN_RE = re.compile(r"<think(:[\w-]+)?>")
+    # Bound on how much unmatched "<think" tail to hold back while waiting for
+    # more chunks (covers the id suffix + closing '>' arriving split across chunks).
+    _MAX_OPEN_TAG_LOOKAHEAD = 40
+
     def __init__(self):
         self.buffer = ""
         self.in_thinking = False
+        self.think_close_tag = "</think>"
         self.in_tool_line = False
 
     def push(self, chunk: str) -> str:
@@ -177,13 +191,13 @@ class TextStreamFilter:
 
         while True:
             if self.in_thinking:
-                end_idx = self.buffer.find("</think>")
+                end_idx = self.buffer.find(self.think_close_tag)
                 if end_idx != -1:
-                    self.buffer = self.buffer[end_idx + 8:]
+                    self.buffer = self.buffer[end_idx + len(self.think_close_tag):]
                     self.in_thinking = False
                     continue
                 else:
-                    keep_len = len("</think>") - 1
+                    keep_len = len(self.think_close_tag) - 1
                     if len(self.buffer) > keep_len:
                         self.buffer = self.buffer[-keep_len:]
                     break
@@ -199,19 +213,29 @@ class TextStreamFilter:
                     break
 
             # Find tags in buffer
-            think_idx = self.buffer.find("<think>")
+            think_match = self._THINK_OPEN_RE.search(self.buffer)
             tool_idx = self.buffer.find("TOOL:")
 
-            indices = []
-            if think_idx != -1:
-                indices.append((think_idx, "think"))
+            candidates = []
+            if think_match:
+                candidates.append((think_match.start(), "think", think_match))
             if tool_idx != -1:
-                indices.append((tool_idx, "tool"))
+                candidates.append((tool_idx, "tool", None))
 
-            if not indices:
-                # No tags, check for partial match prefixes at end
+            if not candidates:
+                # No confirmed tag yet. An in-progress "<think" (with its id
+                # suffix or closing '>' still to arrive) could still be a
+                # partial match -- hold back a bounded tail rather than
+                # requiring an exact fixed-length prefix like plain "<think>".
+                open_idx = self.buffer.rfind("<think")
+                if open_idx != -1 and open_idx >= len(self.buffer) - self._MAX_OPEN_TAG_LOOKAHEAD:
+                    if open_idx > 0:
+                        output += self.buffer[:open_idx]
+                    self.buffer = self.buffer[open_idx:]
+                    break
+
                 max_partial = 0
-                for pattern in ("<think>", "TOOL:"):
+                for pattern in ("<think", "TOOL:"):
                     for i in range(1, len(pattern)):
                         prefix = pattern[:i]
                         if self.buffer.endswith(prefix):
@@ -227,15 +251,17 @@ class TextStreamFilter:
                     self.buffer = ""
                 break
             else:
-                indices.sort()
-                first_idx, tag_type = indices[0]
+                candidates.sort(key=lambda c: c[0])
+                first_idx, tag_type, match = candidates[0]
                 if first_idx > 0:
                     output += self.buffer[:first_idx]
                     self.buffer = self.buffer[first_idx:]
 
                 if tag_type == "think":
                     self.in_thinking = True
-                    self.buffer = self.buffer[7:]
+                    tag_id = match.group(1) or ""
+                    self.think_close_tag = f"</think{tag_id}>"
+                    self.buffer = self.buffer[len(match.group(0)):]
                 elif tag_type == "tool":
                     self.in_tool_line = True
                     self.buffer = self.buffer[5:]
