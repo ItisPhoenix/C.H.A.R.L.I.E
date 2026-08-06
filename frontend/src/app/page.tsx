@@ -16,7 +16,7 @@ import { Sidebar } from "../components/Sidebar";
 import { DesktopFrameView } from "../components/DesktopFrameView";
 import {
   MemoriesView, HardwareView, FilesView, ServicesView, OllamaView, ExtensionsView, SkillsView, AgentsView, MCPCenterView
-} from "../components/WipPages";
+} from "../components/DashboardPanels";
 
 export default function Page(): ReactElement {
   const router = useRouter();
