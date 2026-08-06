@@ -4,7 +4,7 @@ import { type ReactElement } from "react";
 import Link from "next/link";
 import {
   MessageSquare, Monitor, Database, Cpu, Settings, FolderGit, Network,
-  Server, Puzzle, GitBranch, ChevronDown, Cable, Sparkles, type LucideIcon,
+  Server, Puzzle, GitBranch, ChevronDown, Cable, Sparkles, LayoutDashboard, type LucideIcon,
 } from "lucide-react";
 import { SessionRail } from "./SessionRail";
 import { lighten, type Session } from "../store/useCharlieStore";
@@ -76,6 +76,12 @@ export function Sidebar(props: SidebarProps): ReactElement {
             Main
           </h3>
           <div className="space-y-0.5">
+            <NavButton
+              icon={LayoutDashboard}
+              label="Control Center"
+              active={activePage === "controlCenter"}
+              onClick={() => onSelectPage("controlCenter")}
+            />
             <button
               onClick={() => {
                 onSelectPage("chats");

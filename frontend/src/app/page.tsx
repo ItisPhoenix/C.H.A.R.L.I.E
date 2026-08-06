@@ -14,6 +14,7 @@ import { VoiceDock } from "../components/VoiceDock";
 import { TopBar } from "../components/TopBar";
 import { Sidebar } from "../components/Sidebar";
 import { DesktopFrameView } from "../components/DesktopFrameView";
+import { ControlCenterView } from "../components/ControlCenterView";
 import {
   MemoriesView, HardwareView, FilesView, ServicesView, OllamaView, ExtensionsView, SkillsView, AgentsView, MCPCenterView
 } from "../components/DashboardPanels";
@@ -56,7 +57,7 @@ export default function Page(): ReactElement {
   const setVisionModel = useCharlieStore((s) => s.setVisionModel);
 
   // Router Pages state
-  const [activePage, setActivePage] = useState<string>("chats");
+  const [activePage, setActivePage] = useState<string>("controlCenter");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Search filter query
@@ -617,6 +618,8 @@ export default function Page(): ReactElement {
                 </div>
               </>
             )}
+
+            {activePage === "controlCenter" && <ControlCenterView />}
 
             {/* Custom WIP dashboard panels */}
             {activePage === "memories" && <MemoriesView />}
