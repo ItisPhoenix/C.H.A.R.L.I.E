@@ -3,7 +3,7 @@
 import { useEffect, useState, useMemo, useCallback, type ReactElement } from "react";
 import {
   Database, Cpu, HardDrive, FileCode, AlertCircle, Trash2, Globe, Monitor, RefreshCw, Server, Puzzle, Plus, Power, Save,
-  GitBranch, Circle, CheckCircle2, XCircle, Clock, X, Cable
+  GitBranch, Circle, CheckCircle2, XCircle, Clock, X, Cable, Pencil
 } from "lucide-react";
 import { useCharlieStore, type AgentRun, type McpToolLike, groupMcpTools } from "../store/useCharlieStore";
 import { Button } from "./Button";
@@ -40,9 +40,23 @@ const MEMORY_FILES = [
   { path: "PROJECT.md", label: "Project" },
 ] as const;
 
+// Matches charlie/tools.py's _MEMORY_SEP -- entries are stored as one flat
+// string joined by this delimiter, not newlines, so raw file content isn't
+// human-readable as-is (that's the "unclean format" the dashboard used to show).
+const MEMORY_SEP = "§";
+
+function parseMemoryEntries(text: string): string[] {
+  if (!text.trim()) return [];
+  if (!text.includes(MEMORY_SEP)) return [text.trim()];
+  return text.split(MEMORY_SEP).map((e) => e.trim()).filter(Boolean);
+}
+
 export function MemoriesView(): ReactElement {
   const [contents, setContents] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
+  const [editingPath, setEditingPath] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -77,6 +91,49 @@ export function MemoriesView(): ReactElement {
     fetchAll();
   }, [fetchAll]);
 
+  const startEdit = (path: string) => {
+    setEditingPath(path);
+    setDraft(parseMemoryEntries(contents[path] || "").join("\n"));
+  };
+
+  const cancelEdit = () => {
+    setEditingPath(null);
+    setDraft("");
+  };
+
+  const saveEdit = async () => {
+    if (!editingPath) return;
+    setSaving(true);
+    const entries = draft.split("\n").map((line) => line.trim()).filter(Boolean);
+    const newContent = entries.join(MEMORY_SEP);
+    try {
+      const res = await fetch("/api/workspace/file", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: editingPath, content: newContent }),
+      });
+      if (res.ok) {
+        setContents((prev) => ({ ...prev, [editingPath]: newContent }));
+        setEditingPath(null);
+        setDraft("");
+      } else {
+        useCharlieStore.getState().addAlert({
+          severity: "error",
+          message: `Failed to save ${editingPath}.`,
+          timestamp: new Date().toLocaleTimeString(),
+        });
+      }
+    } catch {
+      useCharlieStore.getState().addAlert({
+        severity: "error",
+        message: `Failed to save ${editingPath} -- backend unreachable.`,
+        timestamp: new Date().toLocaleTimeString(),
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="flex-1 p-6 space-y-6 overflow-y-auto scrollbar animate-[rise_0.2s_ease-out]">
       <div className="border-b border-white/5 pb-3 flex justify-between items-end">
@@ -86,7 +143,7 @@ export function MemoriesView(): ReactElement {
             Memories
           </h2>
           <p className="text-xs text-slate-500 font-mono mt-1">
-            Markdown memory files -- edit via the Files page, updated live by the `memory` tool
+            Memory files -- one fact per line, updated live by the `memory` tool
           </p>
         </div>
         <Button onClick={fetchAll} className="font-mono">
@@ -96,20 +153,56 @@ export function MemoriesView(): ReactElement {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        {MEMORY_FILES.map(({ path, label }) => (
-          <div key={path} className="rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-2">
-            <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">{label} ({path})</span>
-            {loading ? (
-              <p className="text-xs font-mono text-slate-500 animate-pulse py-4">Loading...</p>
-            ) : contents[path] ? (
-              <pre className="text-[10px] font-mono text-slate-300 whitespace-pre-wrap max-h-80 overflow-y-auto scrollbar">
-                {contents[path]}
-              </pre>
-            ) : (
-              <p className="text-[10px] font-mono text-slate-500 italic py-4">Empty.</p>
-            )}
-          </div>
-        ))}
+        {MEMORY_FILES.map(({ path, label }) => {
+          const entries = parseMemoryEntries(contents[path] || "");
+          const isEditing = editingPath === path;
+          return (
+            <div key={path} className="rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-2 flex flex-col">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">{label} ({path})</span>
+                {!loading && !isEditing && (
+                  <button
+                    onClick={() => startEdit(path)}
+                    aria-label={`Edit ${label}`}
+                    className="text-slate-500 hover:text-slate-200 cursor-pointer p-0.5 rounded hover:bg-white/5 transition"
+                  >
+                    <Pencil className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+
+              {loading ? (
+                <p className="text-xs font-mono text-slate-500 animate-pulse py-4">Loading...</p>
+              ) : isEditing ? (
+                <>
+                  <textarea
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    spellCheck={false}
+                    placeholder="One entry per line"
+                    className="text-[11px] font-mono text-slate-200 bg-zinc-950/60 border border-white/10 rounded-lg p-2 h-40 resize-none outline-none focus:border-white/20 scrollbar"
+                  />
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={saveEdit} disabled={saving}>
+                      <Save className="w-3 h-3" /> {saving ? "Saving..." : "Save"}
+                    </Button>
+                    <Button size="sm" variant="neutral" onClick={cancelEdit} disabled={saving}>
+                      Cancel
+                    </Button>
+                  </div>
+                </>
+              ) : entries.length > 0 ? (
+                <ol className="text-[11px] font-mono text-slate-300 space-y-1 max-h-80 overflow-y-auto scrollbar list-decimal list-inside">
+                  {entries.map((entry, i) => (
+                    <li key={i} className="leading-relaxed">{entry}</li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="text-[10px] font-mono text-slate-500 italic py-4">Empty.</p>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

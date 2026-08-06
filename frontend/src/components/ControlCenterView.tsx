@@ -306,12 +306,15 @@ function Orb(): ReactElement {
 }
 
 /** Floating live caption -- replaces the bottom VoiceDock bar on this page.
- * Shows the most recent turn's text (user transcript or assistant reply),
- * reusing the same `messages` the chat view already keeps live -- no new
+ * Video-subtitle behavior: only visible while something is actually being
+ * said (listening/speaking), not a permanent last-message readout. Reuses
+ * the same `messages` the chat view already keeps live -- no new
  * transcript/caption plumbing needed. */
 function Caption(): ReactElement | null {
+  const voiceState = useCharlieStore((s) => s.voiceState);
   const messages = useCharlieStore((s) => s.messages);
   const last = messages[messages.length - 1];
+  if (voiceState !== "listening" && voiceState !== "speaking") return null;
   if (!last || !last.content) return null;
 
   return (
@@ -333,11 +336,14 @@ interface TileProps {
   label: string;
   value: string;
   accent?: string;
+  wide?: boolean;
 }
 
-function Tile({ label, value, accent }: TileProps): ReactElement {
+/** Bento-style tile -- most cards are 1x1, a couple of "hero" cards span both
+ * columns, so the metric grid reads as a mosaic instead of a flat table. */
+function Tile({ label, value, accent, wide }: TileProps): ReactElement {
   return (
-    <div className="rounded-xl border border-white/5 bg-zinc-900/30 p-3.5 flex flex-col gap-1 min-w-0">
+    <div className={`rounded-xl border border-white/5 bg-zinc-900/30 p-3.5 flex flex-col gap-1 min-w-0 ${wide ? "col-span-2" : ""}`}>
       <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500 truncate">{label}</span>
       <span className="text-sm font-bold font-mono truncate" style={{ color: accent }}>{value}</span>
     </div>
@@ -420,12 +426,12 @@ export function ControlCenterView(): ReactElement {
 
         <div className="w-72 shrink-0 flex flex-col gap-3 overflow-y-auto scrollbar">
           <div className="grid grid-cols-2 gap-3">
-            <Tile label="Active Session" value={activeSession?.title || "None"} />
+            <Tile wide label="Active Session" value={activeSession?.title || "None"} />
             <Tile label="Queue Depth" value={String(queue.count)} accent={queue.count > 0 ? "var(--color-status-warning)" : undefined} />
             <Tile label="Tool Calls" value={String(toolCallsThisSession)} />
             <Tile label="Running Agents" value={String(runningAgents)} accent={runningAgents > 0 ? "var(--color-status-listening)" : undefined} />
             <Tile label="MCP Servers" value={mcpLabel} accent={mcpColor} />
-            <Tile label="Backend" value={connected ? "Online" : "Offline"} accent={connected ? "var(--color-status-success)" : "var(--color-status-error)"} />
+            <Tile wide label="Backend" value={connected ? "Online" : "Offline"} accent={connected ? "var(--color-status-success)" : "var(--color-status-error)"} />
           </div>
 
           {/* Tier 3: quiet digest, not a full log */}

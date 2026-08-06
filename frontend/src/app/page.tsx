@@ -572,6 +572,7 @@ export default function Page(): ReactElement {
         {/* Main core layout panel */}
         <div className="flex-1 flex overflow-hidden z-10 p-4 pb-2 gap-4 relative">
           <Sidebar
+            autoCollapse={activePage === "controlCenter"}
             mobileMenuOpen={mobileMenuOpen}
             onToggleMobileMenu={() => setMobileMenuOpen((open) => !open)}
             activePage={activePage}

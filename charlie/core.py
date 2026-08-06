@@ -1693,9 +1693,58 @@ class Brain:
                         logger.error("Consolidation API failed status %d: %s", resp.status_code, resp.text)
                     resp.raise_for_status()
                     result = resp.json()["choices"][0]["message"]["content"]
+
+                # The LLM is asked to return ONLY section-sign-delimited entries, but
+                # nothing enforces that -- a model that adds prose/markdown fences or
+                # returns empty/oversized output would otherwise silently destroy the
+                # real memory content on write. Validate and normalize before touching
+                # the file, and keep a one-step-back backup so a bad pass is recoverable.
+                cleaned = result.strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.strip("`")
+                    if "\n" in cleaned:
+                        cleaned = cleaned.split("\n", 1)[1]
+                new_entries = _parse_memory_entries(cleaned)
+                new_len = sum(len(e) for e in new_entries) + (len(new_entries) - 1 if new_entries else 0)
+
+                if not new_entries:
+                    logger.warning(
+                        "Skipping %s consolidation: LLM returned no parseable entries (got %d chars raw)",
+                        target, len(result),
+                    )
+                    continue
+                # A real consolidation of >1 entries essentially never collapses to
+                # exactly one entry with no separator in the raw text -- that shape
+                # is the signature of a model ignoring the format instruction and
+                # returning prose (e.g. "Sure! Here is a summary..."), which
+                # _parse_memory_entries would otherwise accept as one giant entry.
+                if len(entries) > 1 and _MEMORY_SEP not in cleaned:
+                    logger.warning(
+                        "Skipping %s consolidation: LLM returned prose with no §-delimited entries",
+                        target,
+                    )
+                    continue
+                if new_len > max_chars * 1.15:
+                    logger.warning(
+                        "Skipping %s consolidation: result %d chars exceeds budget %d, discarding",
+                        target, new_len, max_chars,
+                    )
+                    continue
+
+                try:
+                    with open(path_val, "r", encoding="utf-8") as f:
+                        backup = f.read()
+                    with open(path_val + ".bak", "w", encoding="utf-8") as f:
+                        f.write(backup)
+                except OSError as exc:
+                    logger.warning("Could not back up %s before consolidation: %s", path_val, exc)
+
+                normalized = _MEMORY_SEP.join(new_entries)
                 with open(path_val, "w", encoding="utf-8") as f:
-                    f.write(result)
-                logger.info("Consolidated %s: %d -> %d chars", target, current_len, len(result))
+                    f.write(normalized)
+                logger.info(
+                    "Consolidated %s: %d -> %d chars (%d entries)", target, current_len, new_len, len(new_entries)
+                )
             except Exception as exc:
                 logger.warning("Failed to consolidate %s: %s", target, exc)
 
