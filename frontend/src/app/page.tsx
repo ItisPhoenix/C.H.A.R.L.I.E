@@ -643,15 +643,17 @@ export default function Page(): ReactElement {
           </div>
         )}
 
-        {/* Bottom Voice Dock Equalizer */}
-        <VoiceDock
-          state={voiceState}
-          connected={connected}
-          audio={audio}
-          mic={mic}
-          onAudioControl={sendAudioControl}
-          onMicControl={sendMicControl}
-        />
+        {/* Bottom Voice Dock Equalizer -- redundant with the Control Center orb, hidden there */}
+        {activePage !== "controlCenter" && (
+          <VoiceDock
+            state={voiceState}
+            connected={connected}
+            audio={audio}
+            mic={mic}
+            onAudioControl={sendAudioControl}
+            onMicControl={sendMicControl}
+          />
+        )}
 
         {paletteOpen && (
           <CommandPalette

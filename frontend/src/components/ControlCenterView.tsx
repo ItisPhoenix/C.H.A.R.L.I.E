@@ -200,22 +200,19 @@ function Orb(): ReactElement {
         ctx.fillRect(0, 0, width, height);
       }
 
-      // Outer tick-mark ring, slowly counter-rotating -- a HUD scan-ring accent.
+      // Outer scan ring -- one smooth dashed circle instead of 48 separate
+      // segments, so it reads as a clean rotating HUD ring, not a flicker.
       ctx.globalCompositeOperation = "source-over";
       ctx.save();
       ctx.translate(cx, cy);
-      ctx.rotate(-angle * 0.5);
-      ctx.strokeStyle = `rgba(${curRgb[0] | 0}, ${curRgb[1] | 0}, ${curRgb[2] | 0}, 0.28)`;
-      ctx.lineWidth = 1;
-      const tickR = radius * 1.34;
-      for (let t = 0; t < 48; t++) {
-        const ta = (t / 48) * Math.PI * 2;
-        const len = t % 4 === 0 ? 7 : 3;
-        ctx.beginPath();
-        ctx.moveTo(Math.cos(ta) * tickR, Math.sin(ta) * tickR);
-        ctx.lineTo(Math.cos(ta) * (tickR + len), Math.sin(ta) * (tickR + len));
-        ctx.stroke();
-      }
+      ctx.rotate(angle * 0.35);
+      ctx.strokeStyle = `rgba(${curRgb[0] | 0}, ${curRgb[1] | 0}, ${curRgb[2] | 0}, 0.32)`;
+      ctx.lineWidth = 1.25;
+      ctx.setLineDash([2, 10]);
+      ctx.beginPath();
+      ctx.arc(0, 0, radius * 1.32, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
       ctx.restore();
 
       // Project every point once so both the edge mesh and the particles share it.
@@ -303,6 +300,31 @@ function Orb(): ReactElement {
       >
         {STATE_LABEL[voiceState]}
       </span>
+      <Caption />
+    </div>
+  );
+}
+
+/** Floating live caption -- replaces the bottom VoiceDock bar on this page.
+ * Shows the most recent turn's text (user transcript or assistant reply),
+ * reusing the same `messages` the chat view already keeps live -- no new
+ * transcript/caption plumbing needed. */
+function Caption(): ReactElement | null {
+  const messages = useCharlieStore((s) => s.messages);
+  const last = messages[messages.length - 1];
+  if (!last || !last.content) return null;
+
+  return (
+    <div
+      key={last.id}
+      className="mt-4 max-w-2xl px-5 py-2.5 rounded-full border border-white/10 bg-zinc-950/60 backdrop-blur-sm anim-rise"
+    >
+      <p className="text-xs text-slate-300 text-center truncate">
+        <span className="text-slate-500 uppercase font-mono text-[10px] mr-2">
+          {last.role === "user" ? "You" : "Charlie"}
+        </span>
+        {last.content}
+      </p>
     </div>
   );
 }
