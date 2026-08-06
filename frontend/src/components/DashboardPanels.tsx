@@ -47,18 +47,26 @@ export function MemoriesView(): ReactElement {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
+      let anyNetworkError = false;
       const results = await Promise.all(
         MEMORY_FILES.map(async ({ path }) => {
           try {
             const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`);
             if (res.ok) return [path, (await res.json()).content as string] as const;
           } catch {
-            // ignore
+            anyNetworkError = true;
           }
           return [path, ""] as const;
         })
       );
       setContents(Object.fromEntries(results));
+      if (anyNetworkError) {
+        useCharlieStore.getState().addAlert({
+          severity: "warn",
+          message: "Could not load some memory files -- backend unreachable.",
+          timestamp: new Date().toLocaleTimeString(),
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -241,7 +249,11 @@ export function FilesView(): ReactElement {
         setFileList(data.files || []);
       }
     } catch {
-      // ignore
+      useCharlieStore.getState().addAlert({
+        severity: "warn",
+        message: "Could not load file list -- backend unreachable.",
+        timestamp: new Date().toLocaleTimeString(),
+      });
     } finally {
       setLoading(false);
     }
@@ -481,7 +493,11 @@ export function ServicesView(): ReactElement {
         setServices(json.services || []);
       }
     } catch {
-      // ignore
+      useCharlieStore.getState().addAlert({
+        severity: "warn",
+        message: "Could not load service status -- backend unreachable.",
+        timestamp: new Date().toLocaleTimeString(),
+      });
     } finally {
       setLoading(false);
     }
@@ -497,7 +513,11 @@ export function ServicesView(): ReactElement {
         setContainers(json.containers || []);
       }
     } catch {
-      // ignore
+      useCharlieStore.getState().addAlert({
+        severity: "warn",
+        message: "Could not load Docker status -- backend unreachable.",
+        timestamp: new Date().toLocaleTimeString(),
+      });
     } finally {
       setDockerLoading(false);
     }
@@ -620,7 +640,11 @@ export function OllamaView(): ReactElement {
         });
       }
     } catch {
-      // ignore
+      useCharlieStore.getState().addAlert({
+        severity: "warn",
+        message: "Could not load local models -- backend unreachable.",
+        timestamp: new Date().toLocaleTimeString(),
+      });
     } finally {
       setLoading(false);
     }
@@ -844,7 +868,11 @@ export function ExtensionsView({ kindFilter }: ExtensionsViewProps = {}): ReactE
         setExtensions(json.extensions || []);
       }
     } catch {
-      // ignore
+      useCharlieStore.getState().addAlert({
+        severity: "warn",
+        message: "Could not load extensions -- backend unreachable.",
+        timestamp: new Date().toLocaleTimeString(),
+      });
     } finally {
       setLoading(false);
     }
@@ -936,7 +964,7 @@ export function ExtensionsView({ kindFilter }: ExtensionsViewProps = {}): ReactE
           <p className="text-xs text-slate-500 font-mono mt-1">
             {kindFilter
               ? "SKILL.md extensions -- reuses the Extensions system, filtered to kind=skill"
-              : "MCP Servers, SKILL.md, OpenAPI Imports & Native Plugins"}
+              : "OpenAPI Imports & Native Plugins -- MCP servers and Skills have their own tabs"}
           </p>
         </div>
 

@@ -45,7 +45,11 @@ export function InsightRail(): ReactElement {
           setToolsLoaded(true);
         }
       } catch {
-        // ignore
+        useCharlieStore.getState().addAlert({
+          severity: "warn",
+          message: "Could not load registered tools -- backend unreachable.",
+          timestamp: new Date().toLocaleTimeString(),
+        });
       }
     }
     fetchData();

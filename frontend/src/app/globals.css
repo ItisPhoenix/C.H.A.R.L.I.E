@@ -56,6 +56,13 @@
   --animate-rise: rise 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
+/* Keyboard-only focus indicator -- most interactive elements here have no
+   explicit focus style, so without this Tab navigation is invisible. */
+:focus-visible {
+  outline: 2px solid var(--color-accent-teal);
+  outline-offset: 2px;
+}
+
 /* Custom Base Styles */
 html,
 body,

@@ -51,8 +51,6 @@ export default function Page(): ReactElement {
   const setVoiceState = useCharlieStore((s) => s.setVoiceState);
   const setAudio = useCharlieStore((s) => s.setAudio);
   const setMic = useCharlieStore((s) => s.setMic);
-  const setLaunchId = useCharlieStore((s) => s.setLaunchId);
-  const setDesktopControlEnabled = useCharlieStore((s) => s.setDesktopControlEnabled);
   const setAccentColor = useCharlieStore((s) => s.setAccentColor);
   const setActiveModel = useCharlieStore((s) => s.setActiveModel);
   const setVisionModel = useCharlieStore((s) => s.setVisionModel);
@@ -183,9 +181,19 @@ export default function Page(): ReactElement {
         const updated = await fetchSessions();
         if (data.session_id) setCurrentSessionId(data.session_id);
         else if (updated.length > 0) setCurrentSessionId(updated[0].id);
+      } else {
+        useCharlieStore.getState().addAlert({
+          severity: "error",
+          message: "Failed to create a new chat -- backend unreachable.",
+          timestamp: new Date().toLocaleTimeString(),
+        });
       }
     } catch {
-      // ignore
+      useCharlieStore.getState().addAlert({
+        severity: "error",
+        message: "Failed to create a new chat -- backend unreachable.",
+        timestamp: new Date().toLocaleTimeString(),
+      });
     }
   }, [fetchSessions, setCurrentSessionId]);
 
@@ -226,7 +234,12 @@ export default function Page(): ReactElement {
         body: JSON.stringify({ session_id: sid }),
       });
     } catch {
-      // ignore
+      // Voice input may route to the wrong session until this succeeds; surface it.
+      useCharlieStore.getState().addAlert({
+        severity: "warn",
+        message: "Could not sync active session -- voice input may route to the wrong chat.",
+        timestamp: new Date().toLocaleTimeString(),
+      });
     }
   }, []);
 
@@ -257,12 +270,17 @@ export default function Page(): ReactElement {
         handleCreateSession("New Chat");
       }
       if (e.key === "Escape") {
+        // Close whatever popover is open first; only stop generation once nothing is open.
+        if (paletteOpen) return;
+        if (modelOpen) { setModelOpen(false); return; }
+        if (bellOpen) { setBellOpen(false); return; }
+        if (mobileMenuOpen) { setMobileMenuOpen(false); return; }
         handleStop();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [handleCreateSession, handleStop]);
+  }, [handleCreateSession, handleStop, paletteOpen, modelOpen, bellOpen, mobileMenuOpen]);
 
   // Apply the persisted accent color after mount, so the first client render matches
   // the server-rendered HTML (avoids a hydration mismatch) before diverging to the saved value.
@@ -274,11 +292,6 @@ export default function Page(): ReactElement {
   // Sync details on boot
   useEffect(() => {
     const init = async () => {
-      const status = await fetchJson("/api/status") as { launch_id?: string; desktop_control_enabled?: boolean } | null;
-      const lid = status && typeof status.launch_id === "string" ? status.launch_id : "";
-      if (lid) setLaunchId(lid);
-      setDesktopControlEnabled(Boolean(status?.desktop_control_enabled));
-
       if (!useCharlieStore.getState().currentSessionId) {
         const storedLastSid = typeof window !== "undefined" ? window.localStorage.getItem("charlie_last_session") : null;
         const existingSessions = await fetchSessions();
@@ -309,7 +322,7 @@ export default function Page(): ReactElement {
       // activeModel/visionModel are populated by the /api/config poll effect above.
     };
     void init();
-  }, [fetchSessions, fetchAgents, handleCreateSession, setAudio, setMic, fetchJson, setLaunchId, setDesktopControlEnabled, setCurrentSessionId]);
+  }, [fetchSessions, fetchAgents, handleCreateSession, setAudio, setMic, fetchJson, setCurrentSessionId]);
 
   // Sync active sessions
   useEffect(() => {
@@ -398,7 +411,7 @@ export default function Page(): ReactElement {
   const handleExportHistory = useCallback(async () => {
     try {
       const res = await fetch("/api/history?limit=1000");
-      if (!res.ok) return;
+      if (!res.ok) throw new Error("export request failed");
       const data = await res.json();
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
@@ -408,7 +421,11 @@ export default function Page(): ReactElement {
       a.click();
       URL.revokeObjectURL(url);
     } catch {
-      // ignore
+      useCharlieStore.getState().addAlert({
+        severity: "error",
+        message: "History export failed -- backend unreachable.",
+        timestamp: new Date().toLocaleTimeString(),
+      });
     }
   }, []);
 
@@ -431,8 +448,13 @@ export default function Page(): ReactElement {
         body: JSON.stringify({ title }),
       });
       if (res.ok) await fetchSessions();
+      else throw new Error("rename request failed");
     } catch {
-      // ignore
+      useCharlieStore.getState().addAlert({
+        severity: "error",
+        message: "Failed to rename chat -- backend unreachable.",
+        timestamp: new Date().toLocaleTimeString(),
+      });
     }
   };
 
@@ -445,9 +467,15 @@ export default function Page(): ReactElement {
           const remaining = updated.filter((s) => s.id !== id);
           setCurrentSessionId(remaining.length > 0 ? remaining[0].id : "");
         }
+      } else {
+        throw new Error("delete request failed");
       }
     } catch {
-      // ignore
+      useCharlieStore.getState().addAlert({
+        severity: "error",
+        message: "Failed to delete chat -- backend unreachable.",
+        timestamp: new Date().toLocaleTimeString(),
+      });
     }
   }, [fetchSessions, currentSessionId, setCurrentSessionId]);
 
@@ -477,10 +505,18 @@ export default function Page(): ReactElement {
             message: `Engine core successfully reloaded with model ${modelId}.`,
             timestamp: new Date().toLocaleTimeString(),
           });
+        } else {
+          throw new Error("reload request failed");
         }
+      } else {
+        throw new Error("config save failed");
       }
     } catch {
-      // ignore
+      useCharlieStore.getState().addAlert({
+        severity: "error",
+        message: `Failed to switch to model ${modelId} -- backend unreachable.`,
+        timestamp: new Date().toLocaleTimeString(),
+      });
     } finally {
       setReloadingModel(false);
     }

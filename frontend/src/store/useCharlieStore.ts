@@ -121,7 +121,6 @@ interface CharlieState {
   // the live in-flight version only, wiped on response_done).
   executionTraces: Record<string, ToolActivityEntry[]>;
   setExecutionTraces: (traces: Record<string, ToolActivityEntry[]>) => void;
-  launchId: string;
   accentColor: string;
 
   setConnected: (c: boolean) => void;
@@ -144,7 +143,6 @@ interface CharlieState {
   clearToolActivity: () => void;
   upsertAgentRun: (patch: Partial<AgentRun> & { agentId: string }) => void;
   setAgentRuns: (runs: AgentRun[]) => void;
-  setLaunchId: (id: string) => void;
   setAccentColor: (color: string) => void;
   activeProposal: RecoveryProposal | null;
   setActiveProposal: (p: RecoveryProposal | null) => void;
@@ -152,8 +150,6 @@ interface CharlieState {
   setActiveToolApproval: (r: ToolApprovalRequest | null) => void;
   latestDesktopFrame: DesktopFrame | null;
   setLatestDesktopFrame: (f: DesktopFrame | null) => void;
-  desktopControlEnabled: boolean;
-  setDesktopControlEnabled: (enabled: boolean) => void;
   selectedFileContent: string;
   setSelectedFileContent: (content: string) => void;
   activeModel: string;
@@ -180,7 +176,6 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   toolActivity: [],
   agentRuns: [],
   executionTraces: {},
-  launchId: "",
   // Always starts at the default; the persisted value (if any) is applied after mount
   // (see page.tsx) so the first client render matches the server-rendered HTML.
   accentColor: "#a855f7",
@@ -238,7 +233,6 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   // Bulk replace on hydrate from /api/agents; upsertAgentRun handles live WS updates.
   setAgentRuns: (agentRuns) => set({ agentRuns }),
   setExecutionTraces: (executionTraces) => set({ executionTraces }),
-  setLaunchId: (launchId) => set({ launchId }),
   setAccentColor: (color) => set(() => {
     if (typeof window !== "undefined") {
       localStorage.setItem("charlie_accent", color);
@@ -252,8 +246,6 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setActiveToolApproval: (activeToolApproval) => set({ activeToolApproval }),
   latestDesktopFrame: null,
   setLatestDesktopFrame: (latestDesktopFrame) => set({ latestDesktopFrame }),
-  desktopControlEnabled: false,
-  setDesktopControlEnabled: (desktopControlEnabled) => set({ desktopControlEnabled }),
   selectedFileContent: "",
   setSelectedFileContent: (selectedFileContent) => set({ selectedFileContent }),
   activeModel: "",

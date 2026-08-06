@@ -193,13 +193,6 @@ describe("useCharlieStore", () => {
       s.setLatestDesktopFrame(null);
       expect(useCharlieStore.getState().latestDesktopFrame).toBeNull();
     });
-
-    it("tracks the desktop-control-enabled flag", () => {
-      const s = useCharlieStore.getState();
-      expect(s.desktopControlEnabled).toBe(false);
-      s.setDesktopControlEnabled(true);
-      expect(useCharlieStore.getState().desktopControlEnabled).toBe(true);
-    });
   });
 
   describe("tool approval requests", () => {
