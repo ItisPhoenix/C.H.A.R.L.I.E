@@ -119,32 +119,32 @@ function StepperEntries({ entries }: { entries: ToolActivityEntry[] }): ReactEle
 
         let bullet = <Circle className="w-3 h-3 text-purple-400 fill-purple-400/20 animate-pulse absolute -left-[6.5px]" />;
         if (isResult) {
-          bullet = <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 fill-black absolute -left-[7px]" />;
+          bullet = <CheckCircle2 className="w-3.5 h-3.5 text-status-success fill-black absolute -left-[7px]" />;
         } else if (t.kind === "thinking_update") {
-          bullet = <Circle className="w-3 h-3 text-cyan-400 fill-cyan-400/20 animate-pulse absolute -left-[6.5px]" />;
+          bullet = <Circle className="w-3 h-3 text-status-listening fill-status-listening/20 animate-pulse absolute -left-[6.5px]" />;
         } else if (t.kind === "agent_spawned") {
           bullet = <Circle className="w-3 h-3 text-indigo-400 fill-indigo-400/20 animate-pulse absolute -left-[6.5px]" />;
         } else if (t.kind === "agent_status") {
-          bullet = <Circle className="w-3 h-3 text-amber-400 fill-amber-400/20 animate-pulse absolute -left-[6.5px]" />;
+          bullet = <Circle className="w-3 h-3 text-status-warning fill-status-warning/20 animate-pulse absolute -left-[6.5px]" />;
         } else if (isAgentResult) {
           bullet = agentFailed
-            ? <XCircle className="w-3.5 h-3.5 text-red-400 fill-black absolute -left-[7px]" />
-            : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 fill-black absolute -left-[7px]" />;
+            ? <XCircle className="w-3.5 h-3.5 text-status-error fill-black absolute -left-[7px]" />
+            : <CheckCircle2 className="w-3.5 h-3.5 text-status-success fill-black absolute -left-[7px]" />;
         }
 
         const labelClass = isCall
           ? "bg-purple-950/60 text-purple-300"
           : isResult
-            ? "bg-emerald-950/60 text-emerald-300"
+            ? "bg-status-success/10 text-status-success"
             : t.kind === "thinking_update"
-              ? "bg-cyan-950/60 text-cyan-300"
+              ? "bg-status-listening/10 text-status-listening"
               : t.kind === "agent_spawned"
                 ? "bg-indigo-950/60 text-indigo-300"
                 : t.kind === "agent_status"
-                  ? "bg-amber-950/60 text-amber-300"
+                  ? "bg-status-warning/10 text-status-warning"
                   : agentFailed
-                    ? "bg-red-950/60 text-red-300"
-                    : "bg-emerald-950/60 text-emerald-300";
+                    ? "bg-status-error/10 text-status-error"
+                    : "bg-status-success/10 text-status-success";
         const label = t.kind.startsWith("agent_") ? t.kind.replace("agent_", "agent ") : t.kind.replace("tool_", "");
 
         return (
@@ -300,7 +300,7 @@ export function ChatView({
         <span className="flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-slate-400">
           <span
             className={`w-2 h-2 rounded-full ${
-              connected ? "bg-cyan-400 animate-pulse" : "bg-red-500"
+              connected ? "bg-status-listening animate-pulse" : "bg-status-error"
             }`}
             aria-hidden="true"
           />
@@ -363,8 +363,8 @@ export function ChatView({
                 {m.content ? formatMessageContent(m.content) : (isUser ? "" : <TypingDots />)}
               </div>
               {isQueued && (
-                <span className="text-[10px] text-amber-400 font-mono mt-1 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                <span className="text-[10px] text-status-warning font-mono mt-1 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-status-warning animate-pulse" />
                   Queued -- waiting for current reply to finish
                 </span>
               )}
@@ -388,12 +388,12 @@ export function ChatView({
               </p>
               
               <div className="space-y-2 mb-4 font-mono text-[11px]">
-                <div className="p-2.5 rounded bg-red-950/20 border border-red-500/10 text-red-200">
-                  <span className="text-[10px] uppercase font-bold text-red-400 block mb-1">Error Command</span>
+                <div className="p-2.5 rounded bg-status-error/10 border border-status-error/10 text-red-200">
+                  <span className="text-[10px] uppercase font-bold text-status-error block mb-1">Error Command</span>
                   {activeProposal.original_command}
                 </div>
-                <div className="p-2.5 rounded bg-emerald-950/20 border border-emerald-500/10 text-emerald-200">
-                  <span className="text-[10px] uppercase font-bold text-emerald-400 block mb-1">Proposed Fix</span>
+                <div className="p-2.5 rounded bg-status-success/10 border border-status-success/10 text-emerald-200">
+                  <span className="text-[10px] uppercase font-bold text-status-success block mb-1">Proposed Fix</span>
                   {activeProposal.proposed_command}
                 </div>
                 {activeProposal.explanation && (
@@ -408,7 +408,7 @@ export function ChatView({
                 <div className="flex items-center gap-1.5">
                   <span
                     className={`w-1.5 h-1.5 rounded-full ${
-                      activeProposal.safeguard_passed ? "bg-emerald-400" : "bg-red-400"
+                      activeProposal.safeguard_passed ? "bg-status-success" : "bg-status-error"
                     }`}
                   />
                   <span className="text-[10px] text-slate-500 font-mono">
@@ -443,8 +443,8 @@ export function ChatView({
         {/* Inline Tool Approval Request */}
         {activeToolApproval && onApproveTool && onRejectTool && (
           <div className="flex justify-start animate-[rise_0.25s_ease-out] my-3">
-            <div className="w-full max-w-xl rounded-xl border border-amber-500/35 bg-amber-950/15 backdrop-blur-md p-4">
-              <div className="flex items-center gap-2 mb-2 text-amber-400">
+            <div className="w-full max-w-xl rounded-xl border border-status-warning/35 bg-status-warning-dim backdrop-blur-md p-4">
+              <div className="flex items-center gap-2 mb-2 text-status-warning">
                 <ShieldAlert className="w-4 h-4 shrink-0" />
                 <h4 className="font-display text-xs font-bold uppercase tracking-wider">
                   OS Security Confirmation Required
@@ -460,7 +460,7 @@ export function ChatView({
                   {activeToolApproval.tool_name}
                 </div>
                 {activeToolApproval.reason && (
-                  <div className="p-2.5 rounded bg-zinc-900 border border-white/5 text-amber-300">
+                  <div className="p-2.5 rounded bg-zinc-900 border border-white/5 text-status-warning">
                     <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Reason</span>
                     {activeToolApproval.reason}
                   </div>
@@ -488,7 +488,7 @@ export function ChatView({
                     onApproveTool(activeToolApproval.request_id);
                     useCharlieStore.getState().setActiveToolApproval(null);
                   }}
-                  className="px-3 py-1.5 rounded-lg bg-amber-500 text-black text-xs font-semibold cursor-pointer hover:bg-amber-400 transition active:scale-[0.98]"
+                  className="px-3 py-1.5 rounded-lg bg-status-warning text-black text-xs font-semibold cursor-pointer hover:bg-status-warning/80 transition active:scale-[0.98]"
                 >
                   Approve & Run
                 </button>

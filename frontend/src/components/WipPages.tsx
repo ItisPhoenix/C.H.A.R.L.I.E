@@ -181,7 +181,7 @@ export function HardwareView(): ReactElement {
             </div>
             <div className="flex justify-between">
               <span>DESKTOP CONTROL STATE</span>
-              <span className={liveStatus.desktop_control_enabled ? "text-emerald-400" : "text-slate-500"}>
+              <span className={liveStatus.desktop_control_enabled ? "text-status-success" : "text-status-idle"}>
                 {liveStatus.desktop_control_enabled ? "ENABLED" : "DISABLED"}
               </span>
             </div>
@@ -197,7 +197,7 @@ export function HardwareView(): ReactElement {
           <div className="space-y-2.5 font-mono text-xs text-slate-400">
             <div className="flex justify-between">
               <span>HTTP API PING LATENCY</span>
-              <span className="text-emerald-400 font-bold">{ping !== null ? `${ping} ms` : "Measuring..."}</span>
+              <span className="text-status-success font-bold">{ping !== null ? `${ping} ms` : "Measuring..."}</span>
             </div>
             <div className="flex justify-between">
               <span>SCREEN RESOLUTION</span>
@@ -381,7 +381,7 @@ export function FilesView(): ReactElement {
         </div>
       )}
 
-      {error && <p className="text-xs text-red-400 font-mono">{error}</p>}
+      {error && <p className="text-xs text-status-error font-mono">{error}</p>}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Workspace Tree */}
@@ -548,8 +548,8 @@ export function ServicesView(): ReactElement {
                 <span
                   className={`text-[10px] uppercase font-bold font-mono px-1.5 py-0.5 rounded border ${
                     s.status === "online"
-                      ? "text-emerald-400 bg-emerald-950/40 border-emerald-500/20"
-                      : "text-slate-500 bg-zinc-950/60 border-white/10"
+                      ? "text-status-success bg-status-success-dim border-status-success/20"
+                      : "text-status-idle bg-zinc-950/60 border-white/10"
                   }`}
                 >
                   {s.status}
@@ -690,14 +690,14 @@ export function OllamaView(): ReactElement {
         </Button>
       </div>
 
-      <div className={`rounded-xl border p-4 space-y-1 font-mono text-xs ${data.activeIsLocal ? "border-emerald-500/30 bg-emerald-500/5" : "border-amber-500/30 bg-amber-500/5"}`}>
+      <div className={`rounded-xl border p-4 space-y-1 font-mono text-xs ${data.activeIsLocal ? "border-status-success/30 bg-status-success/5" : "border-status-warning/30 bg-status-warning/5"}`}>
         <span className="text-[10px] uppercase tracking-wider block font-bold text-slate-500">Charlie&apos;s Active LLM</span>
         {data.activeIsLocal ? (
-          <p className="text-emerald-400">
+          <p className="text-status-success">
             <span className="font-bold">{data.activeModel}</span> -- serving from a local endpoint below.
           </p>
         ) : (
-          <p className="text-amber-400">
+          <p className="text-status-warning">
             <span className="font-bold">{data.activeModel || "(not configured)"}</span> -- not one of the local endpoints below (cloud/remote LLM_URL, or no local server matches this name).
           </p>
         )}
@@ -717,7 +717,7 @@ export function OllamaView(): ReactElement {
             {pulling ? "Pulling..." : "Pull"}
           </Button>
         </div>
-        {error && <p className="text-red-400">{error}</p>}
+        {error && <p className="text-status-error">{error}</p>}
       </div>
 
       <div className="rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-4 font-mono text-xs text-slate-400">
@@ -727,9 +727,9 @@ export function OllamaView(): ReactElement {
             <div key={ep.name} className="flex justify-between items-center">
               <span className="text-slate-300">{ep.name} <span className="text-slate-500">({ep.url})</span></span>
               {ep.reachable ? (
-                <span className="text-emerald-400 font-bold">REACHABLE -- {ep.latency_ms}ms</span>
+                <span className="text-status-success font-bold">REACHABLE -- {ep.latency_ms}ms</span>
               ) : (
-                <span className="text-amber-400 font-bold">UNREACHABLE</span>
+                <span className="text-status-warning font-bold">UNREACHABLE</span>
               )}
             </div>
           ))}
@@ -749,10 +749,10 @@ export function OllamaView(): ReactElement {
               {data.models.map((m, i) => (
                 <div
                   key={i}
-                  className={`px-3 py-1.5 rounded-lg border flex items-center gap-2 ${m.active ? "bg-emerald-500/10 border-emerald-500/40" : "bg-zinc-900 border-white/10"}`}
+                  className={`px-3 py-1.5 rounded-lg border flex items-center gap-2 ${m.active ? "bg-status-success/10 border-status-success/40" : "bg-zinc-900 border-white/10"}`}
                 >
                   {m.active && (
-                    <span className="text-[9px] text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded font-mono font-bold uppercase">In use</span>
+                    <span className="text-[9px] text-status-success bg-status-success/10 px-1.5 py-0.5 rounded font-mono font-bold uppercase">In use</span>
                   )}
                   <span className="text-cyan-300 font-bold text-xs">{m.name}</span>
                   <span className="text-[10px] text-slate-500 bg-white/5 px-1.5 py-0.5 rounded font-mono">{m.source}</span>
@@ -988,7 +988,7 @@ export function ExtensionsView({ kindFilter }: ExtensionsViewProps = {}): ReactE
           rows={3}
           className="w-full bg-zinc-950 border border-white/10 rounded-lg px-2 py-1.5 text-slate-200 placeholder:text-slate-600"
         />
-        {error && <p className="text-red-400">{error}</p>}
+        {error && <p className="text-status-error">{error}</p>}
         <Button onClick={handlePropose} disabled={!name}>
           <Plus className="w-3.5 h-3.5" />
           Propose Install
@@ -996,13 +996,13 @@ export function ExtensionsView({ kindFilter }: ExtensionsViewProps = {}): ReactE
       </div>
 
       {pending && (
-        <div className="rounded-xl border border-amber-500/30 p-4 bg-amber-950/10 space-y-3 font-mono text-xs">
-          <span className="text-[10px] text-amber-400 uppercase tracking-wider block font-bold">Approve Install</span>
+        <div className="rounded-xl border border-status-warning/30 p-4 bg-status-warning-dim space-y-3 font-mono text-xs">
+          <span className="text-[10px] text-status-warning uppercase tracking-wider block font-bold">Approve Install</span>
           <pre className="whitespace-pre-wrap text-slate-300">{pending.skill_card}</pre>
           {pending.warnings.length > 0 && (
             <div className="space-y-1">
               {pending.warnings.map((w, i) => (
-                <p key={i} className="text-amber-400 flex items-center gap-1.5">
+                <p key={i} className="text-status-warning flex items-center gap-1.5">
                   <AlertCircle className="w-3.5 h-3.5 shrink-0" /> {w}
                 </p>
               ))}
@@ -1032,8 +1032,8 @@ export function ExtensionsView({ kindFilter }: ExtensionsViewProps = {}): ReactE
                 <span
                   className={`text-[10px] uppercase font-bold font-mono px-1.5 py-0.5 rounded border ${
                     ext.enabled
-                      ? "text-emerald-400 bg-emerald-950/40 border-emerald-500/20"
-                      : "text-slate-500 bg-zinc-950/60 border-white/10"
+                      ? "text-status-success bg-status-success-dim border-status-success/20"
+                      : "text-status-idle bg-zinc-950/60 border-white/10"
                   }`}
                 >
                   {ext.enabled ? "enabled" : "disabled"}
@@ -1071,10 +1071,10 @@ export function SkillsView(): ReactElement {
 }
 
 const AGENT_STATUS_STYLE: Record<AgentRun["status"], { icon: typeof Circle; className: string; label: string }> = {
-  running: { icon: Circle, className: "text-cyan-400 fill-cyan-400/20 animate-pulse", label: "running" },
-  done: { icon: CheckCircle2, className: "text-emerald-400 fill-black", label: "done" },
-  timeout: { icon: Clock, className: "text-amber-400", label: "timed out" },
-  cancelled: { icon: XCircle, className: "text-slate-500", label: "cancelled" },
+  running: { icon: Circle, className: "text-status-listening fill-status-listening/20 animate-pulse", label: "running" },
+  done: { icon: CheckCircle2, className: "text-status-success fill-black", label: "done" },
+  timeout: { icon: Clock, className: "text-status-warning", label: "timed out" },
+  cancelled: { icon: XCircle, className: "text-status-idle", label: "cancelled" },
 };
 
 function AgentRunCard({ run, onCancel }: { run: AgentRun; onCancel: (agentId: string) => void }): ReactElement {
@@ -1234,8 +1234,8 @@ export function MCPCenterView(): ReactElement {
                   <span
                     className={`text-[10px] uppercase font-bold font-mono px-1.5 py-0.5 rounded border ${
                       status.connected
-                        ? "text-emerald-400 bg-emerald-950/40 border-emerald-500/20"
-                        : "text-slate-500 bg-zinc-950/60 border-white/10"
+                        ? "text-status-success bg-status-success-dim border-status-success/20"
+                        : "text-status-idle bg-zinc-950/60 border-white/10"
                     }`}
                   >
                     {status.connected ? "connected" : "disconnected"}

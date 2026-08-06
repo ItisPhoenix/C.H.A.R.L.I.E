@@ -80,8 +80,8 @@ export function InsightRail(): ReactElement {
       
       {/* Queue: main.py's pending_turns -- utterances waiting behind an already-running turn */}
       {queue.count > 0 && (
-        <div className="rounded-xl border border-amber-500/25 p-3.5 bg-amber-500/5">
-          <span className="w-full flex items-center gap-1.5 text-[10px] font-bold text-amber-400 uppercase tracking-widest">
+        <div className="rounded-xl border border-status-warning/25 p-3.5 bg-status-warning/5">
+          <span className="w-full flex items-center gap-1.5 text-[10px] font-bold text-status-warning uppercase tracking-widest">
             <ListOrdered className="w-3.5 h-3.5" />
             Queued ({queue.count})
           </span>
@@ -122,7 +122,7 @@ export function InsightRail(): ReactElement {
                 >
                   <span
                     className={`mt-1 w-1.5 h-1.5 rounded-full shrink-0 ${
-                      idx === 0 ? "bg-emerald-400" : "bg-slate-700"
+                      idx === 0 ? "bg-status-success" : "bg-slate-700"
                     }`}
                   />
                   <div className="min-w-0 flex-1 font-mono text-[10px]">
@@ -162,7 +162,7 @@ export function InsightRail(): ReactElement {
                 className="flex items-center justify-between p-2 rounded-lg bg-zinc-950/60 border border-white/5 font-mono text-xs"
               >
                 <div className="flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-status-success" />
                   <span className="text-slate-300 font-bold capitalize">{server.name}</span>
                 </div>
                 <span className="text-[10px] text-slate-400 font-bold bg-white/5 px-2 py-0.5 rounded">
@@ -195,7 +195,7 @@ export function InsightRail(): ReactElement {
             </div>
             <div className="flex justify-between items-center p-2 rounded-lg bg-zinc-950/60 border border-white/5 text-[10px]">
               <span>VISION MODEL</span>
-              <span className={`font-bold truncate max-w-[160px] ${visionModel ? "text-emerald-400" : "text-slate-500"}`}>
+              <span className={`font-bold truncate max-w-[160px] ${visionModel ? "text-status-success" : "text-status-idle"}`}>
                 {visionModel || "NOT CONFIGURED"}
               </span>
             </div>
