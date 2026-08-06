@@ -302,6 +302,12 @@ class Config:
         default=os.getenv("DESKTOP_CONTROL_ENABLED", "false").lower() == "true",
         metadata=_meta("DESKTOP_CONTROL_ENABLED", "Desktop Control", restart="reload"),
     )
+    # Independent of desktop_control_enabled -- lets the dashboard live-frame feed be
+    # turned off (privacy) without disabling desktop control tools themselves.
+    desktop_frame_capture_enabled: bool = field(
+        default=os.getenv("DESKTOP_FRAME_CAPTURE_ENABLED", "true").lower() == "true",
+        metadata=_meta("DESKTOP_FRAME_CAPTURE_ENABLED", "Desktop Control", restart="reload"),
+    )
     # Read once into a pynput GlobalHotKeys listener at Brain construction -- needs a full restart to re-arm.
     desktop_panic_hotkey: str = field(
         default=os.getenv("DESKTOP_PANIC_HOTKEY", "ctrl+alt+q"),

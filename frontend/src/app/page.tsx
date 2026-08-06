@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState, useMemo, type ReactElement } from "react";
 import { useRouter } from "next/navigation";
-import { Monitor } from "lucide-react";
 import { useCharlieStore, rgba, type Session, type Message, type AgentRun, type ToolActivityEntry } from "../store/useCharlieStore";
 import { useCharlieSocket } from "../hooks/useCharlieSocket";
 import { ErrorBoundary } from "../components/ErrorBoundary";
@@ -14,6 +13,7 @@ import { EventLog } from "../components/EventLog";
 import { VoiceDock } from "../components/VoiceDock";
 import { TopBar } from "../components/TopBar";
 import { Sidebar } from "../components/Sidebar";
+import { DesktopFrameView } from "../components/DesktopFrameView";
 import {
   MemoriesView, HardwareView, FilesView, ServicesView, OllamaView, ExtensionsView, SkillsView, AgentsView, MCPCenterView
 } from "../components/WipPages";
@@ -593,17 +593,7 @@ export default function Page(): ReactElement {
             {activePage === "agents" && <AgentsView />}
             {activePage === "mcp" && <MCPCenterView />}
             
-            {activePage === "desktop" && (
-              <div className="flex-1 bg-zinc-950 p-6 flex flex-col overflow-y-auto scrollbar animate-[rise_0.2s_ease-out]">
-                <div className="border-b border-white/5 pb-3 mb-6">
-                  <h2 className="font-display text-xl font-bold uppercase tracking-wide flex items-center gap-2">
-                    <Monitor className="w-5 h-5 text-slate-400" />
-                    Desktop control live feed
-                  </h2>
-                </div>
-                <InsightRail />
-              </div>
-            )}
+            {activePage === "desktop" && <DesktopFrameView />}
           </div>
         </div>
 

@@ -1461,7 +1461,7 @@ def _emit_desktop_frame(png_bytes: bytes, elements: List[Any]) -> None:
     the dashboard's "Watch It Drive" live view. Never raises -- a failure
     here must not affect the calling tool's return value."""
     global _last_frame_emit_at
-    if _event_bus is None or _event_loop is None:
+    if _event_bus is None or _event_loop is None or not config.desktop_frame_capture_enabled:
         return
     now = time.time()
     if now - _last_frame_emit_at < 1.0 / _DESKTOP_FRAME_FPS:
