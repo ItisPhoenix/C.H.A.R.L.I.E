@@ -156,6 +156,10 @@ interface CharlieState {
   setDesktopControlEnabled: (enabled: boolean) => void;
   selectedFileContent: string;
   setSelectedFileContent: (content: string) => void;
+  activeModel: string;
+  setActiveModel: (model: string) => void;
+  visionModel: string;
+  setVisionModel: (model: string) => void;
 }
 
 export const useCharlieStore = create<CharlieState>((set) => ({
@@ -252,6 +256,10 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setDesktopControlEnabled: (desktopControlEnabled) => set({ desktopControlEnabled }),
   selectedFileContent: "",
   setSelectedFileContent: (selectedFileContent) => set({ selectedFileContent }),
+  activeModel: "",
+  setActiveModel: (activeModel) => set({ activeModel }),
+  visionModel: "",
+  setVisionModel: (visionModel) => set({ visionModel }),
 }));
 
 export function hexToRgb(hex: string) {

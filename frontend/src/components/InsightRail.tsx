@@ -6,20 +6,16 @@ import {
 } from "lucide-react";
 import { useCharlieStore, rgba, groupMcpTools, type McpToolLike } from "../store/useCharlieStore";
 
-interface ConfigField {
-  key: string;
-  value: unknown;
-}
-
 export function InsightRail(): ReactElement {
   const accentColor = useCharlieStore((s) => s.accentColor);
   const toolActivity = useCharlieStore((s) => s.toolActivity);
   const queue = useCharlieStore((s) => s.queue);
+  // Active model/vision model: single source of truth is page.tsx's poll
+  // (always mounted, unlike this panel) writing into the store -- see
+  // CLAUDE.md 8.5 / execution_plan.md's "duplicate activeModel source" note.
+  const configModel = useCharlieStore((s) => s.activeModel);
+  const visionModel = useCharlieStore((s) => s.visionModel);
 
-  // Active Model config representation
-  const [configModel, setConfigModel] = useState("");
-  const [visionModel, setVisionModel] = useState("");
-  
   // Registered tools list -- toolsLoaded distinguishes "not fetched yet" from
   // "fetched, zero tools" so the panel doesn't render (0) while still loading.
   const [mcpTools, setMcpTools] = useState<McpToolLike[]>([]);
@@ -36,9 +32,9 @@ export function InsightRail(): ReactElement {
     setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  // Fetch registered tools (full registry, not just MCP) & model config,
-  // then keep polling -- both can change while the dashboard is open
-  // (extension installs, config edits), unlike a mount-only fetch.
+  // Fetch registered tools (full registry, not just MCP), then keep polling --
+  // can change while the dashboard is open (extension installs), unlike a
+  // mount-only fetch.
   useEffect(() => {
     async function fetchData() {
       try {
@@ -47,15 +43,6 @@ export function InsightRail(): ReactElement {
           const data = await rTools.json();
           if (data.tools) setMcpTools(data.tools);
           setToolsLoaded(true);
-        }
-        const rConfig = await fetch("/api/config");
-        if (rConfig.ok) {
-          const data = await rConfig.json() as { fields?: ConfigField[] };
-          const fields = data.fields || [];
-          const llm = fields.find((f) => f.key === "LLM_MODEL");
-          const vision = fields.find((f) => f.key === "VISION_LLM_MODEL");
-          if (llm?.value) setConfigModel(String(llm.value));
-          if (vision?.value) setVisionModel(String(vision.value));
         }
       } catch {
         // ignore
