@@ -1694,11 +1694,7 @@ class Brain:
                     resp.raise_for_status()
                     result = resp.json()["choices"][0]["message"]["content"]
 
-                # The LLM is asked to return ONLY section-sign-delimited entries, but
-                # nothing enforces that -- a model that adds prose/markdown fences or
-                # returns empty/oversized output would otherwise silently destroy the
-                # real memory content on write. Validate and normalize before touching
-                # the file, and keep a one-step-back backup so a bad pass is recoverable.
+                # Nothing enforces the "§-delimited entries only" rule -- validate before writing, keep a .bak.
                 cleaned = result.strip()
                 if cleaned.startswith("```"):
                     cleaned = cleaned.strip("`")
@@ -1713,11 +1709,7 @@ class Brain:
                         target, len(result),
                     )
                     continue
-                # A real consolidation of >1 entries essentially never collapses to
-                # exactly one entry with no separator in the raw text -- that shape
-                # is the signature of a model ignoring the format instruction and
-                # returning prose (e.g. "Sure! Here is a summary..."), which
-                # _parse_memory_entries would otherwise accept as one giant entry.
+                # >1 entries collapsing to one with no separator signals a model returning prose, not the format.
                 if len(entries) > 1 and _MEMORY_SEP not in cleaned:
                     logger.warning(
                         "Skipping %s consolidation: LLM returned prose with no §-delimited entries",

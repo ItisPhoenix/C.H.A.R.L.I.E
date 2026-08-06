@@ -43,16 +43,12 @@ const STATE_RGB: Record<VoiceState, [number, number, number]> = {
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
-// Draw-call batching: quantize each point/edge's alpha into one of these
-// tiers so the whole tier paints as a single path instead of one canvas
-// call per item. Depth ordering is approximate within a tier -- fine for a
-// decorative orb, and the real cost saving that fixes the frame lag.
+// Quantize alpha into tiers so each tier paints as one path instead of one canvas call per item -- the real fix for the frame lag.
 const ALPHA_BUCKETS = 6;
 const bucketIndex = (alpha: number, max: number): number =>
   Math.min(ALPHA_BUCKETS - 1, Math.max(0, Math.floor((alpha / max) * ALPHA_BUCKETS)));
 
-/** Fibonacci-spiral sphere -- evenly distributed points via the golden angle,
- * cheaper and more uniform than random spherical sampling. */
+/** Fibonacci-spiral sphere -- evenly distributed points via the golden angle. */
 function buildSphere(count: number): Point3[] {
   const points: Point3[] = [];
   const golden = Math.PI * (3 - Math.sqrt(5));
@@ -67,8 +63,7 @@ function buildSphere(count: number): Point3[] {
 
 const SPHERE = buildSphere(PARTICLE_COUNT);
 
-/** Connect each point to its K nearest neighbors -- gives the wireframe/constellation
- * look (edges precomputed once from fixed sphere topology, cheap even at O(n^2)). */
+/** Connect each point to its K nearest neighbors -- gives the wireframe/constellation look. */
 function buildEdges(points: Point3[], k: number): [number, number][] {
   const edges: [number, number][] = [];
   const seen = new Set<string>();
@@ -93,8 +88,7 @@ function buildEdges(points: Point3[], k: number): [number, number][] {
   return edges;
 }
 
-/** Deterministic PRNG (mulberry32) -- same tangled-chord layout every load,
- * no Math.random() jitter between renders. */
+/** Deterministic PRNG (mulberry32) -- same tangled-chord layout every load. */
 function mulberry32(seed: number): () => number {
   let a = seed;
   return () => {
@@ -106,8 +100,7 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-/** Long random chords through the sphere's interior -- this is what gives the
- * reference "tangled energy" look instead of a clean geodesic wireframe. */
+/** Long random chords through the sphere's interior -- gives the tangled-energy look instead of a clean geodesic wireframe. */
 function buildChords(count: number, total: number): [number, number][] {
   const rand = mulberry32(1337);
   const chords: [number, number][] = [];
@@ -119,9 +112,7 @@ function buildChords(count: number, total: number): [number, number][] {
 
 const EDGES = [...buildEdges(SPHERE, NEIGHBORS_PER_POINT), ...buildChords(220, PARTICLE_COUNT)];
 
-/** Ambient orb centerpiece -- hand-rolled Canvas 2D + rAF, zero new deps.
- * Rotation speed/turbulence/pulse all derive from voiceState + live audioLevel,
- * so the orb visibly reacts to the same signal driving VoiceDock's bars. */
+/** Ambient orb centerpiece -- hand-rolled Canvas 2D + rAF, driven by voiceState + live audioLevel. */
 function Orb(): ReactElement {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const voiceState = useCharlieStore((s) => s.voiceState);
@@ -176,9 +167,7 @@ function Orb(): ReactElement {
 
       const idleBreath = state === "idle" ? Math.sin(time * 0.6) * 0.02 : 0;
       const targetSpeed = state === "thinking" ? 0.024 : state === "idle" ? 0.003 : 0.01;
-      // Small on purpose -- this perturbs each point's individual depth, so it
-      // must stay well under the ~1.6 baseline or the projected sphere warps
-      // into a bell/diamond shape instead of shimmering.
+      // Small on purpose -- must stay well under the ~1.6 depth baseline or the sphere warps into a bell/diamond shape.
       const targetTurbulence = state === "thinking" ? 0.05 + Math.sin(time * 2.2) * 0.015 : 0;
       // Speaking breathes bigger and faster than listening's tighter attentive pulse.
       const targetPulse =
@@ -200,8 +189,7 @@ function Orb(): ReactElement {
 
       ctx.clearRect(0, 0, width, height);
 
-      // Speaking gets a soft amplitude-driven halo behind the particles -- the
-      // clearest visual tell that Charlie is actively talking, not just listening.
+      // Speaking gets a soft amplitude-driven halo -- the clearest visual tell it's talking, not just listening.
       if (state === "speaking") {
         const haloR = radius * (1.15 + level * 0.25);
         const gradient = ctx.createRadialGradient(cx, cy, radius * 0.4, cx, cy, haloR);
@@ -211,8 +199,7 @@ function Orb(): ReactElement {
         ctx.fillRect(0, 0, width, height);
       }
 
-      // Outer scan ring -- one smooth dashed circle instead of 48 separate
-      // segments, so it reads as a clean rotating HUD ring, not a flicker.
+      // Outer scan ring -- one smooth dashed circle instead of 48 separate segments (was flickery).
       ctx.globalCompositeOperation = "source-over";
       ctx.save();
       ctx.translate(cx, cy);
@@ -226,10 +213,7 @@ function Orb(): ReactElement {
       ctx.setLineDash([]);
       ctx.restore();
 
-      // Project every point once so both the edge mesh and the particles share it.
-      // Turbulence phase is decorrelated per-point (uses x/y/z, not just y) so
-      // it reads as shimmer, not a synchronized wave dragging whole latitude
-      // bands out of shape.
+      // Project every point once for both mesh and particles; turbulence phase uses x/y/z (not just y) so it shimmers instead of dragging whole latitude bands out of shape.
       const projected = SPHERE.map((p) => {
         const wobble = curTurbulence
           ? Math.sin(time * 3 + p.x * 8 + p.y * 5 + p.z * 6) * curTurbulence
@@ -241,10 +225,7 @@ function Orb(): ReactElement {
         return { px: cx + rx * radius * scale, py: cy + p.y * radius * scale, scale };
       });
 
-      // Bucket into a handful of alpha tiers and draw each tier as ONE path
-      // instead of one stroke()/fill() call per edge/particle -- ~2000
-      // individual canvas calls per frame was the actual lag source (draw-call
-      // overhead dominates over geometry cost on canvas).
+      // Bucket into alpha tiers, one path per tier -- ~2000 individual canvas calls/frame was the actual lag source.
       ctx.globalCompositeOperation = "lighter";
       ctx.strokeStyle = color;
       ctx.lineWidth = 0.6;
@@ -338,46 +319,31 @@ function Orb(): ReactElement {
   );
 }
 
-/** Floating live caption -- replaces the bottom VoiceDock bar on this page.
- * Video-subtitle behavior: only visible while something is actually being
- * said, not a permanent last-message readout. Reuses the same `messages`
- * the chat view already keeps live -- no new transcript/caption plumbing
- * needed.
- *
- * "listening" is a resting armed-mic state that can persist for minutes
- * between turns (WAKE_WORD_ACTIVITY_TIMEOUT), not just the moment of an
- * utterance -- gating on voiceState alone left the last reply's caption
- * stuck on screen long after Charlie finished speaking. Also require live
- * audioLevel while listening so it hides once actual sound drops. */
-// YouTube-style live caption: only the most recent words, not the whole
-// accumulated reply -- a rolling window, not a fixed-width truncation that
-// always shows the beginning and chops off whatever's currently being said.
-const CAPTION_WORD_WINDOW = 12;
-
+// Genuinely synced: voice.py fires one speaking_start pulse per sentence with its real text, so this shows exactly what's playing.
 function Caption(): ReactElement | null {
   const voiceState = useCharlieStore((s) => s.voiceState);
   const audioLevel = useCharlieStore((s) => s.audioLevel);
-  const messages = useCharlieStore((s) => s.messages);
-  const last = messages[messages.length - 1];
-  const visible = voiceState === "speaking" || (voiceState === "listening" && audioLevel > 0.04);
-  if (!visible) return null;
-  if (!last || !last.content) return null;
+  const currentSpeechChunk = useCharlieStore((s) => s.currentSpeechChunk);
 
-  const words = last.content.trim().split(/\s+/);
-  const recentText = words.length > CAPTION_WORD_WINDOW
-    ? words.slice(-CAPTION_WORD_WINDOW).join(" ")
-    : words.join(" ");
+  // STT has no live partial transcript, only a final result -- show a plain indicator instead of stale text from the previous turn.
+  if (voiceState === "listening" && audioLevel > 0.04) {
+    return (
+      <div className="mt-4 px-5 py-2.5 rounded-full border border-white/10 bg-zinc-950/60 backdrop-blur-sm anim-rise">
+        <p className="text-xs text-slate-500 text-center font-mono uppercase tracking-wider">Listening...</p>
+      </div>
+    );
+  }
+
+  if (voiceState !== "speaking" || !currentSpeechChunk) return null;
 
   return (
     <div
-      key={last.id}
-      className="mt-4 max-w-2xl px-5 py-2.5 rounded-full border border-white/10 bg-zinc-950/60 backdrop-blur-sm anim-rise"
+      key={currentSpeechChunk}
+      className="mt-4 max-w-2xl px-5 py-2.5 rounded-2xl border border-white/10 bg-zinc-950/60 backdrop-blur-sm anim-rise"
     >
-      <p className="text-xs text-slate-300 text-center truncate">
-        <span className="text-slate-500 uppercase font-mono text-[10px] mr-2">
-          {last.role === "user" ? "You" : "Charlie"}
-        </span>
-        {recentText}
+      <p className="text-xs text-slate-300 text-center leading-relaxed">
+        <span className="text-slate-500 uppercase font-mono text-[10px] mr-2">Charlie</span>
+        {currentSpeechChunk}
       </p>
     </div>
   );
@@ -390,8 +356,7 @@ interface TileProps {
   wide?: boolean;
 }
 
-/** Bento-style tile -- most cards are 1x1, a couple of "hero" cards span both
- * columns, so the metric grid reads as a mosaic instead of a flat table. */
+/** Bento-style tile -- most are 1x1, a couple of "hero" cards span both columns for a mosaic layout. */
 function Tile({ label, value, accent, wide }: TileProps): ReactElement {
   return (
     <div className={`rounded-xl border border-white/5 bg-zinc-900/30 p-3.5 flex flex-col gap-1 min-w-0 ${wide ? "col-span-2" : ""}`}>
@@ -406,9 +371,7 @@ interface McpHealth {
   connected: boolean;
 }
 
-/** Control Center: the new default landing page. Answers "is everything OK,
- * does anything need me" in one glance -- no scrolling, no tables. Everything
- * actionable stays in CommandPalette; this page is look-only. */
+/** Control Center: default landing page, look-only -- everything actionable stays in CommandPalette. */
 export function ControlCenterView(): ReactElement {
   const connected = useCharlieStore((s) => s.connected);
   const sessions = useCharlieStore((s) => s.sessions);

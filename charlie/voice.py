@@ -33,6 +33,8 @@ _ECHO_WINDOW_SEC = 2.0
 # been enqueued. Lets the playback worker distinguish "utterance fully spoken"
 # from momentary inter-chunk queue gaps.
 _TTS_RUN_END = object()
+# Marker tag for the (marker, text) 2-tuple carrying a run's sentence text to on_tts_start (live caption sync).
+_TTS_TEXT_MARKER = object()
 # Tags a chime item in playback_queue so it skips TTS state bookkeeping.
 _CHIME_ITEM = object()
 # Silence after a barge-in stop so the cut and the next reply aren't audibly spliced together.
@@ -117,7 +119,7 @@ class VoiceEngine:
         self,
         config,
         on_speech: Callable[[str], None],
-        on_tts_start: Optional[Callable[[], None]] = None,
+        on_tts_start: Optional[Callable[[str], None]] = None,
         on_tts_stop: Optional[Callable[[], None]] = None,
     ):
         self.config = config
@@ -637,6 +639,7 @@ class VoiceEngine:
         """
         _tts_start = time.time()
         _first_chunk = True
+        self.playback_queue.put((_TTS_TEXT_MARKER, text))
         async for samples, sr in self._synth_stream(text, speed):
             if self.stop_tts_event.is_set():
                 break
@@ -654,6 +657,7 @@ class VoiceEngine:
         """Dedicated playback thread."""
         tts_started_fired = False
         just_interrupted = False
+        current_chunk_text = ""
         while not self.stop_event.is_set():
             try:
                 if self.stop_tts_event.is_set():
@@ -679,6 +683,11 @@ class VoiceEngine:
                 try:
                     item = self.playback_queue.get(timeout=0.1)
                 except queue.Empty:
+                    continue
+
+                # 2-tuple text marker (see _TTS_TEXT_MARKER) -- stash it, no audio to play yet.
+                if isinstance(item, tuple) and len(item) == 2 and item[0] is _TTS_TEXT_MARKER:
+                    current_chunk_text = item[1]
                     continue
 
                 # Sentinel marking the true end of a TTS run.
@@ -721,7 +730,7 @@ class VoiceEngine:
                     self.tts_active.set()
                     if self._on_tts_start:
                         try:
-                            self._on_tts_start()
+                            self._on_tts_start(current_chunk_text)
                         except Exception:
                             pass
 

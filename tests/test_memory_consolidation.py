@@ -24,8 +24,7 @@ def _make_brain(tmp_path, memory_capacity_threshold=0.8):
 
 
 def _make_full_memory_entries(count=30, entry_len=65):
-    # _consolidate_memory only fires once current_len/max_chars >= 0.8 (memory's
-    # cap is 2200 chars), so the fixture content must actually cross that line.
+    # _consolidate_memory only fires once current_len/max_chars >= 0.8 (memory's cap is 2200 chars).
     return "§".join([f"fact {i}: {'x' * entry_len}" for i in range(count)])
 
 

@@ -114,6 +114,7 @@ interface CharlieState {
   mic: MicState;
   queue: QueueState;
   audioLevel: number;
+  currentSpeechChunk: string | null;
   toolActivity: ToolActivityEntry[];
   agentRuns: AgentRun[];
   // Persisted per-turn execution trace, keyed by turnId -- backs the "Show
@@ -139,6 +140,7 @@ interface CharlieState {
   setMic: (m: MicState) => void;
   setQueue: (q: QueueState) => void;
   setAudioLevel: (level: number) => void;
+  setCurrentSpeechChunk: (text: string | null) => void;
   appendToolActivity: (e: ToolActivityEntry) => void;
   clearToolActivity: () => void;
   upsertAgentRun: (patch: Partial<AgentRun> & { agentId: string }) => void;
@@ -173,6 +175,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   mic: { mic_muted: false },
   queue: { count: 0, texts: [] },
   audioLevel: 0,
+  currentSpeechChunk: null,
   toolActivity: [],
   agentRuns: [],
   executionTraces: {},
@@ -211,6 +214,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setMic: (mic) => set({ mic }),
   setQueue: (queue) => set({ queue }),
   setAudioLevel: (audioLevel) => set({ audioLevel }),
+  setCurrentSpeechChunk: (currentSpeechChunk) => set({ currentSpeechChunk }),
   appendToolActivity: (e) => set((st) => ({ toolActivity: [...st.toolActivity, e] })),
   clearToolActivity: () => set({ toolActivity: [] }),
   // Merge-by-agentId so agent_spawned/agent_status/agent_result updates the same
@@ -294,10 +298,7 @@ export function groupMcpTools(tools: McpToolLike[]): McpServerGroup[] {
   return Object.entries(servers).map(([name, names]) => ({ name, count: names.length, tools: names }));
 }
 
-/** Writes the live accent color onto :root as real CSS custom properties
- * (globals.css declares matching @theme proxies) so every bg-accent/
- * text-accent/border-accent utility across the app updates together,
- * instead of each consumer tracking accentColor state independently. */
+/** Writes the live accent color onto :root as real CSS custom properties, so every bg-accent/text-accent/border-accent utility updates together. */
 export function applyAccentColor(color: string): void {
   const root = document.documentElement.style;
   root.setProperty("--accent", color);

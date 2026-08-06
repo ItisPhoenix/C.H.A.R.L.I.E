@@ -168,8 +168,7 @@ class TextStreamFilter:
     to look for.
     """
     _THINK_OPEN_RE = re.compile(r"<think(:[\w-]+)?>")
-    # Bound on how much unmatched "<think" tail to hold back while waiting for
-    # more chunks (covers the id suffix + closing '>' arriving split across chunks).
+    # Bound on how much unmatched "<think" tail to hold back waiting for the id suffix + closing '>' across chunks.
     _MAX_OPEN_TAG_LOOKAHEAD = 40
 
     def __init__(self):
@@ -223,10 +222,7 @@ class TextStreamFilter:
                 candidates.append((tool_idx, "tool", None))
 
             if not candidates:
-                # No confirmed tag yet. An in-progress "<think" (with its id
-                # suffix or closing '>' still to arrive) could still be a
-                # partial match -- hold back a bounded tail rather than
-                # requiring an exact fixed-length prefix like plain "<think>".
+                # No confirmed tag yet, but an in-progress "<think" could be a partial match -- hold back.
                 open_idx = self.buffer.rfind("<think")
                 if open_idx != -1 and open_idx >= len(self.buffer) - self._MAX_OPEN_TAG_LOOKAHEAD:
                     if open_idx > 0:

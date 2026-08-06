@@ -308,8 +308,7 @@ class Config:
         default=os.getenv("DESKTOP_FRAME_CAPTURE_ENABLED", "true").lower() == "true",
         metadata=_meta("DESKTOP_FRAME_CAPTURE_ENABLED", "Desktop Control", restart="reload"),
     )
-    # Off by default (2026-08-07) -- the tool-call-count trigger drafted a skill out
-    # of routine multi-search research tasks, not just genuinely reusable procedures.
+    # Off by default -- was drafting skills out of routine research tasks, not just reusable procedures.
     auto_skill_gen_enabled: bool = field(
         default=os.getenv("AUTO_SKILL_GEN_ENABLED", "false").lower() == "true",
         metadata=_meta("AUTO_SKILL_GEN_ENABLED", "Agentic OS", restart="reload"),

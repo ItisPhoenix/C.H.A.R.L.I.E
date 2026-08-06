@@ -26,9 +26,7 @@ const SIZE_CLASSES: Record<ButtonSize, string> = {
   sm: "px-2 py-1 text-[10px]",
 };
 
-/** Shared button styling -- one radius, one active-press scale, one set of
- * variant colors -- so every action button in the dashboard looks and
- * behaves the same instead of each component reinventing its own className. */
+/** Shared button styling -- one radius, one active-press scale, one set of variant colors across the dashboard. */
 export function Button({
   variant = "neutral",
   size = "md",

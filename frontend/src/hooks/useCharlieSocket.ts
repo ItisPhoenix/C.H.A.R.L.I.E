@@ -26,11 +26,7 @@ interface UseCharlieSocketResult {
   isStreaming: (sessionId: string) => boolean;
 }
 
-/** WebSocket client: connect/backoff/reconnect + the full onmessage event
- * dispatcher. Extracted out of page.tsx (was ~185 lines inline) so page.tsx
- * only owns layout/routing. Ref-based params (not effect deps) preserve the
- * original single-mount-effect design -- connectWS must not tear down and
- * reconnect every time fetchMessages/fetchSessions/currentSessionId change. */
+/** WebSocket client: connect/backoff/reconnect + onmessage dispatcher. Ref-based params keep connectWS a single mount effect, not torn down on every prop change. */
 export function useCharlieSocket(params: UseCharlieSocketParams): UseCharlieSocketResult {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
@@ -128,10 +124,12 @@ export function useCharlieSocket(params: UseCharlieSocketParams): UseCharlieSock
         } else if (msg.type === "speaking_start") {
           setVoiceState("speaking");
           setListeningTrigger(null);
+          store.setCurrentSpeechChunk(msg.payload?.text || "");
         } else if (msg.type === "speaking_stop" || msg.type === "response_done") {
           setVoiceState("idle");
           setListeningTrigger(null);
           if (msg.type === "response_done") {
+            store.setCurrentSpeechChunk(null);
             const eventSession = getSessionId(msg);
             wsStreamingRef.current.delete(eventSession || currentSessionIdRef.current);
             store.clearToolActivity();

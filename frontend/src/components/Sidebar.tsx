@@ -17,27 +17,33 @@ interface NavButtonProps {
   collapsed?: boolean;
 }
 
-// Applied to every label/header when the sidebar is in auto-collapse mode --
-// invisible at icon-only width, fades in with the hover-expand instead of
-// clipping mid-word (which read as broken text, not a clean collapsed state).
+// Applied to headers/text blocks (not nav labels -- see HIDDEN_WHEN_COLLAPSED
+// below) when the sidebar is in auto-collapse mode: invisible at icon-only
+// width, fades in with the hover-expand instead of clipping mid-word.
 const HIDE_WHEN_COLLAPSED = "opacity-0 group-hover:opacity-100 transition-opacity duration-150";
 
-/** Sidebar nav item -- one definition instead of the same block copy-pasted
- * per page, and wired to the live --accent token so the active-state color
- * actually follows the user's chosen accent instead of a hardcoded teal. */
+// Nav-item labels use display:none rather than opacity so they take zero
+// layout space while collapsed -- opacity alone still reserves the label's
+// full text width in the flex row, which pushes the icon off-center against
+// the left edge instead of centering it in the icon-only rail.
+const HIDDEN_WHEN_COLLAPSED = "hidden group-hover:inline";
+
+/** Sidebar nav item -- one definition, wired to the live --accent token so the active color follows the user's chosen accent. */
 function NavButton({ icon: Icon, label, active, onClick, collapsed }: NavButtonProps): ReactElement {
   return (
     <button
       onClick={onClick}
       aria-current={active ? "page" : undefined}
       className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer transition ${
+        collapsed ? "justify-center group-hover:justify-start" : ""
+      } ${
         active
-          ? "bg-white/5 text-accent font-semibold border-l-2 border-accent"
+          ? `bg-white/5 text-accent font-semibold ${collapsed ? "" : "border-l-2 border-accent"}`
           : "text-slate-400 hover:text-slate-200 hover:bg-white/5 active:scale-[0.98]"
       }`}
     >
       <Icon className="w-4 h-4 shrink-0" />
-      <span className={`truncate whitespace-nowrap ${collapsed ? HIDE_WHEN_COLLAPSED : ""}`}>{label}</span>
+      <span className={`truncate whitespace-nowrap ${collapsed ? HIDDEN_WHEN_COLLAPSED : ""}`}>{label}</span>
     </button>
   );
 }
@@ -61,8 +67,7 @@ interface SidebarProps {
 
 const ACCENT_SWATCHES = ["#a855f7", "#3b82f6", "#ef4444", "#f59e0b", "#06b6d4"];
 
-/** Left navigation sidebar: Chats accordion, Tools/System nav, accent picker.
- * Extracted out of page.tsx (was ~150 lines inline) so page.tsx only owns layout/routing. */
+/** Left navigation sidebar: Chats accordion, Tools/System nav, accent picker. Extracted out of page.tsx. */
 export function Sidebar(props: SidebarProps): ReactElement {
   const {
     autoCollapse, mobileMenuOpen, onToggleMobileMenu, activePage, onSelectPage, searchedSessions,
@@ -110,16 +115,21 @@ export function Sidebar(props: SidebarProps): ReactElement {
                 onToggleMobileMenu();
               }}
               aria-expanded={mobileMenuOpen}
-              className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center justify-between gap-2.5 font-medium cursor-pointer transition ${
-                activePage === "chats" ? "bg-white/5 text-slate-100" : "text-slate-400 hover:text-slate-200 hover:bg-white/5"
+              className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer transition ${
+                autoCollapse ? "justify-center group-hover:justify-between" : "justify-between"
+              } ${
+                activePage === "chats" ? "bg-white/5 text-accent font-semibold" : "text-slate-400 hover:text-slate-200 hover:bg-white/5"
               }`}
             >
-              <span className="flex items-center gap-2.5 whitespace-nowrap overflow-hidden">
+              {/* inline-flex, not flex -- a block-level flex span fills the button's
+                  full width by default, which defeats the button's own justify-center
+                  (there's nothing left to center once this span already spans 100%). */}
+              <span className="inline-flex items-center gap-2.5 whitespace-nowrap">
                 <MessageSquare className="w-4 h-4 shrink-0" />
-                <span className={autoCollapse ? HIDE_WHEN_COLLAPSED : ""}>Chats</span>
+                <span className={autoCollapse ? HIDDEN_WHEN_COLLAPSED : ""}>Chats</span>
               </span>
               <ChevronDown
-                className={`w-3.5 h-3.5 shrink-0 transition-transform ${mobileMenuOpen ? "rotate-180" : ""} ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}
+                className={`w-3.5 h-3.5 shrink-0 transition-transform ${mobileMenuOpen ? "rotate-180" : ""} ${autoCollapse ? HIDDEN_WHEN_COLLAPSED : ""}`}
               />
             </button>
             {mobileMenuOpen && accordionHasRoom && (
@@ -172,10 +182,12 @@ export function Sidebar(props: SidebarProps): ReactElement {
             <NavButton icon={Cpu} label="Hardware" active={activePage === "hardware"} onClick={() => onSelectPage("hardware")} collapsed={autoCollapse} />
             <Link
               href="/settings"
-              className="w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer text-slate-400 hover:text-slate-200 hover:bg-white/5 active:scale-[0.98] transition whitespace-nowrap overflow-hidden"
+              className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer text-slate-400 hover:text-slate-200 hover:bg-white/5 active:scale-[0.98] transition whitespace-nowrap overflow-hidden ${
+                autoCollapse ? "justify-center group-hover:justify-start" : ""
+              }`}
             >
               <Settings className="w-4 h-4 shrink-0" />
-              <span className={autoCollapse ? HIDE_WHEN_COLLAPSED : ""}>Settings</span>
+              <span className={autoCollapse ? HIDDEN_WHEN_COLLAPSED : ""}>Settings</span>
             </Link>
           </div>
         </div>

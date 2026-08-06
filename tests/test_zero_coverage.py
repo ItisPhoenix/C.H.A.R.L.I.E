@@ -173,8 +173,7 @@ class TestTextStreamFilter:
         assert "bye" in combined
 
     def test_think_block_with_id_suffix_stripped(self):
-        # Some models tag each reasoning block with a per-turn id instead of
-        # plain <think></think> -- this used to leak straight through raw.
+        # Some models tag each reasoning block with a per-turn id -- this used to leak straight through raw.
         from charlie.streaming import TextStreamFilter
         f = TextStreamFilter()
         result = f.push("before<think:6124c78e>reasoning</think:6124c78e>after")

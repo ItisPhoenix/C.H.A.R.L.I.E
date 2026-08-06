@@ -12,10 +12,7 @@ function formatAge(ms: number): string {
   return `${m}m ago`;
 }
 
-/** Real display of the last-captured desktop frame (event-driven, throttled --
- * not a continuous video feed, see charlie/tools.py:_emit_desktop_frame). Was a
- * fake "live feed" that just mounted a duplicate InsightRail; replaced with the
- * store's latestDesktopFrame field, which was already populated and read nowhere. */
+/** Real display of the last-captured desktop frame -- event-driven, throttled, not a continuous video feed (see charlie/tools.py:_emit_desktop_frame). */
 export function DesktopFrameView(): ReactElement {
   const frame = useCharlieStore((s) => s.latestDesktopFrame);
   const [now, setNow] = useState(() => Date.now());

@@ -1172,10 +1172,12 @@ async def main():
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
         # TTS lifecycle callbacks for IPC events
-        def on_tts_start():
+        def on_tts_start(text: str = ""):
             if event_bus:
                 asyncio.run_coroutine_threadsafe(
-                    event_bus.emit("speaking_start", {"session_id": current_web_session_id}), loop
+                    event_bus.emit(
+                        "speaking_start", {"session_id": current_web_session_id, "text": text}
+                    ), loop
                 )
 
         def on_tts_stop():
