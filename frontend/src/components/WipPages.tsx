@@ -815,13 +815,22 @@ interface PendingProposal {
 
 const EXTENSION_KINDS = ["plugin", "mcp", "skill", "openapi"] as const;
 
-export function ExtensionsView(): ReactElement {
+interface ExtensionsViewProps {
+  kindFilter?: (typeof EXTENSION_KINDS)[number];
+}
+
+export function ExtensionsView({ kindFilter }: ExtensionsViewProps = {}): ReactElement {
   const [extensions, setExtensions] = useState<ExtensionItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [pending, setPending] = useState<PendingProposal | null>(null);
 
-  const [kind, setKind] = useState<(typeof EXTENSION_KINDS)[number]>("plugin");
+  const [kind, setKind] = useState<(typeof EXTENSION_KINDS)[number]>(kindFilter || "plugin");
+  // Skills and MCP servers get their own tabs -- the plain Extensions page excludes both kinds so nothing duplicates.
+  const visibleExtensions = kindFilter
+    ? extensions.filter((e) => e.kind === kindFilter)
+    : extensions.filter((e) => e.kind !== "skill" && e.kind !== "mcp");
+  const installableKinds = kindFilter ? EXTENSION_KINDS : EXTENSION_KINDS.filter((k) => k !== "skill" && k !== "mcp");
   const [name, setName] = useState("");
   const [source, setSource] = useState("");
   const [rawText, setRawText] = useState("");
@@ -922,10 +931,12 @@ export function ExtensionsView(): ReactElement {
         <div>
           <h2 className="font-display text-xl font-bold uppercase tracking-wide flex items-center gap-2">
             <Puzzle className="w-5 h-5 text-slate-400" />
-            Extensions
+            {kindFilter ? "Skills" : "Extensions"}
           </h2>
           <p className="text-xs text-slate-500 font-mono mt-1">
-            MCP Servers, SKILL.md, OpenAPI Imports & Native Plugins
+            {kindFilter
+              ? "SKILL.md extensions -- reuses the Extensions system, filtered to kind=skill"
+              : "MCP Servers, SKILL.md, OpenAPI Imports & Native Plugins"}
           </p>
         </div>
 
@@ -936,19 +947,27 @@ export function ExtensionsView(): ReactElement {
       </div>
 
       <div className="rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-3 font-mono text-xs">
-        <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-bold">Install Extension</span>
+        <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-bold">Install {kindFilter || "Extension"}</span>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
-          <select
-            value={kind}
-            onChange={(e) => setKind(e.target.value as (typeof EXTENSION_KINDS)[number])}
-            className="bg-zinc-950 border border-white/10 rounded-lg px-2 py-1.5 text-slate-200"
-          >
-            {EXTENSION_KINDS.map((k) => (
-              <option key={k} value={k}>
-                {k}
-              </option>
-            ))}
-          </select>
+          {kindFilter ? (
+            <input
+              disabled
+              value={kindFilter}
+              className="bg-zinc-950 border border-white/10 rounded-lg px-2 py-1.5 text-slate-500"
+            />
+          ) : (
+            <select
+              value={kind}
+              onChange={(e) => setKind(e.target.value as (typeof EXTENSION_KINDS)[number])}
+              className="bg-zinc-950 border border-white/10 rounded-lg px-2 py-1.5 text-slate-200"
+            >
+              {installableKinds.map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
+              ))}
+            </select>
+          )}
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -1001,12 +1020,12 @@ export function ExtensionsView(): ReactElement {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 font-mono text-xs">
-        {loading && extensions.length === 0 ? (
-          <p className="text-slate-500 italic py-4 md:col-span-2 animate-pulse">Loading extensions...</p>
-        ) : extensions.length === 0 ? (
-          <p className="text-slate-500 italic py-4 md:col-span-2">No extensions installed.</p>
+        {loading && visibleExtensions.length === 0 ? (
+          <p className="text-slate-500 italic py-4 md:col-span-2 animate-pulse">Loading {kindFilter || "extensions"}...</p>
+        ) : visibleExtensions.length === 0 ? (
+          <p className="text-slate-500 italic py-4 md:col-span-2">No {kindFilter || "extensions"} installed.</p>
         ) : (
-          extensions.map((ext) => (
+          visibleExtensions.map((ext) => (
             <div key={ext.name} className="p-4 rounded-xl bg-zinc-900/40 border border-white/5 space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">{ext.kind}</span>
@@ -1045,6 +1064,10 @@ export function ExtensionsView(): ReactElement {
       </div>
     </div>
   );
+}
+
+export function SkillsView(): ReactElement {
+  return <ExtensionsView kindFilter="skill" />;
 }
 
 const AGENT_STATUS_STYLE: Record<AgentRun["status"], { icon: typeof Circle; className: string; label: string }> = {

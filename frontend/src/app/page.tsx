@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   MessageSquare, Monitor, Database, Cpu, Settings, Shield, Bell, Search, Mic, MicOff,
-  FolderGit, Network, RefreshCw, Check, X, Menu, Server, Puzzle, GitBranch, ChevronDown, Cable
+  FolderGit, Network, RefreshCw, Check, X, Menu, Server, Puzzle, GitBranch, ChevronDown, Cable, Sparkles
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useCharlieStore, rgba, lighten, type Session, type Message, type AgentRun, type ToolActivityEntry } from "../store/useCharlieStore";
@@ -24,7 +24,7 @@ import { InsightRail } from "../components/InsightRail";
 import { EventLog } from "../components/EventLog";
 import { VoiceDock } from "../components/VoiceDock";
 import {
-  MemoriesView, HardwareView, FilesView, ServicesView, OllamaView, ExtensionsView, AgentsView, MCPCenterView
+  MemoriesView, HardwareView, FilesView, ServicesView, OllamaView, ExtensionsView, SkillsView, AgentsView, MCPCenterView
 } from "../components/WipPages";
 
 function getSessionId(msg: WSMessage): string | undefined {
@@ -999,6 +999,12 @@ export default function Page(): ReactElement {
                     onClick={() => setActivePage("extensions")}
                   />
                   <NavButton
+                    icon={Sparkles}
+                    label="Skills"
+                    active={activePage === "skills"}
+                    onClick={() => setActivePage("skills")}
+                  />
+                  <NavButton
                     icon={GitBranch}
                     label="Agents"
                     active={activePage === "agents"}
@@ -1098,6 +1104,7 @@ export default function Page(): ReactElement {
             {activePage === "docker" && <ServicesView />}
             {activePage === "ollama" && <OllamaView />}
             {activePage === "extensions" && <ExtensionsView />}
+            {activePage === "skills" && <SkillsView />}
             {activePage === "agents" && <AgentsView />}
             {activePage === "mcp" && <MCPCenterView />}
             
