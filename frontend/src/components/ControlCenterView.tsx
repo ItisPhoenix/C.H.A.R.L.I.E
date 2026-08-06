@@ -85,7 +85,31 @@ function buildEdges(points: Point3[], k: number): [number, number][] {
   return edges;
 }
 
-const EDGES = buildEdges(SPHERE, NEIGHBORS_PER_POINT);
+/** Deterministic PRNG (mulberry32) -- same tangled-chord layout every load,
+ * no Math.random() jitter between renders. */
+function mulberry32(seed: number): () => number {
+  let a = seed;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Long random chords through the sphere's interior -- this is what gives the
+ * reference "tangled energy" look instead of a clean geodesic wireframe. */
+function buildChords(count: number, total: number): [number, number][] {
+  const rand = mulberry32(1337);
+  const chords: [number, number][] = [];
+  for (let c = 0; c < count; c++) {
+    chords.push([Math.floor(rand() * total), Math.floor(rand() * total)]);
+  }
+  return chords;
+}
+
+const EDGES = [...buildEdges(SPHERE, NEIGHBORS_PER_POINT), ...buildChords(220, PARTICLE_COUNT)];
 
 /** Ambient orb centerpiece -- hand-rolled Canvas 2D + rAF, zero new deps.
  * Rotation speed/turbulence/pulse all derive from voiceState + live audioLevel,
@@ -176,22 +200,8 @@ function Orb(): ReactElement {
         ctx.fillRect(0, 0, width, height);
       }
 
-      // HUD armillary rings -- two tilted ellipses turning at their own rates,
-      // the classic Jarvis-style "targeting" accent around the core sphere.
-      ctx.globalCompositeOperation = "source-over";
-      const ringColor = `rgba(${curRgb[0] | 0}, ${curRgb[1] | 0}, ${curRgb[2] | 0}, 0.22)`;
-      for (const ring of [{ rY: 0.34, spin: angle * 0.6, rot: 0.15 }, { rY: 0.2, spin: -angle * 0.4, rot: -0.35 }]) {
-        ctx.save();
-        ctx.translate(cx, cy);
-        ctx.rotate(ring.rot + Math.sin(ring.spin) * 0.05);
-        ctx.strokeStyle = ringColor;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.ellipse(0, 0, radius * 1.22, radius * ring.rY, 0, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
-      }
       // Outer tick-mark ring, slowly counter-rotating -- a HUD scan-ring accent.
+      ctx.globalCompositeOperation = "source-over";
       ctx.save();
       ctx.translate(cx, cy);
       ctx.rotate(-angle * 0.5);
