@@ -1,51 +1,51 @@
 /**
- * Tests that on WS open, `session_active` is sent a second time ~250ms later
+ * Tests that on WS open, session_active is POSTed a second time ~250ms later
  * (Task 7), surviving the ZMQ slow-joiner race. This mirrors the onopen handler
- * in page.tsx: send once immediately, then schedule a guarded re-send.
+ * in page.tsx: POST once immediately, then schedule a guarded re-POST.
+ * (session_active goes over POST /api/session/active, not the WS socket --
+ * see CLAUDE.md 8.5 -- this mock calls a fetch stub, not socket.send.)
  */
 import { describe, it, expect } from "vitest";
 
-describe("WS open: re-send session_active", () => {
-  // Mirror of the onopen scheduling logic. `send` is captured for assertions.
+describe("WS open: re-announce session_active", () => {
+  // Mirror of the onopen scheduling logic. `post` is captured for assertions.
   function onOpen(opts: {
     currentSessionId: string;
-    readyStateAtSchedule: number; // WebSocket.OPEN === 1
+    socketOpenAtSchedule: boolean;
     timer: { fire: () => void };
   }) {
-    const sent: string[] = [];
-    const socket = {
-      readyState: 1,
-      send: (s: string) => sent.push(s),
-    };
+    const posted: string[] = [];
+    const socket = { open: true };
+    const post = (sessionId: string) => posted.push(sessionId);
     const currentSessionIdRef = { current: opts.currentSessionId };
 
-    // Immediate send (mirrors existing behavior).
+    // Immediate POST (mirrors existing behavior).
     if (currentSessionIdRef.current) {
-      socket.send(JSON.stringify({ type: "session_active", payload: { session_id: currentSessionIdRef.current } }));
-      // Scheduled re-send, guarded by still-open socket + truthy session.
+      post(currentSessionIdRef.current);
+      // Scheduled re-POST, guarded by still-open socket + truthy session.
       opts.timer.fire = () => {
-        if (socket.readyState === opts.readyStateAtSchedule && currentSessionIdRef.current) {
-          socket.send(JSON.stringify({ type: "session_active", payload: { session_id: currentSessionIdRef.current } }));
+        if (opts.socketOpenAtSchedule && currentSessionIdRef.current) {
+          post(currentSessionIdRef.current);
         }
       };
     }
-    return { sent, socket };
+    return { posted, socket };
   }
 
-  it("sends session_active twice (immediate + scheduled re-send)", () => {
+  it("posts session_active twice (immediate + scheduled re-announce)", () => {
     const timer = { fire: () => {} };
-    const { sent, socket } = onOpen({ currentSessionId: "session-1", readyStateAtSchedule: 1, timer });
-    expect(sent).toHaveLength(1); // immediate only so far
+    const { posted, socket } = onOpen({ currentSessionId: "session-1", socketOpenAtSchedule: true, timer });
+    expect(posted).toHaveLength(1); // immediate only so far
     timer.fire();
-    expect(sent).toHaveLength(2);
-    expect(JSON.parse(sent[1]).type).toBe("session_active");
-    expect(socket.readyState).toBe(1);
+    expect(posted).toHaveLength(2);
+    expect(posted[1]).toBe("session-1");
+    expect(socket.open).toBe(true);
   });
 
-  it("skips the re-send when the socket is no longer open", () => {
+  it("skips the re-announce when the socket is no longer open", () => {
     const timer = { fire: () => {} };
-    const { sent } = onOpen({ currentSessionId: "session-1", readyStateAtSchedule: 3 /* CLOSED */, timer });
+    const { posted } = onOpen({ currentSessionId: "session-1", socketOpenAtSchedule: false, timer });
     timer.fire();
-    expect(sent).toHaveLength(1);
+    expect(posted).toHaveLength(1);
   });
 });
