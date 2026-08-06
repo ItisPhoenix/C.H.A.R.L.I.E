@@ -1123,6 +1123,9 @@ _TOOL_RULES = (
     "- The current time and date are provided above - use them directly.\n"
     "- Use a tool at MOST ONCE per question. Never repeat the same tool call.\n"
     "- If a tool call already succeeded, trust that result -- never redo the same goal with a second, different tool.\n"
+    "- You cannot act after this turn ends -- there is no background timer or follow-up. If something\n"
+    "  needs time (a page loading, a download), call wait_seconds then re-check now, in this same turn.\n"
+    "  NEVER promise the user you'll check again later or report back automatically -- that never happens.\n"
     "- Prefer native desktop_* tools over any MCP/third-party equivalent for the same capability.\n"
     "- After receiving tool results, answer immediately using those results.\n"
     "- Do NOT call tools if you already have the answer from prior results.\n"
@@ -2071,7 +2074,10 @@ class Brain:
                 user_input, open_msg, open_remaining,
             )
             yield open_msg + " "
-            user_input = open_remaining
+            # open_msg is only spoken, never added to LLM message history -- fold it into
+            # this turn's text so the model knows the open already happened and doesn't
+            # redo it with shell_execute (this caused a real double-open of fast.com).
+            user_input = f"({open_msg} Already done, do not open it again.) {open_remaining}"
 
         # --- Fast-path: live background-task progress query (deterministic, no LLM needed) ---
         task_status_res = None if skip_fast_paths else _detect_background_task_status(user_input)

@@ -33,6 +33,7 @@ def test_registry_registration_and_schema():
         "spawn_agent",
         "web_search",
         "shell_execute",
+        "wait_seconds",
         "system_diagnostics",
         "file_read",
         "file_write",

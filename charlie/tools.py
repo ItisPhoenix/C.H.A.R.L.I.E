@@ -660,6 +660,33 @@ def _detect_app_launch(command: str):
     return None
 
 
+_MAX_WAIT_SECONDS = 10
+
+
+@registry.register_tool(
+    name="wait_seconds",
+    description=(
+        "Pause before re-checking something that needs time (a page still loading, "
+        "a download in progress). Use this then call the check tool again in the same "
+        "turn -- never promise the user you'll check again later, that follow-up never happens."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "seconds": {
+                "type": "number",
+                "description": f"How long to wait, max {_MAX_WAIT_SECONDS}.",
+            },
+        },
+        "required": ["seconds"],
+    },
+)
+def wait_seconds(seconds: float) -> str:
+    capped = max(0.0, min(float(seconds), _MAX_WAIT_SECONDS))
+    time.sleep(capped)
+    return f"Waited {capped}s."
+
+
 @registry.register_tool(
     name="shell_execute",
     description="Run a shell command and get output. Risky commands are blocked.",
