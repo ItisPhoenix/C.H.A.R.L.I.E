@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-07T00:00:00Z",
+  "title": "Design System: Charlie Dashboard",
+  "extensions": {
+    "colorMeta": {
+      "signal-violet": { "role": "primary", "displayName": "Signal Violet", "canonical": "#a855f7", "tonalRamp": ["#1a0f26", "#301c47", "#4a2a6b", "#6b3a99", "#8a4bc4", "#a855f7", "#c084fc", "#e9d5ff"] },
+      "channel-teal": { "role": "secondary", "displayName": "Channel Teal", "canonical": "#06b6d4", "tonalRamp": ["#02181c", "#053540", "#075166", "#086e8c", "#0a94b8", "#06b6d4", "#22d3ee", "#a5f3fc"] },
+      "canvas": { "role": "neutral", "displayName": "Void Black", "canonical": "#000000", "tonalRamp": ["#000000"] },
+      "text-primary": { "role": "neutral", "displayName": "Text Fog Primary", "canonical": "#f4f6fa" },
+      "text-secondary": { "role": "neutral", "displayName": "Text Fog Secondary", "canonical": "#d1d5db" },
+      "text-muted": { "role": "neutral", "displayName": "Text Fog Muted", "canonical": "#6b7280" }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Panel titles, wordmark. Rare, not a default heading style." },
+      "body": { "displayName": "Body", "purpose": "Chat text, descriptions, primary reading content." },
+      "label": { "displayName": "Label", "purpose": "Nav items, buttons, pills, form labels. The dominant size." },
+      "mono": { "displayName": "Mono", "purpose": "Logs, tool-call payloads, timestamps, session IDs." }
+    },
+    "shadows": [],
+    "motion": [
+      { "name": "rise", "value": "0.35s cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "Entrance for panels, pills, captions (anim-rise/anim-left/anim-right)." },
+      { "name": "message-in", "value": "0.2s cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "Chat message entrance." },
+      { "name": "wave", "value": "1.0-1.4s ease-in-out infinite", "purpose": "Voice waveform bars per state (listening/thinking/speaking)." }
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Status Pill",
+      "kind": "chip",
+      "refersTo": "status-pill",
+      "description": "Glass pill with a status-color dot, used for live state badges (listening/thinking/speaking/error).",
+      "html": "<span class=\"ds-status-pill\"><span class=\"ds-status-dot\"></span>Listening</span>",
+      "css": ".ds-status-pill { display: inline-flex; align-items: center; gap: 6px; background: rgba(0,0,0,.55); backdrop-filter: blur(6px); border: 1px solid rgba(255,255,255,.07); border-radius: 9999px; padding: 6px 12px; font-family: Inter, sans-serif; font-size: 12px; font-weight: 500; color: #d1d5db; } .ds-status-dot { width: 6px; height: 6px; border-radius: 9999px; background: #06b6d4; }"
+    },
+    {
+      "name": "Nav Item Active",
+      "kind": "nav",
+      "refersTo": "nav-item-active",
+      "description": "Selected sidebar row: violet-dim fill, primary text, icon + label.",
+      "html": "<div class=\"ds-nav-item ds-nav-item-active\"><span class=\"ds-nav-icon\"></span>Control Center</div>",
+      "css": ".ds-nav-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; font-family: Inter, sans-serif; font-size: 12px; font-weight: 500; color: #d1d5db; transition: background 0.15s; } .ds-nav-item:hover { background: rgba(255,255,255,.03); } .ds-nav-item:active { transform: scale(0.98); } .ds-nav-item-active { background: rgba(168,85,247,.12); color: #f4f6fa; } .ds-nav-icon { width: 16px; height: 16px; }"
+    },
+    {
+      "name": "Glass Panel",
+      "kind": "card",
+      "refersTo": "panel-glass",
+      "description": "Base translucent panel: the primary surface container across the dashboard.",
+      "html": "<div class=\"ds-panel\">Panel content</div>",
+      "css": ".ds-panel { background: rgba(0,0,0,.6); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,.07); border-radius: 12px; padding: 16px; color: #f4f6fa; font-family: Inter, sans-serif; } .ds-panel:hover { border-color: rgba(255,255,255,.14); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Night Console",
+    "overview": "The Night Console is a dark cockpit glowing faintly against pure black: a mission-control readout for a system that runs mostly on its own, checked in on rather than driven at every moment. The canvas is true black (#000000), never near-black or navy-tinted; light only exists where it's earned, as glass-panel translucency, a status dot, or the Signal Violet accent marking whatever Charlie is actively doing. Every surface is a hairline-bordered pane of frosted black glass floating over that void, layered by opacity rather than by shadow. This system explicitly rejects the generic SaaS admin panel: no cream or off-white card grids, no hero-metric tiles, no tiny uppercase eyebrows over every section. It also rejects decoration for its own sake -- the purple isn't a brand flourish, it's the color of \"thinking,\" and it earns its place by meaning something.",
+    "keyCharacteristics": [
+      "Pure black canvas, glass panels stacked by opacity, no shadows",
+      "Signal Violet marks active/AI state; Channel Teal marks listening/live-input state",
+      "Dense, small-type UI (text-xs/text-sm throughout) -- information density over whitespace",
+      "Status color is the primary semantic language, echoed through lucide-react icons",
+      "Motion is quick and directional (rise/fade, ~0.2-0.35s), never decorative flourish"
+    ],
+    "rules": [
+      { "name": "The Earned Light Rule", "body": "Color exists to mean something (a status, an active state, a focus ring) -- it is never applied purely for visual interest.", "section": "colors" },
+      { "name": "The Twelve-Pixel Default Rule", "body": "Absent a specific reason to go bigger, UI text is Label size (12px) or Body size (13px). Display size is a rare event reserved for real section headers. The former scatter of text-[10px]/text-[11px] micro-sizes has been consolidated into the single text-xs Label token.", "section": "typography" },
+      { "name": "The No-Shadow Rule", "body": "Never add box-shadow for depth. Raise glass-bg opacity and blur radius instead, keeping the hairline border.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do keep the canvas pure black (#000000) -- never substitute near-black or a navy tint.",
+      "Do treat Signal Violet and Channel Teal as semantic (AI-state / input-state), not decorative brand colors.",
+      "Do build depth with opacity + blur layering (glass-bg tiers), never box-shadow.",
+      "Do default UI text to 12-13px (Label/Body); reserve Display size for real headers.",
+      "Do route every status color through the seven-token status palette, including its -dim variant for fills."
+    ],
+    "donts": [
+      "Don't use a cream/off-white card-grid admin-panel look -- this is explicitly the anti-reference.",
+      "Don't add tiny uppercase tracked eyebrows above sections; not part of this system's vocabulary.",
+      "Don't add box-shadow anywhere for elevation; it's invisible on black and breaks the flat-glass language.",
+      "Don't introduce a light theme; this is a single dark HUD system, not light/dark parity.",
+      "Don't use border-left/border-right colored stripes as an accent pattern.",
+      "Don't hand-roll a new glass background value; use the existing glass-bg / glass-bg-2 / glass-bg-modal tiers.",
+      "Don't reach for arbitrary Tailwind sizes below text-xs (text-[10px], text-[11px], etc.); the Label token is the floor."
+    ]
+  }
+}

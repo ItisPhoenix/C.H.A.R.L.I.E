@@ -72,13 +72,13 @@ export function InsightRail(): ReactElement {
       {/* Queue: main.py's pending_turns -- utterances waiting behind an already-running turn */}
       {queue.count > 0 && (
         <div className="rounded-xl border border-status-warning/25 p-3.5 bg-status-warning/5">
-          <span className="w-full flex items-center gap-1.5 text-[10px] font-bold text-status-warning uppercase tracking-widest">
+          <span className="w-full flex items-center gap-1.5 text-xs font-bold text-status-warning uppercase tracking-widest">
             <ListOrdered className="w-3.5 h-3.5" />
             Queued ({queue.count})
           </span>
           <div className="space-y-1 pt-2">
             {queue.texts.map((t, idx) => (
-              <p key={idx} className="text-[10px] text-slate-400 font-mono truncate">{t}</p>
+              <p key={idx} className="text-xs text-slate-400 font-mono truncate">{t}</p>
             ))}
           </div>
         </div>
@@ -88,7 +88,7 @@ export function InsightRail(): ReactElement {
       <div className="rounded-xl border border-[var(--color-glass-border)] p-3.5 bg-zinc-900/30">
         <button
           onClick={() => toggleSection("agents")}
-          className="w-full flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest cursor-pointer"
+          className="w-full flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-widest cursor-pointer"
         >
           <span className="flex items-center gap-1.5">
             <Activity className="w-3.5 h-3.5 text-slate-400" />
@@ -100,7 +100,7 @@ export function InsightRail(): ReactElement {
         {openSections.agents && (
           <div className="space-y-1.5 pt-3">
             {recentActivity.length === 0 ? (
-              <p className="text-[10px] text-slate-500 font-mono py-1">No activity yet.</p>
+              <p className="text-xs text-slate-500 font-mono py-1">No activity yet.</p>
             ) : (
               recentActivity.map((entry, idx) => (
                 <div
@@ -116,7 +116,7 @@ export function InsightRail(): ReactElement {
                       idx === 0 ? "bg-status-success" : "bg-slate-700"
                     }`}
                   />
-                  <div className="min-w-0 flex-1 font-mono text-[10px]">
+                  <div className="min-w-0 flex-1 font-mono text-xs">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-slate-200 font-bold truncate">{entry.name}</span>
                       <span className="text-slate-600 uppercase shrink-0">{entry.kind.replace("_", " ")}</span>
@@ -134,7 +134,7 @@ export function InsightRail(): ReactElement {
       <div className="rounded-xl border border-[var(--color-glass-border)] p-3.5 bg-zinc-900/30">
         <button
           onClick={() => toggleSection("mcp")}
-          className="w-full flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest cursor-pointer"
+          className="w-full flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-widest cursor-pointer"
         >
           <span className="flex items-center gap-1.5">
             <Terminal className="w-3.5 h-3.5 text-slate-400" />
@@ -146,7 +146,7 @@ export function InsightRail(): ReactElement {
         {openSections.mcp && (
           <div className="space-y-1.5 pt-3">
             {!toolsLoaded ? (
-              <p className="text-[10px] text-slate-500 font-mono py-1 animate-pulse">Querying registry...</p>
+              <p className="text-xs text-slate-500 font-mono py-1 animate-pulse">Querying registry...</p>
             ) : mcpServers.map((server) => (
               <div
                 key={server.name}
@@ -156,7 +156,7 @@ export function InsightRail(): ReactElement {
                   <span className="w-1.5 h-1.5 rounded-full bg-status-success" />
                   <span className="text-slate-300 font-bold capitalize">{server.name}</span>
                 </div>
-                <span className="text-[10px] text-slate-400 font-bold bg-white/5 px-2 py-0.5 rounded">
+                <span className="text-xs text-slate-400 font-bold bg-white/5 px-2 py-0.5 rounded">
                   {server.count} tools
                 </span>
               </div>
@@ -169,7 +169,7 @@ export function InsightRail(): ReactElement {
       <div className="rounded-xl border border-[var(--color-glass-border)] p-3.5 bg-zinc-900/30">
         <button
           onClick={() => toggleSection("model")}
-          className="w-full flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest cursor-pointer"
+          className="w-full flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-widest cursor-pointer"
         >
           <span className="flex items-center gap-1.5">
             <Shield className="w-3.5 h-3.5 text-slate-400" />
@@ -184,7 +184,7 @@ export function InsightRail(): ReactElement {
               <span>ACTIVE MODEL</span>
               <span className="text-purple-400 font-bold truncate max-w-[160px]">{configModel || "—"}</span>
             </div>
-            <div className="flex justify-between items-center p-2 rounded-lg bg-zinc-950/60 border border-white/5 text-[10px]">
+            <div className="flex justify-between items-center p-2 rounded-lg bg-zinc-950/60 border border-white/5 text-xs">
               <span>VISION MODEL</span>
               <span className={`font-bold truncate max-w-[160px] ${visionModel ? "text-status-success" : "text-status-idle"}`}>
                 {visionModel || "NOT CONFIGURED"}

@@ -342,7 +342,7 @@ function Caption(): ReactElement | null {
       className="mt-4 max-w-2xl px-5 py-2.5 rounded-2xl border border-white/10 bg-zinc-950/60 backdrop-blur-sm anim-rise"
     >
       <p className="text-xs text-slate-300 text-center leading-relaxed">
-        <span className="text-slate-500 uppercase font-mono text-[10px] mr-2">Charlie</span>
+        <span className="text-slate-500 uppercase font-mono text-xs mr-2">Charlie</span>
         {currentSpeechChunk}
       </p>
     </div>
@@ -360,7 +360,7 @@ interface TileProps {
 function Tile({ label, value, accent, wide }: TileProps): ReactElement {
   return (
     <div className={`rounded-xl border border-white/5 bg-zinc-900/30 p-3.5 flex flex-col gap-1 min-w-0 ${wide ? "col-span-2" : ""}`}>
-      <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500 truncate">{label}</span>
+      <span className="text-xs font-mono uppercase tracking-tight text-slate-500 truncate">{label}</span>
       <span className="text-sm font-bold font-mono truncate" style={{ color: accent }}>{value}</span>
     </div>
   );
@@ -450,16 +450,16 @@ export function ControlCenterView(): ReactElement {
 
           {/* Tier 3: quiet digest, not a full log */}
           <div className="flex-1 min-h-0 rounded-xl border border-white/5 bg-zinc-900/20 p-3 flex flex-col gap-2 overflow-hidden">
-            <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500 flex items-center gap-1.5 shrink-0">
+            <span className="text-xs font-mono uppercase tracking-wider text-slate-500 flex items-center gap-1.5 shrink-0">
               <ListTree className="w-3 h-3" />
               Recent Activity
             </span>
             <div className="flex-1 overflow-y-auto scrollbar space-y-1.5">
               {recentActivity.length === 0 ? (
-                <p className="text-[11px] text-slate-600 italic font-mono">Nothing yet this turn.</p>
+                <p className="text-xs text-[var(--color-text-muted)] italic font-mono">Nothing yet this turn.</p>
               ) : (
                 recentActivity.map((entry, i) => (
-                  <div key={i} className="flex items-start gap-1.5 text-[11px] font-mono text-slate-400">
+                  <div key={i} className="flex items-start gap-1.5 text-xs font-mono text-slate-400">
                     <Activity className="w-3 h-3 mt-0.5 shrink-0 text-slate-600" />
                     <span className="truncate"><span className="text-slate-300">{entry.name}</span> {entry.text.slice(0, 60)}</span>
                   </div>

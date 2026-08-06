@@ -49,7 +49,7 @@ npm test
 - **Voice dock** with waveform visualization and voice state display
 - **Session management**: Create, switch, rename, delete sessions
 - **Activity feed**: Real-time tool calls and thinking updates
-- **Glassmorphism design**: Frosted glass panels with electric blue accent (#0066ff)
+- **Glassmorphism design**: Frosted glass panels with a user-configurable accent (default Signal Violet, #a855f7)
 
 ## WebSocket Events
 

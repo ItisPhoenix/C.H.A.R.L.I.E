@@ -91,7 +91,7 @@ function formatMessageContent(content: string): React.ReactNode {
           const codeText = lines.slice(1).join("\n").trim();
           return (
             <div key={index} className="rounded-lg overflow-hidden border border-white/10 bg-zinc-950 font-mono text-xs my-2">
-              <div className="flex items-center justify-between px-3 py-1.5 bg-white/[0.03] border-b border-white/5 text-[10px] text-slate-400 font-sans tracking-wide uppercase select-none">
+              <div className="flex items-center justify-between px-3 py-1.5 bg-white/[0.03] border-b border-white/5 text-xs text-slate-400 font-sans tracking-wide uppercase select-none">
                 <span>{language}</span>
                 <CopyButton text={codeText} />
               </div>
@@ -148,16 +148,16 @@ function StepperEntries({ entries }: { entries: ToolActivityEntry[] }): ReactEle
         const label = t.kind.startsWith("agent_") ? t.kind.replace("agent_", "agent ") : t.kind.replace("tool_", "");
 
         return (
-          <div key={idx} className="relative flex flex-col text-[11px] font-mono leading-relaxed">
+          <div key={idx} className="relative flex flex-col text-xs font-mono leading-relaxed">
             {bullet}
             <div className="flex items-center gap-2">
-              <span className={`uppercase text-[10px] px-1 rounded ${labelClass}`}>
+              <span className={`uppercase text-xs px-1 rounded ${labelClass}`}>
                 {label}
               </span>
               <span className="text-slate-300 font-semibold">{t.name}</span>
             </div>
             {t.text && (
-              <span className="text-slate-500 mt-0.5 pl-2 break-all text-[10px] border-l border-white/5">
+              <span className="text-slate-500 mt-0.5 pl-2 break-all text-xs border-l border-white/5">
                 {t.text}
               </span>
             )}
@@ -174,7 +174,7 @@ function MessageExecutionTrace({ entries }: { entries: ToolActivityEntry[] }): R
     <div className="mt-1.5 max-w-[82%]">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 font-mono uppercase tracking-wider cursor-pointer transition"
+        className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300 font-mono uppercase tracking-wider cursor-pointer transition"
       >
         {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
         Show Execution ({entries.length})
@@ -334,7 +334,7 @@ export function ChatView({
                   <p className="text-xs font-semibold text-slate-300 group-hover:text-slate-100 transition truncate">
                     {p.label}
                   </p>
-                  <p className="text-[10px] text-slate-500 truncate mt-1">
+                  <p className="text-xs text-slate-500 truncate mt-1">
                     {p.text}
                   </p>
                 </button>
@@ -363,7 +363,7 @@ export function ChatView({
                 {m.content ? formatMessageContent(m.content) : (isUser ? "" : <TypingDots />)}
               </div>
               {isQueued && (
-                <span className="text-[10px] text-status-warning font-mono mt-1 flex items-center gap-1">
+                <span className="text-xs text-status-warning font-mono mt-1 flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-status-warning animate-pulse" />
                   Queued -- waiting for current reply to finish
                 </span>
@@ -387,18 +387,18 @@ export function ChatView({
                 Charlie encountered an error running a shell command and has generated a proposed fix.
               </p>
               
-              <div className="space-y-2 mb-4 font-mono text-[11px]">
+              <div className="space-y-2 mb-4 font-mono text-xs">
                 <div className="p-2.5 rounded bg-status-error/10 border border-status-error/10 text-red-200">
-                  <span className="text-[10px] uppercase font-bold text-status-error block mb-1">Error Command</span>
+                  <span className="text-xs uppercase font-bold text-status-error block mb-1">Error Command</span>
                   {activeProposal.original_command}
                 </div>
                 <div className="p-2.5 rounded bg-status-success/10 border border-status-success/10 text-emerald-200">
-                  <span className="text-[10px] uppercase font-bold text-status-success block mb-1">Proposed Fix</span>
+                  <span className="text-xs uppercase font-bold text-status-success block mb-1">Proposed Fix</span>
                   {activeProposal.proposed_command}
                 </div>
                 {activeProposal.explanation && (
                   <div className="p-2.5 rounded bg-zinc-900 border border-white/5 text-slate-400">
-                    <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Rationale</span>
+                    <span className="text-xs uppercase font-bold text-slate-400 block mb-1">Rationale</span>
                     {activeProposal.explanation}
                   </div>
                 )}
@@ -411,7 +411,7 @@ export function ChatView({
                       activeProposal.safeguard_passed ? "bg-status-success" : "bg-status-error"
                     }`}
                   />
-                  <span className="text-[10px] text-slate-500 font-mono">
+                  <span className="text-xs text-slate-500 font-mono">
                     Safeguards: {activeProposal.safeguard_passed ? "PASSED" : "BLOCKED"}
                   </span>
                 </div>
@@ -454,20 +454,20 @@ export function ChatView({
                 Charlie requested execution of a restricted system tool:
               </p>
 
-              <div className="space-y-2 mb-4 font-mono text-[11px]">
+              <div className="space-y-2 mb-4 font-mono text-xs">
                 <div className="p-2.5 rounded bg-zinc-900 border border-white/5 text-slate-200">
-                  <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Restricted Tool</span>
+                  <span className="text-xs uppercase font-bold text-slate-400 block mb-1">Restricted Tool</span>
                   {activeToolApproval.tool_name}
                 </div>
                 {activeToolApproval.reason && (
                   <div className="p-2.5 rounded bg-zinc-900 border border-white/5 text-status-warning">
-                    <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Reason</span>
+                    <span className="text-xs uppercase font-bold text-slate-400 block mb-1">Reason</span>
                     {activeToolApproval.reason}
                   </div>
                 )}
                 {activeToolApproval.arguments && (
                   <div className="p-2.5 rounded bg-zinc-950 border border-white/5 text-cyan-300 whitespace-pre-wrap break-all max-h-32 overflow-y-auto">
-                    <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Arguments</span>
+                    <span className="text-xs uppercase font-bold text-slate-400 block mb-1">Arguments</span>
                     {Object.entries(activeToolApproval.arguments).map(([k, v]) => `${k}: ${String(v)}`).join("\n")}
                   </div>
                 )}
@@ -501,7 +501,7 @@ export function ChatView({
       {/* Floating Stepper Timeline for Tool Activity */}
       {toolActivity && toolActivity.length > 0 && (
         <div className="px-6 pb-2 shrink-0 border-t border-white/5 pt-3 bg-zinc-950/20">
-          <div className="flex items-center justify-between text-[10px] text-slate-500 font-mono select-none">
+          <div className="flex items-center justify-between text-xs text-slate-500 font-mono select-none">
             <span className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-slate-400">
               <Terminal className="w-3.5 h-3.5" />
               Active Stepper Timeline ({toolActivity.length} events)
@@ -545,7 +545,7 @@ export function ChatView({
               variant="danger"
               onClick={onStop}
               aria-label="Stop generation"
-              className="shrink-0 px-4 py-1.5 text-[10px] font-bold uppercase tracking-wider"
+              className="shrink-0 px-4 py-1.5 text-xs font-bold uppercase tracking-wider"
             >
               Stop
             </Button>
@@ -555,7 +555,7 @@ export function ChatView({
               onClick={() => submit()}
               disabled={!input.trim() && !loading}
               aria-label="Send message"
-              className="shrink-0 px-4 py-1.5 text-[10px] font-bold uppercase tracking-wider"
+              className="shrink-0 px-4 py-1.5 text-xs font-bold uppercase tracking-wider"
             >
               Send
             </Button>

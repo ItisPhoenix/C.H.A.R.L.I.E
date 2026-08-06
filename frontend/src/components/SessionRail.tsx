@@ -191,7 +191,7 @@ export function SessionRail({
             <h2 className="font-display text-xs font-bold uppercase tracking-wider text-slate-200">
               Chats
             </h2>
-            <span className="text-[10px] font-mono text-slate-500 bg-zinc-900 border border-white/5 px-1.5 py-0.5 rounded-md font-semibold">
+            <span className="text-xs font-mono text-slate-500 bg-zinc-900 border border-white/5 px-1.5 py-0.5 rounded-md font-semibold">
               {sessions.length}
             </span>
           </div>
@@ -234,7 +234,7 @@ export function SessionRail({
             if (groupItems.length === 0) return null;
             return (
               <div key={groupName} className="space-y-1">
-                <h3 className="px-2 text-[10px] font-mono font-bold uppercase tracking-widest text-slate-500">
+                <h3 className="px-2 text-xs font-mono font-bold uppercase tracking-widest text-slate-500">
                   {groupName}
                 </h3>
 
@@ -280,7 +280,7 @@ export function SessionRail({
                           ) : (
                             <div className="truncate flex-1">
                               <p className="truncate font-medium">{s.title}</p>
-                              <span className="text-[10px] text-slate-500 font-mono block">
+                              <span className="text-xs text-slate-500 font-mono block">
                                 {relativeTime(s.updated_at || s.created_at)}
                               </span>
                             </div>

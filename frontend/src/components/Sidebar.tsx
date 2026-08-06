@@ -98,9 +98,9 @@ export function Sidebar(props: SidebarProps): ReactElement {
       <div className="space-y-6">
         {/* Category: MAIN */}
         <div className="space-y-1.5">
-          <h3 className={`px-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}>
+          <h2 className={`px-2 text-xs font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}>
             Main
-          </h3>
+          </h2>
           <div className="space-y-0.5">
             <NavButton
               icon={LayoutDashboard}
@@ -158,9 +158,9 @@ export function Sidebar(props: SidebarProps): ReactElement {
 
         {/* Category: TOOLS */}
         <div className="space-y-1.5">
-          <h3 className={`px-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}>
+          <h2 className={`px-2 text-xs font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}>
             Tools
-          </h3>
+          </h2>
           <div className="space-y-0.5">
             <NavButton icon={Monitor} label="Desktop" active={activePage === "desktop"} onClick={() => onSelectPage("desktop")} collapsed={autoCollapse} />
             <NavButton icon={FolderGit} label="Files" active={activePage === "files"} onClick={() => onSelectPage("files")} collapsed={autoCollapse} />
@@ -175,9 +175,9 @@ export function Sidebar(props: SidebarProps): ReactElement {
 
         {/* Category: SYSTEM */}
         <div className="space-y-1.5">
-          <h3 className={`px-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}>
+          <h2 className={`px-2 text-xs font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}>
             System
-          </h3>
+          </h2>
           <div className="space-y-0.5">
             <NavButton icon={Cpu} label="Hardware" active={activePage === "hardware"} onClick={() => onSelectPage("hardware")} collapsed={autoCollapse} />
             <Link
@@ -195,7 +195,7 @@ export function Sidebar(props: SidebarProps): ReactElement {
 
       {/* Sidebar Footer Accent Dot Pickers */}
       <div className="border-t border-white/5 pt-4 flex flex-col gap-2">
-        <span className={`px-2 text-[10px] font-mono font-bold tracking-widest text-slate-500 uppercase whitespace-nowrap overflow-hidden block ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}>
+        <span className={`px-2 text-xs font-mono font-bold tracking-widest text-slate-500 uppercase whitespace-nowrap overflow-hidden block ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}>
           ACCENT THEME
         </span>
         <div className={`flex gap-2 px-2 ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}>

@@ -129,7 +129,7 @@ export function EventLog(): ReactElement {
   // Render 32px Compact Minimized Console Bar
   if (minimized) {
     return (
-      <div className="flex items-center justify-between bg-zinc-950/90 border border-[var(--color-glass-border)] rounded-xl px-4 py-1.5 mx-4 mb-2 select-none text-[10px] font-mono shadow-xl transition-all">
+      <div className="flex items-center justify-between bg-zinc-950/90 border border-[var(--color-glass-border)] rounded-xl px-4 py-1.5 mx-4 mb-2 select-none text-xs font-mono shadow-xl transition-all">
         <div className="flex items-center gap-4">
           <span className="font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
             <Terminal className="w-3.5 h-3.5 text-slate-400" />
@@ -145,7 +145,7 @@ export function EventLog(): ReactElement {
 
         <div className="flex items-center gap-3">
           {alerts.length > 0 && (
-            <span className="text-amber-400 bg-amber-950/40 px-2 py-0.5 rounded text-[10px]">
+            <span className="text-amber-400 bg-amber-950/40 px-2 py-0.5 rounded text-xs">
               {alerts.length} ALERTS
             </span>
           )}
@@ -167,11 +167,11 @@ export function EventLog(): ReactElement {
       
       {/* Left: System Overview Dashboard Panel */}
       {showSystemOverview && (
-        <div className="w-72 border-r border-[var(--color-glass-border)] p-4 flex flex-col justify-between bg-black/30 shrink-0 font-mono text-[10px]">
+        <div className="w-72 border-r border-[var(--color-glass-border)] p-4 flex flex-col justify-between bg-black/30 shrink-0 font-mono text-xs">
           {/* Resource Sparklines */}
           <div className="space-y-3">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
+              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
                 <Activity className="w-3.5 h-3.5" />
                 System Overview
               </h3>
@@ -222,7 +222,7 @@ export function EventLog(): ReactElement {
           </div>
 
           {/* Server Uptime / Host Info */}
-          <div className="border-t border-white/5 pt-2.5 space-y-1 text-slate-500 font-mono text-[10px] uppercase tracking-wide">
+          <div className="border-t border-white/5 pt-2.5 space-y-1 text-slate-500 font-mono text-xs uppercase tracking-wide">
             <div className="flex justify-between">
               <span>OS HOST</span>
               <span className="text-slate-300 font-semibold">{osHost || "—"}</span>
@@ -283,7 +283,7 @@ export function EventLog(): ReactElement {
           <div className="flex items-center gap-3">
             <button
               onClick={handleClear}
-              className="flex items-center gap-1 text-[10px] uppercase font-bold text-slate-500 hover:text-red-400 cursor-pointer transition font-mono"
+              className="flex items-center gap-1 text-xs uppercase font-bold text-slate-500 hover:text-red-400 cursor-pointer transition font-mono"
               aria-label="Clear Console Output"
             >
               <Trash2 className="w-3.5 h-3.5" />
@@ -300,7 +300,7 @@ export function EventLog(): ReactElement {
         </div>
 
         {/* Tab Contents Viewport */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-1 scrollbar font-mono text-[11px] leading-relaxed">
+        <div className="flex-1 overflow-y-auto p-4 space-y-1 scrollbar font-mono text-xs leading-relaxed">
           {activeTab === "terminal" && (
             <>
               {toolActivity.length === 0 ? (
@@ -359,7 +359,7 @@ export function EventLog(): ReactElement {
           {activeTab === "artifacts" && (
             <>
               {selectedFileContent ? (
-                <pre className="text-slate-300 break-words whitespace-pre-wrap font-mono text-[11px] leading-relaxed">
+                <pre className="text-slate-300 break-words whitespace-pre-wrap font-mono text-xs leading-relaxed">
                   {selectedFileContent}
                 </pre>
               ) : (

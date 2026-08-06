@@ -3,7 +3,7 @@
 import { useEffect, useState, useMemo, useCallback, type ReactElement } from "react";
 import {
   Database, Cpu, HardDrive, FileCode, AlertCircle, Trash2, Globe, Monitor, RefreshCw, Server, Puzzle, Plus, Power, Save,
-  GitBranch, Circle, CheckCircle2, XCircle, Clock, X, Cable, Pencil
+  GitBranch, Circle, CheckCircle2, XCircle, Clock, X, Cable, Pencil, Folder, FolderOpen, ChevronRight
 } from "lucide-react";
 import { useCharlieStore, type AgentRun, type McpToolLike, groupMcpTools } from "../store/useCharlieStore";
 import { Button } from "./Button";
@@ -159,7 +159,7 @@ export function MemoriesView(): ReactElement {
           return (
             <div key={path} className="rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-2 flex flex-col">
               <div className="flex items-center justify-between">
-                <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">{label} ({path})</span>
+                <span className="text-xs font-mono text-slate-500 uppercase font-bold">{label} ({path})</span>
                 {!loading && !isEditing && (
                   <button
                     onClick={() => startEdit(path)}
@@ -180,7 +180,7 @@ export function MemoriesView(): ReactElement {
                     onChange={(e) => setDraft(e.target.value)}
                     spellCheck={false}
                     placeholder="One entry per line"
-                    className="text-[11px] font-mono text-slate-200 bg-zinc-950/60 border border-white/10 rounded-lg p-2 h-40 resize-none outline-none focus:border-white/20 scrollbar"
+                    className="text-xs font-mono text-slate-200 bg-zinc-950/60 border border-white/10 rounded-lg p-2 h-40 resize-none outline-none focus:border-white/20 scrollbar"
                   />
                   <div className="flex gap-2">
                     <Button size="sm" onClick={saveEdit} disabled={saving}>
@@ -192,13 +192,13 @@ export function MemoriesView(): ReactElement {
                   </div>
                 </>
               ) : entries.length > 0 ? (
-                <ol className="text-[11px] font-mono text-slate-300 space-y-1 max-h-80 overflow-y-auto scrollbar list-decimal list-inside">
+                <ol className="text-xs font-mono text-slate-300 space-y-1 max-h-80 overflow-y-auto scrollbar list-decimal list-inside">
                   {entries.map((entry, i) => (
                     <li key={i} className="leading-relaxed">{entry}</li>
                   ))}
                 </ol>
               ) : (
-                <p className="text-[10px] font-mono text-slate-500 italic py-4">Empty.</p>
+                <p className="text-xs font-mono text-slate-500 italic py-4">Empty.</p>
               )}
             </div>
           );
@@ -323,10 +323,113 @@ export function HardwareView(): ReactElement {
   );
 }
 
+interface TreeDir {
+  type: "dir";
+  name: string;
+  path: string;
+  children: TreeNode[];
+}
+interface TreeFile {
+  type: "file";
+  name: string;
+  path: string;
+}
+type TreeNode = TreeDir | TreeFile;
+
+/** Turn a flat list of relative paths into a nested dir/file tree, dirs sorted before files at each level. */
+function buildFileTree(paths: string[]): TreeNode[] {
+  const root: TreeDir = { type: "dir", name: "", path: "", children: [] };
+  for (const path of paths) {
+    const parts = path.split("/");
+    let cursor = root;
+    for (let i = 0; i < parts.length; i++) {
+      const isFile = i === parts.length - 1;
+      const segPath = parts.slice(0, i + 1).join("/");
+      if (isFile) {
+        cursor.children.push({ type: "file", name: parts[i], path: segPath });
+      } else {
+        let dir = cursor.children.find((c): c is TreeDir => c.type === "dir" && c.name === parts[i]);
+        if (!dir) {
+          dir = { type: "dir", name: parts[i], path: segPath, children: [] };
+          cursor.children.push(dir);
+        }
+        cursor = dir;
+      }
+    }
+  }
+  const sortTree = (nodes: TreeNode[]): TreeNode[] => {
+    nodes.sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "dir" ? -1 : 1));
+    for (const node of nodes) if (node.type === "dir") sortTree(node.children);
+    return nodes;
+  };
+  return sortTree(root.children);
+}
+
+interface FileTreeNodeProps {
+  node: TreeNode;
+  depth: number;
+  selectedFile: string | null;
+  expanded: Set<string>;
+  onToggleDir: (path: string) => void;
+  onSelectFile: (path: string) => void;
+}
+
+function FileTreeNode({ node, depth, selectedFile, expanded, onToggleDir, onSelectFile }: FileTreeNodeProps): ReactElement {
+  const indent = { paddingLeft: `${depth * 14 + 8}px` };
+  if (node.type === "dir") {
+    const isOpen = expanded.has(node.path);
+    return (
+      <div>
+        <button
+          onClick={() => onToggleDir(node.path)}
+          style={indent}
+          className="w-full text-left py-1 pr-2 rounded hover:bg-white/5 transition flex items-center gap-1.5 cursor-pointer font-mono text-slate-400"
+        >
+          <ChevronRight className={`w-3 h-3 shrink-0 transition-transform ${isOpen ? "rotate-90" : ""}`} />
+          {isOpen ? <FolderOpen className="w-3.5 h-3.5 shrink-0 text-slate-500" /> : <Folder className="w-3.5 h-3.5 shrink-0 text-slate-500" />}
+          <span className="truncate">{node.name}</span>
+        </button>
+        {isOpen && node.children.map((child) => (
+          <FileTreeNode
+            key={child.path}
+            node={child}
+            depth={depth + 1}
+            selectedFile={selectedFile}
+            expanded={expanded}
+            onToggleDir={onToggleDir}
+            onSelectFile={onSelectFile}
+          />
+        ))}
+      </div>
+    );
+  }
+  return (
+    <button
+      onClick={() => onSelectFile(node.path)}
+      style={indent}
+      className={`w-full text-left py-1 pr-2 rounded hover:bg-white/5 transition flex items-center gap-1.5 cursor-pointer font-mono truncate ${
+        selectedFile === node.path ? "text-cyan-400 bg-white/5 font-semibold" : "text-slate-400"
+      }`}
+    >
+      <FileCode className="w-3.5 h-3.5 shrink-0" />
+      <span className="truncate">{node.name}</span>
+    </button>
+  );
+}
+
 export function FilesView(): ReactElement {
   const setSelectedFileContent = useCharlieStore((s) => s.setSelectedFileContent);
   const [fileList, setFileList] = useState<string[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const fileTree = useMemo(() => buildFileTree(fileList), [fileList]);
+  const toggleDir = useCallback((path: string) => {
+    setExpandedDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
+  }, []);
   const [loading, setLoading] = useState(true);
   const [editText, setEditText] = useState("");
   const [dirty, setDirty] = useState(false);
@@ -360,6 +463,12 @@ export function FilesView(): ReactElement {
   const selectFile = async (filePath: string) => {
     setSelectedFile(filePath);
     setError("");
+    const parts = filePath.split("/");
+    setExpandedDirs((prev) => {
+      const next = new Set(prev);
+      for (let i = 1; i < parts.length; i++) next.add(parts.slice(0, i).join("/"));
+      return next;
+    });
     try {
       const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(filePath)}`);
       if (res.ok) {
@@ -500,18 +609,17 @@ export function FilesView(): ReactElement {
               Scanning workspace files...
             </div>
           ) : (
-            <div className="space-y-1">
-              {fileList.map((file) => (
-                <button
-                  key={file}
-                  onClick={() => selectFile(file)}
-                  className={`w-full text-left py-1 px-2 rounded hover:bg-white/5 transition flex items-center gap-2 cursor-pointer font-mono truncate ${
-                    selectedFile === file ? "text-cyan-400 bg-white/5 font-semibold" : "text-slate-400"
-                  }`}
-                >
-                  <FileCode className="w-3.5 h-3.5 shrink-0" />
-                  <span className="truncate">{file}</span>
-                </button>
+            <div className="space-y-0.5">
+              {fileTree.map((node) => (
+                <FileTreeNode
+                  key={node.path}
+                  node={node}
+                  depth={0}
+                  selectedFile={selectedFile}
+                  expanded={expandedDirs}
+                  onToggleDir={toggleDir}
+                  onSelectFile={selectFile}
+                />
               ))}
             </div>
           )}
@@ -539,7 +647,7 @@ export function FilesView(): ReactElement {
                   setDirty(true);
                 }}
                 spellCheck={false}
-                className="flex-1 w-full bg-zinc-950/60 text-slate-300 font-mono text-[11px] leading-relaxed p-3 outline-none resize-none scrollbar"
+                className="flex-1 w-full bg-zinc-950/60 text-slate-300 font-mono text-xs leading-relaxed p-3 outline-none resize-none scrollbar"
               />
             </>
           ) : (
@@ -657,9 +765,9 @@ export function ServicesView(): ReactElement {
           {services.map((s, i) => (
             <div key={i} className="p-4 rounded-xl bg-zinc-900/40 border border-white/5 space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">{s.type}</span>
+                <span className="text-xs font-mono text-slate-500 uppercase font-bold">{s.type}</span>
                 <span
-                  className={`text-[10px] uppercase font-bold font-mono px-1.5 py-0.5 rounded border ${
+                  className={`text-xs uppercase font-bold font-mono px-1.5 py-0.5 rounded border ${
                     s.status === "online"
                       ? "text-status-success bg-status-success-dim border-status-success/20"
                       : "text-status-idle bg-zinc-950/60 border-white/10"
@@ -669,7 +777,7 @@ export function ServicesView(): ReactElement {
                 </span>
               </div>
               <p className="text-xs font-bold text-slate-200 truncate">{s.name}</p>
-              <p className="text-[10px] text-slate-400 leading-relaxed">{s.details}</p>
+              <p className="text-xs text-slate-400 leading-relaxed">{s.details}</p>
             </div>
           ))}
         </div>
@@ -696,9 +804,9 @@ export function ServicesView(): ReactElement {
             {containers.map((c, i) => (
               <div key={i} className="p-4 rounded-xl bg-zinc-900/40 border border-white/5 space-y-2">
                 <p className="text-xs font-bold text-slate-200 truncate">{c.Names || "unnamed"}</p>
-                <p className="text-[10px] text-slate-400 truncate">{c.Image}</p>
-                <p className="text-[10px] text-slate-500">{c.Status}</p>
-                {c.Ports && <p className="text-[10px] text-slate-500 truncate">{c.Ports}</p>}
+                <p className="text-xs text-slate-400 truncate">{c.Image}</p>
+                <p className="text-xs text-slate-500">{c.Status}</p>
+                {c.Ports && <p className="text-xs text-slate-500 truncate">{c.Ports}</p>}
               </div>
             ))}
           </div>
@@ -808,7 +916,7 @@ export function OllamaView(): ReactElement {
       </div>
 
       <div className={`rounded-xl border p-4 space-y-1 font-mono text-xs ${data.activeIsLocal ? "border-status-success/30 bg-status-success/5" : "border-status-warning/30 bg-status-warning/5"}`}>
-        <span className="text-[10px] uppercase tracking-wider block font-bold text-slate-500">Charlie&apos;s Active LLM</span>
+        <span className="text-xs uppercase tracking-wider block font-bold text-slate-500">Charlie&apos;s Active LLM</span>
         {data.activeIsLocal ? (
           <p className="text-status-success">
             <span className="font-bold">{data.activeModel}</span> -- serving from a local endpoint below.
@@ -821,7 +929,7 @@ export function OllamaView(): ReactElement {
       </div>
 
       <div className="rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-3 font-mono text-xs">
-        <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-bold">Pull Ollama Model</span>
+        <span className="text-xs text-slate-500 uppercase tracking-wider block font-bold">Pull Ollama Model</span>
         <div className="flex gap-2">
           <input
             value={pullName}
@@ -839,7 +947,7 @@ export function OllamaView(): ReactElement {
 
       <div className="rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-4 font-mono text-xs text-slate-400">
         <div className="space-y-1.5">
-          <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-bold">Local Endpoints</span>
+          <span className="text-xs text-slate-500 uppercase tracking-wider block font-bold">Local Endpoints</span>
           {data.endpoints.map((ep) => (
             <div key={ep.name} className="flex justify-between items-center">
               <span className="text-slate-300">{ep.name} <span className="text-slate-500">({ep.url})</span></span>
@@ -852,7 +960,7 @@ export function OllamaView(): ReactElement {
           ))}
         </div>
         <div className="space-y-2 border-t border-white/5 pt-3">
-          <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-bold">
+          <span className="text-xs text-slate-500 uppercase tracking-wider block font-bold">
             AVAILABLE LOCALLY HOSTED MODELS ({data.models.length})
           </span>
           {loading ? (
@@ -872,18 +980,18 @@ export function OllamaView(): ReactElement {
                     <span className="text-[9px] text-status-success bg-status-success/10 px-1.5 py-0.5 rounded font-mono font-bold uppercase">In use</span>
                   )}
                   <span className="text-cyan-300 font-bold text-xs">{m.name}</span>
-                  <span className="text-[10px] text-slate-500 bg-white/5 px-1.5 py-0.5 rounded font-mono">{m.source}</span>
+                  <span className="text-xs text-slate-500 bg-white/5 px-1.5 py-0.5 rounded font-mono">{m.source}</span>
                   {m.parameter_size && (
-                    <span className="text-[10px] text-slate-400">{m.parameter_size}</span>
+                    <span className="text-xs text-slate-400">{m.parameter_size}</span>
                   )}
                   {m.quantization && (
-                    <span className="text-[10px] text-slate-400 bg-white/5 px-1.5 py-0.5 rounded">{m.quantization}</span>
+                    <span className="text-xs text-slate-400 bg-white/5 px-1.5 py-0.5 rounded">{m.quantization}</span>
                   )}
                   {m.context_length && (
-                    <span className="text-[10px] text-slate-400">{m.context_length.toLocaleString()} ctx</span>
+                    <span className="text-xs text-slate-400">{m.context_length.toLocaleString()} ctx</span>
                   )}
                   {formatBytes(m.size_bytes) && (
-                    <span className="text-[10px] text-slate-500">{formatBytes(m.size_bytes)}</span>
+                    <span className="text-xs text-slate-500">{formatBytes(m.size_bytes)}</span>
                   )}
                   {m.loaded_in_vram && (
                     <span className="text-[9px] text-purple-300 bg-purple-500/10 px-1.5 py-0.5 rounded font-bold uppercase" title={m.vram_bytes ? `${formatBytes(m.vram_bytes)} VRAM` : undefined}>
@@ -1068,7 +1176,7 @@ export function ExtensionsView({ kindFilter }: ExtensionsViewProps = {}): ReactE
       </div>
 
       <div className="rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-3 font-mono text-xs">
-        <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-bold">Install {kindFilter || "Extension"}</span>
+        <span className="text-xs text-slate-500 uppercase tracking-wider block font-bold">Install {kindFilter || "Extension"}</span>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
           {kindFilter ? (
             <input
@@ -1118,7 +1226,7 @@ export function ExtensionsView({ kindFilter }: ExtensionsViewProps = {}): ReactE
 
       {pending && (
         <div className="rounded-xl border border-status-warning/30 p-4 bg-status-warning-dim space-y-3 font-mono text-xs">
-          <span className="text-[10px] text-status-warning uppercase tracking-wider block font-bold">Approve Install</span>
+          <span className="text-xs text-status-warning uppercase tracking-wider block font-bold">Approve Install</span>
           <pre className="whitespace-pre-wrap text-slate-300">{pending.skill_card}</pre>
           {pending.warnings.length > 0 && (
             <div className="space-y-1">
@@ -1149,9 +1257,9 @@ export function ExtensionsView({ kindFilter }: ExtensionsViewProps = {}): ReactE
           visibleExtensions.map((ext) => (
             <div key={ext.name} className="p-4 rounded-xl bg-zinc-900/40 border border-white/5 space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">{ext.kind}</span>
+                <span className="text-xs font-mono text-slate-500 uppercase font-bold">{ext.kind}</span>
                 <span
-                  className={`text-[10px] uppercase font-bold font-mono px-1.5 py-0.5 rounded border ${
+                  className={`text-xs uppercase font-bold font-mono px-1.5 py-0.5 rounded border ${
                     ext.enabled
                       ? "text-status-success bg-status-success-dim border-status-success/20"
                       : "text-status-idle bg-zinc-950/60 border-white/10"
@@ -1161,8 +1269,8 @@ export function ExtensionsView({ kindFilter }: ExtensionsViewProps = {}): ReactE
                 </span>
               </div>
               <p className="text-xs font-bold text-slate-200 truncate">{ext.name}</p>
-              <p className="text-[10px] text-slate-400 truncate">{ext.source || "--"}</p>
-              <p className="text-[10px] text-slate-500">
+              <p className="text-xs text-slate-400 truncate">{ext.source || "--"}</p>
+              <p className="text-xs text-slate-500">
                 {ext.tool_names.length} tool{ext.tool_names.length === 1 ? "" : "s"}: {ext.tool_names.join(", ") || "none"}
               </p>
               <div className="flex gap-2 pt-1">
@@ -1208,16 +1316,16 @@ function AgentRunCard({ run, onCancel }: { run: AgentRun; onCancel: (agentId: st
       <div className="flex items-center justify-between">
         <span className="flex items-center gap-1.5">
           <StatusIcon className={`w-3.5 h-3.5 shrink-0 ${className}`} />
-          <span className="uppercase text-[10px] font-bold text-slate-400">{label}</span>
+          <span className="uppercase text-xs font-bold text-slate-400">{label}</span>
         </span>
-        {durationLabel && <span className="text-[10px] text-slate-600">{durationLabel}</span>}
+        {durationLabel && <span className="text-xs text-slate-600">{durationLabel}</span>}
       </div>
       <p className="text-slate-300 break-words">{run.task}</p>
       {run.lastTool && run.status === "running" && (
-        <p className="text-[10px] text-slate-500">using: {run.lastTool}</p>
+        <p className="text-xs text-slate-500">using: {run.lastTool}</p>
       )}
       {run.result && (
-        <p className="text-[10px] text-slate-500 pl-2 border-l border-white/5 break-words">{run.result}</p>
+        <p className="text-xs text-slate-500 pl-2 border-l border-white/5 break-words">{run.result}</p>
       )}
       {run.status === "running" && (
         <Button size="sm" variant="danger" onClick={() => onCancel(run.agentId)}>
@@ -1272,7 +1380,7 @@ export function AgentsView(): ReactElement {
         <div className="space-y-5">
           {groups.map(([sessionId, runs]) => (
             <div key={sessionId} className="relative pl-4 border-l border-white/10 space-y-2">
-              <span className="text-[10px] text-slate-500 uppercase tracking-wider font-bold font-mono">
+              <span className="text-xs text-slate-500 uppercase tracking-wider font-bold font-mono">
                 Session {sessionId === "unknown" ? "unknown" : sessionId.slice(0, 8)}
               </span>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1353,7 +1461,7 @@ export function MCPCenterView(): ReactElement {
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-slate-200 capitalize">{server.name}</span>
                   <span
-                    className={`text-[10px] uppercase font-bold font-mono px-1.5 py-0.5 rounded border ${
+                    className={`text-xs uppercase font-bold font-mono px-1.5 py-0.5 rounded border ${
                       status.connected
                         ? "text-status-success bg-status-success-dim border-status-success/20"
                         : "text-status-idle bg-zinc-950/60 border-white/10"
@@ -1362,7 +1470,7 @@ export function MCPCenterView(): ReactElement {
                     {status.connected ? "connected" : "disconnected"}
                   </span>
                 </div>
-                <p className="text-[10px] text-slate-500">
+                <p className="text-xs text-slate-500">
                   {server.count} tool{server.count === 1 ? "" : "s"}: {server.tools.join(", ")}
                 </p>
               </div>

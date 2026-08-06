@@ -188,7 +188,7 @@ export function CommandPalette({
                   {cmd.hint === "active" || cmd.hint === "current" ? (
                     <Check className="w-3.5 h-3.5 shrink-0 text-cyan-400" />
                   ) : cmd.hint ? (
-                    <span className="text-[10px] font-mono text-slate-500 shrink-0">{cmd.hint}</span>
+                    <span className="text-xs font-mono text-slate-500 shrink-0">{cmd.hint}</span>
                   ) : null}
                 </button>
               );

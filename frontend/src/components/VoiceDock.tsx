@@ -81,7 +81,7 @@ export function VoiceDock({
       {/* Dynamic Equalizer Visualizer */}
       <div className="flex-1 flex items-center justify-center gap-[3px] h-[26px]">
         {!connected ? (
-          <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-red-500 animate-pulse font-mono">
+          <span className="text-xs font-bold uppercase tracking-[0.18em] text-red-500 animate-pulse font-mono">
             Audio offline
           </span>
         ) : (
@@ -122,7 +122,7 @@ export function VoiceDock({
         style={{
           color: !connected ? "var(--color-status-error)" : stateColor,
         }}
-        className={`text-[10px] font-bold uppercase tracking-[0.18em] min-w-[80px] text-center font-mono`}
+        className={`text-xs font-bold uppercase tracking-[0.18em] min-w-[80px] text-center font-mono`}
         aria-live="polite"
       >
         {!connected ? "Offline" : stateLabel}
@@ -165,7 +165,7 @@ export function VoiceDock({
             style={{ accentColor }}
             className="w-20 cursor-pointer accent-[var(--color-accent-teal)]"
           />
-          <span className="text-[10px] font-mono text-slate-500 w-7 text-right">
+          <span className="text-xs font-mono text-slate-500 w-7 text-right">
             {Math.round(effectiveVolume * 100)}
           </span>
         </div>
@@ -192,7 +192,7 @@ export function VoiceDock({
             {mic.mic_muted || !connected ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
           </button>
           <div className="flex flex-col text-right">
-            <span className="text-[10px] font-bold tracking-widest uppercase text-slate-500">
+            <span className="text-xs font-bold tracking-widest uppercase text-slate-500">
               MIC LINK
             </span>
             <span
@@ -203,7 +203,7 @@ export function VoiceDock({
                   ? "var(--color-text-muted)"
                   : "var(--color-accent-teal)",
               }}
-              className="text-[10px] font-bold uppercase font-mono"
+              className="text-xs font-bold uppercase font-mono"
             >
               {!connected ? "OFFLINE" : mic.mic_muted ? "MUTED" : "LIVE"}
             </span>

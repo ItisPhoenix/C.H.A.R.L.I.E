@@ -267,7 +267,7 @@ export default function SettingsPage(): ReactElement {
             <h1 className="font-display text-lg font-bold uppercase tracking-wide">
               Settings Config
             </h1>
-            <p className="text-[10px] text-slate-500 font-mono">
+            <p className="text-xs text-slate-500 font-mono">
               Charlie Engine Properties Editor
             </p>
           </div>
@@ -313,9 +313,9 @@ export default function SettingsPage(): ReactElement {
             />
           </div>
 
-          <h3 className="px-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest font-mono mb-2">
+          <h2 className="px-2 text-xs font-bold text-slate-500 uppercase tracking-widest font-mono mb-2">
             Categories
-          </h3>
+          </h2>
 
           <div className="space-y-0.5">
             {visibleGroups.map((group) => (
@@ -405,14 +405,14 @@ function FieldRow({
       <div>
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs font-semibold text-slate-200">{spec.label}</span>
-          {saveState === "saved" && <span className="text-[10px] font-mono text-emerald-400 uppercase font-bold">Saved</span>}
-          {saveState === "error" && <span className="text-[10px] font-mono text-red-400 uppercase font-bold">Failed</span>}
+          {saveState === "saved" && <span className="text-xs font-mono text-emerald-400 uppercase font-bold">Saved</span>}
+          {saveState === "error" && <span className="text-xs font-mono text-red-400 uppercase font-bold">Failed</span>}
         </div>
         <div className="flex items-center gap-1.5 flex-wrap mt-1">
-          <span className="text-[10px] font-mono text-slate-500 uppercase">{spec.key}</span>
+          <span className="text-xs font-mono text-slate-500 uppercase">{spec.key}</span>
           {restartMeta && (
             <span
-              className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full"
+              className="text-xs font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full"
               style={{ color: restartMeta.color, background: restartMeta.bg }}
             >
               {restartMeta.label}

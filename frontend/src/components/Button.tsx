@@ -23,7 +23,7 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
 
 const SIZE_CLASSES: Record<ButtonSize, string> = {
   md: "px-3 py-1.5 text-xs",
-  sm: "px-2 py-1 text-[10px]",
+  sm: "px-2 py-1 text-xs",
 };
 
 /** Shared button styling -- one radius, one active-press scale, one set of variant colors across the dashboard. */

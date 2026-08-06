@@ -46,7 +46,7 @@ export function DesktopFrameView(): ReactElement {
           Desktop Frame
         </h2>
         {frame && (
-          <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest">
+          <span className="text-xs font-mono text-slate-500 uppercase tracking-widest">
             last updated {formatAge(now - frame.receivedAt)}
           </span>
         )}
@@ -57,7 +57,7 @@ export function DesktopFrameView(): ReactElement {
           <div className="space-y-2">
             <Monitor className="w-8 h-8 text-slate-700 mx-auto" />
             <p className="text-sm text-slate-500">No frame captured yet.</p>
-            <p className="text-[11px] text-slate-600 max-w-sm">
+            <p className="text-xs text-slate-600 max-w-sm">
               Frames arrive only when a desktop tool actually runs (click, screenshot,
               read-screen) -- this is event-driven, not a continuous video feed.
             </p>

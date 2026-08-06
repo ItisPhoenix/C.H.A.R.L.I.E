@@ -110,6 +110,19 @@ body,
   }
 }
 
+/* Normalize scattered zinc-900/950 opacity backgrounds to a consistent glass-alpha scale (chrome vs. controls). */
+[class*="bg-zinc-950/80"],
+[class*="bg-zinc-950/20"] {
+  background-color: rgba(0, 0, 0, 0.85) !important;
+  backdrop-filter: blur(8px);
+}
+[class*="bg-zinc-900/40"],
+[class*="bg-zinc-900/60"],
+[class*="bg-zinc-900/10"] {
+  background-color: rgba(0, 0, 0, 0.72) !important;
+  backdrop-filter: blur(6px);
+}
+
 /* Custom Scrollbars */
 .scrollbar::-webkit-scrollbar {
   width: 6px;

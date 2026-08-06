@@ -533,147 +533,147 @@ export default function Page(): ReactElement {
 
   return (
     <ErrorBoundary>
-      <div 
+      <div
         style={{ background: canvasBg }}
         className="h-screen w-screen flex flex-col overflow-hidden relative font-sans text-[var(--color-text-primary)]"
       >
-        <ToastContainer />
+            <ToastContainer />
 
-        {/* Ambient offline warning banner */}
-        {!connected && (
-          <div className="bg-status-error/15 border-b border-status-error/25 px-6 py-2 flex items-center justify-between text-[11px] font-mono font-bold anim-rise relative z-40 select-none">
-            <span className="text-status-error uppercase tracking-widest flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-status-error animate-ping" />
-              WebSocket Connection Interrupted. Retrying active socket...
-            </span>
-          </div>
-        )}
-
-        <TopBar
-          mobileMenuOpen={mobileMenuOpen}
-          onToggleMobileMenu={() => setMobileMenuOpen(!mobileMenuOpen)}
-          activeModel={activeModel}
-          modelOpen={modelOpen}
-          onToggleModelOpen={() => setModelOpen(!modelOpen)}
-          reloadingModel={reloadingModel}
-          modelSearchQuery={modelSearchQuery}
-          onModelSearchChange={setModelSearchQuery}
-          filteredModels={filteredModels}
-          onSelectModel={handleModelSelect}
-          mic={mic}
-          onToggleMic={() => sendMicControl({ mic_muted: !mic.mic_muted })}
-          searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
-          bellOpen={bellOpen}
-          onToggleBell={() => setBellOpen(!bellOpen)}
-          alerts={alerts}
-        />
-
-        {/* Main core layout panel */}
-        <div className="flex-1 flex overflow-hidden z-10 p-4 pb-2 gap-4 relative">
-          <Sidebar
-            autoCollapse={activePage === "controlCenter"}
-            mobileMenuOpen={mobileMenuOpen}
-            onToggleMobileMenu={() => setMobileMenuOpen((open) => !open)}
-            activePage={activePage}
-            onSelectPage={setActivePage}
-            searchedSessions={searchedSessions}
-            currentSessionId={currentSessionId}
-            onSelectSession={handleSelectSession}
-            onCreateSession={() => handleCreateSession("New Chat")}
-            onRenameSession={handleRenameSession}
-            onDeleteSession={handleDeleteSession}
-            onExportHistory={handleExportHistory}
-            accentColor={accentColor}
-            onSetAccentColor={setAccentColor}
-          />
-
-          {/* Dynamic Router Viewport Content */}
-          <div className="flex-1 flex overflow-hidden h-full">
-            {activePage === "chats" && (
-              <>
-                {/* Session list now lives as a dropdown off the Chats nav item, see above -- no permanent column here. */}
-
-                {/* Middle: Chat Feed Viewport */}
-                <main className="flex-1 min-w-0 flex flex-col h-full bg-zinc-900/10">
-                  <ChatView
-                    messages={messages}
-                    onSend={handleSendMessage}
-                    onStop={handleStop}
-                    loading={messagesLoading}
-                    voiceState={voiceState}
-                    toolActivity={toolActivity}
-                    executionTraces={executionTraces}
-                    activeProposal={activeProposal}
-                    onApproveRecovery={handleApproveRecovery}
-                    onRejectRecovery={handleRejectRecovery}
-                    activeToolApproval={activeToolApproval}
-                    onApproveTool={handleApproveToolCall}
-                    onRejectTool={handleRejectToolCall}
-                  />
-                </main>
-
-                {/* Right Sidebar widgets */}
-                <div className="hidden xl:flex h-full">
-                  <InsightRail />
-                </div>
-              </>
+            {/* Ambient offline warning banner */}
+            {!connected && (
+              <div className="bg-status-error/15 border-b border-status-error/25 px-6 py-2 flex items-center justify-between text-xs font-mono font-bold anim-rise relative z-40 select-none">
+                <span className="text-status-error uppercase tracking-widest flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-status-error animate-ping" />
+                  WebSocket Connection Interrupted. Retrying active socket...
+                </span>
+              </div>
             )}
 
-            {activePage === "controlCenter" && <ControlCenterView />}
+            <TopBar
+              mobileMenuOpen={mobileMenuOpen}
+              onToggleMobileMenu={() => setMobileMenuOpen(!mobileMenuOpen)}
+              activeModel={activeModel}
+              modelOpen={modelOpen}
+              onToggleModelOpen={() => setModelOpen(!modelOpen)}
+              reloadingModel={reloadingModel}
+              modelSearchQuery={modelSearchQuery}
+              onModelSearchChange={setModelSearchQuery}
+              filteredModels={filteredModels}
+              onSelectModel={handleModelSelect}
+              mic={mic}
+              onToggleMic={() => sendMicControl({ mic_muted: !mic.mic_muted })}
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              bellOpen={bellOpen}
+              onToggleBell={() => setBellOpen(!bellOpen)}
+              alerts={alerts}
+            />
 
-            {/* Custom WIP dashboard panels */}
-            {activePage === "memories" && <MemoriesView />}
-            {activePage === "hardware" && <HardwareView />}
-            {activePage === "files" && <FilesView />}
-            {activePage === "docker" && <ServicesView />}
-            {activePage === "ollama" && <OllamaView />}
-            {activePage === "extensions" && <ExtensionsView />}
-            {activePage === "skills" && <SkillsView />}
-            {activePage === "agents" && <AgentsView />}
-            {activePage === "mcp" && <MCPCenterView />}
-            
-            {activePage === "desktop" && <DesktopFrameView />}
-          </div>
-        </div>
+            {/* Main core layout panel */}
+            <div className="flex-1 flex overflow-hidden z-10 p-4 pb-2 gap-4 relative">
+              <Sidebar
+                autoCollapse={activePage === "controlCenter"}
+                mobileMenuOpen={mobileMenuOpen}
+                onToggleMobileMenu={() => setMobileMenuOpen((open) => !open)}
+                activePage={activePage}
+                onSelectPage={setActivePage}
+                searchedSessions={searchedSessions}
+                currentSessionId={currentSessionId}
+                onSelectSession={handleSelectSession}
+                onCreateSession={() => handleCreateSession("New Chat")}
+                onRenameSession={handleRenameSession}
+                onDeleteSession={handleDeleteSession}
+                onExportHistory={handleExportHistory}
+                accentColor={accentColor}
+                onSetAccentColor={setAccentColor}
+              />
 
-        {/* Bottom Console Multi-Tab Log */}
-        {activePage === "chats" && (
-          <div className="shrink-0 px-1 mt-2">
-            <EventLog />
-          </div>
-        )}
+              {/* Dynamic Router Viewport Content */}
+              <div className="flex-1 flex overflow-hidden h-full">
+                {activePage === "chats" && (
+                  <>
+                    {/* Session list now lives as a dropdown off the Chats nav item, see above -- no permanent column here. */}
 
-        {/* Bottom Voice Dock Equalizer -- redundant with the Control Center orb, hidden there */}
-        {activePage !== "controlCenter" && (
-          <VoiceDock
-            state={voiceState}
-            connected={connected}
-            audio={audio}
-            mic={mic}
-            onAudioControl={sendAudioControl}
-            onMicControl={sendMicControl}
-          />
-        )}
+                    {/* Middle: Chat Feed Viewport */}
+                    <main className="flex-1 min-w-0 flex flex-col h-full bg-zinc-900/10">
+                      <ChatView
+                        messages={messages}
+                        onSend={handleSendMessage}
+                        onStop={handleStop}
+                        loading={messagesLoading}
+                        voiceState={voiceState}
+                        toolActivity={toolActivity}
+                        executionTraces={executionTraces}
+                        activeProposal={activeProposal}
+                        onApproveRecovery={handleApproveRecovery}
+                        onRejectRecovery={handleRejectRecovery}
+                        activeToolApproval={activeToolApproval}
+                        onApproveTool={handleApproveToolCall}
+                        onRejectTool={handleRejectToolCall}
+                      />
+                    </main>
 
-        {paletteOpen && (
-          <CommandPalette
-            onClose={() => setPaletteOpen(false)}
-            sessions={sessions}
-            currentSessionId={currentSessionId}
-            onJumpToSession={handleSelectSession}
-            models={availableModels}
-            activeModel={activeModel}
-            onSwitchModel={handleModelSelect}
-            micMuted={mic.mic_muted}
-            onToggleMic={() => sendMicControl({ mic_muted: !mic.mic_muted })}
-            audioMuted={audio.muted}
-            onToggleAudio={() => sendAudioControl({ muted: !audio.muted })}
-            onOpenSettings={() => router.push("/settings")}
-            onExportHistory={handleExportHistory}
-            onStartBackgroundTask={(text) => sendWS({ type: "background_task_start", payload: { text } })}
-          />
-        )}
+                    {/* Right Sidebar widgets */}
+                    <div className="hidden xl:flex h-full">
+                      <InsightRail />
+                    </div>
+                  </>
+                )}
+
+                {activePage === "controlCenter" && <ControlCenterView />}
+
+                {/* Custom WIP dashboard panels */}
+                {activePage === "memories" && <MemoriesView />}
+                {activePage === "hardware" && <HardwareView />}
+                {activePage === "files" && <FilesView />}
+                {activePage === "docker" && <ServicesView />}
+                {activePage === "ollama" && <OllamaView />}
+                {activePage === "extensions" && <ExtensionsView />}
+                {activePage === "skills" && <SkillsView />}
+                {activePage === "agents" && <AgentsView />}
+                {activePage === "mcp" && <MCPCenterView />}
+
+                {activePage === "desktop" && <DesktopFrameView />}
+              </div>
+            </div>
+
+            {/* Bottom Console Multi-Tab Log */}
+            {activePage === "chats" && (
+              <div className="shrink-0 px-1 mt-2">
+                <EventLog />
+              </div>
+            )}
+
+            {/* Bottom Voice Dock Equalizer -- redundant with the Control Center orb, hidden there */}
+            {activePage !== "controlCenter" && (
+              <VoiceDock
+                state={voiceState}
+                connected={connected}
+                audio={audio}
+                mic={mic}
+                onAudioControl={sendAudioControl}
+                onMicControl={sendMicControl}
+              />
+            )}
+
+            {paletteOpen && (
+              <CommandPalette
+                onClose={() => setPaletteOpen(false)}
+                sessions={sessions}
+                currentSessionId={currentSessionId}
+                onJumpToSession={handleSelectSession}
+                models={availableModels}
+                activeModel={activeModel}
+                onSwitchModel={handleModelSelect}
+                micMuted={mic.mic_muted}
+                onToggleMic={() => sendMicControl({ mic_muted: !mic.mic_muted })}
+                audioMuted={audio.muted}
+                onToggleAudio={() => sendAudioControl({ muted: !audio.muted })}
+                onOpenSettings={() => router.push("/settings")}
+                onExportHistory={handleExportHistory}
+                onStartBackgroundTask={(text) => sendWS({ type: "background_task_start", payload: { text } })}
+              />
+            )}
       </div>
     </ErrorBoundary>
   );

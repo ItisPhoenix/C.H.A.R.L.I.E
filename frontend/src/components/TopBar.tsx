@@ -48,10 +48,10 @@ export function TopBar(props: TopBarProps): ReactElement {
             C
           </div>
           <div>
-            <h1 className="font-display font-bold uppercase tracking-wider text-xs">
+            <h1 className="font-display font-bold uppercase tracking-wider text-sm">
               CHARLIE
             </h1>
-            <p className="text-[10px] font-mono text-slate-500 tracking-widest uppercase">
+            <p className="text-xs font-mono text-slate-500 tracking-widest uppercase">
               AI OS dashboard
             </p>
           </div>
@@ -71,7 +71,7 @@ export function TopBar(props: TopBarProps): ReactElement {
             ) : (
               <Shield className="w-3.5 h-3.5 text-slate-400" />
             )}
-            <span className="font-mono text-[10px] truncate max-w-[120px]">{activeModel}</span>
+            <span className="font-mono text-xs truncate max-w-[120px]">{activeModel}</span>
           </button>
 
           {modelOpen && (
@@ -83,19 +83,19 @@ export function TopBar(props: TopBarProps): ReactElement {
                   value={modelSearchQuery}
                   onChange={(e) => onModelSearchChange(e.target.value)}
                   placeholder="Filter API key / local models..."
-                  className="w-full bg-zinc-900 border border-white/10 rounded-md pl-7 pr-2 py-1 text-[10px] text-slate-200 placeholder:text-slate-500 outline-none font-mono"
+                  className="w-full bg-zinc-900 border border-white/10 rounded-md pl-7 pr-2 py-1 text-xs text-slate-200 placeholder:text-slate-500 outline-none font-mono"
                   autoFocus
                 />
               </div>
               <div className="max-h-60 overflow-y-auto scrollbar space-y-0.5">
                 {filteredModels.length === 0 ? (
-                  <div className="py-3 text-center text-[10px] font-mono text-slate-500">No models match &quot;{modelSearchQuery}&quot;</div>
+                  <div className="py-3 text-center text-xs font-mono text-slate-500">No models match &quot;{modelSearchQuery}&quot;</div>
                 ) : (
                   filteredModels.map((model) => (
                     <button
                       key={model}
                       onClick={() => onSelectModel(model)}
-                      className="w-full text-left font-mono text-[10px] text-slate-300 hover:text-slate-100 px-2.5 py-1.5 rounded-lg hover:bg-white/5 flex items-center justify-between cursor-pointer"
+                      className="w-full text-left font-mono text-xs text-slate-300 hover:text-slate-100 px-2.5 py-1.5 rounded-lg hover:bg-white/5 flex items-center justify-between cursor-pointer"
                     >
                       <span className="truncate pr-2">{model}</span>
                       {activeModel === model && <Check className="w-3.5 h-3.5 text-status-listening shrink-0" />}
@@ -117,12 +117,12 @@ export function TopBar(props: TopBarProps): ReactElement {
           {mic.mic_muted ? (
             <>
               <MicOff className="w-3.5 h-3.5 text-slate-500" />
-              <span className="text-[10px] text-slate-500 font-mono">MUTED</span>
+              <span className="text-xs text-slate-500 font-mono">MUTED</span>
             </>
           ) : (
             <>
               <Mic className="w-3.5 h-3.5 text-status-listening animate-pulse" />
-              <span className="text-[10px] text-status-listening font-mono">LISTENING</span>
+              <span className="text-xs text-status-listening font-mono">LISTENING</span>
             </>
           )}
         </button>
@@ -158,7 +158,7 @@ export function TopBar(props: TopBarProps): ReactElement {
           </button>
 
           {bellOpen && (
-            <div className="absolute top-9 right-0 z-50 w-72 rounded-xl bg-zinc-950 border border-[var(--color-glass-border)] p-3 shadow-2xl animate-[rise_0.15s_ease-out] font-mono text-[10px]">
+            <div className="absolute top-9 right-0 z-50 w-72 rounded-xl bg-zinc-950 border border-[var(--color-glass-border)] p-3 shadow-2xl animate-[rise_0.15s_ease-out] font-mono text-xs">
               <div className="flex items-center justify-between border-b border-white/5 pb-2 mb-2">
                 <span className="font-bold text-slate-400 uppercase tracking-widest">Recent Alerts</span>
                 <button
@@ -177,7 +177,7 @@ export function TopBar(props: TopBarProps): ReactElement {
                       <p className={`font-semibold ${alert.severity === "error" ? "text-status-error" : "text-slate-300"}`}>
                         {alert.message}
                       </p>
-                      <span className="text-[10px] text-slate-500 block mt-1">{alert.timestamp}</span>
+                      <span className="text-xs text-slate-500 block mt-1">{alert.timestamp}</span>
                     </div>
                   ))}
                 </div>

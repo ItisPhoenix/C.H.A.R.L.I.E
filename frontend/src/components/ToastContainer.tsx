@@ -74,7 +74,7 @@ export function ToastContainer(): ReactElement {
               <p className={`text-xs font-sans leading-relaxed ${textClass} break-words`}>
                 {toast.message}
               </p>
-              <span className="text-[10px] font-mono text-slate-500 mt-1 block">
+              <span className="text-xs font-mono text-slate-500 mt-1 block">
                 {toast.timestamp}
               </span>
             </div>
