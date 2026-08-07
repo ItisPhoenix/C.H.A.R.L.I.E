@@ -15,6 +15,7 @@ import { TopBar } from "../components/TopBar";
 import { Sidebar } from "../components/Sidebar";
 import { DesktopFrameView } from "../components/DesktopFrameView";
 import { ControlCenterView } from "../components/ControlCenterView";
+import { ScratchpadPanel } from "../components/ScratchpadPanel";
 import {
   MemoriesView, HardwareView, FilesView, ServicesView, OllamaView, ExtensionsView, SkillsView, AgentsView, MCPCenterView
 } from "../components/DashboardPanels";
@@ -57,8 +58,9 @@ export default function Page(): ReactElement {
   const setVisionModel = useCharlieStore((s) => s.setVisionModel);
 
   // Router Pages state
-  const [activePage, setActivePage] = useState<string>("controlCenter");
+  const [activePage, setActivePage] = useState<string>("chats");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [chatsAccordionOpen, setChatsAccordionOpen] = useState(false);
 
   // Search filter query
   const [searchQuery, setSearchQuery] = useState("");
@@ -125,6 +127,7 @@ export default function Page(): ReactElement {
 
   // Notification bell popover state
   const [bellOpen, setBellOpen] = useState(false);
+  const [insightOpen, setInsightOpen] = useState(false);
 
   // Command palette (Ctrl+K) state
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -275,13 +278,15 @@ export default function Page(): ReactElement {
         if (paletteOpen) return;
         if (modelOpen) { setModelOpen(false); return; }
         if (bellOpen) { setBellOpen(false); return; }
+        if (insightOpen) { setInsightOpen(false); return; }
+        if (chatsAccordionOpen) { setChatsAccordionOpen(false); return; }
         if (mobileMenuOpen) { setMobileMenuOpen(false); return; }
-        handleStop();
+        if (voiceState !== "idle") handleStop();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [handleCreateSession, handleStop, paletteOpen, modelOpen, bellOpen, mobileMenuOpen]);
+  }, [handleCreateSession, handleStop, paletteOpen, modelOpen, bellOpen, insightOpen, chatsAccordionOpen, mobileMenuOpen, voiceState]);
 
   // Apply the persisted accent color after mount, so the first client render matches
   // the server-rendered HTML (avoids a hydration mismatch) before diverging to the saved value.
@@ -555,6 +560,7 @@ export default function Page(): ReactElement {
               activeModel={activeModel}
               modelOpen={modelOpen}
               onToggleModelOpen={() => setModelOpen(!modelOpen)}
+              onCloseModel={() => setModelOpen(false)}
               reloadingModel={reloadingModel}
               modelSearchQuery={modelSearchQuery}
               onModelSearchChange={setModelSearchQuery}
@@ -566,6 +572,7 @@ export default function Page(): ReactElement {
               onSearchChange={setSearchQuery}
               bellOpen={bellOpen}
               onToggleBell={() => setBellOpen(!bellOpen)}
+              onCloseBell={() => setBellOpen(false)}
               alerts={alerts}
             />
 
@@ -574,7 +581,9 @@ export default function Page(): ReactElement {
               <Sidebar
                 autoCollapse={activePage === "controlCenter"}
                 mobileMenuOpen={mobileMenuOpen}
-                onToggleMobileMenu={() => setMobileMenuOpen((open) => !open)}
+                chatsAccordionOpen={chatsAccordionOpen}
+                onToggleChatsAccordion={() => setChatsAccordionOpen((open) => !open)}
+                onCloseChatsAccordion={() => setChatsAccordionOpen(false)}
                 activePage={activePage}
                 onSelectPage={setActivePage}
                 searchedSessions={searchedSessions}
@@ -610,20 +619,38 @@ export default function Page(): ReactElement {
                         activeToolApproval={activeToolApproval}
                         onApproveTool={handleApproveToolCall}
                         onRejectTool={handleRejectToolCall}
+                        onToggleInsight={() => setInsightOpen((open) => !open)}
+                        insightOpen={insightOpen}
                       />
                     </main>
 
-                    {/* Right Sidebar widgets */}
+                    {/* xl+: docked rail. Below xl: overlay drawer from chat header toggle. */}
                     <div className="hidden xl:flex h-full">
                       <InsightRail />
                     </div>
+                    {insightOpen && (
+                      <div className="xl:hidden fixed inset-0 z-40 flex justify-end">
+                        <button
+                          type="button"
+                          className="absolute inset-0 bg-black/55"
+                          aria-label="Close insights"
+                          onClick={() => setInsightOpen(false)}
+                        />
+                        <div className="relative h-full z-10 anim-right shadow-2xl">
+                          <InsightRail />
+                        </div>
+                      </div>
+                    )}
                   </>
                 )}
 
-                {activePage === "controlCenter" && <ControlCenterView />}
+                {activePage === "controlCenter" && (
+                  <ControlCenterView onNavigateToChats={() => setActivePage("chats")} />
+                )}
 
                 {/* Custom WIP dashboard panels */}
                 {activePage === "memories" && <MemoriesView />}
+                {activePage === "scratchpad" && <ScratchpadPanel />}
                 {activePage === "hardware" && <HardwareView />}
                 {activePage === "files" && <FilesView />}
                 {activePage === "docker" && <ServicesView />}

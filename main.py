@@ -1287,6 +1287,16 @@ async def main():
             import charlie.tools
             charlie.tools.set_event_bus(bus, asyncio.get_running_loop())
 
+            from charlie import reminders as _reminders
+            _reminders.set_loop(asyncio.get_running_loop())
+
+            def _on_reminder_fired(reminder_id: str, text: str) -> None:
+                msg = f"Reminder: {text}"
+                _safe_speak(voice, msg, "neutral", "reminder")
+                asyncio.ensure_future(bus.emit("alert", {"severity": "info", "message": msg}))
+
+            _reminders.set_fire_callback(_on_reminder_fired)
+
             from charlie import background_task as _background_task
             interrupted_task = _background_task.check_interrupted_task()
             if interrupted_task is not None:

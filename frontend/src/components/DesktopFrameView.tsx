@@ -65,6 +65,7 @@ export function DesktopFrameView(): ReactElement {
         </div>
       ) : (
         <div className="relative inline-block max-w-full mx-auto rounded-xl overflow-hidden border border-white/10">
+          {/* eslint-disable-next-line @next/next/no-img-element -- base64 data URI of unknown size, next/image optimization doesn't apply */}
           <img
             ref={imgRef}
             src={`data:image/png;base64,${frame.imageB64}`}

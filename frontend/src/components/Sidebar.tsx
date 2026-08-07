@@ -4,7 +4,7 @@ import { useState, type ReactElement } from "react";
 import Link from "next/link";
 import {
   MessageSquare, Monitor, Database, Cpu, Settings, FolderGit, Network,
-  Server, Puzzle, GitBranch, ChevronDown, Cable, Sparkles, LayoutDashboard, type LucideIcon,
+  Server, Puzzle, GitBranch, ChevronDown, Cable, Sparkles, LayoutDashboard, NotebookPen, type LucideIcon,
 } from "lucide-react";
 import { SessionRail } from "./SessionRail";
 import { lighten, type Session } from "../store/useCharlieStore";
@@ -51,7 +51,9 @@ function NavButton({ icon: Icon, label, active, onClick, collapsed }: NavButtonP
 interface SidebarProps {
   autoCollapse?: boolean;
   mobileMenuOpen: boolean;
-  onToggleMobileMenu: () => void;
+  chatsAccordionOpen: boolean;
+  onToggleChatsAccordion: () => void;
+  onCloseChatsAccordion: () => void;
   activePage: string;
   onSelectPage: (page: string) => void;
   searchedSessions: Session[];
@@ -70,29 +72,33 @@ const ACCENT_SWATCHES = ["#a855f7", "#3b82f6", "#ef4444", "#f59e0b", "#06b6d4"];
 /** Left navigation sidebar: Chats accordion, Tools/System nav, accent picker. Extracted out of page.tsx. */
 export function Sidebar(props: SidebarProps): ReactElement {
   const {
-    autoCollapse, mobileMenuOpen, onToggleMobileMenu, activePage, onSelectPage, searchedSessions,
+    autoCollapse, mobileMenuOpen, chatsAccordionOpen,
+    onToggleChatsAccordion, onCloseChatsAccordion, activePage, onSelectPage, searchedSessions,
     currentSessionId, onSelectSession, onCreateSession, onRenameSession, onDeleteSession,
     onExportHistory, accentColor, onSetAccentColor,
   } = props;
 
   // The Chats accordion's content assumes a full-width sidebar. autoCollapse's
   // hover-to-expand is pure CSS, so if the mouse leaves before React knows,
-  // the accordion can stay "open" (mobileMenuOpen=true) while the nav is
-  // back at icon-only width -- rendering the session list garbled into 56px.
-  // Track real hover in JS so the accordion only ever renders when there's
-  // room, and auto-close it when the mouse leaves a collapsed sidebar.
+  // the accordion can stay open while the nav is back at icon-only width --
+  // rendering the session list garbled into 56px. Track real hover in JS so
+  // the accordion only ever renders when there's room, and auto-close it when
+  // the mouse leaves a collapsed sidebar.
   const [isHovering, setIsHovering] = useState(false);
+  const [toolsExpanded, setToolsExpanded] = useState(false);
   const accordionHasRoom = !autoCollapse || isHovering;
+  const sidebarWide = mobileMenuOpen || chatsAccordionOpen;
+  const onToolsPage = ["desktop", "files", "docker", "ollama", "extensions", "skills", "agents", "mcp"].includes(activePage);
 
   return (
     <nav
       onMouseEnter={() => setIsHovering(true)}
       onMouseLeave={() => {
         setIsHovering(false);
-        if (autoCollapse && mobileMenuOpen) onToggleMobileMenu();
+        if (autoCollapse && chatsAccordionOpen) onCloseChatsAccordion();
       }}
       className={`group shrink-0 border-r border-[var(--color-glass-border)] bg-zinc-950/20 p-4 flex flex-col justify-between select-none overflow-y-auto overflow-x-hidden scrollbar transition-[width] duration-200 ${
-        autoCollapse ? "w-14 hover:w-56" : mobileMenuOpen ? "w-72" : "w-52"
+        autoCollapse ? "w-14 hover:w-56" : sidebarWide ? "w-72" : "w-52"
       }`}
     >
       <div className="space-y-6">
@@ -112,9 +118,9 @@ export function Sidebar(props: SidebarProps): ReactElement {
             <button
               onClick={() => {
                 onSelectPage("chats");
-                onToggleMobileMenu();
+                onToggleChatsAccordion();
               }}
-              aria-expanded={mobileMenuOpen}
+              aria-expanded={chatsAccordionOpen}
               className={`w-full text-left rounded-lg px-2.5 py-2 text-xs flex items-center gap-2.5 font-medium cursor-pointer transition ${
                 autoCollapse ? "justify-center group-hover:justify-between" : "justify-between"
               } ${
@@ -129,10 +135,10 @@ export function Sidebar(props: SidebarProps): ReactElement {
                 <span className={autoCollapse ? HIDDEN_WHEN_COLLAPSED : ""}>Chats</span>
               </span>
               <ChevronDown
-                className={`w-3.5 h-3.5 shrink-0 transition-transform ${mobileMenuOpen ? "rotate-180" : ""} ${autoCollapse ? HIDDEN_WHEN_COLLAPSED : ""}`}
+                className={`w-3.5 h-3.5 shrink-0 transition-transform ${chatsAccordionOpen ? "rotate-180" : ""} ${autoCollapse ? HIDDEN_WHEN_COLLAPSED : ""}`}
               />
             </button>
-            {mobileMenuOpen && accordionHasRoom && (
+            {chatsAccordionOpen && accordionHasRoom && (
               <div className="rounded-lg border border-white/5 bg-zinc-900/40 overflow-hidden">
                 <SessionRail
                   variant="accordion"
@@ -153,24 +159,41 @@ export function Sidebar(props: SidebarProps): ReactElement {
               onClick={() => onSelectPage("memories")}
               collapsed={autoCollapse}
             />
+            <NavButton
+              icon={NotebookPen}
+              label="Scratchpad"
+              active={activePage === "scratchpad"}
+              onClick={() => onSelectPage("scratchpad")}
+              collapsed={autoCollapse}
+            />
           </div>
         </div>
 
-        {/* Category: TOOLS */}
+        {/* Category: TOOLS -- collapsed by default to cut nav overload */}
         <div className="space-y-1.5">
-          <h2 className={`px-2 text-xs font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}>
-            Tools
-          </h2>
-          <div className="space-y-0.5">
-            <NavButton icon={Monitor} label="Desktop" active={activePage === "desktop"} onClick={() => onSelectPage("desktop")} collapsed={autoCollapse} />
-            <NavButton icon={FolderGit} label="Files" active={activePage === "files"} onClick={() => onSelectPage("files")} collapsed={autoCollapse} />
-            <NavButton icon={Server} label="Services" active={activePage === "docker"} onClick={() => onSelectPage("docker")} collapsed={autoCollapse} />
-            <NavButton icon={Network} label="Local Models" active={activePage === "ollama"} onClick={() => onSelectPage("ollama")} collapsed={autoCollapse} />
-            <NavButton icon={Puzzle} label="Extensions" active={activePage === "extensions"} onClick={() => onSelectPage("extensions")} collapsed={autoCollapse} />
-            <NavButton icon={Sparkles} label="Skills" active={activePage === "skills"} onClick={() => onSelectPage("skills")} collapsed={autoCollapse} />
-            <NavButton icon={GitBranch} label="Agents" active={activePage === "agents"} onClick={() => onSelectPage("agents")} collapsed={autoCollapse} />
-            <NavButton icon={Cable} label="MCP Servers" active={activePage === "mcp"} onClick={() => onSelectPage("mcp")} collapsed={autoCollapse} />
-          </div>
+          <button
+            type="button"
+            onClick={() => setToolsExpanded((open) => !open)}
+            aria-expanded={toolsExpanded}
+            className={`w-full px-2 text-xs font-bold uppercase tracking-widest whitespace-nowrap flex items-center justify-between cursor-pointer transition ${
+              onToolsPage && !toolsExpanded ? "text-accent" : "text-slate-500 hover:text-slate-300"
+            } ${autoCollapse ? HIDE_WHEN_COLLAPSED : ""}`}
+          >
+            <span>Tools</span>
+            <ChevronDown className={`w-3 h-3 transition-transform ${toolsExpanded ? "rotate-180" : ""}`} />
+          </button>
+          {toolsExpanded && (
+            <div className="space-y-0.5">
+              <NavButton icon={Monitor} label="Desktop" active={activePage === "desktop"} onClick={() => onSelectPage("desktop")} collapsed={autoCollapse} />
+              <NavButton icon={FolderGit} label="Files" active={activePage === "files"} onClick={() => onSelectPage("files")} collapsed={autoCollapse} />
+              <NavButton icon={Server} label="Services" active={activePage === "docker"} onClick={() => onSelectPage("docker")} collapsed={autoCollapse} />
+              <NavButton icon={Network} label="Local Models" active={activePage === "ollama"} onClick={() => onSelectPage("ollama")} collapsed={autoCollapse} />
+              <NavButton icon={Puzzle} label="Extensions" active={activePage === "extensions"} onClick={() => onSelectPage("extensions")} collapsed={autoCollapse} />
+              <NavButton icon={Sparkles} label="Skills" active={activePage === "skills"} onClick={() => onSelectPage("skills")} collapsed={autoCollapse} />
+              <NavButton icon={GitBranch} label="Agents" active={activePage === "agents"} onClick={() => onSelectPage("agents")} collapsed={autoCollapse} />
+              <NavButton icon={Cable} label="MCP Servers" active={activePage === "mcp"} onClick={() => onSelectPage("mcp")} collapsed={autoCollapse} />
+            </div>
+          )}
         </div>
 
         {/* Category: SYSTEM */}

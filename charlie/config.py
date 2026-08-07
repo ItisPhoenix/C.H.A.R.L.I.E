@@ -210,6 +210,10 @@ class Config:
         default=os.getenv("EXTENSIONS_STATE_PATH", "extensions_state.json"),
         metadata=_meta("EXTENSIONS_STATE_PATH", "Server", restart="process"),
     )
+    scratchpad_db_path: str = field(
+        default=os.getenv("SCRATCHPAD_DB_PATH", "scratchpad.db"),
+        metadata=_meta("SCRATCHPAD_DB_PATH", "Server", restart="process"),
+    )
     # Search provider (SearXNG self-hosted)
     searxng_url: str = field(
         default=os.getenv("SEARXNG_URL", ""),

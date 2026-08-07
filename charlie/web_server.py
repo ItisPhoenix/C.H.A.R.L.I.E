@@ -21,11 +21,12 @@ from typing import List, Set
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from charlie.config import Config, config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
+from charlie.scratchpad import Scratchpad
 from charlie.session_store import SessionStore
 from charlie.utils import build_auth_headers
 
@@ -202,6 +203,16 @@ def _get_store() -> SessionStore:
     if _store is None:
         _store = SessionStore(config.session_db_path)
     return _store
+
+
+_scratchpad: Scratchpad | None = None
+
+
+def _get_scratchpad() -> Scratchpad:
+    global _scratchpad
+    if _scratchpad is None:
+        _scratchpad = Scratchpad(config.scratchpad_db_path)
+    return _scratchpad
 
 
 pipeline_state: str = "idle"
@@ -493,6 +504,56 @@ async def background_task_status():
 
     task = background_task.get_current_task()
     return {"task": task.to_event() if task is not None else None}
+
+
+@app.get("/api/scratchpad")
+async def list_scratchpad():
+    """List all scratchpad entries."""
+    pad = _get_scratchpad()
+    entries = await asyncio.to_thread(pad.list)
+    return {"entries": [{"index": i, "text": text, "created_at": c} for i, text, c in entries]}
+
+
+@app.post("/api/scratchpad")
+async def add_scratchpad(data: dict):
+    """Append a scratchpad entry."""
+    pad = _get_scratchpad()
+    try:
+        index = await asyncio.to_thread(pad.add, data.get("text", ""))
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    return {"index": index}
+
+
+@app.put("/api/scratchpad/{index}")
+async def edit_scratchpad(index: int, data: dict):
+    """Replace the text of a scratchpad entry by its 1-based index."""
+    pad = _get_scratchpad()
+    try:
+        ok = await asyncio.to_thread(pad.edit, index, data.get("text", ""))
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": f"No entry at index {index}"})
+    return {"index": index}
+
+
+@app.delete("/api/scratchpad/{index}")
+async def delete_scratchpad(index: int):
+    """Delete a scratchpad entry by its 1-based index."""
+    pad = _get_scratchpad()
+    ok = await asyncio.to_thread(pad.delete, index)
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": f"No entry at index {index}"})
+    return {"deleted": index}
+
+
+@app.delete("/api/scratchpad")
+async def clear_scratchpad():
+    """Delete all scratchpad entries."""
+    pad = _get_scratchpad()
+    await asyncio.to_thread(pad.clear)
+    return {"cleared": True}
 
 
 @app.get("/api/sessions")

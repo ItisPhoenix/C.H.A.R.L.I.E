@@ -18,9 +18,10 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 import httpx
 
-from charlie import recovery
+from charlie import recovery, reminders
 from charlie.config import config
 from charlie.known_apps import APP_REGISTRY
+from charlie.scratchpad import Scratchpad
 from charlie.session_store import SessionStore
 from charlie.utils import is_process_running
 
@@ -685,6 +686,162 @@ def wait_seconds(seconds: float) -> str:
     capped = max(0.0, min(float(seconds), _MAX_WAIT_SECONDS))
     time.sleep(capped)
     return f"Waited {capped}s."
+
+
+@registry.register_tool(
+    name="set_reminder",
+    description=(
+        "Set a one-off reminder that fires (spoken + dashboard toast) after a delay. "
+        f"Max {reminders.MAX_REMINDER_SECONDS}s (24h). Not recurring, lost on restart."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "What to remind the user of."},
+            "seconds": {"type": "number", "description": "Delay in seconds before firing."},
+        },
+        "required": ["text", "seconds"],
+    },
+)
+def set_reminder(text: str, seconds: float) -> str:
+    try:
+        reminder_id = reminders.set_reminder(text, float(seconds))
+    except ValueError as e:
+        return f"Reminder rejected: {e}"
+    return f"Reminder set (id={reminder_id}), fires in {seconds:g}s: {text}"
+
+
+@registry.register_tool(
+    name="list_reminders",
+    description="List all pending (not yet fired) reminders.",
+    schema={"type": "object", "properties": {}},
+)
+def list_reminders() -> str:
+    pending = reminders.list_reminders()
+    if not pending:
+        return "No pending reminders."
+    now = time.time()
+    lines = [
+        f"- {rid}: \"{entry['text']}\" (fires in {max(0, round(entry['fire_at'] - now))}s)"
+        for rid, entry in pending.items()
+    ]
+    return "\n".join(lines)
+
+
+@registry.register_tool(
+    name="cancel_reminder",
+    description="Cancel a pending reminder by its id (from set_reminder or list_reminders).",
+    schema={
+        "type": "object",
+        "properties": {
+            "reminder_id": {"type": "string", "description": "The reminder id to cancel."},
+        },
+        "required": ["reminder_id"],
+    },
+)
+def cancel_reminder(reminder_id: str) -> str:
+    if reminders.cancel_reminder(reminder_id):
+        return f"Reminder {reminder_id} cancelled."
+    return f"No pending reminder with id {reminder_id}."
+
+
+def _get_scratchpad() -> Scratchpad:
+    return Scratchpad(db_path=config.scratchpad_db_path)
+
+
+@registry.register_tool(
+    name="scratchpad_add",
+    description="Append a freeform note to the shared scratchpad (persists across sessions).",
+    schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The note text to add."},
+        },
+        "required": ["text"],
+    },
+)
+def scratchpad_add(text: str) -> str:
+    pad = _get_scratchpad()
+    try:
+        index = pad.add(text)
+    except ValueError as e:
+        return f"Error: {e}"
+    finally:
+        pad.close()
+    return f"Added as entry {index}."
+
+
+@registry.register_tool(
+    name="scratchpad_list",
+    description="List all entries currently in the shared scratchpad.",
+    schema={"type": "object", "properties": {}},
+)
+def scratchpad_list() -> str:
+    pad = _get_scratchpad()
+    try:
+        entries = pad.list()
+    finally:
+        pad.close()
+    if not entries:
+        return "Scratchpad is empty."
+    return "\n".join(f"{i}. {text}" for i, text, _created_at in entries)
+
+
+@registry.register_tool(
+    name="scratchpad_edit",
+    description="Replace the text of a scratchpad entry by its 1-based index (see scratchpad_list).",
+    schema={
+        "type": "object",
+        "properties": {
+            "index": {"type": "integer", "description": "1-based entry index."},
+            "text": {"type": "string", "description": "New text for that entry."},
+        },
+        "required": ["index", "text"],
+    },
+)
+def scratchpad_edit(index: int, text: str) -> str:
+    pad = _get_scratchpad()
+    try:
+        ok = pad.edit(int(index), text)
+    except ValueError as e:
+        return f"Error: {e}"
+    finally:
+        pad.close()
+    return f"Entry {index} updated." if ok else f"No entry at index {index}."
+
+
+@registry.register_tool(
+    name="scratchpad_delete",
+    description="Delete a scratchpad entry by its 1-based index (see scratchpad_list).",
+    schema={
+        "type": "object",
+        "properties": {
+            "index": {"type": "integer", "description": "1-based entry index."},
+        },
+        "required": ["index"],
+    },
+)
+def scratchpad_delete(index: int) -> str:
+    pad = _get_scratchpad()
+    try:
+        ok = pad.delete(int(index))
+    finally:
+        pad.close()
+    return f"Entry {index} deleted." if ok else f"No entry at index {index}."
+
+
+@registry.register_tool(
+    name="scratchpad_clear",
+    description="Delete all entries in the shared scratchpad.",
+    schema={"type": "object", "properties": {}},
+)
+def scratchpad_clear() -> str:
+    pad = _get_scratchpad()
+    try:
+        pad.clear()
+    finally:
+        pad.close()
+    return "Scratchpad cleared."
 
 
 @registry.register_tool(
