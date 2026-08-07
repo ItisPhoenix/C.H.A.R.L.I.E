@@ -418,7 +418,6 @@ function FileTreeNode({ node, depth, selectedFile, expanded, onToggleDir, onSele
 }
 
 export function FilesView(): ReactElement {
-  const setSelectedFileContent = useCharlieStore((s) => s.setSelectedFileContent);
   const [fileList, setFileList] = useState<string[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
@@ -473,12 +472,11 @@ export function FilesView(): ReactElement {
       const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(filePath)}`);
       if (res.ok) {
         const data = await res.json();
-        setSelectedFileContent(data.content || "");
         setEditText(data.content || "");
         setDirty(false);
       }
     } catch {
-      setSelectedFileContent("// Failed to load file content.");
+      setEditText("// Failed to load file content.");
     }
   };
 
@@ -493,7 +491,6 @@ export function FilesView(): ReactElement {
         body: JSON.stringify({ path: selectedFile, content: editText }),
       });
       if (res.ok) {
-        setSelectedFileContent(editText);
         setDirty(false);
       } else {
         setError("Save failed");
@@ -515,7 +512,6 @@ export function FilesView(): ReactElement {
       if (res.ok) {
         setSelectedFile(null);
         setEditText("");
-        setSelectedFileContent("");
         setDirty(false);
         fetchFileList();
       } else {

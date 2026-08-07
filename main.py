@@ -92,6 +92,7 @@ from charlie.ipc import EventBus
 from charlie.memory_store import MemoryStore
 from charlie.personality import get_emotion_for_context, parse_voice_command, parse_yes_no
 from charlie.session_store import SessionStore
+from charlie.utils import make_id
 from charlie.voice import VoiceEngine
 from charlie.monitors import start_monitor_thread
 
@@ -278,7 +279,12 @@ async def main():
             asyncio.run_coroutine_threadsafe(
                 event_bus.emit(
                     "queue_update",
-                    {"count": len(pending_turns), "texts": [t for t, _, _ in pending_turns][:5]},
+                    {
+                        "count": len(pending_turns),
+                        "ids": [i for i, _, _, _ in pending_turns][:5],
+                        "texts": [t for _, t, _, _ in pending_turns][:5],
+                        "session_ids": [s for _, _, s, _ in pending_turns][:5],
+                    },
                 ),
                 loop,
             )
@@ -534,7 +540,7 @@ async def main():
         # interrupt, so their follow-up must queue purely on turn_active.
         not_speaking_or_web = platform != "voice" or not voice.is_speaking.is_set()
         if turn_active and not_speaking_or_web and not get_active_voice_approval():
-            pending_turns.append((text, session_id, platform))
+            pending_turns.append((make_id(8), text, session_id, platform))
             logger.info(f"Queued utterance (a turn is already running tool calls): {text}")
             on_queue_update()
             return
@@ -812,7 +818,7 @@ async def main():
         finally:
             turn_active = False
             if pending_turns:
-                next_text, next_session, next_platform = pending_turns.pop(0)
+                _next_id, next_text, next_session, next_platform = pending_turns.pop(0)
                 logger.info(f"Dequeuing pending turn: {next_text}")
                 on_queue_update()
                 _schedule_process(
@@ -987,6 +993,12 @@ async def main():
                     set_active_session_id(current_web_session_id)
                     chat_text = cmd.get("text") or cmd.get("payload", {}).get("text", "")
                     await _dispatch_or_queue(chat_text, current_web_session_id, platform="web")
+                elif cmd_type == "queue_cancel":
+                    cancel_id = cmd.get("payload", {}).get("id")
+                    before = len(pending_turns)
+                    pending_turns[:] = [t for t in pending_turns if t[0] != cancel_id]
+                    if len(pending_turns) != before:
+                        on_queue_update()
                 elif cmd_type == "session_active":
                     payload_sid = cmd.get("payload", {}).get("session_id")
                     current_web_session_id = cmd.get("session_id") or payload_sid or _voice_fallback_session_id

@@ -1,24 +1,32 @@
 "use client";
 
 import { useEffect, useState, useMemo, type ReactElement } from "react";
-import { 
-  Terminal, Database, Activity, FileText, Trash2, ChevronDown, ChevronUp, PanelLeftClose, PanelLeftOpen 
+import {
+  Terminal, Database, Activity, Trash2, ChevronDown, ChevronUp, PanelLeftClose, PanelLeftOpen
 } from "lucide-react";
 import { useCharlieStore } from "../store/useCharlieStore";
 
-type TabType = "terminal" | "logs" | "output" | "artifacts";
+type TabType = "terminal" | "logs";
 
-function Sparkline({ data }: { data: number[] }): ReactElement {
+interface SparklineProps {
+  data: number[];
+  /** Value range the line is scaled against. Defaults to a 0-100 percent scale (CPU/RAM/GPU usage). */
+  min?: number;
+  max?: number;
+}
+
+export function Sparkline({ data, min = 0, max = 100 }: SparklineProps): ReactElement {
   if (data.length < 2) return <svg className="w-12 h-5" />;
   const width = 100;
   const height = 24;
   const padding = 2;
-  const maxVal = 100;
-  const minVal = 0;
-  
+  const maxVal = max;
+  const minVal = min;
+  const range = maxVal - minVal || 1;
+
   const points = data.map((val, i) => {
     const x = (i / (data.length - 1)) * (width - padding * 2) + padding;
-    const y = height - ((val - minVal) / (maxVal - minVal)) * (height - padding * 2) - padding;
+    const y = height - ((val - minVal) / range) * (height - padding * 2) - padding;
     return `${x},${y}`;
   }).join(" ");
 
@@ -38,7 +46,6 @@ export function EventLog(): ReactElement {
   const alerts = useCharlieStore((s) => s.alerts);
   const systemStatus = useCharlieStore((s) => s.systemStatus);
   const toolActivity = useCharlieStore((s) => s.toolActivity);
-  const selectedFileContent = useCharlieStore((s) => s.selectedFileContent);
   const accentColor = useCharlieStore((s) => s.accentColor);
 
   // Uptime and PID state
@@ -258,8 +265,6 @@ export function EventLog(): ReactElement {
             {[
               { id: "terminal", label: "Terminal", icon: <Terminal className="w-3.5 h-3.5" /> },
               { id: "logs", label: "Logs", icon: <Database className="w-3.5 h-3.5" /> },
-              { id: "output", label: "Output", icon: <Activity className="w-3.5 h-3.5" /> },
-              { id: "artifacts", label: "Artifacts", icon: <FileText className="w-3.5 h-3.5" /> }
             ].map((tab) => {
               const active = activeTab === tab.id;
               return (
@@ -335,37 +340,6 @@ export function EventLog(): ReactElement {
                     </p>
                   );
                 })
-              )}
-            </>
-          )}
-
-          {activeTab === "output" && (
-            <>
-              {toolActivity.filter(t => t.kind === "tool_result").length === 0 ? (
-                <span className="text-slate-500 italic block">No tool output results parsed yet.</span>
-              ) : (
-                toolActivity
-                  .filter(t => t.kind === "tool_result")
-                  .map((t, i) => (
-                    <div key={i} className="mb-2 p-2 rounded bg-zinc-900 border border-white/5">
-                      <span className="text-emerald-400 font-bold uppercase block mb-1">[{t.name} Result]</span>
-                      <pre className="text-slate-300 break-words whitespace-pre-wrap">{t.text}</pre>
-                    </div>
-                  ))
-              )}
-            </>
-          )}
-
-          {activeTab === "artifacts" && (
-            <>
-              {selectedFileContent ? (
-                <pre className="text-slate-300 break-words whitespace-pre-wrap font-mono text-xs leading-relaxed">
-                  {selectedFileContent}
-                </pre>
-              ) : (
-                <span className="text-slate-500 italic block">
-                  Select a document from the Files explorer tree to preview its content here.
-                </span>
               )}
             </>
           )}

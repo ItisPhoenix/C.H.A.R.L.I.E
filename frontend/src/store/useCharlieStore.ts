@@ -57,7 +57,9 @@ export interface MicState {
 
 export interface QueueState {
   count: number;
+  ids: string[];
   texts: string[];
+  sessionIds: string[];
 }
 
 export interface ToolActivityEntry {
@@ -152,8 +154,6 @@ interface CharlieState {
   setActiveToolApproval: (r: ToolApprovalRequest | null) => void;
   latestDesktopFrame: DesktopFrame | null;
   setLatestDesktopFrame: (f: DesktopFrame | null) => void;
-  selectedFileContent: string;
-  setSelectedFileContent: (content: string) => void;
   activeModel: string;
   setActiveModel: (model: string) => void;
   visionModel: string;
@@ -173,7 +173,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   listeningTrigger: null,
   audio: { muted: false, volume: 1.0 },
   mic: { mic_muted: false },
-  queue: { count: 0, texts: [] },
+  queue: { count: 0, ids: [], texts: [], sessionIds: [] },
   audioLevel: 0,
   currentSpeechChunk: null,
   toolActivity: [],
@@ -250,8 +250,6 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setActiveToolApproval: (activeToolApproval) => set({ activeToolApproval }),
   latestDesktopFrame: null,
   setLatestDesktopFrame: (latestDesktopFrame) => set({ latestDesktopFrame }),
-  selectedFileContent: "",
-  setSelectedFileContent: (selectedFileContent) => set({ selectedFileContent }),
   activeModel: "",
   setActiveModel: (activeModel) => set({ activeModel }),
   visionModel: "",

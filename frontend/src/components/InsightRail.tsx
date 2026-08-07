@@ -2,11 +2,15 @@
 
 import { useEffect, useState, useMemo, type ReactElement } from "react";
 import {
-  Activity, Terminal, Shield, ChevronDown, ChevronUp, ListOrdered
+  Activity, Terminal, Shield, ChevronDown, ChevronUp, ListOrdered, X
 } from "lucide-react";
 import { useCharlieStore, rgba, groupMcpTools, type McpToolLike } from "../store/useCharlieStore";
 
-export function InsightRail(): ReactElement {
+interface InsightRailProps {
+  onCancelQueued?: (id: string) => void;
+}
+
+export function InsightRail({ onCancelQueued }: InsightRailProps): ReactElement {
   const accentColor = useCharlieStore((s) => s.accentColor);
   const toolActivity = useCharlieStore((s) => s.toolActivity);
   const queue = useCharlieStore((s) => s.queue);
@@ -78,7 +82,18 @@ export function InsightRail(): ReactElement {
           </span>
           <div className="space-y-1 pt-2">
             {queue.texts.map((t, idx) => (
-              <p key={idx} className="text-xs text-slate-400 font-mono truncate">{t}</p>
+              <div key={queue.ids[idx] ?? idx} className="flex items-center gap-1.5">
+                <p className="flex-1 text-xs text-slate-400 font-mono truncate">{t}</p>
+                {onCancelQueued && queue.ids[idx] && (
+                  <button
+                    onClick={() => onCancelQueued(queue.ids[idx])}
+                    aria-label="Cancel queued message"
+                    className="shrink-0 p-0.5 rounded text-slate-500 hover:text-red-400 hover:bg-white/10 cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
             ))}
           </div>
         </div>

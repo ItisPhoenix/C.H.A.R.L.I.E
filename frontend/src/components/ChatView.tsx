@@ -259,7 +259,8 @@ export function ChatView({
     el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
   }, [input]);
   const connected = useCharlieStore((s) => s.connected);
-  const queuedTexts = useCharlieStore((s) => s.queue.texts);
+  const queue = useCharlieStore((s) => s.queue);
+  const currentSessionId = useCharlieStore((s) => s.currentSessionId);
   const accentColor = useCharlieStore((s) => s.accentColor);
   const [stepperExpanded, setStepperExpanded] = useState(true);
 
@@ -377,7 +378,9 @@ export function ChatView({
         {messages.map((m, i) => {
           const isUser = m.role === "user";
           const trace = !isUser && m.turnId ? executionTraces?.[m.turnId] : undefined;
-          const isQueued = isUser && queuedTexts.includes(m.content);
+          const isQueued = isUser && queue.texts.some(
+            (t, qi) => t === m.content && queue.sessionIds[qi] === currentSessionId
+          );
           return (
             <div
               key={m.id ?? `${m.role}-${i}`}

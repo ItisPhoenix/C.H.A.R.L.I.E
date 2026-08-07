@@ -403,6 +403,10 @@ export default function Page(): ReactElement {
     sendWS({ type: "tool_reject", payload: { request_id: requestId } });
   };
 
+  const handleCancelQueued = (id: string) => {
+    sendWS({ type: "queue_cancel", payload: { id } });
+  };
+
   const handleSelectSession = useCallback((id: string) => {
     // Re-selecting the already-active session is a no-op for React's state (same
     // primitive), so the currentSessionId effect never re-fires -- force the refetch.
@@ -626,7 +630,7 @@ export default function Page(): ReactElement {
 
                     {/* xl+: docked rail. Below xl: overlay drawer from chat header toggle. */}
                     <div className="hidden xl:flex h-full">
-                      <InsightRail />
+                      <InsightRail onCancelQueued={handleCancelQueued} />
                     </div>
                     {insightOpen && (
                       <div className="xl:hidden fixed inset-0 z-40 flex justify-end">
@@ -637,7 +641,7 @@ export default function Page(): ReactElement {
                           onClick={() => setInsightOpen(false)}
                         />
                         <div className="relative h-full z-10 anim-right shadow-2xl">
-                          <InsightRail />
+                          <InsightRail onCancelQueued={handleCancelQueued} />
                         </div>
                       </div>
                     )}

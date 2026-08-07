@@ -150,7 +150,9 @@ export function useCharlieSocket(params: UseCharlieSocketParams): UseCharlieSock
         } else if (msg.type === "queue_update") {
           setQueue({
             count: typeof msg.payload?.count === "number" ? msg.payload.count : 0,
+            ids: Array.isArray(msg.payload?.ids) ? msg.payload.ids : [],
             texts: Array.isArray(msg.payload?.texts) ? msg.payload.texts : [],
+            sessionIds: Array.isArray(msg.payload?.session_ids) ? msg.payload.session_ids : [],
           });
         } else if (msg.type === "session_updated") {
           const sid = getSessionId(msg);

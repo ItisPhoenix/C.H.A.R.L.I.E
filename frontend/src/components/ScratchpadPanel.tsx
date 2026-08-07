@@ -182,47 +182,24 @@ export function ScratchpadPanel(): ReactElement {
       ) : entries.length === 0 ? (
         <p className="text-xs font-mono text-slate-500 italic py-4">Scratchpad is empty.</p>
       ) : (
-        <div className="space-y-2">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
           {entries.map((entry) => {
             const isEditing = editingIndex === entry.index;
             const isConfirmingDelete = confirmDeleteIndex === entry.index;
             return (
               <div
                 key={entry.index}
-                className="group rounded-xl border border-white/5 bg-zinc-900/20 px-4 py-3 flex items-start gap-3"
+                className="group rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-2 flex flex-col"
               >
-                <span className="text-xs font-mono text-slate-600 shrink-0 mt-0.5 w-5 text-right">
-                  {entry.index}.
-                </span>
-                {isEditing ? (
-                  <div className="flex-1 space-y-2">
-                    <textarea
-                      value={editText}
-                      onChange={(e) => setEditText(e.target.value)}
-                      autoFocus
-                      spellCheck={false}
-                      className="w-full text-xs font-mono text-slate-200 bg-zinc-950/60 border border-white/10 rounded-lg p-2 h-20 resize-none outline-none focus:border-white/20 scrollbar"
-                    />
-                    <div className="flex gap-2">
-                      <Button size="sm" onClick={saveEdit} disabled={!editText.trim()}>
-                        <Save className="w-3 h-3" /> Save
-                      </Button>
-                      <Button size="sm" variant="neutral" onClick={cancelEdit}>
-                        Cancel
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <p className="flex-1 text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">
-                      {entry.text}
-                    </p>
-                    <div className="shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono text-slate-500 uppercase font-bold">Entry {entry.index}</span>
+                  {!isEditing && (
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
                       {isConfirmingDelete ? (
                         <>
                           <button
                             onClick={() => deleteEntry(entry.index)}
-                            className="px-2 py-1 rounded text-xs font-mono text-red-300 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30"
+                            className="px-2 py-0.5 rounded text-xs font-mono text-red-300 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30"
                           >
                             Confirm delete
                           </button>
@@ -253,7 +230,31 @@ export function ScratchpadPanel(): ReactElement {
                         </>
                       )}
                     </div>
+                  )}
+                </div>
+
+                {isEditing ? (
+                  <>
+                    <textarea
+                      value={editText}
+                      onChange={(e) => setEditText(e.target.value)}
+                      autoFocus
+                      spellCheck={false}
+                      className="text-xs font-mono text-slate-200 bg-zinc-950/60 border border-white/10 rounded-lg p-2 h-32 resize-none outline-none focus:border-white/20 scrollbar"
+                    />
+                    <div className="flex gap-2">
+                      <Button size="sm" onClick={saveEdit} disabled={!editText.trim()}>
+                        <Save className="w-3 h-3" /> Save
+                      </Button>
+                      <Button size="sm" variant="neutral" onClick={cancelEdit}>
+                        Cancel
+                      </Button>
+                    </div>
                   </>
+                ) : (
+                  <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap max-h-40 overflow-y-auto scrollbar">
+                    {entry.text}
+                  </p>
                 )}
               </div>
             );

@@ -5,6 +5,7 @@ import {
   Activity, AlertTriangle, ListTree, ShieldAlert, WifiOff,
 } from "lucide-react";
 import { useCharlieStore, type VoiceState } from "../store/useCharlieStore";
+import { Sparkline } from "./EventLog";
 
 const STATE_COLOR: Record<VoiceState, string> = {
   idle: "#4b5563",
@@ -354,15 +355,36 @@ interface TileProps {
   value: string;
   accent?: string;
   wide?: boolean;
+  trend?: number[];
+  trendMax?: number;
 }
 
 /** Bento-style tile -- most are 1x1, a couple of "hero" cards span both columns for a mosaic layout. */
-function Tile({ label, value, accent, wide }: TileProps): ReactElement {
+function Tile({ label, value, accent, wide, trend, trendMax }: TileProps): ReactElement {
   return (
     <div className={`rounded-xl border border-white/5 bg-zinc-900/30 p-3.5 flex flex-col gap-1 min-w-0 ${wide ? "col-span-2" : ""}`}>
       <span className="text-xs font-mono uppercase tracking-tight text-slate-500 truncate">{label}</span>
-      <span className="text-sm font-bold font-mono truncate" style={{ color: accent }}>{value}</span>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm font-bold font-mono truncate" style={{ color: accent }}>{value}</span>
+        {trend && trend.length >= 2 && (
+          <Sparkline data={trend} min={0} max={trendMax ?? Math.max(1, ...trend)} />
+        )}
+      </div>
     </div>
+  );
+}
+
+/** Live HH:MM:SS readout -- a quiet cockpit-clock touch, client-side only, no new data source. */
+function HudClock(): ReactElement {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const interval = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+  return (
+    <span className="font-mono text-xs text-slate-600 tabular-nums">
+      {now.toLocaleTimeString(undefined, { hour12: false })}
+    </span>
   );
 }
 
@@ -378,6 +400,7 @@ interface ControlCenterViewProps {
 
 export function ControlCenterView({ onNavigateToChats }: ControlCenterViewProps): ReactElement {
   const connected = useCharlieStore((s) => s.connected);
+  const voiceState = useCharlieStore((s) => s.voiceState);
   const sessions = useCharlieStore((s) => s.sessions);
   const currentSessionId = useCharlieStore((s) => s.currentSessionId);
   const queue = useCharlieStore((s) => s.queue);
@@ -404,9 +427,21 @@ export function ControlCenterView({ onNavigateToChats }: ControlCenterViewProps)
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
+  // Rolling trend history for queue-depth/running-agents tiles, sampled locally like EventLog's sparklines.
+  const [queueHist, setQueueHist] = useState<number[]>([]);
+  const [agentsHist, setAgentsHist] = useState<number[]>([]);
+  const runningAgentsCount = agentRuns.filter((r) => r.status === "running").length;
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setQueueHist((prev) => [...prev, queue.count].slice(-15));
+      setAgentsHist((prev) => [...prev, runningAgentsCount].slice(-15));
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [queue.count, runningAgentsCount]);
+
   const activeSession = sessions.find((s) => s.id === currentSessionId);
   const toolCallsThisSession = Object.values(executionTraces).reduce((sum, entries) => sum + entries.length, 0);
-  const runningAgents = agentRuns.filter((r) => r.status === "running").length;
+  const runningAgents = runningAgentsCount;
   const mcpLabel = mcpHealth === null ? "Unknown" : !mcpHealth.enabled ? "Off" : mcpHealth.connected ? "Connected" : "Disconnected";
   const mcpColor = mcpHealth?.connected ? "var(--color-status-success)" : mcpHealth?.enabled ? "var(--color-status-error)" : "var(--color-status-idle)";
 
@@ -418,20 +453,20 @@ export function ControlCenterView({ onNavigateToChats }: ControlCenterViewProps)
       {(!connected || activeProposal || activeToolApproval) && (
         <div className="shrink-0 flex flex-col gap-2">
           {!connected && (
-            <div className="flex items-center gap-2 rounded-lg border border-status-error/30 bg-status-error-dim px-3 py-2 text-xs text-red-200">
+            <div className="flex items-center gap-2 rounded-lg border border-dashed border-status-error/40 bg-status-error-dim px-3 py-2 text-xs text-red-200 font-mono">
               <WifiOff className="w-4 h-4 shrink-0 text-status-error" />
-              Backend connection lost -- reconnecting...
+              <span className="text-red-400/70">[ALERT]</span> Live connection lost -- reconnecting...
             </div>
           )}
           {activeProposal && (
             <button
               type="button"
               onClick={onNavigateToChats}
-              className="flex items-center gap-2 rounded-lg border border-orange-500/30 bg-orange-950/20 px-3 py-2 text-xs text-orange-200 text-left w-full cursor-pointer hover:bg-orange-950/35 transition"
+              className="flex items-center gap-2 rounded-lg border border-dashed border-orange-500/40 bg-orange-950/20 px-3 py-2 text-xs text-orange-200 font-mono text-left w-full cursor-pointer hover:bg-orange-950/35 transition"
             >
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <span className="flex-1">
-                Command recovery proposal waiting on you in Chats.
+                <span className="text-orange-400/70">[ALERT]</span> Command recovery proposal waiting on you in Chats.
                 {onNavigateToChats ? " Click to open." : ""}
               </span>
             </button>
@@ -440,11 +475,11 @@ export function ControlCenterView({ onNavigateToChats }: ControlCenterViewProps)
             <button
               type="button"
               onClick={onNavigateToChats}
-              className="flex items-center gap-2 rounded-lg border border-status-warning/30 bg-status-warning-dim px-3 py-2 text-xs text-amber-200 text-left w-full cursor-pointer hover:bg-status-warning/15 transition"
+              className="flex items-center gap-2 rounded-lg border border-dashed border-status-warning/40 bg-status-warning-dim px-3 py-2 text-xs text-amber-200 font-mono text-left w-full cursor-pointer hover:bg-status-warning/15 transition"
             >
               <ShieldAlert className="w-4 h-4 shrink-0 text-status-warning" />
               <span className="flex-1">
-                A restricted tool call needs your approval in Chats.
+                <span className="text-amber-400/70">[ALERT]</span> A restricted tool call needs your approval in Chats.
                 {onNavigateToChats ? " Click to open." : ""}
               </span>
             </button>
@@ -454,16 +489,26 @@ export function ControlCenterView({ onNavigateToChats }: ControlCenterViewProps)
 
       {/* Tier 2: centerpiece + in-flight metrics */}
       <div className="flex-1 flex gap-6 min-h-0">
-        <Orb />
+        <div className="flex-1 relative min-w-0 flex flex-col">
+          <div className="absolute top-0 left-0 flex flex-col gap-0.5 font-mono text-[10px] uppercase tracking-widest text-slate-700">
+            <span>SYS.STATE</span>
+            <span className="text-slate-500">{STATE_LABEL[voiceState]}</span>
+          </div>
+          <div className="absolute top-0 right-0 flex flex-col gap-0.5 items-end font-mono text-[10px] uppercase tracking-widest text-slate-700">
+            <span>CLOCK</span>
+            <HudClock />
+          </div>
+          <Orb />
+        </div>
 
         <div className="w-72 shrink-0 flex flex-col gap-3 overflow-y-auto scrollbar">
           <div className="grid grid-cols-2 gap-3">
             <Tile wide label="Active Session" value={activeSession?.title || "None"} />
-            <Tile label="Queue Depth" value={String(queue.count)} accent={queue.count > 0 ? "var(--color-status-warning)" : undefined} />
+            <Tile label="Queue Depth" value={String(queue.count)} accent={queue.count > 0 ? "var(--color-status-warning)" : undefined} trend={queueHist} />
             <Tile label="Tool Calls" value={String(toolCallsThisSession)} />
-            <Tile label="Running Agents" value={String(runningAgents)} accent={runningAgents > 0 ? "var(--color-status-listening)" : undefined} />
+            <Tile label="Running Agents" value={String(runningAgents)} accent={runningAgents > 0 ? "var(--color-status-listening)" : undefined} trend={agentsHist} />
             <Tile label="MCP Servers" value={mcpLabel} accent={mcpColor} />
-            <Tile wide label="Backend" value={connected ? "Online" : "Offline"} accent={connected ? "var(--color-status-success)" : "var(--color-status-error)"} />
+            <Tile wide label="Live Link" value={connected ? "Online" : "Offline"} accent={connected ? "var(--color-status-success)" : "var(--color-status-error)"} />
           </div>
 
           {/* Tier 3: quiet digest, not a full log */}
@@ -480,6 +525,7 @@ export function ControlCenterView({ onNavigateToChats }: ControlCenterViewProps)
                   <div key={i} className="flex items-start gap-1.5 text-xs font-mono text-slate-400">
                     <Activity className="w-3 h-3 mt-0.5 shrink-0 text-slate-600" />
                     <span className="truncate"><span className="text-slate-300">{entry.name}</span> {entry.text.slice(0, 60)}</span>
+                    {i === 0 && <span className="text-status-listening animate-pulse shrink-0">_</span>}
                   </div>
                 ))
               )}
