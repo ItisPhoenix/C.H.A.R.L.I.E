@@ -26,12 +26,6 @@ _POSITION_PATH = Path(config.pet_position_path)
 _PULSE_INTERVAL_MS = 30
 _CAPTION_MAX_CHARS = 200
 
-_STATE_COLORS = {
-    "idle": "#4b5563",
-    "listening": "#06b6d4",
-    "thinking": "#a855f7",
-    "speaking": "#10b981",
-}
 # Eyes stay cyan to match EMO aesthetic, but we can modulate alpha
 _EYE_COLOR = "#00ffff"
 _EYE_GLOW_ALPHA = {
