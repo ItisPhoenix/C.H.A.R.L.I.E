@@ -145,6 +145,8 @@ from charlie.utils import make_id
 _event_bus: Any = None
 _active_ws_count: int = 0
 _active_session_id: str = "default"
+# (platform, session_id) of the turn currently running the tool loop -- single-slot since turn_active serializes turns.
+_current_turn: tuple = ("voice", "default")
 pending_proposals: Dict[str, asyncio.Future] = {}
 
 def set_active_ws_count(count: int) -> None:
@@ -161,6 +163,13 @@ def set_active_session_id(session_id: str) -> None:
 
 def get_active_session_id() -> str:
     return _active_session_id
+
+def set_current_turn(platform: str, session_id: str) -> None:
+    global _current_turn
+    _current_turn = (platform, session_id)
+
+def get_current_turn() -> tuple:
+    return _current_turn
 
 async def request_recovery_approval(
     original_command: str,

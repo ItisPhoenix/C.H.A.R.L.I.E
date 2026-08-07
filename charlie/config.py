@@ -331,6 +331,15 @@ class Config:
         default=os.getenv("PET_POSITION_PATH", "pet_position.json"),
         metadata=_meta("PET_POSITION_PATH", "Desktop Control", restart="process"),
     )
+    # Telegram remote control -- long-polling bot, DM-only, single owner user.
+    telegram_bot_token: str = field(
+        default=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+        metadata=_meta("TELEGRAM_BOT_TOKEN", "Telegram", secret=True, restart="process"),
+    )
+    telegram_user_id: str = field(
+        default=os.getenv("TELEGRAM_USER_ID", ""),
+        metadata=_meta("TELEGRAM_USER_ID", "Telegram", restart="process"),
+    )
     desktop_max_actions: int = field(
         default=int(os.getenv("DESKTOP_MAX_ACTIONS", "40")),
         metadata=_meta("DESKTOP_MAX_ACTIONS", "Desktop Control", restart="reload"),

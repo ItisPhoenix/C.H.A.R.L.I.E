@@ -20,6 +20,32 @@ def _compute_type(device: str) -> str:
     return "int8_float16" if device == "cuda" else "int8"
 
 
+_file_model: "WhisperModel | None" = None
+
+
+def _get_file_model(model_size: str, device: str) -> WhisperModel:
+    """Lazily-loaded singleton for one-off file transcription (e.g. Telegram voice notes)."""
+    global _file_model
+    if _file_model is None:
+        _file_model = WhisperModel(
+            model_size, device=device, compute_type=_compute_type(device), local_files_only=True
+        )
+    return _file_model
+
+
+def transcribe_file(
+    path: str, model_size: str, device: str, default_language: str, asr_config: dict | None = None
+) -> str:
+    """Transcribe an arbitrary audio file (faster-whisper decodes via PyAV, no ffmpeg install needed)."""
+    whisper = _get_file_model(model_size, device)
+    kwargs = _build_transcribe_kwargs(
+        is_warmup=False, flags={}, default_language=default_language, asr_config=asr_config
+    )
+    segments, _info = whisper.transcribe(path, **kwargs)
+    segments = _filter_hallucinated_segments(list(segments))
+    return "".join(s.text for s in segments).strip()
+
+
 # Match openai/whisper CLI's own hallucination-suppression defaults
 # (no_speech_threshold=0.6, compression_ratio_threshold=2.4, logprob_threshold=-1.0)
 # -- faster-whisper computes all three per segment but never acts on them,

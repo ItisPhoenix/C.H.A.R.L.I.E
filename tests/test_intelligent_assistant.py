@@ -12,6 +12,7 @@ from charlie.core import (
     _detect_standing_instruction,
     _detect_verbosity_feedback,
     _is_followup,
+    _needs_web_search,
     _strip_vocatives,
 )
 
@@ -164,6 +165,17 @@ class TestCorrectionFastPath:
 
     def test_followup_what_was_that(self):
         assert _is_followup("what was that") is True
+
+    def test_what_question_not_a_followup(self):
+        # Regression: unanchored "what" match let real questions false-positive as follow-ups.
+        assert _is_followup("what's the current stock price of tsla") is False
+        assert _is_followup("what's the tech news?") is False
+
+    def test_news_questions_trigger_web_search(self):
+        # Regression: neither "what's happening"/"tech news" phrasing triggered pre-search at all.
+        assert _needs_web_search("what's happening in ai world?") is True
+        assert _needs_web_search("what's the tech news?") is True
+        assert _needs_web_search("what's the current stock price of tsla") is True
 
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import tempfile
 import time
 from typing import Callable, Dict, Tuple
 
@@ -85,6 +86,9 @@ console_handler.setFormatter(console_formatter)
 root_logger.handlers = []
 root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
+# Telegram's Bot API embeds the token in request URLs -- both httpx and telegram log it below.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.INFO)
 
 from charlie.config import Config, config
 from charlie.core import Brain
@@ -158,13 +162,24 @@ def _strip_tool_lines(text: str) -> str:
     return "\n".join(kept).strip()
 
 
-def _safe_speak(voice, text: str, emotion: str, label: str = "") -> None:
+def _safe_speak(
+    voice, text: str, emotion: str, label: str = "", platform: str = "voice", session_id: str = ""
+) -> None:
     """Speak text, logging (not swallowing) any TTS failure.
 
     A mid-stream TTS error must never abort the answer generation loop --
     the UI token stream and message persistence downstream must still run.
+    Telegram turns have no local listener; the same incremental chunk instead
+    feeds the Telegram message-edit stream (see charlie.telegram_bot.TelegramBot.stream_append).
     """
     if not text or not text.strip():
+        return
+    if platform == "telegram":
+        from charlie.telegram_bot import get_active_bot
+        bot = get_active_bot()
+        if bot is not None and session_id:
+            chat_id = session_id.split(":", 1)[1]
+            asyncio.ensure_future(bot.stream_append(chat_id, text))
         return
     try:
         voice.speak(text.strip(), emotion)
@@ -174,6 +189,20 @@ def _safe_speak(voice, text: str, emotion: str, label: str = "") -> None:
             f" ({label})" if label else "",
             exc_info=True,
         )
+
+
+async def _relay_written_file_to_telegram(bot, session_id: str, path: str) -> None:
+    """A file_write call on a Telegram turn also gets sent as a document attachment, artifact-style."""
+    if not path:
+        return
+    try:
+        with open(path, "rb") as f:
+            content = f.read()
+    except Exception as e:
+        logger.warning(f"Failed to read file for Telegram relay: {e}")
+        return
+    chat_id = session_id.split(":", 1)[1]
+    await bot.send_document(chat_id, os.path.basename(path), content)
 
 
 def _schedule_process(coro, loop):
@@ -229,6 +258,8 @@ async def main():
     # True while a chat turn's LLM/tool loop runs -- see _dispatch_or_queue.
     turn_active = False
     pending_turns: list = []
+    # Set below, only when a token + user ID are configured -- see the Telegram startup block.
+    telegram_bot = None
 
     try:
         store = SessionStore(config.session_db_path)
@@ -261,7 +292,7 @@ async def main():
                 loop,
             )
 
-    def on_tool_result(name, result, turn_id=None, session_id=None):
+    def on_tool_result(name, result, turn_id=None, session_id=None, arguments=None):
         if event_bus:
             asyncio.run_coroutine_threadsafe(
                 event_bus.emit(
@@ -273,6 +304,19 @@ async def main():
                 ),
                 loop,
             )
+        if (
+            name == "file_write"
+            and session_id
+            and session_id.startswith("telegram:")
+            and arguments
+            and not str(result).startswith("Error")
+        ):
+            from charlie.telegram_bot import get_active_bot
+            bot = get_active_bot()
+            if bot is not None:
+                asyncio.run_coroutine_threadsafe(
+                    _relay_written_file_to_telegram(bot, session_id, arguments.get("path", "")), loop
+                )
 
     def on_queue_update():
         if event_bus:
@@ -717,7 +761,7 @@ async def main():
                 if is_first_flush:
                     def _speak_first(part: str) -> None:
                         nonlocal sparkle
-                        _safe_speak(voice, sparkle + part, detected_emotion, "first-flush")
+                        _safe_speak(voice, sparkle + part, detected_emotion, "first-flush", platform, session_id)
                         sparkle = ""
 
                     sentence_buffer, flushed = _flush_complete_sentences(
@@ -729,7 +773,10 @@ async def main():
                         clause_idx = _CLAUSE_BOUNDARY.search(sentence_buffer)
                         if clause_idx:
                             flush_end = clause_idx.end()
-                            _safe_speak(voice, sparkle + sentence_buffer[:flush_end], detected_emotion, "first-clause")
+                            _safe_speak(
+                                voice, sparkle + sentence_buffer[:flush_end], detected_emotion,
+                                "first-clause", platform, session_id,
+                            )
                             sparkle = ""
                             sentence_buffer = sentence_buffer[flush_end:].lstrip()
                             is_first_flush = False
@@ -737,7 +784,10 @@ async def main():
                         elif len(sentence_buffer) >= _FIRST_FLUSH_MAX_CHARS:
                             idx = sentence_buffer.rfind(" ", 0, _FIRST_FLUSH_MAX_CHARS)
                             if idx > 0:
-                                _safe_speak(voice, sparkle + sentence_buffer[:idx], detected_emotion, "first-force")
+                                _safe_speak(
+                                    voice, sparkle + sentence_buffer[:idx], detected_emotion,
+                                    "first-force", platform, session_id,
+                                )
                                 sparkle = ""
                                 sentence_buffer = sentence_buffer[idx:].lstrip()
                             is_first_flush = False
@@ -746,7 +796,7 @@ async def main():
                 if not flushed:
                     sentence_buffer, flushed = _flush_complete_sentences(
                         sentence_buffer,
-                        lambda part: _safe_speak(voice, part, detected_emotion, "sentence"),
+                        lambda part: _safe_speak(voice, part, detected_emotion, "sentence", platform, session_id),
                     )
 
                 if not flushed and len(sentence_buffer) >= _MAX_FLUSH_CHARS:
@@ -755,12 +805,16 @@ async def main():
                     clause_idx = _CLAUSE_BOUNDARY.search(sentence_buffer[:_MAX_FLUSH_CHARS])
                     if clause_idx:
                         flush_end = clause_idx.end()
-                        _safe_speak(voice, sentence_buffer[:flush_end], detected_emotion, "clause")
+                        _safe_speak(
+                            voice, sentence_buffer[:flush_end], detected_emotion, "clause", platform, session_id
+                        )
                         sentence_buffer = sentence_buffer[flush_end:].lstrip()
                     else:
                         word_idx = sentence_buffer.rfind(" ", 0, _MAX_FLUSH_CHARS)
                         if word_idx > 0:
-                            _safe_speak(voice, sentence_buffer[:word_idx], detected_emotion, "word")
+                            _safe_speak(
+                                voice, sentence_buffer[:word_idx], detected_emotion, "word", platform, session_id
+                            )
                             sentence_buffer = sentence_buffer[word_idx:].lstrip()
                         elif sentence_buffer.strip():
                             _safe_speak(
@@ -768,6 +822,8 @@ async def main():
                                 sentence_buffer[:_MAX_FLUSH_CHARS],
                                 detected_emotion,
                                 "force",
+                                platform,
+                                session_id,
                             )
                             sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
 
@@ -789,7 +845,7 @@ async def main():
 
             # Final TTS
             if sentence_buffer.strip():
-                _safe_speak(voice, sparkle + sentence_buffer, detected_emotion, "final")
+                _safe_speak(voice, sparkle + sentence_buffer, detected_emotion, "final", platform, session_id)
 
             # Persist the generated reply, falling back to web_buffer if cancelled.
             final_reply = full_reply_buffer.strip() or web_buffer.strip()
@@ -801,6 +857,8 @@ async def main():
                     logger.warning(
                         f"Failed to archive assistant message or touch session: {e}"
                     )
+                if platform == "telegram" and telegram_bot is not None:
+                    asyncio.create_task(telegram_bot.stream_finish(session_id.split(":", 1)[1], quick_actions=True))
 
             # Emit response_done event so the UI can stop its typing indicator.
             if event_bus:
@@ -809,7 +867,12 @@ async def main():
                 )
         except Exception:
             # Turn failures used to be silent -- surface one, then re-raise.
-            _safe_speak(voice, "Sorry, something went wrong on my end. Try again?", last_emotion, "turn-failed")
+            _safe_speak(
+                voice, "Sorry, something went wrong on my end. Try again?", last_emotion,
+                "turn-failed", platform, session_id,
+            )
+            if platform == "telegram" and telegram_bot is not None:
+                asyncio.create_task(telegram_bot.stream_finish(session_id.split(":", 1)[1]))
             if event_bus:
                 asyncio.create_task(
                     event_bus.emit("response_done", {"session_id": session_id})
@@ -1324,6 +1387,82 @@ async def main():
 
             _reminders.set_fire_callback(_on_reminder_fired)
 
+            if config.telegram_bot_token and config.telegram_user_id:
+                from charlie.telegram_bot import TelegramBot, set_active_bot
+
+                async def _on_telegram_message(text: str, chat_id: str) -> None:
+                    session_id = f"telegram:{chat_id}"
+                    store.create_session(session_id, source="telegram")
+                    await telegram_bot.stream_start(chat_id)
+                    async with telegram_bot.typing(chat_id):
+                        await _dispatch_or_queue(text, session_id, platform="telegram")
+
+                async def _on_telegram_approval(approval_id: str, approved: bool) -> None:
+                    from charlie.core import resolve_tool_approval
+                    resolve_tool_approval(approval_id, approved)
+
+                async def _on_telegram_voice(audio_bytes: bytes, _caption: str, chat_id: str) -> None:
+                    from charlie import asr_worker
+                    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+                        f.write(audio_bytes)
+                        tmp_path = f.name
+                    try:
+                        text = await asyncio.to_thread(
+                            asr_worker.transcribe_file, tmp_path,
+                            config.whisper_model, config.gpu_device, config.default_language,
+                        )
+                    finally:
+                        os.unlink(tmp_path)
+                    if not text.strip():
+                        await telegram_bot.send_message(chat_id, "I couldn't make out any speech in that voice note.")
+                        return
+                    session_id = f"telegram:{chat_id}"
+                    store.create_session(session_id, source="telegram")
+                    await telegram_bot.stream_start(chat_id)
+                    async with telegram_bot.typing(chat_id):
+                        await _dispatch_or_queue(text, session_id, platform="telegram")
+
+                async def _on_telegram_photo(photo_bytes: bytes, caption: str, chat_id: str) -> None:
+                    from charlie.desktop.vision import to_data_url
+                    description = await brain._describe_image(to_data_url(photo_bytes))
+                    photo_note = f"[Photo attached -- {description}]"
+                    text = f"{caption}\n\n{photo_note}" if caption else photo_note
+                    session_id = f"telegram:{chat_id}"
+                    store.create_session(session_id, source="telegram")
+                    await telegram_bot.stream_start(chat_id)
+                    async with telegram_bot.typing(chat_id):
+                        await _dispatch_or_queue(text, session_id, platform="telegram")
+
+                telegram_bot = TelegramBot(
+                    config.telegram_bot_token,
+                    config.telegram_user_id,
+                    on_message=_on_telegram_message,
+                    on_approval=_on_telegram_approval,
+                    on_voice=_on_telegram_voice,
+                    on_photo=_on_telegram_photo,
+                )
+                try:
+                    await telegram_bot.start()
+                    set_active_bot(telegram_bot)
+                except Exception as e:
+                    logger.warning(f"Failed to start Telegram bot: {e}")
+                    telegram_bot = None
+
+            _monitor_loop = asyncio.get_running_loop()
+
+            def _push_telegram_alert(message: str) -> None:
+                """Best-effort proactive push to Telegram -- alerts you wouldn't otherwise see away from the PC.
+
+                Uses run_coroutine_threadsafe (not ensure_future) because this is also called from
+                _on_resource_alert, which runs on the charlie-monitors background thread with no event
+                loop of its own -- ensure_future there raised "no current event loop in thread".
+                """
+                if telegram_bot is None or not config.telegram_user_id:
+                    return
+                asyncio.run_coroutine_threadsafe(
+                    telegram_bot.send_message(config.telegram_user_id, message), _monitor_loop
+                )
+
             from charlie import background_task as _background_task
             interrupted_task = _background_task.check_interrupted_task()
             if interrupted_task is not None:
@@ -1335,12 +1474,11 @@ async def main():
                 logger.info(_interrupted_msg)
                 await bus.emit("alert", {"severity": "warning", "message": _interrupted_msg})
                 voice.speak(_interrupted_msg, "neutral")
+                _push_telegram_alert(_interrupted_msg)
 
             def _read_cpu_ram_percent() -> Tuple[float, float]:
                 import psutil
                 return psutil.cpu_percent(), psutil.virtual_memory().percent
-
-            _monitor_loop = asyncio.get_running_loop()
 
             def _on_resource_alert(message: str) -> None:
                 logger.warning(f"Resource alert: {message}")
@@ -1355,6 +1493,7 @@ async def main():
                     voice.speak(message, "neutral")
                 except Exception:
                     logger.warning("Failed to speak resource alert", exc_info=True)
+                _push_telegram_alert(message)
 
             try:
                 start_monitor_thread(
@@ -1414,6 +1553,11 @@ async def main():
                 logger.info("MCP subsystem stopped")
             except Exception as e:
                 logger.warning(f"MCP subsystem stop error: {e}")
+        if "telegram_bot" in locals() and telegram_bot is not None:
+            try:
+                await telegram_bot.stop()
+            except Exception as e:
+                logger.warning(f"Telegram bot stop error: {e}")
         if web_proc is not None:
             web_proc.terminate()
             try:

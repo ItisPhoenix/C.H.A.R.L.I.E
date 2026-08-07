@@ -13,19 +13,19 @@ def test_map_event_to_state():
 
 
 def test_map_event_to_caption():
-    assert _map_event_to_caption({"type": "vad_start"}) == "Listening..."
-    assert _map_event_to_caption({"type": "thinking"}) == "Thinking..."
+    assert _map_event_to_caption({"type": "vad_start"}) == ("Listening...", "I'm paying attention")
+    assert _map_event_to_caption({"type": "thinking"}) == ("Thinking...", "Processing request...")
     assert _map_event_to_caption(
         {"type": "speaking_start", "payload": {"text": "Hello there"}}
-    ) == "Hello there"
-    assert _map_event_to_caption({"type": "speaking_start", "payload": {}}) == "Speaking..."
-    assert _map_event_to_caption({"type": "speaking_stop"}) == ""
-    assert _map_event_to_caption({"type": "response_done"}) == ""
-    assert _map_event_to_caption({"type": "audio_level"}) is None
+    ) == ("Speaking", "Hello there")
+    assert _map_event_to_caption({"type": "speaking_start", "payload": {}}) == ("Speaking", "Responding...")
+    assert _map_event_to_caption({"type": "speaking_stop"}) == (None, None)
+    assert _map_event_to_caption({"type": "response_done"}) == (None, None)
+    assert _map_event_to_caption({"type": "audio_level"}) == (None, None)
 
 
 def test_map_event_to_caption_truncates_long_text():
     long_text = "x" * (_CAPTION_MAX_CHARS + 50)
-    caption = _map_event_to_caption({"type": "speaking_start", "payload": {"text": long_text}})
-    assert caption.endswith("...")
-    assert len(caption) <= _CAPTION_MAX_CHARS + 3
+    _title, desc = _map_event_to_caption({"type": "speaking_start", "payload": {"text": long_text}})
+    assert desc.endswith("...")
+    assert len(desc) <= _CAPTION_MAX_CHARS + 3

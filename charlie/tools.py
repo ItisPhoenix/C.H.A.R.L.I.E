@@ -67,7 +67,7 @@ _DESKTOP_FRAME_FPS = 2.0
 _DESKTOP_FRAME_MAX_EDGE = 960
 
 # --- SearXNG keyword detection ---
-_TIME_SENSITIVE_KEYWORDS = ("today", "new", "recent", "latest", "breaking")
+_TIME_SENSITIVE_KEYWORDS = ("today", "new", "recent", "latest", "breaking", "happening")
 _NEWS_KEYWORDS = ("news", "headline", "story", "stories")
 
 # --- Query decomposition ---
@@ -1637,6 +1637,13 @@ def _emit_desktop_frame(png_bytes: bytes, elements: List[Any]) -> None:
         asyncio.run_coroutine_threadsafe(
             _event_bus.emit("desktop_frame", payload), _event_loop
         )
+        turn_platform, turn_session_id = recovery.get_current_turn()
+        if turn_platform == "telegram":
+            from charlie.telegram_bot import get_active_bot
+            bot = get_active_bot()
+            if bot is not None:
+                chat_id = turn_session_id.split(":", 1)[1]
+                asyncio.run_coroutine_threadsafe(bot.send_photo(chat_id, png_bytes), _event_loop)
     except Exception:
         logger.warning("desktop_frame emit failed", exc_info=True)
 

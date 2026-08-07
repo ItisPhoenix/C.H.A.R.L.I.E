@@ -221,6 +221,7 @@ _TIME_SENSITIVE_RE = re.compile(
     r"|stock\s+price|share\s+price|market|trading"
     r"|weather|temperature|forecast"
     r"|cryptocurrency|bitcoin|ethereum"
+    r"|news|headlines?|happening|going\s+on|what's\s+new"
     r")",
     re.IGNORECASE,
 )
@@ -229,7 +230,7 @@ _TIME_SENSITIVE_RE = re.compile(
 # --- Follow-up detection (skip web search for repeat/clarification requests) ---
 _FOLLOWUP_RE = re.compile(
     r"^(?:"
-    r"what|come again|repeat|say that again|pardon|sorry|excuse me|"
+    r"what(?=\s*[?.!]?\s*$)|come again|repeat|say that again|pardon|sorry|excuse me|"
     r"what was that|what did you say|tell me again|once more|go on|"
     r"continue|and then|what else|what else did you say|anything else|"
     r"elaborate|more info|no[,.]?\s|that's\s+wrong|that's\s+not\s+right|actually|I\s+meant"
@@ -1079,6 +1080,14 @@ _PLATFORM_OUTPUT_RULES: Dict[str, str] = {
         "Bold key points, use bullet lists for multiple items, "
         "and wrap code snippets in standard markdown code blocks."
     ),
+    "telegram": (
+        "Use Telegram-compatible Markdown: single asterisks for *bold* (never double asterisks), "
+        "underscores for _italic_, and standard code blocks -- Telegram's parser does not render "
+        "double-asterisk bold. Write like a professional assistant, not a chatbot: sparing emoji. "
+        "For long-form content the user wants to keep -- a report, a summary, a list of items -- "
+        "write it to a .md file with file_write instead of a wall of chat text; it is delivered as "
+        "a downloadable document automatically, the same way you'd share an artifact or attachment."
+    ),
 }
 _DEFAULT_OUTPUT_RULES = (
     "Keep responses concise. Use natural formatting and emojis where appropriate."
@@ -1139,6 +1148,18 @@ _TOOL_RULES = (
     "- You are fully authorized to act immediately with any tool -- shell commands, file writes,\n"
     "  desktop clicks/typing, all of it. Never ask the user for permission first and never refuse or\n"
     "  write instructions telling the user how to do it themselves. Execute the tool first.\n"
+    "- COMPOUND COMMANDS: if a request has multiple steps ('open X and play Y and set volume to Z'),\n"
+    "  do ALL of them with tool calls in this same turn, not just the first. A message marked\n"
+    "  '(...Already done, do not open it again.)' means step one already ran via a fast-path --\n"
+    "  you still own every remaining step. Search/click/type/set-volume with desktop_* and\n"
+    "  system_control tools yourself; never describe what the user should search for or click next.\n"
+    "- SEARCH-THEN-ACT TASKS: opening a search-results page (YouTube, Google, Amazon, any site) is\n"
+    "  NEVER the finished task if the user asked you to play/open/select something specific. After it\n"
+    "  loads, desktop_observe (or desktop_screenshot if UIA/OCR comes up sparse) to see the results,\n"
+    "  then desktop_click/desktop_click_at the actual result, then finish any remaining sub-steps\n"
+    "  (press space to play, set volume, etc.) -- all in this same turn. If the page needs a moment,\n"
+    "  wait_seconds then observe, don't click blind on a still-loading page. 'I opened X, go pick one\n"
+    "  yourself' is exactly the failure this rule exists to stop.\n"
     "- Approval prompts, when they happen, come from the system itself for specific risky actions --\n"
     "  never simulate, anticipate, or add your own extra permission question on top of that. If a tool\n"
     "  call comes back declined, say so plainly and move on; do not ask again.\n"
@@ -1755,16 +1776,25 @@ class Brain:
         """True if the physical panic hotkey or this instance's own turn-halt tripped."""
         return (desktop_actions is not None and desktop_actions.is_halted()) or self._turn_halted
 
-    async def request_tool_approval(self, tool_name: str, arguments: Dict[str, Any], reason: str) -> bool:
+    async def request_tool_approval(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        reason: str,
+        platform: str = "voice",
+        session_id: Optional[str] = None,
+    ) -> bool:
         """Ask the user to approve/decline a gated tool call and wait for the
         answer. Web dashboard is primary: broadcasts a "tool_approval_request"
         event and waits for a "tool_approve"/"tool_reject" WS command. If no
-        dashboard is connected, falls back to voice: speaks the prompt via
-        `on_thought_callback` and waits for main.py's speech handler to route
-        the next transcript here as a yes/no (see get_active_voice_approval).
-        Times out to declined (safe default) after self._approval_timeout seconds
-        (matching charlie.recovery.request_recovery_approval's fail-safe stance),
-        or parks indefinitely if approval_timeout=None (background tasks). Background
+        dashboard is connected and this turn came from Telegram, sends inline
+        Yes/No buttons instead. Otherwise falls back to voice: speaks the
+        prompt via `on_thought_callback` and waits for main.py's speech
+        handler to route the next transcript here as a yes/no (see
+        get_active_voice_approval). Times out to declined (safe default)
+        after self._approval_timeout seconds (matching
+        charlie.recovery.request_recovery_approval's fail-safe stance), or
+        parks indefinitely if approval_timeout=None (background tasks). Background
         Brains omit session_id from the broadcast -- the dashboard filters
         tool_approval_request by "is this the session I'm currently viewing,"
         and a background task has no chat session tab open at all, so tagging
@@ -1793,6 +1823,15 @@ class Brain:
                         "session_id": None if self._is_background else recovery.get_active_session_id(),
                     },
                 )
+            elif platform == "telegram" and session_id:
+                from charlie.telegram_bot import get_active_bot
+
+                bot = get_active_bot()
+                if bot is None:
+                    logger.warning("Gated tool call from Telegram but no bot is running -- declining safely.")
+                    return False
+                chat_id = session_id.split(":", 1)[1]
+                await bot.send_approval_prompt(chat_id, prompt, request_id)
             elif self.on_thought_callback:
                 _active_voice_approval_id = request_id
                 self.on_thought_callback(prompt)
@@ -1968,6 +2007,9 @@ class Brain:
         skip_fast_paths: bool = False,
     ) -> AsyncGenerator[str, None]:
         from datetime import datetime
+
+        from charlie import recovery
+        recovery.set_current_turn(platform, session_id)
 
         # Load session-specific history from SQLite store at the start of the turn
         if self.session_store:
@@ -2334,7 +2376,9 @@ class Brain:
 
                 approved = True
                 if gate_reason:
-                    approved = await self.request_tool_approval(tool_name, call["arguments"], gate_reason)
+                    approved = await self.request_tool_approval(
+                        tool_name, call["arguments"], gate_reason, platform=platform, session_id=session_id
+                    )
 
                 if gate_reason and not approved:
                     r = f"Error: Command declined by user (required approval: {gate_reason})."
@@ -2422,7 +2466,9 @@ class Brain:
                     r = f"{r}\n\n[Vision] {vision_description}"
 
             if self.on_tool_result:
-                self.on_tool_result(call["name"], r, turn_id=turn_id, session_id=session_id)
+                self.on_tool_result(
+                    call["name"], r, turn_id=turn_id, session_id=session_id, arguments=call["arguments"]
+                )
 
             # Persist tool result to session store (truncated)
             if self.session_store:
