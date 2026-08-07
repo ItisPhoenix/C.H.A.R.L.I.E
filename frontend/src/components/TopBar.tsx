@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactElement } from "react";
+import { useEffect, useRef, type ReactElement } from "react";
 import { Bell, Check, Menu, Mic, MicOff, RefreshCw, Search, Shield, X } from "lucide-react";
 import { useCharlieStore, type Alert, type MicState } from "../store/useCharlieStore";
 
@@ -10,6 +10,7 @@ interface TopBarProps {
   activeModel: string;
   modelOpen: boolean;
   onToggleModelOpen: () => void;
+  onCloseModel: () => void;
   reloadingModel: boolean;
   modelSearchQuery: string;
   onModelSearchChange: (q: string) => void;
@@ -21,6 +22,7 @@ interface TopBarProps {
   onSearchChange: (q: string) => void;
   bellOpen: boolean;
   onToggleBell: () => void;
+  onCloseBell: () => void;
   alerts: Alert[];
 }
 
@@ -28,10 +30,24 @@ interface TopBarProps {
  * Extracted out of page.tsx (was ~150 lines inline) so page.tsx only owns layout/routing. */
 export function TopBar(props: TopBarProps): ReactElement {
   const {
-    mobileMenuOpen, onToggleMobileMenu, activeModel, modelOpen, onToggleModelOpen,
+    mobileMenuOpen, onToggleMobileMenu, activeModel, modelOpen, onToggleModelOpen, onCloseModel,
     reloadingModel, modelSearchQuery, onModelSearchChange, filteredModels, onSelectModel,
-    mic, onToggleMic, searchQuery, onSearchChange, bellOpen, onToggleBell, alerts,
+    mic, onToggleMic, searchQuery, onSearchChange, bellOpen, onToggleBell, onCloseBell, alerts,
   } = props;
+
+  const modelRef = useRef<HTMLDivElement>(null);
+  const bellRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!modelOpen && !bellOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (modelOpen && modelRef.current && !modelRef.current.contains(t)) onCloseModel();
+      if (bellOpen && bellRef.current && !bellRef.current.contains(t)) onCloseBell();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [modelOpen, bellOpen, onCloseModel, onCloseBell]);
 
   return (
     <header className="px-6 py-3 bg-zinc-950/80 border-b border-[var(--color-glass-border)] flex items-center justify-between z-30 shrink-0 select-none">
@@ -39,7 +55,7 @@ export function TopBar(props: TopBarProps): ReactElement {
         <button
           onClick={onToggleMobileMenu}
           className="md:hidden p-1.5 rounded-lg border border-[var(--color-glass-border)] text-slate-300 hover:text-slate-100 hover:bg-zinc-900 transition active:scale-[0.98] cursor-pointer"
-          aria-label={mobileMenuOpen ? "Close session menu" : "Open session menu"}
+          aria-label={mobileMenuOpen ? "Close navigation" : "Open navigation"}
         >
           {mobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
         </button>
@@ -58,7 +74,7 @@ export function TopBar(props: TopBarProps): ReactElement {
         </div>
 
         {/* Active Model Selector */}
-        <div className="relative">
+        <div className="relative" ref={modelRef}>
           <button
             onClick={onToggleModelOpen}
             disabled={reloadingModel}
@@ -82,7 +98,7 @@ export function TopBar(props: TopBarProps): ReactElement {
                   type="text"
                   value={modelSearchQuery}
                   onChange={(e) => onModelSearchChange(e.target.value)}
-                  placeholder="Filter API key / local models..."
+                  placeholder="Filter models..."
                   className="w-full bg-zinc-900 border border-white/10 rounded-md pl-7 pr-2 py-1 text-xs text-slate-200 placeholder:text-slate-500 outline-none font-mono"
                   autoFocus
                 />
@@ -121,8 +137,8 @@ export function TopBar(props: TopBarProps): ReactElement {
             </>
           ) : (
             <>
-              <Mic className="w-3.5 h-3.5 text-status-listening animate-pulse" />
-              <span className="text-xs text-status-listening font-mono">LISTENING</span>
+              <Mic className="w-3.5 h-3.5 text-status-listening" />
+              <span className="text-xs text-status-listening font-mono">LIVE</span>
             </>
           )}
         </button>
@@ -143,7 +159,7 @@ export function TopBar(props: TopBarProps): ReactElement {
         </div>
 
         {/* Notification Bell */}
-        <div className="relative select-none">
+        <div className="relative select-none" ref={bellRef}>
           <button
             onClick={onToggleBell}
             className="relative rounded-lg w-8 h-8 grid place-items-center text-slate-400 hover:text-slate-100 hover:bg-white/5 active:scale-95 transition"

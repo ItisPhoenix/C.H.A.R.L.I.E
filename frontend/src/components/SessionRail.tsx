@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo, type ReactElement } from "react";
-import { Plus, Search, MessageSquare, Edit2, Trash2, Download, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Plus, Search, MessageSquare, Edit2, Trash2, Download, PanelLeftClose, PanelLeftOpen, X } from "lucide-react";
 import { useCharlieStore, rgba } from "../store/useCharlieStore";
 
 interface SessionItem {
@@ -92,6 +92,7 @@ export function SessionRail({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [filterQuery, setFilterQuery] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const accentColor = useCharlieStore((s) => s.accentColor);
 
@@ -288,29 +289,55 @@ export function SessionRail({
                         </div>
 
                         {/* Edit/Delete actions on hover */}
-                        {!isEditing && (
-                          <div className="opacity-0 group-hover:opacity-100 transition flex items-center gap-1 shrink-0">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                startRename(s);
-                              }}
-                              className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-white/10"
-                              title="Rename"
-                            >
-                              <Edit2 className="w-3 h-3" />
-                            </button>
+                        {!isEditing && confirmDeleteId === s.id ? (
+                          <div className="flex items-center gap-1 shrink-0">
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
                                 onDelete(s.id);
+                                setConfirmDeleteId(null);
                               }}
-                              className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-white/10"
-                              title="Delete"
+                              className="px-1.5 py-0.5 rounded text-xs font-mono text-red-300 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30"
+                              title={`Confirm delete "${s.title}"`}
                             >
-                              <Trash2 className="w-3 h-3" />
+                              Confirm
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmDeleteId(null);
+                              }}
+                              className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-white/10"
+                              title="Cancel"
+                            >
+                              <X className="w-3 h-3" />
                             </button>
                           </div>
+                        ) : (
+                          !isEditing && (
+                            <div className="opacity-0 group-hover:opacity-100 transition flex items-center gap-1 shrink-0">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  startRename(s);
+                                }}
+                                className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-white/10"
+                                title="Rename"
+                              >
+                                <Edit2 className="w-3 h-3" />
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setConfirmDeleteId(s.id);
+                                }}
+                                className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-white/10"
+                                title="Delete"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )
                         )}
                       </div>
                     );

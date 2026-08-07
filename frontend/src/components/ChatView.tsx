@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactElement } from "react";
 import {
-  Check, Copy, AlertTriangle, ShieldAlert, Sparkles,
+  Check, Copy, AlertTriangle, ShieldAlert, Sparkles, PanelRight,
   Circle, CheckCircle2, XCircle, Terminal, ChevronDown, ChevronUp
 } from "lucide-react";
 import { useCharlieStore, type ToolActivityEntry, type RecoveryProposal, type ToolApprovalRequest, rgba } from "../store/useCharlieStore";
@@ -223,6 +223,9 @@ interface ChatViewProps {
   activeToolApproval?: ToolApprovalRequest | null;
   onApproveTool?: (id: string) => void;
   onRejectTool?: (id: string) => void;
+
+  onToggleInsight?: () => void;
+  insightOpen?: boolean;
 }
 
 export function ChatView({
@@ -239,11 +242,14 @@ export function ChatView({
   activeToolApproval,
   onApproveTool,
   onRejectTool,
+  onToggleInsight,
+  insightOpen = false,
 }: ChatViewProps): ReactElement {
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const isSubmittingRef = useRef(false);
+  const stickToBottomRef = useRef(true);
 
   // Grow the textarea with content up to max-h-32 (128px), then let it scroll internally.
   useEffect(() => {
@@ -257,16 +263,23 @@ export function ChatView({
   const accentColor = useCharlieStore((s) => s.accentColor);
   const [stepperExpanded, setStepperExpanded] = useState(true);
 
-  // Smooth scroll into view
+  // Only auto-scroll when the user is already near the bottom.
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) {
+    if (el && stickToBottomRef.current) {
       el.scrollTo({
         top: el.scrollHeight,
         behavior: "smooth",
       });
     }
   }, [messages, loading, toolActivity, activeProposal, activeToolApproval]);
+
+  const handleMessagesScroll = (): void => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distanceFromBottom < 80;
+  };
 
   const submit = (overrideText?: string): void => {
     if (isSubmittingRef.current) return;
@@ -297,20 +310,38 @@ export function ChatView({
             Console Chat
           </h1>
         </div>
-        <span className="flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-slate-400">
-          <span
-            className={`w-2 h-2 rounded-full ${
-              connected ? "bg-status-listening animate-pulse" : "bg-status-error"
-            }`}
-            aria-hidden="true"
-          />
-          {connected ? "Online" : "Offline"}
-        </span>
+        <div className="flex items-center gap-3">
+          {onToggleInsight && (
+            <button
+              type="button"
+              onClick={onToggleInsight}
+              aria-pressed={insightOpen}
+              aria-label={insightOpen ? "Close insights" : "Open insights"}
+              className={`xl:hidden p-1.5 rounded-lg border transition cursor-pointer ${
+                insightOpen
+                  ? "border-accent/40 text-accent bg-accent/10"
+                  : "border-[var(--color-glass-border)] text-slate-400 hover:text-slate-100 hover:bg-white/5"
+              }`}
+            >
+              <PanelRight className="w-4 h-4" />
+            </button>
+          )}
+          <span className="flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-slate-400">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                connected ? "bg-status-listening animate-pulse" : "bg-status-error"
+              }`}
+              aria-hidden="true"
+            />
+            {connected ? "Online" : "Offline"}
+          </span>
+        </div>
       </header>
 
       {/* Messages viewport */}
       <div
         ref={scrollRef}
+        onScroll={handleMessagesScroll}
         className="flex-1 overflow-y-auto px-6 py-5 space-y-4 scrollbar"
       >
         {messages.length === 0 && (

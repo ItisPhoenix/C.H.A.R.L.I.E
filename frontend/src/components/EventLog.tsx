@@ -31,7 +31,7 @@ function Sparkline({ data }: { data: number[] }): ReactElement {
 
 export function EventLog(): ReactElement {
   const [activeTab, setActiveTab] = useState<TabType>("terminal");
-  const [minimized, setMinimized] = useState(false);
+  const [minimized, setMinimized] = useState(true);
   const [showSystemOverview, setShowSystemOverview] = useState(true);
 
   const logs = useCharlieStore((s) => s.logs);

@@ -8,7 +8,8 @@ interface ActiveToast extends Alert {
   id: string;
 }
 
-const AUTO_DISMISS_MS = 2000;
+const INFO_DISMISS_MS = 4000;
+const WARN_ERROR_DISMISS_MS = 6000;
 
 export function ToastContainer(): ReactElement {
   const alerts = useCharlieStore((s) => s.alerts);
@@ -30,10 +31,13 @@ export function ToastContainer(): ReactElement {
 
     setToasts((prev) => [newToast, ...prev].slice(0, 3));
 
-    // Auto-dismiss after 2 seconds (stable: doesn't depend on toasts state)
+    const dismissMs =
+      latest.severity === "error" || latest.severity === "warn"
+        ? WARN_ERROR_DISMISS_MS
+        : INFO_DISMISS_MS;
     const timer = setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== newToast.id));
-    }, AUTO_DISMISS_MS);
+    }, dismissMs);
 
     return () => clearTimeout(timer);
   }, [alerts]);

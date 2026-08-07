@@ -371,8 +371,12 @@ interface McpHealth {
   connected: boolean;
 }
 
-/** Control Center: default landing page, look-only -- everything actionable stays in CommandPalette. */
-export function ControlCenterView(): ReactElement {
+/** Control Center: look-only status surface -- actionable approvals deep-link to Chats. */
+interface ControlCenterViewProps {
+  onNavigateToChats?: () => void;
+}
+
+export function ControlCenterView({ onNavigateToChats }: ControlCenterViewProps): ReactElement {
   const connected = useCharlieStore((s) => s.connected);
   const sessions = useCharlieStore((s) => s.sessions);
   const currentSessionId = useCharlieStore((s) => s.currentSessionId);
@@ -420,16 +424,30 @@ export function ControlCenterView(): ReactElement {
             </div>
           )}
           {activeProposal && (
-            <div className="flex items-center gap-2 rounded-lg border border-orange-500/30 bg-orange-950/20 px-3 py-2 text-xs text-orange-200">
+            <button
+              type="button"
+              onClick={onNavigateToChats}
+              className="flex items-center gap-2 rounded-lg border border-orange-500/30 bg-orange-950/20 px-3 py-2 text-xs text-orange-200 text-left w-full cursor-pointer hover:bg-orange-950/35 transition"
+            >
               <AlertTriangle className="w-4 h-4 shrink-0" />
-              Command recovery proposal waiting on you in Chats.
-            </div>
+              <span className="flex-1">
+                Command recovery proposal waiting on you in Chats.
+                {onNavigateToChats ? " Click to open." : ""}
+              </span>
+            </button>
           )}
           {activeToolApproval && (
-            <div className="flex items-center gap-2 rounded-lg border border-status-warning/30 bg-status-warning-dim px-3 py-2 text-xs text-amber-200">
+            <button
+              type="button"
+              onClick={onNavigateToChats}
+              className="flex items-center gap-2 rounded-lg border border-status-warning/30 bg-status-warning-dim px-3 py-2 text-xs text-amber-200 text-left w-full cursor-pointer hover:bg-status-warning/15 transition"
+            >
               <ShieldAlert className="w-4 h-4 shrink-0 text-status-warning" />
-              A restricted tool call needs your approval in Chats.
-            </div>
+              <span className="flex-1">
+                A restricted tool call needs your approval in Chats.
+                {onNavigateToChats ? " Click to open." : ""}
+              </span>
+            </button>
           )}
         </div>
       )}
