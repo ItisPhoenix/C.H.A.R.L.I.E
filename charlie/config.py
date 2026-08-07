@@ -322,6 +322,15 @@ class Config:
         default=os.getenv("DESKTOP_PANIC_HOTKEY", "ctrl+alt+q"),
         metadata=_meta("DESKTOP_PANIC_HOTKEY", "Desktop Control", restart="process"),
     )
+    # Floating desktop pet (PySide6 subprocess), Windows-only.
+    pet_enabled: bool = field(
+        default=os.getenv("PET_ENABLED", "true").lower() == "true",
+        metadata=_meta("PET_ENABLED", "Desktop Control", restart="process"),
+    )
+    pet_position_path: str = field(
+        default=os.getenv("PET_POSITION_PATH", "pet_position.json"),
+        metadata=_meta("PET_POSITION_PATH", "Desktop Control", restart="process"),
+    )
     desktop_max_actions: int = field(
         default=int(os.getenv("DESKTOP_MAX_ACTIONS", "40")),
         metadata=_meta("DESKTOP_MAX_ACTIONS", "Desktop Control", restart="reload"),

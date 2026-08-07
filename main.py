@@ -1181,6 +1181,21 @@ async def main():
     except Exception as e:
         logger.warning(f"Failed to start web server: {e}")
 
+    # Start floating pet subprocess (Windows-only, PySide6)
+    if config.pet_enabled and sys.platform == "win32":
+        try:
+            pet_entry = os.path.join(
+                os.path.dirname(__file__), "charlie", "pet_entry.py"
+            )
+            pet_proc = subprocess.Popen(
+                [sys.executable, pet_entry],
+                cwd=os.path.dirname(__file__),
+                env=_web_env,
+            )
+            logger.info(f"Pet subprocess started (PID: {pet_proc.pid})")
+        except Exception as e:
+            logger.warning(f"Failed to start pet window: {e}")
+
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
         # TTS lifecycle callbacks for IPC events
