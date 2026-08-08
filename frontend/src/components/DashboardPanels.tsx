@@ -252,7 +252,11 @@ export function ProjectsView(): ReactElement {
         setContents((prev) => ({ ...prev, [slug]: data.content as string }));
       }
     } catch {
-      // ignore -- file may not exist over the workspace endpoint yet
+      useCharlieStore.getState().addAlert({
+        severity: "warn",
+        message: `Could not load entries for project "${slug}" -- backend unreachable.`,
+        timestamp: new Date().toLocaleTimeString(),
+      });
     }
   }, []);
 
@@ -1631,7 +1635,11 @@ export function MCPCenterView(): ReactElement {
       if (rStatus.ok) setStatus(await rStatus.json());
       if (rTools.ok) setTools((await rTools.json()).tools || []);
     } catch {
-      // ignore -- next poll retries
+      useCharlieStore.getState().addAlert({
+        severity: "warn",
+        message: "Could not load MCP status -- backend unreachable.",
+        timestamp: new Date().toLocaleTimeString(),
+      });
     } finally {
       setLoading(false);
     }

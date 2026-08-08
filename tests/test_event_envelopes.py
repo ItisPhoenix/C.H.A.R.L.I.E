@@ -64,11 +64,16 @@ def _run_callback(name: str, captured: List[Dict[str, Any]],
         def create_task(coro):
             return None
 
+    def _fake_emit_threadsafe(event_bus, loop, event_type, payload):
+        event_bus.emit(event_type, payload)
+        return None
+
     namespace: Dict[str, Any] = {
         "event_bus": bus,
         "loop": None,
         "current_web_session_id": session_id,
         "asyncio": _FakeAsyncio,
+        "_emit_threadsafe": _fake_emit_threadsafe,
     }
     exec(compile(src, f"<main.{name}>", "exec"), namespace)
     callback = namespace[name]

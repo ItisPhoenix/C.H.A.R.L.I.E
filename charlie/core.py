@@ -1453,6 +1453,8 @@ class Brain:
         self._agent_tool_counts: Dict[str, int] = {}
         self._agent_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_AGENTS)
         self._active_agents: Dict[str, asyncio.Task] = {}
+        # Tracks agent_ids cancelled via cancel_agent(), vs spawn_agent's own task being cancelled (e.g. barge-in).
+        self._user_cancelled_agents: set = set()
         self._approval_timeout = approval_timeout
         self._build_llm_client()
         self._chat_generation = 0
@@ -1843,8 +1845,8 @@ class Brain:
                 from charlie.telegram_bot import get_active_bot
 
                 bot = get_active_bot()
-                if bot is None:
-                    logger.warning("Gated tool call from Telegram but no bot is running -- declining safely.")
+                if bot is None or ":" not in session_id:
+                    logger.warning("Gated tool call from Telegram but no bot or malformed session_id -- declining.")
                     return False
                 chat_id = session_id.split(":", 1)[1]
                 await bot.send_approval_prompt(chat_id, prompt, request_id)
@@ -2562,7 +2564,11 @@ class Brain:
             # Interactive tools run sequentially after read-only tools complete.
             for idx, call in enumerate(tool_calls):
                 if tool_registry.is_interactive(call["name"]):
-                    results_map[idx] = await _exec_one(call)
+                    try:
+                        results_map[idx] = await _exec_one(call)
+                    except Exception as e:
+                        logger.error(f"Error executing interactive tool '{call['name']}': {e}", exc_info=True)
+                        results_map[idx] = f"Error executing tool '{call['name']}': {e}"
 
             exec_results = [results_map[i] for i in range(len(tool_calls))]
             # Step 3: Post-tool confidence gate - replace low-quality results
@@ -2669,10 +2675,17 @@ class Brain:
             result = f"Error: Sub-agent timed out after {_AGENT_TIMEOUT_SEC:.0f}s"
             logger.warning("Sub-agent %s timed out on task: %s", agent_id, task)
         except asyncio.CancelledError:
-            result = "Error: Sub-agent was cancelled"
-            logger.info("Sub-agent %s cancelled", agent_id)
+            if agent_id in self._user_cancelled_agents:
+                result = "Error: Sub-agent was cancelled"
+                logger.info("Sub-agent %s cancelled via cancel_agent()", agent_id)
+            else:
+                logger.info("Sub-agent %s cancelled (spawn_agent's own task was cancelled)", agent_id)
+                if not agent_task.done():
+                    agent_task.cancel()
+                raise
         finally:
             self._active_agents.pop(agent_id, None)
+            self._user_cancelled_agents.discard(agent_id)
         if self.on_agent_result:
             self.on_agent_result(agent_id, result)
         tool_count = self._agent_tool_counts.pop(agent_id, 0)
@@ -2730,6 +2743,7 @@ class Brain:
         agent_task = self._active_agents.get(agent_id)
         if agent_task is None:
             return False
+        self._user_cancelled_agents.add(agent_id)
         agent_task.cancel()
         return True
 

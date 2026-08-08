@@ -280,7 +280,7 @@ export function SessionRail({
                             />
                           ) : (
                             <div className="truncate flex-1">
-                              <p className="truncate font-medium">{s.title}</p>
+                              <p className="truncate font-medium" title={s.title}>{s.title}</p>
                               <span className="text-xs text-slate-500 font-mono block">
                                 {relativeTime(s.updated_at || s.created_at)}
                               </span>

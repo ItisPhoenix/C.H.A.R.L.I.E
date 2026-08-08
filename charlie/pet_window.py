@@ -10,7 +10,9 @@ from typing import Optional
 
 import zmq
 from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen, QRadialGradient
+from PySide6.QtGui import (
+    QColor, QCursor, QFont, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen, QRadialGradient,
+)
 from PySide6.QtWidgets import QApplication, QWidget
 
 from charlie.config import config

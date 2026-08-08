@@ -463,6 +463,10 @@ async def websocket_endpoint(ws: WebSocket):
                     _active_frontend_session = msg.get("session_id") or msg.get("payload", {}).get("session_id")
                     ws_sessions[ws] = _active_frontend_session
                     logger.info("Active session synced: %s", _active_frontend_session)
+                    if event_bus:
+                        await event_bus.send_command(
+                            {"type": "session_active", "session_id": _active_frontend_session}
+                        )
                 elif event_bus:
                     await event_bus.send_command(msg)
                     logger.debug("WS forwarded command: %s", msg)
@@ -1019,9 +1023,7 @@ async def set_active_session(data: dict):
     global _active_frontend_session
     _active_frontend_session = data.get("session_id")
     logger.info("Active frontend session: %s", _active_frontend_session)
-    # Also update WS client subscriptions and route the switch to the voice
-    # process so microphone speech lands in the right session. The WS
-    # `session_active` path already does this; the POST path must too.
+    # Also update WS client subscriptions and route the switch to the voice process for mic routing.
     for ws in active_connections:
         ws_sessions[ws] = _active_frontend_session
     if event_bus:
@@ -1184,7 +1186,12 @@ async def get_workspace_file(path: str):
     from pathlib import Path
     root_dir = Path(__file__).parent.parent
     target = (root_dir / path).resolve()
-    if not str(target).startswith(str(root_dir)) or not target.exists() or not target.is_file():
+    if (
+        Path(path).suffix not in _WORKSPACE_ALLOWED_EXTS
+        or not str(target).startswith(str(root_dir) + os.sep)
+        or not target.exists()
+        or not target.is_file()
+    ):
         raise HTTPException(status_code=400, detail="Invalid path")
     try:
         content = target.read_text(encoding="utf-8", errors="ignore")
@@ -1205,7 +1212,7 @@ async def put_workspace_file(data: dict):
         raise HTTPException(status_code=400, detail="Invalid path or extension")
     root_dir = Path(__file__).parent.parent
     target = (root_dir / path).resolve()
-    if not str(target).startswith(str(root_dir)):
+    if not str(target).startswith(str(root_dir) + os.sep):
         raise HTTPException(status_code=400, detail="Invalid path")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1222,7 +1229,12 @@ async def delete_workspace_file(path: str):
     from pathlib import Path
     root_dir = Path(__file__).parent.parent
     target = (root_dir / path).resolve()
-    if not str(target).startswith(str(root_dir)) or not target.exists() or not target.is_file():
+    if (
+        Path(path).suffix not in _WORKSPACE_ALLOWED_EXTS
+        or not str(target).startswith(str(root_dir) + os.sep)
+        or not target.exists()
+        or not target.is_file()
+    ):
         raise HTTPException(status_code=400, detail="Invalid path")
     try:
         target.unlink()

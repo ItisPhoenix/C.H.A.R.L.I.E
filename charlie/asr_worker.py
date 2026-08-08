@@ -274,7 +274,7 @@ def asr_worker_process(
         except KeyboardInterrupt:
             break
         except Exception as e:
-            logger.error(f"ASR Worker: Error during transcription: {e}")
+            logger.error(f"ASR Worker: Error during transcription: {e}", exc_info=True)
             output_queue.put(("", 0.0, {"is_warmup": False}))
 
     logger.info("ASR Worker: Shutting down.")

@@ -77,7 +77,7 @@ _YES_RE = re.compile(
     re.IGNORECASE,
 )
 _NO_RE = re.compile(
-    r"\b(?:no|nope|nah|cancel|stop|don't|do not|decline\w*|reject\w*|negative)\b",
+    r"\b(?:no|nope|nah|cancel|stop|don't|do not|not|decline\w*|reject\w*|negative)\b",
     re.IGNORECASE,
 )
 

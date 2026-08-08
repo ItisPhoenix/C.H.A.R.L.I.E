@@ -54,7 +54,7 @@ const GROUP_HELP: Record<string, string> = {
   "Chat Behavior": "Tool calling, context window, and history compression.",
   "Memory Files": "MEMORY.md / USER.md / OPINIONS.md and session history storage.",
   "Search Providers": "Web search fallback chain.",
-  "Wake Word": "Hands-free “Charlie” activation.",
+  "Wake Word": "Hands-free \"Charlie\" activation.",
   "Vector Memory": "Semantic recall and the knowledge graph.",
   "Agentic OS": "Swarm orchestration and MCP servers.",
   "Desktop Control": "Screen perception and UI automation.",
@@ -460,6 +460,7 @@ function FieldRow({
           <div className="flex items-center gap-2">
             <input
               type="color"
+              aria-label="Pet accent color"
               value={String(value || "#00ffff")}
               onChange={(e) => onChange(e.target.value)}
               className="w-8 h-8 rounded cursor-pointer bg-transparent border-0 p-0"

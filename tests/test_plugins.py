@@ -341,6 +341,12 @@ class TestCodeExecPlugin:
         assert "error" in result
         assert "Rejected" in result["error"]
 
+    def test_exec_rejects_aliased_dangerous_builtin(self):
+        plugin = CodeExecPlugin()
+        result = plugin.call_tool("code_exec_python", {"code": "e = eval\ne('1+1')"})
+        assert "error" in result
+        assert "Rejected" in result["error"]
+
     def test_unknown_tool(self):
         plugin = CodeExecPlugin()
         with pytest.raises(ValueError, match="Unknown tool"):

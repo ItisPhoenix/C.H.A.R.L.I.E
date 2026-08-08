@@ -375,9 +375,9 @@ class MemoryStore:
                 logger.debug("No LLM configured for fact extraction")
                 return []
 
-            headers = {"Content-Type": "application/json"}
-            if fast_key and fast_key not in ("no-key", "no_key"):
-                headers["Authorization"] = f"Bearer {fast_key}"
+            from charlie.utils import build_auth_headers
+
+            headers = {"Content-Type": "application/json", **build_auth_headers(fast_key)}
 
             payload = {
                 "model": fast_model,

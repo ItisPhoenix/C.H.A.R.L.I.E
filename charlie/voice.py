@@ -145,7 +145,6 @@ class VoiceEngine:
         # any part of it, not only the last one.
         self._recent_spoken_words: set = set()
         self.speech_echo_window = _ECHO_WINDOW_SEC
-        self._widget_callback = None
 
         # Speaker output state (driven by the dashboard audio controls).
         # `muted` silences TTS playback; `volume` is a 0.0-1.0 linear gain
@@ -176,10 +175,6 @@ class VoiceEngine:
         self._wake_word_active: bool = False  # True = in active session after wake word
         self._last_activity_time: float = 0.0
         self._on_wake_word: Optional[Callable[[], None]] = None
-
-    def set_widget_callback(self, cb: Callable[[str], None]) -> None:
-        """Register callback for mode changes (listening/speaking/idle)."""
-        self._widget_callback = cb
 
     def set_wake_word_callback(self, cb: Callable[[], None]) -> None:
         """Register callback for wake-word detection events."""
@@ -232,6 +227,19 @@ class VoiceEngine:
             asyncio.run_coroutine_threadsafe(bus.emit("vad_start", {}), loop)
         except Exception:
             logger.debug("vad_start emit failed", exc_info=True)
+
+    def _emit_alert(self, message: str, severity: str = "error") -> None:
+        """Publish a dashboard alert toast (mirrors background_task.py's pattern)."""
+        bus = getattr(self, "_event_bus", None)
+        loop = getattr(self, "_event_loop", None)
+        if bus is None or loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                bus.emit("alert", {"severity": severity, "message": message}), loop
+            )
+        except Exception:
+            logger.debug("alert emit failed", exc_info=True)
 
     @staticmethod
     def _rms(samples: "np.ndarray") -> float:
@@ -505,9 +513,8 @@ class VoiceEngine:
         # Echo detection
         if self.is_echo(text):
             return ""
-        # A new reply (not a continuation chunk of one already being spoken)
-        # starts a fresh word set instead of carrying over the last reply's.
-        if not self.is_speaking.is_set():
+        # New reply starts fresh; is_speaking alone lags first-chunk playback, so also check the queues.
+        if not self.is_speaking.is_set() and self.tts_queue.empty() and self.playback_queue.empty():
             self._recent_spoken_words = set()
         self._last_speech_time = time.time()
 
@@ -574,7 +581,7 @@ class VoiceEngine:
                     mouth_values = []
                     return (samples, sample_rate, mouth_values)
                 except Exception as e:
-                    logger.error(f"synth_error | {e}")
+                    logger.error(f"synth_error | {e}", exc_info=True)
                     return None
         finally:
             phon_logger.setLevel(old_level)
@@ -627,7 +634,7 @@ class VoiceEngine:
             except queue.Empty:
                 continue
             except Exception as e:
-                logger.error(f"tts_worker_error | {e}")
+                logger.error(f"tts_worker_error | {e}", exc_info=True)
 
     async def _tts_stream_and_queue(self, text: str, speed: float):
         """Consume _synth_stream and push each chunk to playback_queue.
@@ -749,7 +756,7 @@ class VoiceEngine:
                 # after all chunks) signals the real end of the utterance.
 
             except Exception as e:
-                logger.error(f"playback_error | {e}")
+                logger.error(f"playback_error | {e}", exc_info=True)
                 if tts_started_fired and self._on_tts_stop:
                     try:
                         self._on_tts_stop()
@@ -1009,44 +1016,51 @@ class VoiceEngine:
         block_size = 1024
 
         def _callback(indata, frames, time_info, status):
-            # Mic muted: drop the frame before ASR and stop publishing its
-            # level so the VU meter reads flat instead of faking live audio.
-            if self.mic_muted:
-                return
-            # Avoid logging on the audio thread; check status flag silently or log on debug
             try:
-                self._audio_queue.put_nowait(indata.copy())
-            except queue.Full:
-                try:
-                    self._audio_queue.get_nowait()
-                except queue.Empty:
-                    pass
+                # Mic muted: drop frame before ASR so the VU meter reads flat instead of faking live audio.
+                if self.mic_muted:
+                    return
                 try:
                     self._audio_queue.put_nowait(indata.copy())
                 except queue.Full:
-                    pass  # drop oldest frame on overflow
-            # Publish live mic amplitude from every captured frame (throttled
-            # in _emit_audio_level). Near-zero when quiet, rises with speech.
-            self._emit_audio_level(self._rms(indata))
+                    try:
+                        self._audio_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._audio_queue.put_nowait(indata.copy())
+                    except queue.Full:
+                        pass  # drop oldest frame on overflow
+                # Publish live mic amplitude, throttled in _emit_audio_level.
+                self._emit_audio_level(self._rms(indata))
+            except Exception:
+                logger.error("Audio capture callback error", exc_info=True)
 
         self._audio_queue: queue.Queue = queue.Queue(maxsize=32)
 
         # Resolve input device: -1 -> system default
         input_device = None if self.config.mic_index == -1 else self.config.mic_index
 
-        try:
-            self.audio_stream = sd.InputStream(
-                samplerate=samplerate,
-                channels=1,
-                dtype="float32",
-                blocksize=block_size,
-                device=input_device,
-                callback=_callback,
-            )
-            self.audio_stream.start()
-        except Exception as e:
-            logger.error(f"Failed to open audio stream: {e}")
-            return
+        _MAX_OPEN_ATTEMPTS = 3
+        for attempt in range(1, _MAX_OPEN_ATTEMPTS + 1):
+            try:
+                self.audio_stream = sd.InputStream(
+                    samplerate=samplerate,
+                    channels=1,
+                    dtype="float32",
+                    blocksize=block_size,
+                    device=input_device,
+                    callback=_callback,
+                )
+                self.audio_stream.start()
+                break
+            except Exception as e:
+                logger.error(f"Failed to open audio stream (attempt {attempt}/{_MAX_OPEN_ATTEMPTS}): {e}",
+                             exc_info=True)
+                if attempt == _MAX_OPEN_ATTEMPTS:
+                    self._emit_alert(f"Microphone capture failed to start: {e}")
+                    return
+                time.sleep(2.0)
 
         try:
             dev_info = sd.query_devices(input_device)
@@ -1250,4 +1264,4 @@ class VoiceEngine:
             except queue.Empty:
                 continue
             except Exception as e:
-                logger.error(f"asr_poller_error | {e}")
+                logger.error(f"asr_poller_error | {e}", exc_info=True)

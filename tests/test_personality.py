@@ -133,6 +133,9 @@ class TestParseYesNo:
         utterance -- must not match the "do it" yes-pattern instead."""
         assert parse_yes_no("no, don't do it") is False
 
+    def test_thats_not_correct_is_no(self):
+        assert parse_yes_no("that's not correct") is False
+
     def test_unrelated_text_returns_none(self):
         assert parse_yes_no("what's the weather") is None
 

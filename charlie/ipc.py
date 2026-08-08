@@ -105,7 +105,11 @@ class EventBus:
             raise RuntimeError("consume_events() called on producer EventBus")
         while True:
             data = await self._sub_socket.recv_string()
-            event = json.loads(data)
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                logger.warning("consume_events: dropping malformed event: %s", data[:200])
+                continue
             await callback(event)
 
     async def send_command(self, command: dict):

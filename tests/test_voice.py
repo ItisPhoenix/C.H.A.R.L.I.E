@@ -316,13 +316,6 @@ class TestVoiceEngineInit:
         engine.muted = False
         assert not engine.muted
 
-    def test_set_widget_callback(self):
-        engine = self._make_engine()
-        def cb(x):
-            return None
-        engine.set_widget_callback(cb)
-        assert engine._widget_callback is cb
-
     def test_set_wake_word_callback(self):
         engine = self._make_engine()
         def cb():

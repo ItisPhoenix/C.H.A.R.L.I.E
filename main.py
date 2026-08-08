@@ -205,6 +205,15 @@ async def _relay_written_file_to_telegram(bot, session_id: str, path: str) -> No
     await bot.send_document(chat_id, os.path.basename(path), content)
 
 
+def _emit_threadsafe(event_bus, loop, event_type, payload):
+    """Fire-and-forget event_bus.emit from any thread; logs failures the future would otherwise swallow."""
+    fut = asyncio.run_coroutine_threadsafe(event_bus.emit(event_type, payload), loop)
+    fut.add_done_callback(
+        lambda f: logger.warning(f"Event emit '{event_type}' failed: {f.exception()}") if f.exception() else None
+    )
+    return fut
+
+
 def _schedule_process(coro, loop):
     fut = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
@@ -281,28 +290,22 @@ async def main():
 
     def on_tool_call(name, args, turn_id=None, session_id=None):
         if event_bus:
-            asyncio.run_coroutine_threadsafe(
-                event_bus.emit(
-                    "tool_call",
-                    {
-                        "name": name, "args": args, "turn_id": turn_id,
-                        "session_id": session_id or current_web_session_id,
-                    },
-                ),
-                loop,
+            _emit_threadsafe(
+                event_bus, loop, "tool_call",
+                {
+                    "name": name, "args": args, "turn_id": turn_id,
+                    "session_id": session_id or current_web_session_id,
+                },
             )
 
     def on_tool_result(name, result, turn_id=None, session_id=None, arguments=None):
         if event_bus:
-            asyncio.run_coroutine_threadsafe(
-                event_bus.emit(
-                    "tool_result",
-                    {
-                        "name": name, "text": result, "turn_id": turn_id,
-                        "session_id": session_id or current_web_session_id,
-                    },
-                ),
-                loop,
+            _emit_threadsafe(
+                event_bus, loop, "tool_result",
+                {
+                    "name": name, "text": result, "turn_id": turn_id,
+                    "session_id": session_id or current_web_session_id,
+                },
             )
         if (
             name == "file_write"
@@ -320,17 +323,14 @@ async def main():
 
     def on_queue_update():
         if event_bus:
-            asyncio.run_coroutine_threadsafe(
-                event_bus.emit(
-                    "queue_update",
-                    {
-                        "count": len(pending_turns),
-                        "ids": [i for i, _, _, _ in pending_turns][:5],
-                        "texts": [t for _, t, _, _ in pending_turns][:5],
-                        "session_ids": [s for _, _, s, _ in pending_turns][:5],
-                    },
-                ),
-                loop,
+            _emit_threadsafe(
+                event_bus, loop, "queue_update",
+                {
+                    "count": len(pending_turns),
+                    "ids": [i for i, _, _, _ in pending_turns][:5],
+                    "texts": [t for _, t, _, _ in pending_turns][:5],
+                    "session_ids": [s for _, _, s, _ in pending_turns][:5],
+                },
             )
 
     def on_thinking_update(name, args):
@@ -339,46 +339,32 @@ async def main():
             if args:
                 summary = str(args)[:80]
                 desc += f" with {summary}"
-            asyncio.run_coroutine_threadsafe(
-                event_bus.emit("thinking_update", {"text": desc, "session_id": current_web_session_id}), loop
-            )
+            _emit_threadsafe(event_bus, loop, "thinking_update", {"text": desc, "session_id": current_web_session_id})
 
     def on_agent_spawned(agent_id, task):
         if event_bus:
-            asyncio.run_coroutine_threadsafe(
-                event_bus.emit(
-                    "agent_spawned",
-                    {"agent_id": agent_id, "task": task, "session_id": current_web_session_id},
-                ),
-                loop,
+            _emit_threadsafe(
+                event_bus, loop, "agent_spawned",
+                {"agent_id": agent_id, "task": task, "session_id": current_web_session_id},
             )
 
     def on_agent_status(agent_id, tool_name):
         if event_bus:
-            asyncio.run_coroutine_threadsafe(
-                event_bus.emit(
-                    "agent_status",
-                    {"agent_id": agent_id, "tool_name": tool_name, "session_id": current_web_session_id},
-                ),
-                loop,
+            _emit_threadsafe(
+                event_bus, loop, "agent_status",
+                {"agent_id": agent_id, "tool_name": tool_name, "session_id": current_web_session_id},
             )
 
     def on_agent_result(agent_id, result):
         if event_bus:
-            asyncio.run_coroutine_threadsafe(
-                event_bus.emit(
-                    "agent_result",
-                    {"agent_id": agent_id, "result": result, "session_id": current_web_session_id},
-                ),
-                loop,
+            _emit_threadsafe(
+                event_bus, loop, "agent_result",
+                {"agent_id": agent_id, "result": result, "session_id": current_web_session_id},
             )
 
     def on_skill_installed(name, raw_text):
         if event_bus:
-            asyncio.run_coroutine_threadsafe(
-                event_bus.emit("skill_installed", {"name": name, "raw_text": raw_text}),
-                loop,
-            )
+            _emit_threadsafe(event_bus, loop, "skill_installed", {"name": name, "raw_text": raw_text})
 
     try:
         brain = Brain(
@@ -535,12 +521,7 @@ async def main():
                 return
             store.update_session_title(session_id, candidate)
             if event_bus:
-                asyncio.run_coroutine_threadsafe(
-                    event_bus.emit(
-                        "session_updated", {"session_id": session_id, "title": candidate}
-                    ),
-                    loop,
-                )
+                _emit_threadsafe(event_bus, loop, "session_updated", {"session_id": session_id, "title": candidate})
         except Exception as exc:
             logger.debug(f"update_session_title_from_text skipped: {exc}")
 
@@ -1267,17 +1248,12 @@ async def main():
         # TTS lifecycle callbacks for IPC events
         def on_tts_start(text: str = ""):
             if event_bus:
-                asyncio.run_coroutine_threadsafe(
-                    event_bus.emit(
-                        "speaking_start", {"session_id": current_web_session_id, "text": text}
-                    ), loop
-                )
+                payload = {"session_id": current_web_session_id, "text": text}
+                _emit_threadsafe(event_bus, loop, "speaking_start", payload)
 
         def on_tts_stop():
             if event_bus:
-                asyncio.run_coroutine_threadsafe(
-                    event_bus.emit("speaking_stop", {"session_id": current_web_session_id}), loop
-                )
+                _emit_threadsafe(event_bus, loop, "speaking_stop", {"session_id": current_web_session_id})
 
         voice = VoiceEngine(
             config,
@@ -1289,9 +1265,7 @@ async def main():
 
         def on_wake_word():
             if event_bus:
-                asyncio.run_coroutine_threadsafe(
-                    event_bus.emit("wake_word", {}), loop
-                )
+                _emit_threadsafe(event_bus, loop, "wake_word", {})
 
         voice.set_wake_word_callback(on_wake_word)
 

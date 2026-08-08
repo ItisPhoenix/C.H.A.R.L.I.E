@@ -589,10 +589,10 @@ class SessionStore:
             return []
 
     def close(self) -> None:
-        """Closes connection cleanly."""
-        if self.conn:
+        """Closes connection cleanly, without lazily opening one first via the conn property."""
+        if getattr(self._local, "conn", None):
             try:
-                self.conn.close()
+                self._local.conn.close()
             except sqlite3.Error:
                 pass
-            self.conn = None
+            self._local.conn = None

@@ -235,8 +235,8 @@ async def request_recovery_approval(
             proposal_id, source, proposed_command
         )
         return (
-            "Error: Command execution rejected by user. Original failure: [winerror 2] "
-            f"The system cannot find the file specified. Proposed but rejected fix: {proposed_command}."
+            f"Error: Command execution rejected by user. Original failure ({failure_class}): "
+            f"{explanation}. Proposed but rejected fix: {proposed_command}."
         )
 
     logger.info(

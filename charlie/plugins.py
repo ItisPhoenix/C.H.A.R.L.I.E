@@ -613,13 +613,11 @@ class CodeExecPlugin(Plugin):
                     slc = node.slice
                     if isinstance(slc, ast.Constant) and isinstance(slc.value, str) and slc.value.startswith("__"):
                         return {"error": "Rejected: dunder index access not allowed."}
-                if isinstance(node, ast.Call):
-                    func = node.func
-                    if isinstance(func, ast.Name):
-                        if func.id in _BANNED_BUILTINS:
-                            return {"error": f"Rejected: call to dangerous builtin '{func.id}' is blocked."}
-                        if func.id.startswith("__"):
-                            return {"error": f"Rejected: call to dunder builtin '{func.id}' is blocked."}
+                if isinstance(node, ast.Name):
+                    if node.id in _BANNED_BUILTINS:
+                        return {"error": f"Rejected: reference to dangerous builtin '{node.id}' is blocked."}
+                    if node.id.startswith("__"):
+                        return {"error": f"Rejected: reference to dunder builtin '{node.id}' is blocked."}
         except SyntaxError as e:
             return {"error": f"SyntaxError: {e}"}
 

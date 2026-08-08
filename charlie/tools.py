@@ -1724,7 +1724,7 @@ def _emit_desktop_frame(png_bytes: bytes, elements: List[Any]) -> None:
         if turn_platform == "telegram":
             from charlie.telegram_bot import get_active_bot
             bot = get_active_bot()
-            if bot is not None:
+            if bot is not None and turn_session_id and ":" in turn_session_id:
                 chat_id = turn_session_id.split(":", 1)[1]
                 asyncio.run_coroutine_threadsafe(bot.send_photo(chat_id, png_bytes), _event_loop)
     except Exception:
