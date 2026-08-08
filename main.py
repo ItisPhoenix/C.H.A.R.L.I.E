@@ -928,7 +928,7 @@ async def main():
                         existing = u_path.read_text(encoding="utf-8")
 
                     if learning not in existing:
-                        await asyncio.get_running_loop().run_in_executor(
+                        result = await asyncio.get_running_loop().run_in_executor(
                             None,
                             tool_registry.execute_tool,
                             "memory",
@@ -938,7 +938,10 @@ async def main():
                                 "content": learning,
                             },
                         )
-                        logger.info(f"Learning: {learning}")
+                        if result.startswith("Error") or result.startswith("Memory full"):
+                            logger.warning(f"Learning write failed: {result}")
+                        else:
+                            logger.info(f"Learning: {learning}")
                 except Exception as e:
                     logger.debug(f"Learning loop skipped: {e}")
 

@@ -16,7 +16,7 @@ def _make_brain(tmp_path, memory_capacity_threshold=0.8):
             memory_file=str(memory_file),
             user_file=str(tmp_path / "USER.md"),
             opinions_file=str(tmp_path / "OPINIONS.md"),
-            project_file=str(tmp_path / "PROJECT.md"),
+            projects_dir=str(tmp_path / "projects"),
             memory_capacity_threshold=memory_capacity_threshold,
         ),
         register_panic_hotkey=False,

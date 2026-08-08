@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 
 from charlie.config import Config, config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
+from charlie.projects import Projects
 from charlie.scratchpad import Scratchpad
 from charlie.session_store import SessionStore
 from charlie.utils import build_auth_headers
@@ -213,6 +214,10 @@ def _get_scratchpad() -> Scratchpad:
     if _scratchpad is None:
         _scratchpad = Scratchpad(config.scratchpad_db_path)
     return _scratchpad
+
+
+def _get_projects() -> Projects:
+    return Projects(config.projects_dir)
 
 
 pipeline_state: str = "idle"
@@ -554,6 +559,37 @@ async def clear_scratchpad():
     pad = _get_scratchpad()
     await asyncio.to_thread(pad.clear)
     return {"cleared": True}
+
+
+@app.get("/api/projects")
+async def list_projects():
+    """List project workspaces and which one is active."""
+    store = _get_projects()
+    names = await asyncio.to_thread(store.list)
+    active = await asyncio.to_thread(store.get_active)
+    return {"projects": names, "active": active}
+
+
+@app.post("/api/projects")
+async def create_project(data: dict):
+    """Create a new project workspace."""
+    store = _get_projects()
+    try:
+        slug = await asyncio.to_thread(store.create, data.get("name", ""))
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    return {"slug": slug}
+
+
+@app.put("/api/projects/active")
+async def switch_project(data: dict):
+    """Switch the active project workspace; pass slug=null to go back to global."""
+    store = _get_projects()
+    try:
+        await asyncio.to_thread(store.set_active, data.get("slug"))
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    return {"active": data.get("slug")}
 
 
 @app.get("/api/sessions")

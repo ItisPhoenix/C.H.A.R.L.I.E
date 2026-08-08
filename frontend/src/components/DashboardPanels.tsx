@@ -208,6 +208,233 @@ export function MemoriesView(): ReactElement {
   );
 }
 
+export function ProjectsView(): ReactElement {
+  const [projects, setProjects] = useState<string[]>([]);
+  const [active, setActive] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [newName, setNewName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [contents, setContents] = useState<Record<string, string>>({});
+  const [editingSlug, setEditingSlug] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const fetchProjects = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/projects");
+      if (res.ok) {
+        const data = await res.json();
+        setProjects(data.projects || []);
+        setActive(data.active ?? null);
+      }
+    } catch {
+      useCharlieStore.getState().addAlert({
+        severity: "warn",
+        message: "Could not load projects -- backend unreachable.",
+        timestamp: new Date().toLocaleTimeString(),
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data fetch on mount
+    fetchProjects();
+  }, [fetchProjects]);
+
+  const fetchEntries = useCallback(async (slug: string) => {
+    try {
+      const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(`projects/${slug}.md`)}`);
+      if (res.ok) {
+        const data = await res.json();
+        setContents((prev) => ({ ...prev, [slug]: data.content as string }));
+      }
+    } catch {
+      // ignore -- file may not exist over the workspace endpoint yet
+    }
+  }, []);
+
+  const createProject = async () => {
+    if (!newName.trim()) return;
+    setCreating(true);
+    try {
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newName.trim() }),
+      });
+      if (res.ok) {
+        setNewName("");
+        await fetchProjects();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        useCharlieStore.getState().addAlert({
+          severity: "error",
+          message: data.error || "Failed to create project.",
+          timestamp: new Date().toLocaleTimeString(),
+        });
+      }
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const switchTo = async (slug: string | null) => {
+    const res = await fetch("/api/projects/active", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug }),
+    });
+    if (res.ok) setActive(slug);
+  };
+
+  const startEdit = (slug: string) => {
+    setEditingSlug(slug);
+    setDraft(parseMemoryEntries(contents[slug] || "").join("\n"));
+  };
+
+  const saveEdit = async () => {
+    if (!editingSlug) return;
+    setSaving(true);
+    const entries = draft.split("\n").map((line) => line.trim()).filter(Boolean);
+    const newContent = entries.join(MEMORY_SEP);
+    try {
+      const res = await fetch("/api/workspace/file", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: `projects/${editingSlug}.md`, content: newContent }),
+      });
+      if (res.ok) {
+        setContents((prev) => ({ ...prev, [editingSlug]: newContent }));
+        setEditingSlug(null);
+        setDraft("");
+      } else {
+        useCharlieStore.getState().addAlert({
+          severity: "error",
+          message: `Failed to save project '${editingSlug}'.`,
+          timestamp: new Date().toLocaleTimeString(),
+        });
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex-1 p-6 space-y-6 overflow-y-auto scrollbar animate-[rise_0.2s_ease-out]">
+      <div className="border-b border-white/5 pb-3 flex justify-between items-end">
+        <div>
+          <h2 className="font-display text-xl font-bold uppercase tracking-wide flex items-center gap-2">
+            <Folder className="w-5 h-5 text-slate-400" />
+            Projects
+          </h2>
+          <p className="text-xs text-slate-500 font-mono mt-1">
+            One project active at a time -- global memory applies when none is active
+          </p>
+        </div>
+        <Button onClick={fetchProjects} className="font-mono">
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-cyan-400" : ""}`} />
+          Refresh
+        </Button>
+      </div>
+
+      <div className="flex gap-2 items-center">
+        <input
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && createProject()}
+          placeholder="New project name..."
+          className="flex-1 max-w-xs text-xs font-mono text-slate-200 bg-zinc-950/60 border border-white/10 rounded-lg px-3 py-2 outline-none focus:border-white/20"
+        />
+        <Button size="sm" onClick={createProject} disabled={creating || !newName.trim()}>
+          <Plus className="w-3 h-3" /> {creating ? "Creating..." : "Create"}
+        </Button>
+        {active && (
+          <Button size="sm" variant="neutral" onClick={() => switchTo(null)}>
+            Go global (clear active)
+          </Button>
+        )}
+      </div>
+
+      {!loading && projects.length === 0 && (
+        <p className="text-xs font-mono text-slate-500 italic">No projects yet -- create one above.</p>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        {projects.map((slug) => {
+          const isActive = slug === active;
+          const entries = parseMemoryEntries(contents[slug] || "");
+          const isEditing = editingSlug === slug;
+          return (
+            <div key={slug} className="rounded-xl border border-white/5 p-4 bg-zinc-900/20 space-y-2 flex flex-col">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-mono text-slate-500 uppercase font-bold flex items-center gap-1.5">
+                  {isActive ? <FolderOpen className="w-3.5 h-3.5 text-accent" /> : <Folder className="w-3.5 h-3.5" />}
+                  {slug}
+                  {isActive && <span className="text-accent normal-case">(active)</span>}
+                </span>
+                <div className="flex items-center gap-1">
+                  {!isEditing && contents[slug] !== undefined && (
+                    <button
+                      onClick={() => startEdit(slug)}
+                      aria-label={`Edit ${slug}`}
+                      className="text-slate-500 hover:text-slate-200 cursor-pointer p-0.5 rounded hover:bg-white/5 transition"
+                    >
+                      <Pencil className="w-3 h-3" />
+                    </button>
+                  )}
+                  {!isActive && (
+                    <Button size="sm" variant="neutral" onClick={() => switchTo(slug)}>
+                      <ChevronRight className="w-3 h-3" /> Switch
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {contents[slug] === undefined ? (
+                <button
+                  onClick={() => fetchEntries(slug)}
+                  className="text-xs font-mono text-slate-500 italic py-2 text-left hover:text-slate-300"
+                >
+                  Load entries...
+                </button>
+              ) : isEditing ? (
+                <>
+                  <textarea
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    spellCheck={false}
+                    placeholder="One entry per line"
+                    className="text-xs font-mono text-slate-200 bg-zinc-950/60 border border-white/10 rounded-lg p-2 h-32 resize-none outline-none focus:border-white/20 scrollbar"
+                  />
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={saveEdit} disabled={saving}>
+                      <Save className="w-3 h-3" /> {saving ? "Saving..." : "Save"}
+                    </Button>
+                    <Button size="sm" variant="neutral" onClick={() => setEditingSlug(null)} disabled={saving}>
+                      Cancel
+                    </Button>
+                  </div>
+                </>
+              ) : entries.length > 0 ? (
+                <ol className="text-xs font-mono text-slate-300 space-y-1 max-h-60 overflow-y-auto scrollbar list-decimal list-inside">
+                  {entries.map((entry, i) => (
+                    <li key={i} className="leading-relaxed">{entry}</li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="text-xs font-mono text-slate-500 italic py-2">Empty.</p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 interface HostStatus {
   cpu?: number;
   ram?: number;

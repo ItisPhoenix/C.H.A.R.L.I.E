@@ -194,9 +194,9 @@ class Config:
         default=os.getenv("OPINIONS_FILE", "OPINIONS.md"),
         metadata=_meta("OPINIONS_FILE", "Memory Files", restart="reload"),
     )
-    project_file: str = field(
-        default=os.getenv("PROJECT_FILE", "PROJECT.md"),
-        metadata=_meta("PROJECT_FILE", "Memory Files", restart="reload"),
+    projects_dir: str = field(
+        default=os.getenv("PROJECTS_DIR", "projects"),
+        metadata=_meta("PROJECTS_DIR", "Memory Files", restart="reload"),
     )
     prompt_memory_max: int = field(
         default=int(os.getenv("PROMPT_MEMORY_MAX", "2200")),
@@ -330,6 +330,10 @@ class Config:
     pet_position_path: str = field(
         default=os.getenv("PET_POSITION_PATH", "pet_position.json"),
         metadata=_meta("PET_POSITION_PATH", "Desktop Control", restart="process"),
+    )
+    pet_color: str = field(
+        default=os.getenv("PET_COLOR", "#00ffff"),
+        metadata=_meta("PET_COLOR", "Companion", restart="reload"),
     )
     # Telegram remote control -- long-polling bot, DM-only, single owner user.
     telegram_bot_token: str = field(

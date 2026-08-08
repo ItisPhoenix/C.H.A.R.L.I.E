@@ -127,6 +127,7 @@ class SessionStore:
                     ("source", "TEXT DEFAULT 'voice'"),
                     ("launch_id", "TEXT DEFAULT NULL"),
                     ("parent_session_id", "TEXT DEFAULT NULL"),
+                    ("project_id", "TEXT DEFAULT NULL"),
                 ):
                     try:
                         self.conn.execute(
@@ -379,15 +380,16 @@ class SessionStore:
         source: str = "voice",
         launch_id: Optional[str] = None,
         parent_session_id: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> None:
         """Creates a session metadata row with origin tracking."""
         try:
             with self.conn:
                 self.conn.execute(
                     "INSERT OR IGNORE INTO sessions "
-                    "(session_id, title, source, launch_id, parent_session_id, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (session_id, title, source, launch_id, parent_session_id, utc_now_iso()),
+                    "(session_id, title, source, launch_id, parent_session_id, project_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, title, source, launch_id, parent_session_id, project_id, utc_now_iso()),
                 )
                 # If the row already exists but source/launch_id were NULL,
                 # backfill them so filtering works for sessions created before this migration.

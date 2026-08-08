@@ -1496,7 +1496,8 @@ class Brain:
         memory_content = self._read_file_safe(config.memory_file, max_chars)
         user_content = self._read_file_safe(config.user_file, max_chars)
         opinions_content = self._read_file_safe(config.opinions_file, max_chars)
-        project_content = self._read_file_safe(config.project_file, max_chars)
+        project_path = self._active_project_path()
+        project_content = self._read_file_safe(project_path, max_chars) if project_path else ""
         self._context_tier: str = _build_context_tier(
             memory_content, user_content, opinions_content, self._installed_skill_blocks, project_content
         )
@@ -1563,6 +1564,16 @@ class Brain:
         if old_client is not None:
             asyncio.create_task(old_client.aclose())
 
+    def _active_project_path(self) -> Optional[str]:
+        """Path to the active project's markdown file, or None if no project is active."""
+        from charlie.projects import Projects
+        try:
+            slug = Projects(self.config.projects_dir).get_active()
+        except Exception:
+            logger.warning("Could not read active project pointer", exc_info=True)
+            return None
+        return os.path.join(self.config.projects_dir, f"{slug}.md") if slug else None
+
     @staticmethod
     def _read_file_safe(path: str, max_chars: int) -> str:
         """Read a file, creating it if missing. Returns truncated content."""
@@ -1583,7 +1594,8 @@ class Brain:
         memory_content = self._read_file_safe(self.config.memory_file, max_chars)
         user_content = self._read_file_safe(self.config.user_file, max_chars)
         opinions_content = self._read_file_safe(self.config.opinions_file, max_chars)
-        project_content = self._read_file_safe(self.config.project_file, max_chars)
+        project_path = self._active_project_path()
+        project_content = self._read_file_safe(project_path, max_chars) if project_path else ""
         self._context_tier = _build_context_tier(
             memory_content, user_content, opinions_content, self._installed_skill_blocks, project_content
         )
@@ -1635,8 +1647,10 @@ class Brain:
                 "memory": (self.config.memory_file, 2200),
                 "user": (self.config.user_file, 1375),
                 "opinions": (self.config.opinions_file, 800),
-                "project": (self.config.project_file, 1600),
             }
+            project_path = self._active_project_path()
+            if project_path:
+                files["project"] = (project_path, 1600)
             needs_review = False
             for target, (path_val, max_chars) in files.items():
                 if not os.path.exists(path_val):
@@ -1667,8 +1681,10 @@ class Brain:
             "memory": (self.config.memory_file, 2200),
             "user": (self.config.user_file, 1375),
             "opinions": (self.config.opinions_file, 800),
-            "project": (self.config.project_file, 1600),
         }
+        project_path = self._active_project_path()
+        if project_path:
+            files["project"] = (project_path, 1600)
         for target, (path_val, max_chars) in files.items():
             if not os.path.exists(path_val):
                 continue

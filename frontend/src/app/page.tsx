@@ -17,7 +17,7 @@ import { DesktopFrameView } from "../components/DesktopFrameView";
 import { ControlCenterView } from "../components/ControlCenterView";
 import { ScratchpadPanel } from "../components/ScratchpadPanel";
 import {
-  MemoriesView, HardwareView, FilesView, ServicesView, OllamaView, ExtensionsView, SkillsView, AgentsView, MCPCenterView
+  MemoriesView, ProjectsView, HardwareView, FilesView, ServicesView, OllamaView, ExtensionsView, SkillsView, AgentsView, MCPCenterView
 } from "../components/DashboardPanels";
 
 export default function Page(): ReactElement {
@@ -655,6 +655,7 @@ export default function Page(): ReactElement {
                 {/* Custom WIP dashboard panels */}
                 {activePage === "memories" && <MemoriesView />}
                 {activePage === "scratchpad" && <ScratchpadPanel />}
+                {activePage === "projects" && <ProjectsView />}
                 {activePage === "hardware" && <HardwareView />}
                 {activePage === "files" && <FilesView />}
                 {activePage === "docker" && <ServicesView />}

@@ -21,6 +21,7 @@ import httpx
 from charlie import recovery, reminders
 from charlie.config import config
 from charlie.known_apps import APP_REGISTRY
+from charlie.projects import Projects
 from charlie.scratchpad import Scratchpad
 from charlie.session_store import SessionStore
 from charlie.utils import is_process_running
@@ -1195,7 +1196,6 @@ _MEMORY_MAX_CHARS = {
     "memory": 2200,
     "user": 1375,
     "opinions": 800,
-    "project": 1600,
 }
 _MEMORY_SEP = "\u00a7"  # section sign - unambiguous entry delimiter
 
@@ -1249,11 +1249,11 @@ def _memory_capacity_error(target: str, entries: list, max_chars: int, new_len: 
             },
             "target": {
                 "type": "string",
-                "enum": ["memory", "user", "opinions", "project"],
+                "enum": ["memory", "user", "opinions"],
                 "description": (
                     "memory (max 2200, global facts), user (max 1375, about the user), "
-                    "opinions (max 800), project (max 1600, facts scoped to the current "
-                    "working directory/repo, not global)."
+                    "opinions (max 800). For facts scoped to one project workspace, use "
+                    "project_memory_add instead."
                 ),
             },
             "content": {
@@ -1339,6 +1339,89 @@ def memory(action: str, target: str, content: str = "", old_text: str = "", **kw
     except Exception as e:
         logger.exception("Memory tool error: action=%s target=%s", action, target)
         return f"Error updating memory: {e}"
+
+
+def _get_projects() -> Projects:
+    return Projects(config.projects_dir)
+
+
+@registry.register_tool(
+    name="list_projects",
+    description="List all project workspaces and which one (if any) is active.",
+    schema={"type": "object", "properties": {}},
+)
+def list_projects() -> str:
+    store = _get_projects()
+    names = store.list()
+    if not names:
+        return "No projects exist yet. Use create_project to make one."
+    active = store.get_active()
+    lines = [f"{'* ' if n == active else '  '}{n}" for n in names]
+    return "Projects (* = active):\n" + "\n".join(lines)
+
+
+@registry.register_tool(
+    name="create_project",
+    description="Create a new project workspace and make it active.",
+    schema={
+        "type": "object",
+        "properties": {"name": {"type": "string", "description": "Project name, e.g. 'Charlie Dev'."}},
+        "required": ["name"],
+    },
+)
+def create_project(name: str) -> str:
+    store = _get_projects()
+    try:
+        slug = store.create(name)
+        store.set_active(slug)
+    except ValueError as e:
+        return f"Error: {e}"
+    return f"Created and switched to project '{slug}'."
+
+
+@registry.register_tool(
+    name="switch_project",
+    description="Switch the active project workspace, or pass 'none' to go back to global (no project).",
+    schema={
+        "type": "object",
+        "properties": {"name": {"type": "string", "description": "Project slug from list_projects, or 'none'."}},
+        "required": ["name"],
+    },
+)
+def switch_project(name: str) -> str:
+    store = _get_projects()
+    if name.strip().lower() == "none":
+        store.set_active(None)
+        return "Switched to global (no active project)."
+    try:
+        store.set_active(name)
+    except ValueError as e:
+        return f"Error: {e}"
+    return f"Switched to project '{name}'."
+
+
+@registry.register_tool(
+    name="project_memory_add",
+    description="Add a fact scoped to a project workspace. Defaults to the active project.",
+    schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The fact to remember."},
+            "project": {"type": "string", "description": "Project slug; omit to use the active project."},
+        },
+        "required": ["text"],
+    },
+)
+def project_memory_add(text: str, project: str = "") -> str:
+    store = _get_projects()
+    slug = project.strip() or store.get_active()
+    if not slug:
+        return "Error: no active project and none named. Use create_project or switch_project first."
+    try:
+        store.add_entry(slug, text)
+    except ValueError as e:
+        return f"Error: {e}"
+    return f"Added to project '{slug}'."
 
 
 @registry.register_tool(

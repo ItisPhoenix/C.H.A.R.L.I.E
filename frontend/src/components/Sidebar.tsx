@@ -4,7 +4,7 @@ import { useState, type ReactElement } from "react";
 import Link from "next/link";
 import {
   MessageSquare, Monitor, Database, Cpu, Settings, FolderGit, Network,
-  Server, Puzzle, GitBranch, ChevronDown, Cable, Sparkles, LayoutDashboard, NotebookPen, type LucideIcon,
+  Server, Puzzle, GitBranch, ChevronDown, Cable, Sparkles, LayoutDashboard, NotebookPen, FolderKanban, type LucideIcon,
 } from "lucide-react";
 import { SessionRail } from "./SessionRail";
 import { lighten, type Session } from "../store/useCharlieStore";
@@ -164,6 +164,13 @@ export function Sidebar(props: SidebarProps): ReactElement {
               label="Scratchpad"
               active={activePage === "scratchpad"}
               onClick={() => onSelectPage("scratchpad")}
+              collapsed={autoCollapse}
+            />
+            <NavButton
+              icon={FolderKanban}
+              label="Projects"
+              active={activePage === "projects"}
+              onClick={() => onSelectPage("projects")}
               collapsed={autoCollapse}
             />
           </div>
