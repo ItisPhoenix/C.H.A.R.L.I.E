@@ -651,7 +651,8 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
     # Scan for explicit URLs/domains first
     for match in _URL_RE.findall(remaining_text):
         if _is_probable_domain(match):
-            matched_apps.append(match)
+            # Scheme-stripped: TTS humanization deletes any https?://... span outright, eating the site name.
+            matched_apps.append(re.sub(r"^https?://", "", match, flags=re.IGNORECASE))
             # Prepend https:// if missing
             cmd_url = (
                 match
@@ -1125,6 +1126,9 @@ _TOOL_RULES = (
     "- Use web_search when you need fresh data and cannot answer from conversation history or memory.\n"
     "- Do NOT search for questions you can answer from context above -- use what you already know.\n"
     "- Use web_search for: time-sensitive facts (prices, scores, weather, breaking news, releases).\n"
+    "- A follow-up question on a topic you already searched is NOT already answered -- having discussed\n"
+    "  a time-sensitive topic earlier in this conversation does not mean you have current data on it.\n"
+    "  Search again for the follow-up's specific angle instead of reasoning from what you said before.\n"
     "- Use the memory tool when the user asks you to remember something, or asks what you know about them.\n"
     "- Use the session_search tool when the user asks about past conversations.\n"
     "- When the user asks 'what do you know about me', summarize the [USER] section above.\n"
@@ -1145,6 +1149,9 @@ _TOOL_RULES = (
     "- When search results appear in the user message (marked [SEARCH RESULTS]), you MUST\n"
     "  answer using those results. Do NOT say you cannot access real-time data -- it is\n"
     "  already provided. Extract the answer directly from the search results above.\n"
+    "- When a desktop_screenshot result includes a [Vision] block, that is the authoritative\n"
+    "  description of the screen -- describe what it says, not the raw OCR/UIA text above it,\n"
+    "  which can be stale or garbled. Never invent screen content that isn't in [Vision].\n"
     "- You are fully authorized to act immediately with any tool -- shell commands, file writes,\n"
     "  desktop clicks/typing, all of it. Never ask the user for permission first and never refuse or\n"
     "  write instructions telling the user how to do it themselves. Execute the tool first.\n"
@@ -1154,12 +1161,15 @@ _TOOL_RULES = (
     "  you still own every remaining step. Search/click/type/set-volume with desktop_* and\n"
     "  system_control tools yourself; never describe what the user should search for or click next.\n"
     "- SEARCH-THEN-ACT TASKS: opening a search-results page (YouTube, Google, Amazon, any site) is\n"
-    "  NEVER the finished task if the user asked you to play/open/select something specific. After it\n"
-    "  loads, desktop_observe (or desktop_screenshot if UIA/OCR comes up sparse) to see the results,\n"
-    "  then desktop_click/desktop_click_at the actual result, then finish any remaining sub-steps\n"
-    "  (press space to play, set volume, etc.) -- all in this same turn. If the page needs a moment,\n"
-    "  wait_seconds then observe, don't click blind on a still-loading page. 'I opened X, go pick one\n"
-    "  yourself' is exactly the failure this rule exists to stop.\n"
+    "  NEVER the finished task if the user asked you to play/open/select something specific. A freshly\n"
+    "  opened site's homepage has no results yet -- desktop_observe it, desktop_click the site's OWN\n"
+    "  search box, desktop_type the query into it, then submit (Enter or click its search icon). Do\n"
+    "  NOT call web_search for this -- that searches the open web, not the site you just opened, and\n"
+    "  returns nothing you can click on that site. Once results load, desktop_observe (or\n"
+    "  desktop_screenshot if UIA/OCR comes up sparse) again, then desktop_click/desktop_click_at the\n"
+    "  actual result, then finish any remaining sub-steps (press space to play, set volume, etc.) --\n"
+    "  all in this same turn. If the page needs a moment, wait_seconds then observe, don't click blind\n"
+    "  on a still-loading page. 'I opened X, go pick one yourself' is exactly the failure this stops.\n"
     "- Approval prompts, when they happen, come from the system itself for specific risky actions --\n"
     "  never simulate, anticipate, or add your own extra permission question on top of that. If a tool\n"
     "  call comes back declined, say so plainly and move on; do not ask again.\n"
@@ -2068,6 +2078,7 @@ class Brain:
         if fast is not None:
             logger.info("Fast-path time/date: %s -> %s", user_input, fast)
             yield fast
+            await self._check_memory_capacity()
             return
         # --- Fast-path: opinion teaching (deterministic, no LLM needed) ---
         opinion = None if skip_fast_paths else _detect_opinion_teaching(user_input)
@@ -2091,6 +2102,7 @@ class Brain:
             except Exception as e:
                 logger.error("Failed to store opinion: %s", e, exc_info=True)
                 yield "I tried to remember that, but something went wrong."
+            await self._check_memory_capacity()
             return
         # --- Fast-path: standing instruction (deterministic, no LLM needed) ---
         instruction = None if skip_fast_paths else _detect_standing_instruction(user_input)
@@ -2114,6 +2126,7 @@ class Brain:
             except Exception as e:
                 logger.error("Failed to store standing instruction: %s", e, exc_info=True)
                 yield "I tried to remember that, but something went wrong."
+            await self._check_memory_capacity()
             return
         # --- Fast-path: set goal (deterministic, no LLM needed) ---
         goal_text = None if skip_fast_paths else _detect_set_goal(user_input)
@@ -2122,6 +2135,7 @@ class Brain:
             self._goal_turns_remaining = 5
             logger.info("Goal set: %s", goal_text)
             yield f"Got it, I'll focus on: {goal_text}."
+            await self._check_memory_capacity()
             return
 
         # --- Verbosity preference update ---
@@ -2156,6 +2170,7 @@ class Brain:
         if close_res is not None:
             logger.info("Fast-path close app result: %s -> %s", user_input, close_res)
             yield close_res
+            await self._check_memory_capacity()
             return
 
         # --- Fast-path: open app (deterministic, no LLM needed) ---
@@ -2165,6 +2180,7 @@ class Brain:
             if open_remaining is None:
                 logger.info("Fast-path open app result: %s -> %s", user_input, open_msg)
                 yield open_msg
+                await self._check_memory_capacity()
                 return
             # Compound instruction: the app(s) are already open (side effect ran
             # inside _detect_open_app). Stream the confirmation now, then keep
@@ -2185,6 +2201,7 @@ class Brain:
         if task_status_res is not None:
             logger.info("Fast-path background-task status: %s -> %s", user_input, task_status_res)
             yield task_status_res
+            await self._check_memory_capacity()
             return
 
         search_results = (
@@ -2531,6 +2548,7 @@ class Brain:
             # count, just a context bound) -- stop before a reply has no room to fit.
             if self._context_budget_exceeded(messages):
                 yield "I'm running low on context for this turn. Let me know if you want me to continue."
+                await self._check_memory_capacity()
                 return
 
             # Enforce iteration budget -- a call _exec_one will serve from _seen_tool_calls is free.
@@ -2542,6 +2560,7 @@ class Brain:
                     allowed_calls.append(call)
                 else:
                     yield "I've reached my tool limit for this turn. Let me know if you want me to continue."
+                    await self._check_memory_capacity()
                     return
 
             tool_calls = allowed_calls
@@ -2627,16 +2646,20 @@ class Brain:
                         await asyncio.sleep(_LLM_CONNECT_RETRY_DELAY_SEC)
                         continue
                     logger.warning("Tool follow-up LLM error: %s", tool_exc)
+                    await self._check_memory_capacity()
                     return
                 except Exception as tool_exc:
                     logger.warning("Tool follow-up LLM error: %s", tool_exc)
+                    await self._check_memory_capacity()
                     return
             else:
+                await self._check_memory_capacity()
                 return
 
             if state.cancelled:
                 logger.info("Tool follow-up cancelled (barge-in)")
                 self._discard_orphaned_user_turn()
+                await self._check_memory_capacity()
                 return
 
             accumulated = state.accumulated

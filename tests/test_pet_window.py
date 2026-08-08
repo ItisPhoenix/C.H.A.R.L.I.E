@@ -19,8 +19,9 @@ def test_map_event_to_caption():
         {"type": "speaking_start", "payload": {"text": "Hello there"}}
     ) == ("Speaking", "Hello there")
     assert _map_event_to_caption({"type": "speaking_start", "payload": {}}) == ("Speaking", "Responding...")
-    assert _map_event_to_caption({"type": "speaking_stop"}) == (None, None)
-    assert _map_event_to_caption({"type": "response_done"}) == (None, None)
+    assert _map_event_to_caption({"type": "speaking_stop"}) == ("", "")
+    assert _map_event_to_caption({"type": "response_done"}) == ("", "")
+    assert _map_event_to_caption({"type": "vad_stop"}) == ("", "")
     assert _map_event_to_caption({"type": "audio_level"}) == (None, None)
 
 

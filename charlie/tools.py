@@ -393,6 +393,32 @@ def web_search(query: str) -> str:
     return _single_search(query)
 
 
+def _searxng_request(base: str, params: Dict[str, str], query: str, cleaned: str) -> Optional[str]:
+    """One SearXNG query attempt. Returns formatted results, or None to let the caller retry/fall back."""
+    try:
+        logger.info("SearXNG search: original=%r cleaned=%r params=%r", query, cleaned, params)
+        response = httpx.get(f"{base}/search", params=params, timeout=SEARXNG_TIMEOUT)
+        if response.status_code == 200:
+            results = []
+            for item in response.json().get("results", [])[:SEARCH_RESULT_LIMIT]:
+                content = item.get("content", "") or ""
+                if not _is_ddg_result_valid(content):
+                    continue
+                results.append(
+                    f"Title: {item.get('title', 'No Title')}\n"
+                    f"URL: {item.get('url', 'No URL')}\n"
+                    f"Content: {_truncate(content)}"
+                )
+            if results:
+                return "\n\n".join(results)
+        logger.error(
+            "SearXNG failed with status %s for query %r: %s", response.status_code, cleaned, response.text,
+        )
+    except Exception:
+        logger.exception("SearXNG search error for query: %s", cleaned)
+    return None
+
+
 def _single_search(query: str) -> str:
     """Execute a single search query across all providers."""
     cleaned = _clean_search_query(query)
@@ -403,39 +429,25 @@ def _single_search(query: str) -> str:
 
     # Tier 1: SearXNG (self-hosted, no API key needed)
     if searxng_url:
-        try:
-            logger.info("SearXNG search: original=%r cleaned=%r", query, cleaned)
-            base = searxng_url.rstrip("/")
-            q_lower = cleaned.lower()
-            params: Dict[str, str] = {"q": cleaned, "format": "json", "language": "en"}
-            if any(kw in q_lower for kw in _TIME_SENSITIVE_KEYWORDS):
-                params["time_range"] = "day"
-            if any(kw in q_lower for kw in _NEWS_KEYWORDS):
-                params["categories"] = "news"
-            response = httpx.get(
-                f"{base}/search", params=params, timeout=SEARXNG_TIMEOUT
-            )
-            if response.status_code == 200:
-                results = []
-                for item in response.json().get("results", [])[:SEARCH_RESULT_LIMIT]:
-                    content = item.get("content", "") or ""
-                    if not _is_ddg_result_valid(content):
-                        continue
-                    results.append(
-                        f"Title: {item.get('title', 'No Title')}\n"
-                        f"URL: {item.get('url', 'No URL')}\n"
-                        f"Content: {_truncate(content)}"
-                    )
-                if results:
-                    return "\n\n".join(results)
-            logger.error(
-                "SearXNG failed with status %s for query %r: %s",
-                response.status_code,
-                cleaned,
-                response.text,
-            )
-        except Exception:
-            logger.exception("SearXNG search error for query: %s", cleaned)
+        base = searxng_url.rstrip("/")
+        q_lower = cleaned.lower()
+        params: Dict[str, str] = {"q": cleaned, "format": "json", "language": "en"}
+        if any(kw in q_lower for kw in _TIME_SENSITIVE_KEYWORDS):
+            params["time_range"] = "day"
+        is_news_query = any(kw in q_lower for kw in _NEWS_KEYWORDS)
+        if is_news_query:
+            params["categories"] = "news"
+
+        searxng_result = _searxng_request(base, params, query, cleaned)
+        if searxng_result is not None:
+            return searxng_result
+
+        # News category has few engines and can zero out when all are blocked at once -- general aggregates more.
+        if is_news_query:
+            general_params = {k: v for k, v in params.items() if k != "categories"}
+            searxng_result = _searxng_request(base, general_params, query, cleaned)
+            if searxng_result is not None:
+                return searxng_result
 
     # Tier 2: Exa
     if exa_key:

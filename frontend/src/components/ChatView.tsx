@@ -264,14 +264,11 @@ export function ChatView({
   const accentColor = useCharlieStore((s) => s.accentColor);
   const [stepperExpanded, setStepperExpanded] = useState(true);
 
-  // Only auto-scroll when the user is already near the bottom.
+  // Instant, not smooth -- smooth restarted on every streamed token falls behind and visibly catches up later.
   useEffect(() => {
     const el = scrollRef.current;
     if (el && stickToBottomRef.current) {
-      el.scrollTo({
-        top: el.scrollHeight,
-        behavior: "smooth",
-      });
+      el.scrollTop = el.scrollHeight;
     }
   }, [messages, loading, toolActivity, activeProposal, activeToolApproval]);
 

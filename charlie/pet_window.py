@@ -11,7 +11,16 @@ from typing import Optional
 import zmq
 from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QColor, QCursor, QFont, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen, QRadialGradient,
+    QColor,
+    QCursor,
+    QFont,
+    QFontMetrics,
+    QLinearGradient,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QRadialGradient,
 )
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -78,7 +87,7 @@ class PetWindow(QWidget):
         self._caption_fade_dir = 0 # 1=in, -1=out
         self._caption_time_left = 0
         self._caption_phase = 0.0 # for bouncy spring popup
-        
+
         # Dimensions saved for mask
         self._card_x = 0
         self._card_y = 0
@@ -89,10 +98,11 @@ class PetWindow(QWidget):
         self._tick_count = 0
         self._idle_ticks = 0
         self._pet_color = config.pet_color or "#00ffff"
-        
+
         self._drag_origin: Optional[QPoint] = None
         self._press_pos: Optional[QPoint] = None
         self._dragged = False
+        self._captions_enabled = True
         self._chevron_rect = QRectF()
         self.state_changed.connect(self._on_state_changed)
         self.caption_changed.connect(self._on_caption_changed)
@@ -101,7 +111,7 @@ class PetWindow(QWidget):
         self._pulse_timer = QTimer(self)
         self._pulse_timer.timeout.connect(self._tick)
         self._pulse_timer.start(_PULSE_INTERVAL_MS)
-        
+
         self._color_poll_timer = QTimer(self)
         self._color_poll_timer.timeout.connect(self._poll_color)
         self._color_poll_timer.start(5000)
@@ -127,13 +137,15 @@ class PetWindow(QWidget):
     def _on_caption_changed(self, title: str, desc: str):
         if not title and not desc:
             # Clear / fade out
-            self._caption_time_left = 0
+            if self._caption_visible:
+                self._caption_fade_dir = -1
         else:
             self._caption_title = title
             self._caption_desc = desc
             self._caption_visible = True
             self._caption_fade_dir = 1
-            self._caption_time_left = 5000 // _PULSE_INTERVAL_MS # 5 seconds
+            # Stay visible much longer (30 seconds), will be cleared by speaking_stop or next event
+            self._caption_time_left = 30000 // _PULSE_INTERVAL_MS
         self.update()
 
     def _tick(self):
@@ -175,22 +187,47 @@ class PetWindow(QWidget):
 
         self._draw_pet(painter, cx, cy, pet_w, pet_h)
 
-        if self._caption_alpha > 0:
+        if self._captions_enabled and self._caption_alpha > 0:
             self._draw_caption_bubble(painter, cx, cy, pet_w, pet_h)
+
+        # Draw independent chevron button top-left of pet
+        chevron_cx = cx - 10
+        chevron_cy = cy + 10
+        self._chevron_rect = QRectF(chevron_cx - 12, chevron_cy - 12, 24, 24)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(40, 40, 40, 180))
+        painter.drawEllipse(self._chevron_rect)
+
+        painter.setPen(QPen(QColor(255, 255, 255, 200), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+        path = QPainterPath()
+        if self._captions_enabled:
+            # point right to hide
+            path.moveTo(chevron_cx - 2, chevron_cy - 4)
+            path.lineTo(chevron_cx + 3, chevron_cy)
+            path.lineTo(chevron_cx - 2, chevron_cy + 4)
+        else:
+            # point left to show
+            path.moveTo(chevron_cx + 2, chevron_cy - 4)
+            path.lineTo(chevron_cx - 3, chevron_cy)
+            path.lineTo(chevron_cx + 2, chevron_cy + 4)
+        painter.drawPath(path)
 
         # Update click-through mask
         mask = QRegion(int(cx - 30), int(cy - 30), int(pet_w + 60), int(pet_h + 60))
-        if self._caption_alpha > 0:
+        if self._captions_enabled and self._caption_alpha > 0:
             mask = mask | QRegion(int(self._card_x - 10), int(self._card_y - 10), int(self._card_w + 20), int(self._card_h + 20))
+        mask = mask | QRegion(int(self._chevron_rect.x() - 5), int(self._chevron_rect.y() - 5), int(self._chevron_rect.width() + 10), int(self._chevron_rect.height() + 10))
         self.setMask(mask)
-        
+
         self._idle_ticks += 1
         if self._idle_ticks > (60 * 1000) // _PULSE_INTERVAL_MS and self._state == "idle":
             self._state = "sleeping"
 
     def _draw_pet(self, painter: QPainter, cx: float, cy: float, w: float, h: float):
         pet_c = QColor(self._pet_color)
-        
+
         # 1. Base Drop Shadow / Glow
         painter.setPen(Qt.NoPen)
         glow_alpha = _EYE_GLOW_ALPHA.get(self._state, 150) // 4
@@ -252,15 +289,18 @@ class PetWindow(QWidget):
         right_eye_x = cx + w/2 + eye_space/2
 
         # Mouse Tracking Offset
-        cursor_pos = self.mapFromGlobal(QCursor.pos())
-        dx = cursor_pos.x() - (cx + w/2)
-        dy = cursor_pos.y() - (cy + h/2)
-        dist = math.hypot(dx, dy)
-        max_dist = 5.0
-        if dist > max_dist:
-            dx = (dx / dist) * max_dist
-            dy = (dy / dist) * max_dist
-            
+        dx = 0
+        dy = 0
+        if self._state != "sleeping":
+            cursor_pos = self.mapFromGlobal(QCursor.pos())
+            dx = cursor_pos.x() - (cx + w/2)
+            dy = cursor_pos.y() - (cy + h/2)
+            dist = math.hypot(dx, dy)
+            max_dist = 5.0
+            if dist > max_dist:
+                dx = (dx / dist) * max_dist
+                dy = (dy / dist) * max_dist
+
         left_eye_x += dx
         right_eye_x += dx
         eye_y += dy
@@ -277,69 +317,54 @@ class PetWindow(QWidget):
         elif self._state == "sleeping":
             eye_y += eye_h / 2 - 2
             eye_h_left = eye_h_right = 3
-            # Floating Zzzs
-            painter.setPen(QColor(255, 255, 255, 120))
-            painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
-            z_y = cy - 10 - 15 * math.sin(self._phase * 0.5)
-            z_x = cx + w - 10 + 5 * math.cos(self._phase * 0.5)
-            painter.drawText(int(z_x), int(z_y), "Z")
-            z_y2 = cy - 25 - 15 * math.sin(self._phase * 0.5 + 1)
-            z_x2 = cx + w + 5 + 5 * math.cos(self._phase * 0.5 + 1)
-            painter.drawText(int(z_x2), int(z_y2), "z")
+            # We don't draw normal rectangles, we draw "Z" in the eyes later
+
         elif self._state in ("thinking", "searching", "reading"):
-            # Spin in circles
-            eye_h_left = eye_h_right = 8
+            # Spin shrink
+            eye_w_left = eye_w_right = 6
+            eye_h_left = eye_h_right = 6
+            spin_r = 4.0
+            left_eye_x += spin_r * math.cos(self._phase * 3)
+            right_eye_x += spin_r * math.cos(self._phase * 3)
+            eye_y += spin_r * math.sin(self._phase * 3)
+
+        elif self._state == "error":
+            eye_w_left = eye_h_left = 12
+            eye_w_right = eye_h_right = 12
+
+        # Color
+        eye_color = QColor(pet_c.red(), pet_c.green(), pet_c.blue())
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(eye_color)
+
+        if self._state == "speaking":
+            bar_w = 3
+            spacing = 2
+            for bx in (left_eye_x, right_eye_x):
+                for i in range(3):
+                    b_h = 4 + 8 * abs(math.sin(self._phase * 5 + i))
+                    b_y = eye_y + eye_h/2 - b_h/2
+                    painter.drawRoundedRect(bx - eye_w/2 + i*(bar_w+spacing), b_y, bar_w, b_h, 1, 1)
+
+        elif self._state == "error":
+            painter.setPen(QPen(eye_color, 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            for ex in (left_eye_x, right_eye_x):
+                painter.drawLine(ex - 4, eye_y - 4, ex + 4, eye_y + 4)
+                painter.drawLine(ex + 4, eye_y - 4, ex - 4, eye_y + 4)
+            painter.setPen(Qt.NoPen)
+        elif self._state == "sleeping":
+            painter.setPen(eye_color)
+            painter.setFont(QFont("Segoe UI", 12, QFont.Bold))
+            painter.drawText(int(left_eye_x - 5), int(eye_y + 5), "Z")
+            painter.drawText(int(right_eye_x - 5), int(eye_y + 5), "Z")
+            painter.setPen(Qt.NoPen)
+        else:
             eye_w_left = eye_w_right = 8
             eye_y += 4
             spin = 4
             left_eye_x += spin * math.cos(self._phase * 4)
             right_eye_x += spin * math.cos(self._phase * 4)
-            eye_y += spin * math.sin(self._phase * 4)
-        elif self._state == "listening":
-            # Puppy tilt
-            eye_h_left = eye_h_right = 20
-            eye_y -= 4
-            eye_angle = 15 # degrees
-        elif self._state == "error":
-            eye_h_left = 18
-            eye_w_left = 18
-            eye_h_right = 8
-            eye_w_right = 8
-            shake = 4 * math.sin(self._phase * 15)
-            left_eye_x += shake
-            right_eye_x += shake
-
-        eye_color = QColor(pet_c.red(), pet_c.green(), pet_c.blue(), _EYE_GLOW_ALPHA.get(self._state, 200))
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(eye_color)
-
-        if self._state == "speaking" and not self._is_blinking():
-            # 3 vertical soundwave bars per eye
-            bar_w = 4
-            spacing = 2
-            for i in range(3):
-                bh = 6 + 8 * math.sin(self._phase * 8 + i)
-                if bh < 4: bh = 4
-                bx = left_eye_x + i * (bar_w + spacing)
-                painter.drawRoundedRect(bx, eye_y + (16 - bh)/2, bar_w, bh, 2, 2)
-            for i in range(3):
-                bh = 6 + 8 * math.sin(self._phase * 8 + i + 1)
-                if bh < 4: bh = 4
-                bx = right_eye_x + i * (bar_w + spacing)
-                painter.drawRoundedRect(bx, eye_y + (16 - bh)/2, bar_w, bh, 2, 2)
-        else:
-            # Draw standard rounded rect eyes with optional tilt
-            painter.save()
-            painter.translate(left_eye_x + eye_w_left/2, eye_y + eye_h_left/2)
-            painter.rotate(eye_angle)
-            painter.drawRoundedRect(-eye_w_left/2, -eye_h_left/2, eye_w_left, eye_h_left, 6, 6)
-            painter.restore()
-            
-            painter.save()
-            painter.translate(right_eye_x + eye_w_right/2, eye_y + eye_h_right/2)
-            painter.rotate(-eye_angle)
-            painter.drawRoundedRect(-eye_w_right/2, -eye_h_right/2, eye_w_right, eye_h_right, 6, 6)
-            painter.restore()
 
         # Context Props
         if self._state == "reading":
@@ -360,15 +385,35 @@ class PetWindow(QWidget):
         alpha = int(self._caption_alpha)
 
         # Bouncy spring popup animation
-        spring = min(1.0, math.sin(min(self._caption_phase, math.pi/2) * 1.5))
         if self._caption_fade_dir == -1:
             spring = self._caption_alpha / 255.0
+        else:
+            t = min(1.0, self._caption_phase / 2.0)
+            # Damped spring: overshoot then settle exactly at 1.0
+            spring = 1.0 - math.cos(t * math.pi * 2.5) * math.exp(-t * 4)
+            if t == 1.0:
+                spring = 1.0
 
-        card_w = (cx + w - 20) * spring
-        card_h = 48 * spring
-        card_x = 10 + (cx + w - 20 - card_w) / 2
-        card_y = cy - card_h - 10
-        
+        title_font = QFont("Segoe UI", 9, QFont.Bold)
+        desc_font = QFont("Segoe UI", 8)
+
+        fm_title = QFontMetrics(title_font)
+        fm_desc = QFontMetrics(desc_font)
+
+        # Dynamic sizing based on text
+        # 16px left pad, 16px right pad, text width
+        text_w = max(fm_title.horizontalAdvance(self._caption_title), fm_desc.horizontalAdvance(self._caption_desc))
+        target_w = text_w + 32
+        target_h = fm_title.height() + fm_desc.height() + 16
+
+        card_w = target_w * spring
+        card_h = target_h * spring
+
+        # Right edge of the caption aligns with the right edge of the pet
+        card_x = max(10.0, cx + w - card_w)
+
+        card_y = cy - card_h - 15
+
         self._card_x = card_x
         self._card_y = card_y
         self._card_w = card_w
@@ -378,47 +423,39 @@ class PetWindow(QWidget):
         pet_c = QColor(self._pet_color)
         painter.setBrush(QColor(30, 30, 30, int(alpha * 0.9)))
         painter.setPen(QPen(QColor(pet_c.red(), pet_c.green(), pet_c.blue(), int(alpha * 0.6)), 1.5))
-        painter.drawRoundedRect(card_x, card_y, card_w, card_h, 24, 24)
-
-        # Chevron button INSIDE the right edge of the caption
-        chevron_cx = card_x + card_w - 20
-        chevron_cy = card_y + card_h / 2
-        self._chevron_rect = QRectF(chevron_cx - 12, chevron_cy - 12, 24, 24)
-
-        # Circle background for chevron inside caption
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(60, 60, 60, int(alpha * 0.8)))
-        painter.drawEllipse(self._chevron_rect)
-
-        # Chevron arrow (down)
-        painter.setPen(QPen(QColor(255, 255, 255, alpha), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.setBrush(Qt.NoBrush)
-        path = QPainterPath()
-        path.moveTo(chevron_cx - 4, chevron_cy - 2)
-        path.lineTo(chevron_cx, chevron_cy + 3)
-        path.lineTo(chevron_cx + 4, chevron_cy - 2)
-        painter.drawPath(path)
+        painter.drawRoundedRect(card_x, card_y, card_w, card_h, 16, 16)
 
         # Text Metrics
         painter.setPen(QColor(255, 255, 255, alpha))
 
         # Title (Bold)
-        title_font = QFont("Segoe UI", 9, QFont.Bold)
         painter.setFont(title_font)
-        painter.drawText(card_x + 16, card_y + 4, card_w - 32, 20, Qt.AlignLeft | Qt.AlignVCenter, self._caption_title)
+        title_rect = QRectF(card_x + 16, card_y + 8, card_w - 48, fm_title.height())
+        painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignTop, self._caption_title)
 
         # Description (Regular)
-        desc_font = QFont("Segoe UI", 8)
         painter.setFont(desc_font)
         painter.setPen(QColor(150, 150, 150, alpha))
-        painter.drawText(card_x + 16, card_y + 24, card_w - 32, 20, Qt.AlignLeft | Qt.AlignVCenter, self._caption_desc)
+        desc_rect = QRectF(card_x + 16, card_y + 8 + fm_title.height(), card_w - 48, fm_desc.height())
+        painter.drawText(desc_rect, Qt.AlignLeft | Qt.AlignTop, self._caption_desc)
 
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
-            self._drag_origin = event.globalPosition().toPoint() - self.pos()
-            self._press_pos = event.globalPosition().toPoint()
-            self._dragged = False
+            pos = event.position()
+            pet_w = 64
+            pet_h = 54
+            cx = _WIDTH - pet_w - 20
+            bounce = int(_BOUNCE_AMPLITUDE_PX.get(self._state, 2.0) * math.sin(self._phase))
+            cy = _HEIGHT - pet_h - 20 + bounce
+            pet_rect = QRectF(cx, cy, pet_w, pet_h)
+
+            if pet_rect.contains(pos):
+                self._drag_origin = event.globalPosition().toPoint() - self.pos()
+                self._press_pos = event.globalPosition().toPoint()
+                self._dragged = False
+            else:
+                self._drag_origin = None
 
     def mouseMoveEvent(self, event: QMouseEvent):
         if self._drag_origin is None:
@@ -428,18 +465,27 @@ class PetWindow(QWidget):
             self._dragged = True
         self.move(current - self._drag_origin)
 
-    def mouseReleaseEvent(self, event: QMouseEvent):
+    def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
-            if not self._dragged:
-                if self._chevron_rect.contains(event.position()):
-                    # Clicked the chevron -> show caption thing or dashboard
-                    self._open_dashboard()
+            pos = event.pos()
+            # If clicked chevron, toggle captions and apply fade
+            if hasattr(self, '_chevron_rect') and self._chevron_rect.contains(pos):
+                self._captions_enabled = not self._captions_enabled
+                if not self._captions_enabled:
+                    self._caption_fade_dir = -1
+                    self._caption_time_left = 0
                 else:
-                    self._open_dashboard()
-            else:
+                    self._caption_visible = True
+                    self._caption_fade_dir = 1
+                    self._caption_time_left = 30000 // _PULSE_INTERVAL_MS
+                return
+            
+            if not self._dragged and self._press_pos:
+                self._open_dashboard()
+            elif self._dragged:
                 self._save_position()
             self._drag_origin = None
-            self._press_pos = None
+        self._press_pos = None
 
     def _open_dashboard(self):
         url = f"http://{config.charlie_host}:{config.charlie_port}"
@@ -517,8 +563,8 @@ def _map_event_to_caption(event: dict) -> tuple[Optional[str], Optional[str]]:
             text = text[:_CAPTION_MAX_CHARS].rstrip() + "..."
         return ("Speaking", text or "Responding...")
 
-    if etype in ("speaking_stop", "response_done"):
-        return (None, None)
+    if etype in ("speaking_stop", "response_done", "vad_stop"):
+        return ("", "")
 
     return (None, None)
 

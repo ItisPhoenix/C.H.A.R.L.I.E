@@ -491,7 +491,8 @@ def test_detect_open_app(monkeypatch):
     msg, remaining = res
     assert "reddit.com" in msg
     assert "wikipedia.org" in msg
-    assert "https://neon.tech" in msg
+    assert "neon.tech" in msg
+    assert "https://neon.tech" not in msg
     assert remaining is None
     assert 'start "" https://reddit.com' in called_cmds
     assert 'start "" https://wikipedia.org' in called_cmds
