@@ -41,6 +41,7 @@ const GROUP_ORDER = [
   "Vector Memory",
   "Agentic OS",
   "Desktop Control",
+  "Companion",
   "Vision",
   "Plugins",
   "Server",
@@ -57,6 +58,7 @@ const GROUP_HELP: Record<string, string> = {
   "Vector Memory": "Semantic recall and the knowledge graph.",
   "Agentic OS": "Swarm orchestration and MCP servers.",
   "Desktop Control": "Screen perception and UI automation.",
+  "Companion": "Desktop pet customization and color themes.",
   "Vision": "Separate vision-model endpoint for screenshots.",
   "Plugins": "Hybrid plugin sandbox.",
   "Server": "Bind address and settings that need a full restart.",
@@ -454,6 +456,21 @@ function FieldRow({
             rows={2}
             className="w-full bg-zinc-950 border border-white/10 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-white/20 transition resize-y scrollbar"
           />
+        ) : spec.key === "PET_COLOR" ? (
+          <div className="flex items-center gap-2">
+            <input
+              type="color"
+              value={String(value || "#00ffff")}
+              onChange={(e) => onChange(e.target.value)}
+              className="w-8 h-8 rounded cursor-pointer bg-transparent border-0 p-0"
+            />
+            <input
+              type="text"
+              value={String(value ?? "")}
+              onChange={(e) => onChange(e.target.value)}
+              className="flex-1 bg-zinc-950 border border-white/10 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-white/20 transition"
+            />
+          </div>
         ) : (
           <input
             type={spec.secret ? "password" : spec.type === "int" || spec.type === "float" ? "number" : "text"}
