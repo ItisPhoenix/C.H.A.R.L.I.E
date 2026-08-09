@@ -117,6 +117,32 @@ def _install_extension(kind: str, name: str, source: str, raw_text: str) -> List
     return tool_names
 
 
+async def _stage_proposed_extension(payload: dict) -> None:
+    """Chat-triggered tier-3 proposal (see Brain._handle_propose_new_tool):
+    stage it in this process's ExtensionManager exactly like a dashboard-
+    initiated /api/extensions/propose call, then broadcast the pending_id so
+    a connected dashboard can render it and call /api/extensions/confirm --
+    no frontend surface exists for this yet, this only stages the state.
+    """
+    from charlie.extensions import build_skill_card
+
+    kind = payload.get("kind", "generated")
+    name = payload.get("name", "")
+    source = payload.get("source", "chat")
+    raw_text = payload.get("raw_text", "")
+    if not name or not raw_text:
+        return
+    card = build_skill_card(name, source, payload.get("declared_tools", [name]), raw_text)
+    pending_id = _extension_manager.propose(card)
+    await broadcast({
+        "type": "extension_pending",
+        "payload": {
+            "pending_id": pending_id, "kind": kind, "name": name, "source": source,
+            "raw_text": raw_text, "skill_card": card.describe(), "warnings": card.warnings,
+        },
+    })
+
+
 async def _forward_to_voice(command_type: str, payload: dict) -> None:
     """Best-effort mirror of an extension install/enable/disable/uninstall
     into the voice process, so Charlie's actual chat Brain -- which runs in
@@ -188,7 +214,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_event_bridge())
     logger.info("Web server started, event bridge active")
 
-    # ZMQ guard — suppress CancelledError traceback on Windows shutdown
+    # ZMQ guard -- suppress CancelledError traceback on Windows shutdown
     loop = asyncio.get_event_loop()
     _orig_call = loop.call_exception_handler
     def _guarded_call(context):
@@ -291,6 +317,9 @@ async def _event_bridge():
         elif etype == "mic_state":
             global _mic_state
             _mic_state = event.get("payload", {})
+        elif etype == "extension_proposed":
+            await _stage_proposed_extension(event.get("payload", {}))
+            return
 
         await broadcast(event)
 
@@ -384,6 +413,33 @@ async def status():
         "pid": os.getpid(),
         "desktop_control_enabled": config.desktop_control_enabled,
         "os_host": f"{_platform.system()} {_platform.machine()}",
+    }
+
+
+@app.get("/api/health")
+async def health():
+    from charlie import telemetry
+    last_success = telemetry.last_llm_success_timestamp()
+    log_path = "logs/charlie.log"
+    log_stat = os.stat(log_path) if os.path.exists(log_path) else None
+    return {
+        "llm_last_success_seconds_ago": (time.time() - last_success) if last_success else None,
+        "llm_error_rate": telemetry.llm_error_rate(),
+        "tool_error_rate": telemetry.tool_error_rate(),
+        "approval_channel_connected": len(active_connections) > 0,
+        "log_file_size_bytes": log_stat.st_size if log_stat else 0,
+        "log_file_age_seconds": (time.time() - log_stat.st_mtime) if log_stat else None,
+        "uptime_seconds": int(time.time() - _START_TIME),
+    }
+
+
+@app.get("/api/metrics")
+async def metrics():
+    from charlie import telemetry
+    return {
+        "llm_error_rate": telemetry.llm_error_rate(),
+        "tool_error_rate": telemetry.tool_error_rate(),
+        "tool_error_rate_by_tool": telemetry.tool_error_rate_by_name(),
     }
 
 

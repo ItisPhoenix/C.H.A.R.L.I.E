@@ -6,7 +6,6 @@ import tempfile
 from charlie.core import (
     _apply_correction_to_memory,
     _assess_tool_result_relevance,
-    _build_volatile_tier,
     _detect_correction,
     _detect_operator_persona,
     _detect_set_goal,
@@ -14,6 +13,7 @@ from charlie.core import (
     _is_followup,
     _strip_vocatives,
 )
+from charlie.prompt_builder import build_volatile_tier as _build_volatile_tier
 
 # ---------------------------------------------------------------------------
 # Step 1: Correction Detection & Auto-Learning

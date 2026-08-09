@@ -36,6 +36,7 @@ def test_registry_registration_and_schema():
         "file_read",
         "file_write",
         "memory",
+        "propose_new_tool",
         "vector_memory",
         "session_search",
         "graph_add_fact",

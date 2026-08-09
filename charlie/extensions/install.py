@@ -60,6 +60,10 @@ def declared_tools_for(
         return [op.operation_id for op in parse_openapi_spec(raw_text, base_url=source).operations]
     if kind == "plugin":
         return [t["name"] for t in builtin_plugin(name, plugin_allow_dirs).get_tools()]
+    if kind == "generated":
+        from charlie.extensions.generated import parse_generated_tool
+
+        return [parse_generated_tool(name, raw_text).name]
     raise ValueError(f"Unknown extension kind '{kind}'")
 
 
@@ -141,4 +145,9 @@ def install_extension(
         from charlie.tools import enable_plugin
 
         return enable_plugin(registry, plugin_manager, builtin_plugin(name, plugin_allow_dirs)), mcp_client
+    if kind == "generated":
+        from charlie.extensions.generated import parse_generated_tool, register_generated_tool
+
+        spec = parse_generated_tool(name, raw_text)
+        return register_generated_tool(registry, spec), mcp_client
     raise ValueError(f"Unknown extension kind '{kind}'")

@@ -135,22 +135,22 @@ class TestGroundingRules:
     """Grounding rules must be present in the system prompt stable tier."""
 
     def test_grounding_contract_in_tool_rules(self):
-        from charlie.core import _TOOL_RULES
+        from charlie.prompt_builder import _TOOL_RULES
         assert "GROUNDING CONTRACT" in _TOOL_RULES
         assert "Answer ONLY from" in _TOOL_RULES
 
     def test_anti_fabrication_in_tool_rules(self):
-        from charlie.core import _TOOL_RULES
+        from charlie.prompt_builder import _TOOL_RULES
         assert "ANTI-FABRICATION" in _TOOL_RULES
         assert "Do not invent" in _TOOL_RULES
 
     def test_tool_result_trust_in_tool_rules(self):
-        from charlie.core import _TOOL_RULES
+        from charlie.prompt_builder import _TOOL_RULES
         assert "TOOL-RESULT TRUST" in _TOOL_RULES
         assert "ground truth" in _TOOL_RULES
 
     def test_memory_humility_in_tool_rules(self):
-        from charlie.core import _TOOL_RULES
+        from charlie.prompt_builder import _TOOL_RULES
         assert "MEMORY HUMILITY" in _TOOL_RULES
         assert "outdated" in _TOOL_RULES
 
@@ -161,7 +161,7 @@ class TestGroundingRules:
     def test_volatile_tier_shows_evidence_blocks(self):
         from datetime import datetime
 
-        from charlie.core import _build_volatile_tier
+        from charlie.prompt_builder import build_volatile_tier as _build_volatile_tier
         now = datetime(2026, 1, 15, 10, 30)
         tier = _build_volatile_tier(
             "voice", now, 10,
@@ -177,7 +177,7 @@ class TestGroundingRules:
     def test_volatile_tier_no_evidence(self):
         from datetime import datetime
 
-        from charlie.core import _build_volatile_tier
+        from charlie.prompt_builder import build_volatile_tier as _build_volatile_tier
         now = datetime(2026, 1, 15, 10, 30)
         tier = _build_volatile_tier("voice", now, 10)
         assert "none" in tier
@@ -185,7 +185,7 @@ class TestGroundingRules:
     def test_volatile_tier_omits_tool_catalog_by_default(self):
         from datetime import datetime
 
-        from charlie.core import _build_volatile_tier
+        from charlie.prompt_builder import build_volatile_tier as _build_volatile_tier
         now = datetime(2026, 1, 15, 10, 30)
         tier = _build_volatile_tier("voice", now, 10)
         assert "AVAILABLE TOOLS" not in tier
@@ -198,7 +198,7 @@ class TestGroundingRules:
         for."""
         from datetime import datetime
 
-        from charlie.core import _build_volatile_tier
+        from charlie.prompt_builder import build_volatile_tier as _build_volatile_tier
         from charlie.tools import registry as tool_registry
         now = datetime(2026, 1, 15, 10, 30)
         tier = _build_volatile_tier(
@@ -211,7 +211,7 @@ class TestGroundingRules:
     def test_volatile_tier_omits_idle_time_by_default(self):
         from datetime import datetime
 
-        from charlie.core import _build_volatile_tier
+        from charlie.prompt_builder import build_volatile_tier as _build_volatile_tier
         now = datetime(2026, 1, 15, 10, 30)
         tier = _build_volatile_tier("voice", now, 10)
         assert "idle" not in tier.lower()
@@ -219,7 +219,7 @@ class TestGroundingRules:
     def test_volatile_tier_includes_idle_time_when_provided(self):
         from datetime import datetime
 
-        from charlie.core import _build_volatile_tier
+        from charlie.prompt_builder import build_volatile_tier as _build_volatile_tier
         now = datetime(2026, 1, 15, 10, 30)
         tier = _build_volatile_tier("voice", now, 10, idle_seconds=42.0)
         assert "idle time: 42s" in tier
@@ -276,12 +276,12 @@ class TestHelmPersona:
     """Helm persona text and auto-detect (Task A4 see-act-verify hardening)."""
 
     def test_helm_persona_mentions_verify_and_raw_input(self):
-        from charlie.core import _HELM_PERSONA_TEXT
+        from charlie.prompt_builder import _HELM_PERSONA_TEXT
         for phrase in ("desktop_click_at", "re-observe", "verify"):
             assert phrase in _HELM_PERSONA_TEXT
 
     def test_helm_persona_mentions_window_management(self):
-        from charlie.core import _HELM_PERSONA_TEXT
+        from charlie.prompt_builder import _HELM_PERSONA_TEXT
         for phrase in ("desktop_windows", "desktop_focus"):
             assert phrase in _HELM_PERSONA_TEXT
 
@@ -311,7 +311,7 @@ class TestCapabilitiesBlock:
 
     def test_capabilities_block_overrides_stale_claims(self):
         from charlie.config import Config
-        from charlie.core import _build_capabilities_block
+        from charlie.prompt_builder import build_capabilities_block as _build_capabilities_block
         cfg = Config()
         block = _build_capabilities_block(cfg)
         assert "conversation memory" in block
@@ -319,7 +319,8 @@ class TestCapabilitiesBlock:
 
     def test_stable_tier_includes_capabilities_block(self):
         from charlie.config import Config
-        from charlie.core import _build_capabilities_block, _build_stable_tier
+        from charlie.prompt_builder import build_capabilities_block as _build_capabilities_block
+        from charlie.prompt_builder import build_stable_tier as _build_stable_tier
         cfg = Config()
         block = _build_capabilities_block(cfg)
         stable = _build_stable_tier("Test soul text.", block)
@@ -328,7 +329,7 @@ class TestCapabilitiesBlock:
 
     def test_capabilities_block_omits_desktop_control_when_disabled(self):
         from charlie.config import Config
-        from charlie.core import _build_capabilities_block
+        from charlie.prompt_builder import build_capabilities_block as _build_capabilities_block
         cfg = Config()
         cfg.desktop_control_enabled = False
         block = _build_capabilities_block(cfg)
@@ -336,7 +337,7 @@ class TestCapabilitiesBlock:
 
     def test_stable_tier_default_second_arg_matches_old_single_arg_call(self):
         """Existing callers passing only soul_text must still work unchanged."""
-        from charlie.core import _build_stable_tier
+        from charlie.prompt_builder import build_stable_tier as _build_stable_tier
         stable = _build_stable_tier("Test soul text.")
         assert "Test soul text." in stable
 
@@ -345,12 +346,12 @@ class TestCapabilitiesBlock:
         the real _DESKTOP_AVAILABLE import-success flag, mirroring tools.py's
         _desktop_ready() double-check, or the prompt claims a capability that
         actual tool execution will refuse."""
-        import charlie.core as core_module
+        import charlie.prompt_builder as prompt_builder_module
         from charlie.config import Config
         cfg = Config()
         cfg.desktop_control_enabled = True
-        with patch.object(core_module, "_DESKTOP_AVAILABLE", False):
-            block = core_module._build_capabilities_block(cfg)
+        with patch.object(prompt_builder_module, "_DESKTOP_AVAILABLE", False):
+            block = prompt_builder_module.build_capabilities_block(cfg)
         assert "Desktop control" not in block
 
 
@@ -414,7 +415,8 @@ class TestVisualContentQueryFastPath:
     def test_visual_content_query_regex_does_not_duplicate_screen_query_re(self):
         """"read my screen" is already covered by _SCREEN_QUERY_RE; the new
         regex should not re-match it (kept out to avoid a redundant alternative)."""
-        from charlie.core import _SCREEN_QUERY_RE, _VISUAL_CONTENT_QUERY_RE
+        from charlie.core import _VISUAL_CONTENT_QUERY_RE
+        from charlie.router import SCREEN_QUERY_RE as _SCREEN_QUERY_RE
         assert _SCREEN_QUERY_RE.search("read my screen")
         assert not _VISUAL_CONTENT_QUERY_RE.search("read my screen")
 
@@ -440,7 +442,7 @@ class TestVisualContentQueryFastPath:
         assert _VISUAL_CONTENT_QUERY_RE.search("what is this")
 
     def test_screen_query_regex_matches_what_is_uncontracted(self):
-        from charlie.core import _SCREEN_QUERY_RE
+        from charlie.router import SCREEN_QUERY_RE as _SCREEN_QUERY_RE
         assert _SCREEN_QUERY_RE.search("what is on my screen right now")
         assert _SCREEN_QUERY_RE.search("what's on my screen")
 
@@ -493,12 +495,12 @@ class TestMaybeInjectVisualScreenshotCall:
     consume the image before any vision-routed follow-up ever ran)."""
 
     def test_no_injection_when_not_queuing(self):
-        from charlie.core import _maybe_inject_visual_screenshot_call
+        from charlie.router import maybe_inject_visual_screenshot_call as _maybe_inject_visual_screenshot_call
         calls = [{"id": "1", "name": "web_search", "arguments": {}}]
         assert _maybe_inject_visual_screenshot_call(calls, False) is calls
 
     def test_injects_synthetic_call_when_queuing_and_empty(self):
-        from charlie.core import _maybe_inject_visual_screenshot_call
+        from charlie.router import maybe_inject_visual_screenshot_call as _maybe_inject_visual_screenshot_call
         result = _maybe_inject_visual_screenshot_call([], True)
         assert len(result) == 1
         call = result[0]
@@ -511,7 +513,7 @@ class TestMaybeInjectVisualScreenshotCall:
         assert call.get("id") is not None
 
     def test_injects_alongside_existing_real_calls(self):
-        from charlie.core import _maybe_inject_visual_screenshot_call
+        from charlie.router import maybe_inject_visual_screenshot_call as _maybe_inject_visual_screenshot_call
         real_calls = [{"id": "abc", "name": "web_search", "arguments": {"query": "x"}}]
         result = _maybe_inject_visual_screenshot_call(real_calls, True)
         assert len(result) == 2
@@ -519,7 +521,7 @@ class TestMaybeInjectVisualScreenshotCall:
         assert result[1]["name"] == "desktop_screenshot"
 
     def test_no_duplicate_when_model_already_called_desktop_screenshot(self):
-        from charlie.core import _maybe_inject_visual_screenshot_call
+        from charlie.router import maybe_inject_visual_screenshot_call as _maybe_inject_visual_screenshot_call
         real_calls = [{"id": "abc", "name": "desktop_screenshot", "arguments": {}}]
         result = _maybe_inject_visual_screenshot_call(real_calls, True)
         assert result == real_calls

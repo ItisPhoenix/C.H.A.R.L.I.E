@@ -1,5 +1,5 @@
 """Tests for charlie.known_apps -- the single-source-of-truth app registry
-that core.py's _OPEN_APP_MAP/_CLOSE_APP_MAP and text_utils.KNOWN_APPS are
+that router.py's _OPEN_APP_MAP/_CLOSE_APP_MAP and text_utils.KNOWN_APPS are
 derived from."""
 
 from charlie.known_apps import APP_REGISTRY, KNOWN_APP_NAMES
@@ -21,7 +21,7 @@ def test_local_app_entries_have_close_process():
 
 
 def test_core_derives_open_and_close_maps_from_registry():
-    from charlie.core import _CLOSE_APP_MAP, _OPEN_APP_MAP
+    from charlie.router import _CLOSE_APP_MAP, _OPEN_APP_MAP
 
     assert _OPEN_APP_MAP["chrome"] == "chrome"
     assert _CLOSE_APP_MAP["chrome"] == "chrome.exe"

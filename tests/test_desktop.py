@@ -12,7 +12,6 @@ from charlie.config import Config
 from charlie.core import (
     _DESKTOP_COM_TOOLS,
     _DESKTOP_CONTROL_TOOLS,
-    _SCREEN_QUERY_RE,
     Brain,
     _payload_is_vision,
     _with_vision_image,
@@ -28,6 +27,7 @@ from charlie.desktop.uia import (
     resolve_is_password,
     resolve_name,
 )
+from charlie.router import SCREEN_QUERY_RE as _SCREEN_QUERY_RE
 from charlie.tools import config as _tools_config
 from charlie.tools import (
     desktop_click,

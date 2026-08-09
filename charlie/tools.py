@@ -628,10 +628,6 @@ def _detect_app_launch(command: str):
                 "type": "string",
                 "description": "The shell command to execute.",
             },
-            "voice_mode": {
-                "type": "boolean",
-                "description": "Restrict to a safe command allowlist for voice input.",
-            },
         },
         "required": ["command"],
     },
@@ -1113,6 +1109,34 @@ def memory(action: str, target: str, content: str = "", old_text: str = "") -> s
     except Exception as e:
         logger.exception("Memory tool error: action=%s target=%s", action, target)
         return f"Error updating memory: {e}"
+
+
+@registry.register_tool(
+    name="propose_new_tool",
+    description=(
+        "Tier-3 self-extension: author a brand-new tool in Python and queue it for "
+        "your review. Use only when no existing tool covers the request and you're asked "
+        "to 'learn' or permanently gain a new capability -- never for a one-off task. "
+        "Always requires your explicit approval on the dashboard before it can run."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Tool name, snake_case, matching the function name in code."},
+            "description": {"type": "string", "description": "One line: what the tool does."},
+            "code": {
+                "type": "string",
+                "description": "Full Python source: exactly one top-level function named `name`, with a docstring.",
+            },
+        },
+        "required": ["name", "description", "code"],
+    },
+)
+def propose_new_tool(name: str, description: str, code: str) -> str:
+    """Never actually reached -- charlie.core._exec_one intercepts this tool name before
+    dispatch here (it needs Brain/event-bus access this plain registry func doesn't have),
+    the same pattern shell_execute's voice_mode gets special-cased."""
+    return "Error: propose_new_tool must be intercepted by the tool loop, not executed directly."
 
 
 @registry.register_tool(

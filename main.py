@@ -2,6 +2,7 @@
 import asyncio
 import io
 import logging
+import logging.handlers
 import os
 import re
 import sys
@@ -73,7 +74,9 @@ root_logger.setLevel(logging.DEBUG)
 file_formatter = logging.Formatter(
     "%(asctime)s [%(name)s] [%(levelname)s] %(funcName)s:%(lineno)d - %(message)s"
 )
-file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8", mode="a")
+file_handler = logging.handlers.RotatingFileHandler(
+    LOG_FILE, encoding="utf-8", maxBytes=20 * 1024 * 1024, backupCount=5
+)
 file_handler.setFormatter(file_formatter)
 
 console_formatter = logging.Formatter(
@@ -717,7 +720,7 @@ async def main():
         # whatever's on screen at that moment, never a genuine user preference,
         # and storing it as one pollutes memory with stale screen snapshots that
         # resurface on later "what's on my screen" queries.
-        from charlie.core import _SCREEN_QUERY_RE as _screen_query_re
+        from charlie.router import SCREEN_QUERY_RE as _screen_query_re
         if full_reply_buffer.strip() and text.strip() and not _screen_query_re.search(text):
 
             async def _background_learn(user_text: str, reply_text: str):

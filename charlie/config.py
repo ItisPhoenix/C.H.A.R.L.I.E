@@ -143,6 +143,12 @@ class Config:
         metadata=_meta("NATIVE_TOOL_CALLING", "Chat Behavior"),
     )
 
+    # One cheap LLM classifier call for short phrasings that miss every router.py regex.
+    router_classifier_enabled: bool = field(
+        default=os.getenv("ROUTER_CLASSIFIER_ENABLED", "false").lower() == "true",
+        metadata=_meta("ROUTER_CLASSIFIER_ENABLED", "Chat Behavior"),
+    )
+
     # Iteration Budget & Context Compression
     iteration_budget_max: int = field(
         default=int(os.getenv("ITERATION_BUDGET_MAX", "12")),
@@ -180,6 +186,10 @@ class Config:
     session_db_path: str = field(
         default=os.getenv("SESSION_DB_PATH", "sessions.db"),
         metadata=_meta("SESSION_DB_PATH", "Server", restart="process"),
+    )
+    world_model_db_path: str = field(
+        default=os.getenv("WORLD_MODEL_DB_PATH", "world_model.db"),
+        metadata=_meta("WORLD_MODEL_DB_PATH", "Server", restart="process"),
     )
     # Search provider (SearXNG self-hosted)
     searxng_url: str = field(default=os.getenv("SEARXNG_URL", ""), metadata=_meta("SEARXNG_URL", "Search Providers"))

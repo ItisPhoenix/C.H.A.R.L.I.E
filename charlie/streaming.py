@@ -41,7 +41,13 @@ def collect_tool_calls(tc_by_index: Dict[int, Dict[str, str]]) -> List[Dict[str,
         try:
             args = json.loads(tc["arguments"]) if tc["arguments"] else {}
         except json.JSONDecodeError:
+            logger.warning(
+                "Malformed tool-call arguments JSON for %r, defaulting to {}: %r",
+                tc.get("name"), tc["arguments"],
+            )
             args = {}
+        if not tc["name"]:
+            logger.warning("Tool-call delta at index %d has an empty name -- will reach execute_tool as ''", idx)
         calls.append({"id": tc["id"], "name": tc["name"], "arguments": args})
     return calls
 
