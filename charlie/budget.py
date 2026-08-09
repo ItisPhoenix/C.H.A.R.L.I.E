@@ -23,6 +23,7 @@ class IterationBudget:
             # sub-loop of up to 8 tool calls -- keeps repeated failed retries from
             # quietly burning the whole turn budget before the user hears about it.
             "spawn_agent": 3,
+            "browser_task": 3,
         }
     )
 

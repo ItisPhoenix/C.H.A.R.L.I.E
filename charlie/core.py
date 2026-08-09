@@ -43,6 +43,11 @@ except ImportError:  # pragma: no cover - guard mirrors charlie/desktop/__init__
     desktop_session = None
     desktop_uia = None
 
+try:
+    from charlie.browser import BROWSER_AVAILABLE as _BROWSER_AVAILABLE
+except ImportError:  # pragma: no cover - guard mirrors charlie/browser/__init__.py
+    _BROWSER_AVAILABLE = False
+
 logger = logging.getLogger("charlie.core")
 if TYPE_CHECKING:
     from charlie.config import Config
@@ -74,8 +79,8 @@ def _tool_call_key(name: str, arguments: Dict[str, Any]) -> str:
 
 def _is_cacheable_tool(name: str) -> bool:
     """Desktop-COM calls aren't idempotent (real actions/live screen state) and
-    spawn_agent must run every time it's called -- see _exec_one's docstring."""
-    return name not in _DESKTOP_COM_TOOLS and name != "spawn_agent"
+    spawn_agent/browser_task must run every time -- see _exec_one's docstring."""
+    return name not in _DESKTOP_COM_TOOLS and name not in ("spawn_agent", "browser_task")
 # Screen-content questions must always be answered from a fresh observation,
 # never from history -- the model has shown it will otherwise repeat an old
 # answer verbatim instead of re-observing.
@@ -142,7 +147,9 @@ _TOOL_TIMEOUTS = {
     # access) needs far more than the 15s default -- scanning a whole drive
     # tree routinely takes longer than that.
     "plugin_fs_search": 120.0,
+    "browser_read": 20.0,
 }
+_BROWSER_TASK_TIMEOUT_SEC = 100.0  # headroom above browser_task's own internal deadline (up to 90s)
 # Dynamically-registered mcp_* tools inherited the 15s default and timed out on slow ops.
 _MCP_TOOL_TIMEOUT_SEC = 120.0
 
@@ -646,6 +653,7 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
 
     matched_apps = []
     launched_commands = []
+    is_website_matches = []
     remaining_text = " " + target_text + " "
 
     # Scan for explicit URLs/domains first
@@ -660,6 +668,7 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
                 else f"https://{match}"
             )
             launched_commands.append(cmd_url)
+            is_website_matches.append(True)
             # Remove from remaining text to prevent double matching
             remaining_text = re.sub(
                 r"\b" + re.escape(match) + r"\b", " ", remaining_text
@@ -672,6 +681,7 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
         if re.search(pattern, remaining_text):
             matched_apps.append(key)
             launched_commands.append(_OPEN_APP_MAP[key])
+            is_website_matches.append(_APP_REGISTRY[key].is_website)
             remaining_text = re.sub(pattern, " ", remaining_text)
 
     # Fuzzy fallback for ASR mis-transcriptions ("noteped" -> "notepad") -- only
@@ -686,6 +696,7 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
                 key = close[0]
                 matched_apps.append(key)
                 launched_commands.append(_OPEN_APP_MAP[key])
+                is_website_matches.append(_APP_REGISTRY[key].is_website)
                 remaining_text = remaining_text.replace(word, " ", 1)
                 logger.info("Fuzzy-matched app name '%s' -> '%s'", word, key)
 
@@ -725,7 +736,9 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
     already_open_apps = []
     failed_apps = []
 
-    for app, cmd in zip(matched_apps, launched_commands):
+    for app, cmd, is_website in zip(matched_apps, launched_commands, is_website_matches):
+        if is_website and leftover_instruction:
+            continue  # website + leftover text is a "do something on this site" request -- defer to browser_task
         # Already-running local apps get focused via the native tool, not relaunched.
         process_name = _CLOSE_APP_MAP.get(app)
         if process_name and is_process_running(process_name):
@@ -763,11 +776,13 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
             logger.error("Failed to launch %s (%s): %s", app, cmd, last_error)
             failed_apps.append((app, error_detail))
 
+    if not success_apps and not already_open_apps and not failed_apps:
+        return ("", leftover_instruction)  # every match was a deferred website -- nothing to report yet
+
     if not success_apps and not already_open_apps:
         failed_names = [f"{name} ({err})" for name, err in failed_apps]
         return (f"I could not open {', '.join(failed_names)}.", leftover_instruction)
 
-    # Build response message
     msg_parts = []
     if success_apps:
         msg_parts.append(f"I've opened {format_app_list(success_apps)} for you.")
@@ -777,6 +792,58 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
         failed_names = [name for name, _ in failed_apps]
         msg_parts.append(f"(Failed to open: {format_app_list(failed_names)})")
     return (" ".join(msg_parts), leftover_instruction)
+
+
+_BROWSER_TASK_VERBS = (
+    "play", "watch", "listen to", "listen", "search for", "search",
+    "find", "look up", "look for", "browse", "check",
+)
+_BROWSER_TASK_VERB_RE = re.compile(
+    r"^(?:hey\s+charlie,?|ok\s+charlie,?|charlie,?)?\s*(?:"
+    + "|".join(re.escape(v) for v in sorted(_BROWSER_TASK_VERBS, key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
+_BROWSER_TASK_ON_SITE_RE = re.compile(r"\bon\s+([a-z0-9][\w.]*)", re.IGNORECASE)
+
+
+def _detect_browser_task_intent(query: str) -> Optional[str]:
+    """Deterministic fast-path for '<verb> ... on <site>' -- models skip prompted tool calls (CLAUDE.md 11.2)."""
+    q = query.lower().strip()
+    if not _BROWSER_TASK_VERB_RE.match(q):
+        return None
+    on_match = _BROWSER_TASK_ON_SITE_RE.search(q)
+    if not on_match:
+        return None
+    site = on_match.group(1).strip(".,!?")
+    entry = _APP_REGISTRY.get(site)
+    if not entry or not entry.is_website:
+        return None
+    return query.strip()
+
+
+_PLAYBACK_ACTION_PATTERNS = {
+    "play_pause": re.compile(
+        r"^(?:pause|resume|unpause|play)(?:\s+(?:the|my)?\s*(?:youtube\s+)?(?:music|video|song|it))?$", re.I
+    ),
+    "mute": re.compile(r"^(?:mute|unmute)(?:\s+(?:the|my)?\s*(?:audio|video|sound|it))?$", re.I),
+    "volume_up": re.compile(r"^(?:volume up|turn up the volume|increase the volume|louder)$", re.I),
+    "volume_down": re.compile(
+        r"^(?:volume down|turn down the volume|decrease the volume|lower the volume|quieter)$", re.I
+    ),
+    "next_track": re.compile(r"^(?:next track|next song|skip(?:\s+(?:this|the)\s+(?:track|song))?)$", re.I),
+    "prev_track": re.compile(r"^(?:previous track|previous song|go back(?:\s+a\s+track)?)$", re.I),
+}
+
+
+def _detect_playback_control_intent(query: str) -> Optional[str]:
+    """Deterministic fast-path for bare media commands ('pause', 'resume the video', 'mute') -- same rationale as
+    _detect_browser_task_intent: this class of model reliably ignores the prompted system_control tool call."""
+    q = re.sub(r"^(?:hey\s+charlie,?|ok\s+charlie,?|charlie,?)?\s*", "", query.lower().strip()).rstrip(".!")
+    for action, pattern in _PLAYBACK_ACTION_PATTERNS.items():
+        if pattern.match(q):
+            return action
+    return None
 
 
 def _is_low_confidence_desktop_call(tool_name: str, arguments: Dict[str, Any]) -> bool:
@@ -1155,6 +1222,8 @@ _TOOL_RULES = (
     "- You are fully authorized to act immediately with any tool -- shell commands, file writes,\n"
     "  desktop clicks/typing, all of it. Never ask the user for permission first and never refuse or\n"
     "  write instructions telling the user how to do it themselves. Execute the tool first.\n"
+    "- If a listed tool matches the request, CALL IT before answering -- do not substitute an apology,\n"
+    "  a guess, or 'I can't do that' prose for a tool call that exists to do exactly that.\n"
     "- COMPOUND COMMANDS: if a request has multiple steps ('open X and play Y and set volume to Z'),\n"
     "  do ALL of them with tool calls in this same turn, not just the first. A message marked\n"
     "  '(...Already done, do not open it again.)' means step one already ran via a fast-path --\n"
@@ -1173,6 +1242,23 @@ _TOOL_RULES = (
     "- Approval prompts, when they happen, come from the system itself for specific risky actions --\n"
     "  never simulate, anticipate, or add your own extra permission question on top of that. If a tool\n"
     "  call comes back declined, say so plainly and move on; do not ask again.\n"
+    "- If browser_task is available: use it for anything that requires being ON a website (search inside\n"
+    "  it, click through, play a video) -- it drives a headless browser and opens the user's real\n"
+    "  browser only when they asked to see/play/watch it. Use web_search for questions answerable from\n"
+    "  search snippets, browser_read to read one specific known URL's text, and never desktop_click a\n"
+    "  browser window for a website task when browser_task exists.\n"
+    "\n"
+    "EXAMPLES (call the tool, don't just describe what you'd do):\n"
+    "- 'Remember I like dark mode' -> memory(action=add, target=user, content='prefers dark mode'), then confirm.\n"
+    "- 'What's on my screen' -> desktop_observe (already forced above you, but never answer without it).\n"
+    "- 'Read report.txt' -> file_read(path='report.txt'), then summarize its actual content.\n"
+    "- 'Run npm install' -> shell_execute(command='npm install'), then report the real output.\n"
+    "- 'What's the latest on the X launch' -> web_search(query=...), then answer from those results only.\n"
+    "- 'Remind me in 10 minutes to check the oven' -> set_reminder(...), then confirm the exact time.\n"
+    "- 'Add buy milk to my notes' -> scratchpad_add(text='buy milk'), then confirm.\n"
+    "- 'Click Save' -> desktop_observe for the mark id, then desktop_click(mark_id=...); never guess coordinates.\n"
+    "None of these are answered correctly by explaining what you would do, or by claiming you can't --\n"
+    "every example above has a real tool that does exactly that action; call it.\n"
     "\n"
     "GROUNDING CONTRACT:\n"
     "- Answer ONLY from [SEARCH RESULTS], [Relevant memories], and conversation history above.\n"
@@ -1233,6 +1319,12 @@ def _build_capabilities_block(config: "Config") -> str:
         "longer-term store (vector search + a knowledge graph of facts). "
         "You are not limited to only what's in the current conversation."
     )
+    if config.browser_enabled and _BROWSER_AVAILABLE:
+        lines.append(
+            "- Headless browsing: you can search/click/navigate inside websites offscreen via "
+            "browser_task, and read one specific URL's text via browser_read. This is real, not "
+            "hypothetical -- use it instead of opening a bare tab and stopping."
+        )
     if config.mcp_enabled or config.plugins_enabled:
         lines.append(
             "- You have access to additional external tools via MCP servers "
@@ -2190,11 +2282,35 @@ class Brain:
                 "Fast-path partial open: %s -> opened=%s, continuing with: %s",
                 user_input, open_msg, open_remaining,
             )
-            yield open_msg + " "
-            # open_msg is only spoken, never added to LLM message history -- fold it into
-            # this turn's text so the model knows the open already happened and doesn't
-            # redo it with shell_execute (this caused a real double-open of fast.com).
-            user_input = f"({open_msg} Already done, do not open it again.) {open_remaining}"
+            if open_msg:
+                yield open_msg + " "
+                # open_msg is only spoken, never added to LLM message history -- fold it into this turn's text
+                user_input = f"({open_msg} Already done, do not open it again.) {open_remaining}"
+            elif self.config.browser_enabled:
+                # open_msg == "" -- every match deferred (website); go straight to browser_task.
+                logger.info("Fast-path browser task (deferred open): %s", original_user_input)
+                yield await self._browser_task_bounded(original_user_input, platform, session_id)
+                await self._check_memory_capacity()
+                return
+            else:
+                user_input = open_remaining
+
+        # --- Fast-path: browser task ("play/watch/search X on <site>") bypasses the LLM's tool-call decision ---
+        browser_task_query = None if skip_fast_paths else _detect_browser_task_intent(user_input)
+        if browser_task_query is not None and self.config.browser_enabled:
+            logger.info("Fast-path browser task: %s", browser_task_query)
+            yield await self._browser_task_bounded(browser_task_query, platform, session_id)
+            await self._check_memory_capacity()
+            return
+
+        # --- Fast-path: playback control ("pause", "resume the video", "mute") -- same rationale as above ---
+        playback_action = None if skip_fast_paths else _detect_playback_control_intent(user_input)
+        if playback_action is not None:
+            logger.info("Fast-path playback control: %s -> %s", user_input, playback_action)
+            result = await asyncio.to_thread(tool_registry.execute_tool, "system_control", {"action": playback_action})
+            yield "Done." if not result.startswith("Error") else result
+            await self._check_memory_capacity()
+            return
 
         # --- Fast-path: live background-task progress query (deterministic, no LLM needed) ---
         task_status_res = None if skip_fast_paths else _detect_background_task_status(user_input)
@@ -2399,6 +2515,12 @@ class Brain:
                 # tool_registry.execute_tool like every other tool -- dispatched
                 # directly to Brain.spawn_agent instead.
                 r = await self.spawn_agent(call["arguments"].get("task", ""))
+            elif tool_name == "browser_task":
+                # Same reason as spawn_agent -- tier 3 needs this Brain's LLM client.
+                r = await asyncio.wait_for(
+                    self.browser_task(call["arguments"].get("task", ""), platform=platform, session_id=session_id),
+                    timeout=_BROWSER_TASK_TIMEOUT_SEC,
+                )
             else:
                 # Only destructive shell keywords require explicit approve/decline
                 # before _run() is ever called -- see charlie.tools.is_shell_command_gated
@@ -2719,6 +2841,79 @@ class Brain:
         ):
             asyncio.create_task(self._maybe_auto_draft_skill(task, result))
         return result
+
+    async def _browser_task_bounded(self, task: str, platform: str, session_id: str) -> str:
+        """Fast-path callers' safety net -- same timeout bound _exec_one already gives the LLM-dispatched path."""
+        try:
+            return await asyncio.wait_for(
+                self.browser_task(task, platform=platform, session_id=session_id), timeout=_BROWSER_TASK_TIMEOUT_SEC
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Fast-path browser_task timed out after %.0fs: %s", _BROWSER_TASK_TIMEOUT_SEC, task)
+            return "That's taking too long -- I gave up on it."
+
+    async def browser_task(self, task: str, platform: str = "voice", session_id: Optional[str] = None) -> str:
+        """Resolve `task` through charlie.browser's tier cascade and report back.
+
+        Tiers 0-2 need no LLM; tier 3 uses this Brain's own client/model (CLAUDE.md section 5)
+        via _stream_completion; tier 4 is a last-resort stealth retry after a detected block.
+        Opens the user's real browser only when the task carries open-intent."""
+        if not self.config.browser_enabled:
+            return "Browser control is disabled (set BROWSER_ENABLED=true and install the browser extra)."
+        from charlie.browser import BROWSER_AVAILABLE
+        if not BROWSER_AVAILABLE:
+            return "Browser control is disabled (set BROWSER_ENABLED=true and install the browser extra)."
+
+        from charlie.browser import intent as browser_intent
+        from charlie.browser.actions import open_in_real_browser
+        from charlie.browser.session import get_session
+        from charlie.browser.task import resolve as resolve_browser_task
+
+        loop = asyncio.get_running_loop()
+        open_intent = browser_intent.has_open_intent(task)
+
+        if browser_intent.is_bare_followup(task):
+            last_url = get_session().last_url
+            if not last_url:
+                return "I don't have a page to reopen yet."
+            opened = await loop.run_in_executor(None, open_in_real_browser, last_url)
+            return f"Opened {last_url}." if opened else f"Found {last_url} but couldn't open your browser."
+
+        max_steps = self.config.browser_max_steps if platform == "voice" else 8
+        deadline_s = float(self.config.browser_deadline_s if platform == "voice" else 90)
+        generation = self._chat_generation
+
+        async def _complete(prompt: str) -> str:
+            payload = self._build_payload([{"role": "user", "content": prompt}], skip_tools=True)
+            text, _ = await self._stream_completion(payload, generation)
+            return text
+
+        async def _approve_click(name: str, url: str) -> bool:
+            return await self.request_tool_approval(
+                "browser_task", {"action": f'click "{name}"', "url": url},
+                f'click "{name}" on {url}', platform=platform, session_id=session_id,
+            )
+
+        def _on_progress() -> None:
+            if self.on_thinking_update:
+                self.on_thinking_update("browser_task", {"task": task})
+
+        result = await resolve_browser_task(
+            task, _complete, self._describe_image if self.config.vision_enabled else None,
+            _approve_click, max_steps, deadline_s, _on_progress,
+        )
+
+        if result.url and open_intent:
+            opened = await loop.run_in_executor(None, open_in_real_browser, result.url)
+            parts = ([result.answer] if result.answer else []) + [
+                f"Opened {result.url}." if opened else f"Found {result.url} but couldn't open your browser."
+            ]
+            return " ".join(parts)
+        if result.answer:
+            return result.answer
+        if result.url:
+            return f"Found it: {result.url}"
+        return "I couldn't complete that."
 
     async def _maybe_auto_draft_skill(self, task: str, result: str) -> None:
         """A sub-agent that needed several tool calls to succeed did real,

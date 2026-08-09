@@ -41,6 +41,17 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def open_url_in_browser(url: str) -> bool:
+    """Open a URL in the user's real default browser via `start ""`, same as core.py's app opener."""
+    import subprocess
+
+    try:
+        subprocess.Popen(f'start "" {url}', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
+
+
 def is_process_running(process_name: str) -> bool:
     """True if a process named `process_name` (e.g. "notepad.exe") is currently running."""
     import psutil

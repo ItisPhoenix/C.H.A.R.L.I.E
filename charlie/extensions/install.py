@@ -13,15 +13,14 @@ from __future__ import annotations
 
 from typing import Any, Callable, List, Optional, Tuple
 
-BUILTIN_PLUGIN_NAMES = ("filesystem", "browser", "calendar", "code_exec")
+BUILTIN_PLUGIN_NAMES = ("filesystem", "calendar", "code_exec")
 
 
 def builtin_plugin(name: str, plugin_allow_dirs: List[str]) -> Any:
-    from charlie.plugins import BrowserPlugin, CalendarPlugin, CodeExecPlugin, FilesystemPlugin
+    from charlie.plugins import CalendarPlugin, CodeExecPlugin, FilesystemPlugin
 
     factories = {
         "filesystem": lambda: FilesystemPlugin(allowed_dirs=plugin_allow_dirs),
-        "browser": BrowserPlugin,
         "calendar": CalendarPlugin,
         "code_exec": CodeExecPlugin,
     }

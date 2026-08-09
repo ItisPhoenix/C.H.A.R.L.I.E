@@ -6,9 +6,11 @@ with a uniform interface for tool registration, configuration, and lifecycle.
 
 Built-in plugins:
 1. FilesystemPlugin -- safe local file operations
-2. BrowserPlugin -- web browsing via headless browser
-3. CalendarPlugin -- local calendar access
-4. CodeExecPlugin -- sandboxed code execution
+2. CalendarPlugin -- local calendar access
+3. CodeExecPlugin -- sandboxed code execution
+
+Web browsing lives in charlie/browser/ (browser_task/browser_read tools), not here --
+BrowserPlugin was removed in favor of that headless-Chromium subsystem.
 """
 
 import abc
@@ -19,16 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import httpx
-import trafilatura
-
 logger = logging.getLogger("charlie.plugins")
-
-_FETCH_TIMEOUT_SEC = 15.0
-_JINA_TIMEOUT_SEC = 20.0
-_FETCH_MAX_CHARS = 50000
-# Below this, trafilatura's extraction is probably an empty JS-rendered shell, not real content.
-_MIN_EXTRACTED_CHARS = 200
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +71,7 @@ class PluginManager:
 
         pm = PluginManager()
         pm.register(FilesystemPlugin())
-        pm.register(BrowserPlugin())
+        pm.register(CalendarPlugin())
         pm.start()
 
         # Get all tools for LLM prompt injection
@@ -359,104 +352,6 @@ class FilesystemPlugin(Plugin):
                 break
             matches.append(str(match.relative_to(path)))
         return {"path": str(path), "pattern": pattern, "matches": matches, "count": len(matches)}
-
-
-# ---------------------------------------------------------------------------
-# Built-in Plugin: Browser
-# ---------------------------------------------------------------------------
-
-class BrowserPlugin(Plugin):
-    """Web browsing via a headless browser.
-
-    Provides URL fetching, content extraction, and screenshot capabilities
-    using subprocess calls to a headless browser tool (if available).
-    """
-
-    @property
-    def name(self) -> str:
-        return "browser"
-
-    @property
-    def description(self) -> str:
-        return "Web browsing and content extraction"
-
-    def get_tools(self) -> List[Dict[str, Any]]:
-        return [
-            {
-                "name": "browser_fetch",
-                "description": "Fetch and extract text content from a URL",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL to fetch"},
-                    },
-                    "required": ["url"],
-                },
-            },
-            {
-                "name": "browser_screenshot",
-                "description": "Take a screenshot of a web page",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL to screenshot"},
-                        "output_path": {"type": "string", "description": "Path to save screenshot"},
-                    },
-                    "required": ["url"],
-                },
-            },
-        ]
-
-    def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
-        if tool_name == "browser_fetch":
-            return self._fetch(arguments["url"])
-        elif tool_name == "browser_screenshot":
-            return self._screenshot(arguments["url"], arguments.get("output_path", "screenshot.png"))
-        raise ValueError(f"Unknown tool: {tool_name}")
-
-    def _fetch(self, url: str) -> Dict[str, Any]:
-        """Fetch a URL and extract clean text. Raw HTML goes through trafilatura;
-        pages that come back near-empty (JS-rendered shells) fall back to Jina
-        Reader (r.jina.ai), which renders the page server-side, for free."""
-        try:
-            resp = httpx.get(
-                url, timeout=_FETCH_TIMEOUT_SEC, follow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; CharlieBot/1.0)"},
-            )
-            resp.raise_for_status()
-            text = trafilatura.extract(resp.text) or ""
-        except Exception as exc:
-            text = ""
-            logger.debug("Direct fetch failed for %s: %s", url, exc)
-
-        if len(text.strip()) < _MIN_EXTRACTED_CHARS:
-            try:
-                jina_resp = httpx.get(f"https://r.jina.ai/{url}", timeout=_JINA_TIMEOUT_SEC)
-                if jina_resp.status_code == 200 and jina_resp.text.strip():
-                    text = jina_resp.text
-            except Exception as exc:
-                logger.debug("Jina Reader fallback failed for %s: %s", url, exc)
-
-        if not text.strip():
-            return {"error": f"Could not extract content from {url}"}
-        content = text[:_FETCH_MAX_CHARS]
-        return {"url": url, "content": content, "length": len(content)}
-
-    def _screenshot(self, url: str, output_path: str) -> Dict[str, Any]:
-        """Take screenshot using playwright if available."""
-        try:
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.goto(url, wait_until="networkidle", timeout=15000)
-                page.screenshot(path=output_path, full_page=False)
-                browser.close()
-            return {"url": url, "screenshot": output_path}
-        except ImportError:
-            return {"error": "playwright not installed (pip install playwright)"}
-        except Exception as exc:
-            return {"error": str(exc)}
 
 
 # ---------------------------------------------------------------------------

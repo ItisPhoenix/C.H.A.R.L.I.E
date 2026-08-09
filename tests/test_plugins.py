@@ -3,7 +3,6 @@
 import pytest
 
 from charlie.plugins import (
-    BrowserPlugin,
     CalendarPlugin,
     CodeExecPlugin,
     FilesystemPlugin,
@@ -46,22 +45,22 @@ class TestPlugin:
 class TestPluginManager:
     def test_register_plugin(self):
         manager = PluginManager()
-        browser = BrowserPlugin()
-        manager.register(browser)
-        assert "browser" in manager._plugins
+        cal = CalendarPlugin()
+        manager.register(cal)
+        assert "calendar" in manager._plugins
 
     def test_register_duplicate_warns(self):
         manager = PluginManager()
-        p1 = BrowserPlugin()
+        p1 = CalendarPlugin()
         manager.register(p1)
-        manager.register(BrowserPlugin())  # Should warn, not raise
-        assert "browser" in manager._plugins
+        manager.register(CalendarPlugin())  # Should warn, not raise
+        assert "calendar" in manager._plugins
 
     def test_unregister_plugin(self):
         manager = PluginManager()
-        manager.register(BrowserPlugin())
-        manager.unregister("browser")
-        assert "browser" not in manager._plugins
+        manager.register(CalendarPlugin())
+        manager.unregister("calendar")
+        assert "calendar" not in manager._plugins
 
     def test_unregister_nonexistent(self):
         manager = PluginManager()
@@ -93,12 +92,12 @@ class TestPluginManager:
 
     def test_get_status(self):
         manager = PluginManager()
-        manager.register(BrowserPlugin())
+        manager.register(CalendarPlugin())
         manager.register(FilesystemPlugin())
         statuses = manager.get_status()
         assert len(statuses) == 2
         names = [s["name"] for s in statuses]
-        assert "browser" in names
+        assert "calendar" in names
         assert "filesystem" in names
 
     def test_get_tools_for_prompt(self):
@@ -115,7 +114,7 @@ class TestPluginManager:
 
     def test_stop_clears_plugins(self):
         manager = PluginManager()
-        manager.register(BrowserPlugin())
+        manager.register(CalendarPlugin())
         manager.stop()
         assert len(manager._plugins) == 0
         assert len(manager._tool_to_plugin) == 0
@@ -194,91 +193,6 @@ class TestFilesystemPlugin:
         plugin = FilesystemPlugin(allowed_dirs=["/tmp"])
         with pytest.raises(PermissionError):
             plugin.call_tool("fs_read_file", {"path": "/etc/passwd"})
-
-
-class TestBrowserPlugin:
-    def test_name_and_description(self):
-        plugin = BrowserPlugin()
-        assert plugin.name == "browser"
-        assert "web" in plugin.description.lower() or "browse" in plugin.description.lower()
-
-    def test_get_tools_count(self):
-        plugin = BrowserPlugin()
-        tools = plugin.get_tools()
-        assert len(tools) == 2
-        names = [t["name"] for t in tools]
-        assert "browser_fetch" in names
-        assert "browser_screenshot" in names
-
-    def test_fetch_example_com(self):
-        plugin = BrowserPlugin()
-        result = plugin.call_tool("browser_fetch", {"url": "https://example.com"})
-        # May succeed or fail depending on network
-        assert isinstance(result, dict)
-
-    def test_unknown_tool(self):
-        plugin = BrowserPlugin()
-        with pytest.raises(ValueError, match="Unknown tool"):
-            plugin.call_tool("nonexistent", {})
-
-    def test_fetch_uses_trafilatura_extraction(self, monkeypatch):
-        class FakeResponse:
-            text = "<html><body><p>real article text</p></body></html>"
-
-            def raise_for_status(self):
-                pass
-
-        monkeypatch.setattr("charlie.plugins.httpx.get", lambda *a, **k: FakeResponse())
-        monkeypatch.setattr("charlie.plugins.trafilatura.extract", lambda html: "x" * 300)
-
-        plugin = BrowserPlugin()
-        result = plugin.call_tool("browser_fetch", {"url": "https://example.com"})
-
-        assert result["content"] == "x" * 300
-
-    def test_fetch_falls_back_to_jina_when_extraction_thin(self, monkeypatch):
-        """Regression: curl-based raw HTML fetch returned near-empty JS-rendered
-        shells for sites like weather.com -- trafilatura extraction below
-        _MIN_EXTRACTED_CHARS now falls back to Jina Reader's server-rendered text."""
-        calls = []
-
-        class FakeResponse:
-            def __init__(self, text, status_code=200):
-                self.text = text
-                self.status_code = status_code
-
-            def raise_for_status(self):
-                pass
-
-        def fake_get(url, **kwargs):
-            calls.append(url)
-            if "r.jina.ai" in url:
-                return FakeResponse("full rendered article " * 20)
-            return FakeResponse("<html><body><div id='root'></div></body></html>")
-
-        monkeypatch.setattr("charlie.plugins.httpx.get", fake_get)
-        monkeypatch.setattr("charlie.plugins.trafilatura.extract", lambda html: "")
-
-        plugin = BrowserPlugin()
-        result = plugin.call_tool("browser_fetch", {"url": "https://weather.com/x"})
-
-        assert any("r.jina.ai" in c for c in calls)
-        assert "full rendered article" in result["content"]
-
-    def test_fetch_returns_error_when_both_sources_empty(self, monkeypatch):
-        class FakeResponse:
-            text = ""
-
-            def raise_for_status(self):
-                pass
-
-        monkeypatch.setattr("charlie.plugins.httpx.get", lambda *a, **k: FakeResponse())
-        monkeypatch.setattr("charlie.plugins.trafilatura.extract", lambda html: "")
-
-        plugin = BrowserPlugin()
-        result = plugin.call_tool("browser_fetch", {"url": "https://example.com"})
-
-        assert "error" in result
 
 
 class TestCalendarPlugin:
@@ -388,10 +302,8 @@ class TestPluginToolBridge:
         manager = register_plugin_tools_into(reg, _FakeConfig(enabled=True))
         assert manager is not None
         names = {t["function"]["name"] for t in reg.get_tool_definitions()}
-        # All four plugins should be represented.
         assert "plugin_fs_read_file" in names
         assert "plugin_fs_write_file" in names
-        assert "plugin_browser_fetch" in names
         assert "plugin_cal_list_events" in names
         assert "plugin_code_exec_python" in names
 

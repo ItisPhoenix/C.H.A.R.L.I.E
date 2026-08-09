@@ -325,15 +325,49 @@ class Config:
     # Floating desktop pet (PySide6 subprocess), Windows-only.
     pet_enabled: bool = field(
         default=os.getenv("PET_ENABLED", "true").lower() == "true",
-        metadata=_meta("PET_ENABLED", "Desktop Control", restart="process"),
+        metadata=_meta("PET_ENABLED", "Pet", restart="process"),
     )
     pet_position_path: str = field(
         default=os.getenv("PET_POSITION_PATH", "pet_position.json"),
-        metadata=_meta("PET_POSITION_PATH", "Desktop Control", restart="process"),
+        metadata=_meta("PET_POSITION_PATH", "Pet", restart="process"),
     )
     pet_color: str = field(
         default=os.getenv("PET_COLOR", "#00ffff"),
-        metadata=_meta("PET_COLOR", "Companion", restart="reload"),
+        metadata=_meta("PET_COLOR", "Pet", restart="reload"),
+    )
+    pet_scale: float = field(
+        default=float(os.getenv("PET_SCALE", "1.0")),
+        metadata=_meta("PET_SCALE", "Pet", restart="reload"),
+    )
+    # Headless browser (Playwright + Chrome), optional -- off by default, needs the browser extra.
+    browser_enabled: bool = field(
+        default=os.getenv("BROWSER_ENABLED", "false").lower() == "true",
+        metadata=_meta("BROWSER_ENABLED", "Browser", restart="reload"),
+    )
+    browser_profile_path: str = field(
+        default=os.getenv("BROWSER_PROFILE_PATH", "browser_profile"),
+        metadata=_meta("BROWSER_PROFILE_PATH", "Browser", restart="process"),
+    )
+    browser_idle_timeout_s: int = field(
+        default=int(os.getenv("BROWSER_IDLE_TIMEOUT_S", "120")),
+        metadata=_meta("BROWSER_IDLE_TIMEOUT_S", "Browser", restart="reload"),
+    )
+    # Step cap and wall-clock deadline both apply; whichever trips first ends the task.
+    browser_max_steps: int = field(
+        default=int(os.getenv("BROWSER_MAX_STEPS", "3")),
+        metadata=_meta("BROWSER_MAX_STEPS", "Browser", restart="reload"),
+    )
+    browser_deadline_s: int = field(
+        default=int(os.getenv("BROWSER_DEADLINE_S", "25")),
+        metadata=_meta("BROWSER_DEADLINE_S", "Browser", restart="reload"),
+    )
+    browser_headless: bool = field(
+        default=os.getenv("BROWSER_HEADLESS", "true").lower() == "true",
+        metadata=_meta("BROWSER_HEADLESS", "Browser", restart="process"),
+    )
+    browser_warm_on_wake: bool = field(
+        default=os.getenv("BROWSER_WARM_ON_WAKE", "true").lower() == "true",
+        metadata=_meta("BROWSER_WARM_ON_WAKE", "Browser", restart="reload"),
     )
     # Telegram remote control -- long-polling bot, DM-only, single owner user.
     telegram_bot_token: str = field(

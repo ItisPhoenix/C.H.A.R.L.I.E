@@ -12,7 +12,6 @@ import zmq
 from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
-    QCursor,
     QFont,
     QFontMetrics,
     QLinearGradient,
@@ -69,6 +68,7 @@ _BLINK_DURATION_TICKS = 5
 class PetWindow(QWidget):
     state_changed = Signal(str)
     caption_changed = Signal(str, str) # title, desc
+    reset_signal = Signal()
 
     def __init__(self):
         super().__init__()
@@ -98,6 +98,8 @@ class PetWindow(QWidget):
         self._tick_count = 0
         self._idle_ticks = 0
         self._pet_color = config.pet_color or "#00ffff"
+        self._pet_scale = 1.0
+        self.resize(int(_WIDTH * self._pet_scale), int(_HEIGHT * self._pet_scale))
 
         self._drag_origin: Optional[QPoint] = None
         self._press_pos: Optional[QPoint] = None
@@ -106,6 +108,7 @@ class PetWindow(QWidget):
         self._chevron_rect = QRectF()
         self.state_changed.connect(self._on_state_changed)
         self.caption_changed.connect(self._on_caption_changed)
+        self.reset_signal.connect(self._reset_position)
         self._restore_position()
 
         self._pulse_timer = QTimer(self)
@@ -113,10 +116,10 @@ class PetWindow(QWidget):
         self._pulse_timer.start(_PULSE_INTERVAL_MS)
 
         self._color_poll_timer = QTimer(self)
-        self._color_poll_timer.timeout.connect(self._poll_color)
-        self._color_poll_timer.start(5000)
+        self._color_poll_timer.timeout.connect(self._poll_config)
+        self._color_poll_timer.start(250)
 
-    def _poll_color(self):
+    def _poll_config(self):
         try:
             env_path = Path(".env")
             if env_path.exists():
@@ -125,6 +128,16 @@ class PetWindow(QWidget):
                         val = line.split("=", 1)[1].strip(' "\'')
                         if val:
                             self._pet_color = val
+                    elif line.startswith("PET_SCALE="):
+                        val = line.split("=", 1)[1].strip(' "\'')
+                        if val:
+                            try:
+                                scale = float(val)
+                                if scale != self._pet_scale:
+                                    self._pet_scale = scale
+                                    self.resize(int(_WIDTH * scale), int(_HEIGHT * scale))
+                            except ValueError:
+                                pass
         except Exception:
             pass
 
@@ -176,6 +189,7 @@ class PetWindow(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.scale(self._pet_scale, self._pet_scale)
 
         # Coordinates for EMO head
         pet_w = 64
@@ -215,10 +229,18 @@ class PetWindow(QWidget):
         painter.drawPath(path)
 
         # Update click-through mask
-        mask = QRegion(int(cx - 30), int(cy - 30), int(pet_w + 60), int(pet_h + 60))
+        s = self._pet_scale
+        mask = QRegion(int((cx - 30)*s), int((cy - 30)*s), int((pet_w + 60)*s), int((pet_h + 60)*s))
         if self._captions_enabled and self._caption_alpha > 0:
-            mask = mask | QRegion(int(self._card_x - 10), int(self._card_y - 10), int(self._card_w + 20), int(self._card_h + 20))
-        mask = mask | QRegion(int(self._chevron_rect.x() - 5), int(self._chevron_rect.y() - 5), int(self._chevron_rect.width() + 10), int(self._chevron_rect.height() + 10))
+            mask = mask | QRegion(
+                int((self._card_x - 10) * s), int((self._card_y - 10) * s),
+                int((self._card_w + 20) * s), int((self._card_h + 20) * s),
+            )
+        chevron = self._chevron_rect
+        mask = mask | QRegion(
+            int((chevron.x() - 5) * s), int((chevron.y() - 5) * s),
+            int((chevron.width() + 10) * s), int((chevron.height() + 10) * s),
+        )
         self.setMask(mask)
 
         self._idle_ticks += 1
@@ -233,7 +255,7 @@ class PetWindow(QWidget):
         glow_alpha = _EYE_GLOW_ALPHA.get(self._state, 150) // 4
         glow_grad = QRadialGradient(cx + w/2, cy + h/2, w*0.8)
         glow_grad.setColorAt(0, QColor(pet_c.red(), pet_c.green(), pet_c.blue(), glow_alpha))
-        glow_grad.setColorAt(1, QColor(0, 0, 0, 0))
+        glow_grad.setColorAt(1, QColor(pet_c.red(), pet_c.green(), pet_c.blue(), 0))
         painter.setBrush(glow_grad)
         painter.drawRoundedRect(cx - 20, cy - 20, w + 40, h + 40, 40, 40)
 
@@ -247,7 +269,8 @@ class PetWindow(QWidget):
         painter.setBrush(QColor("#1a1a1a"))
         painter.drawRoundedRect(hp_left_rect, hp_w/2, hp_w/2)
         # Left HP Neon Ring
-        ring_c = QColor(pet_c.red(), pet_c.green(), pet_c.blue(), int(self._caption_alpha if self._state != "idle" else 100))
+        ring_alpha = int(self._caption_alpha if self._state != "idle" else 100)
+        ring_c = QColor(pet_c.red(), pet_c.green(), pet_c.blue(), ring_alpha)
         painter.setPen(QPen(ring_c, 2))
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(hp_left_rect.adjusted(4, 8, -4, -8), (hp_w-8)/2, (hp_w-8)/2)
@@ -288,28 +311,10 @@ class PetWindow(QWidget):
         left_eye_x = cx + w/2 - eye_space/2 - eye_w
         right_eye_x = cx + w/2 + eye_space/2
 
-        # Mouse Tracking Offset
-        dx = 0
-        dy = 0
-        if self._state != "sleeping":
-            cursor_pos = self.mapFromGlobal(QCursor.pos())
-            dx = cursor_pos.x() - (cx + w/2)
-            dy = cursor_pos.y() - (cy + h/2)
-            dist = math.hypot(dx, dy)
-            max_dist = 5.0
-            if dist > max_dist:
-                dx = (dx / dist) * max_dist
-                dy = (dy / dist) * max_dist
-
-        left_eye_x += dx
-        right_eye_x += dx
-        eye_y += dy
-
         eye_w_left = eye_w
         eye_h_left = eye_h
         eye_w_right = eye_w
         eye_h_right = eye_h
-        eye_angle = 0
 
         if self._is_blinking():
             eye_y += eye_h / 2 - 2
@@ -379,7 +384,8 @@ class PetWindow(QWidget):
             painter.setPen(QPen(QColor(200, 200, 200, 200), 2))
             painter.setBrush(Qt.NoBrush)
             painter.drawEllipse(right_eye_x - 6, eye_y - 6, eye_w_right + 12, eye_h_right + 12)
-            painter.drawLine(right_eye_x + eye_w_right + 2, eye_y + eye_h_right + 2, right_eye_x + eye_w_right + 12, eye_y + eye_h_right + 12)
+            handle_x, handle_y = right_eye_x + eye_w_right + 2, eye_y + eye_h_right + 2
+            painter.drawLine(handle_x, handle_y, handle_x + 10, handle_y + 10)
 
     def _draw_caption_bubble(self, painter: QPainter, cx: float, cy: float, w: float, h: float):
         alpha = int(self._caption_alpha)
@@ -442,7 +448,7 @@ class PetWindow(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
-            pos = event.position()
+            pos = event.position() / self._pet_scale
             pet_w = 64
             pet_h = 54
             cx = _WIDTH - pet_w - 20
@@ -467,7 +473,7 @@ class PetWindow(QWidget):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
-            pos = event.pos()
+            pos = event.position() / self._pet_scale
             # If clicked chevron, toggle captions and apply fade
             if hasattr(self, '_chevron_rect') and self._chevron_rect.contains(pos):
                 self._captions_enabled = not self._captions_enabled
@@ -479,7 +485,7 @@ class PetWindow(QWidget):
                     self._caption_fade_dir = 1
                     self._caption_time_left = 30000 // _PULSE_INTERVAL_MS
                 return
-            
+
             if not self._dragged and self._press_pos:
                 self._open_dashboard()
             elif self._dragged:
@@ -495,15 +501,26 @@ class PetWindow(QWidget):
             logger.warning("Failed to open dashboard: %s", e, exc_info=True)
 
     def _restore_position(self):
+        screen = QApplication.primaryScreen().availableGeometry()
         try:
             if _POSITION_PATH.exists():
                 data = json_loads(_POSITION_PATH.read_text(encoding="utf-8"))
-                self.move(int(data["x"]), int(data["y"]))
+                x = min(max(int(data["x"]), screen.left()), screen.right() - int(_WIDTH * self._pet_scale))
+                y = min(max(int(data["y"]), screen.top()), screen.bottom() - int(_HEIGHT * self._pet_scale))
+                self.move(x, y)
                 return
         except Exception as e:
             logger.debug("No usable saved pet position, using default: %s", e)
+        self.move(
+            screen.right() - int(_WIDTH * self._pet_scale) - 24, screen.bottom() - int(_HEIGHT * self._pet_scale) - 24
+        )
+
+    def _reset_position(self):
         screen = QApplication.primaryScreen().availableGeometry()
-        self.move(screen.right() - _WIDTH - 24, screen.bottom() - _HEIGHT - 24)
+        self.move(
+            screen.right() - int(_WIDTH * self._pet_scale) - 24, screen.bottom() - int(_HEIGHT * self._pet_scale) - 24
+        )
+        self._save_position()
 
     def _save_position(self):
         try:
@@ -588,6 +605,10 @@ def _sub_loop(window: PetWindow, stop_event: threading.Event):
             try:
                 event = json.loads(raw)
             except Exception:
+                continue
+
+            if event.get("type") == "pet_reset":
+                window.reset_signal.emit()
                 continue
 
             state = _map_event_to_state(event.get("type", ""), event)

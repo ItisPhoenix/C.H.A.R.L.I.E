@@ -285,6 +285,16 @@ class TestVoiceEngineInit:
         engine.stop_tts()
         assert engine.stop_tts_event.is_set()
 
+    def test_speak_does_not_clear_stop_tts_event(self):
+        """Regression: speak() used to unconditionally clear stop_tts_event, so a leftover
+        sentence flushed from a just-cancelled turn could race ahead of the worker threads
+        and un-stop a pending stop_tts() before they ever observed it set."""
+        engine = self._make_engine()
+        engine.stop_tts()
+        assert engine.stop_tts_event.is_set()
+        engine.speak("one more buffered sentence")
+        assert engine.stop_tts_event.is_set()
+
     def test_stop_tts_does_not_call_sd_directly(self):
         """stop_tts() runs on the caller's thread (e.g. barge-in), while
         _playback_worker's own thread concurrently drives sd.play/sd.stop/

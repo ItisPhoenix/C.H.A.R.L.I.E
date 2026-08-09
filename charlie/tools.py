@@ -422,6 +422,9 @@ def _searxng_request(base: str, params: Dict[str, str], query: str, cleaned: str
 def _single_search(query: str) -> str:
     """Execute a single search query across all providers."""
     cleaned = _clean_search_query(query)
+    q_lower = cleaned.lower()
+    # Reused below -- only SearXNG applied a freshness filter before, leaving the DuckDuckGo fallback tier stale.
+    is_time_sensitive = any(kw in q_lower for kw in _TIME_SENSITIVE_KEYWORDS)
 
     searxng_url = config.searxng_url
     tavily_key = config.tavily_api_key
@@ -430,9 +433,8 @@ def _single_search(query: str) -> str:
     # Tier 1: SearXNG (self-hosted, no API key needed)
     if searxng_url:
         base = searxng_url.rstrip("/")
-        q_lower = cleaned.lower()
         params: Dict[str, str] = {"q": cleaned, "format": "json", "language": "en"}
-        if any(kw in q_lower for kw in _TIME_SENSITIVE_KEYWORDS):
+        if is_time_sensitive:
             params["time_range"] = "day"
         is_news_query = any(kw in q_lower for kw in _NEWS_KEYWORDS)
         if is_news_query:
@@ -520,11 +522,12 @@ def _single_search(query: str) -> str:
         )
         from bs4 import BeautifulSoup
 
+        ddg_params = {"q": cleaned, **({"df": "d"} if is_time_sensitive else {})}
         for endpoint in ("lite", "html"):
             try:
                 response = httpx.get(
                     f"https://{endpoint}.duckduckgo.com/{endpoint}/",
-                    params={"q": cleaned},
+                    params=ddg_params,
                     headers={"User-Agent": DDG_USER_AGENT},
                     timeout=DDG_TIMEOUT,
                 )
@@ -1543,8 +1546,6 @@ _PLUGIN_ACTION_DESCRIPTIONS: Dict[str, str] = {
     "fs_read_file": "Read the text contents of a file on the local filesystem.",
     "fs_write_file": "Write text content to a file on the local filesystem.",
     "fs_search": "Search the local filesystem for files matching a glob pattern.",
-    "browser_fetch": "Fetch and return the rendered HTML/text of a web URL.",
-    "browser_screenshot": "Capture a screenshot image of a web URL.",
     "cal_list_events": "List events from the local calendar store.",
     "code_exec_python": (
         "Execute a snippet of Python in a sandboxed interpreter. "
@@ -1563,7 +1564,6 @@ def _build_plugin_manager(
     module unless plugins are actually enabled.
     """
     from charlie.plugins import (
-        BrowserPlugin,
         CalendarPlugin,
         CodeExecPlugin,
         FilesystemPlugin,
@@ -1572,7 +1572,6 @@ def _build_plugin_manager(
 
     manager = PluginManager()
     manager.register(FilesystemPlugin(allowed_dirs=allow_dirs))
-    manager.register(BrowserPlugin())
     manager.register(CalendarPlugin())
     manager.register(CodeExecPlugin())
     return manager
@@ -2198,6 +2197,63 @@ def system_control(action: str) -> str:
         return _DESKTOP_DISABLED_MSG
     from charlie.desktop.actions import system_control as _system_control
     return _system_control(action)
+
+
+# --- Headless browser tools (Playwright + Chrome) -- gated, off by default.
+
+_BROWSER_DISABLED_MSG = (
+    "Browser control is disabled (set BROWSER_ENABLED=true and install the "
+    "browser extra: uv sync --extra browser)."
+)
+
+
+def _browser_ready() -> bool:
+    if not config.browser_enabled:
+        return False
+    from charlie.browser import BROWSER_AVAILABLE
+    return BROWSER_AVAILABLE
+
+
+@registry.register_tool(
+    name="browser_task",
+    description=(
+        "Do something inside a website in a headless browser -- search, click through, play a "
+        "video, fill a form -- and report back. Opens the user's real browser only when the "
+        "request implies it (play/watch/listen, or 'show me'/'open it'). Use for anything that "
+        "requires being on a site; use web_search for questions answerable from search snippets, "
+        "and browser_read to read one specific known URL."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "task": {"type": "string", "description": "A clear, self-contained description of the browsing task."},
+        },
+        "required": ["task"],
+    },
+)
+def browser_task(task: str) -> str:
+    return "Error: browser_task must be dispatched through Brain.browser_task, not called directly."
+
+
+@registry.register_tool(
+    name="browser_read",
+    description="Fetch one specific known URL and return its extracted text content.",
+    schema={
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "URL to fetch."},
+        },
+        "required": ["url"],
+    },
+)
+def browser_read(url: str) -> str:
+    if not _browser_ready():
+        return _BROWSER_DISABLED_MSG
+    from charlie.browser.actions import read_url
+    result = read_url(url)
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return f"URL: {result['url']}\n\n{result['content']}"
 
 
 def set_pending_vision_image(url: Optional[str]) -> None:

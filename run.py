@@ -15,6 +15,12 @@ import sys
 import uuid
 from pathlib import Path
 
+# A bare "python run.py" can silently hit a global interpreter missing platform extras (PySide6, uiautomation).
+if sys.prefix == sys.base_prefix:
+    print(f"Charlie must run inside its project .venv, not a global Python ({sys.executable}).")
+    print("Use: uv run python run.py   (or activate .venv first)")
+    sys.exit(1)
+
 # Web-only mode never inherits a launch_id from a parent process (main.py
 # generates one for its subprocess) -- set one here, before any charlie.*
 # import, since charlie/__init__.py eagerly imports charlie.config and bakes

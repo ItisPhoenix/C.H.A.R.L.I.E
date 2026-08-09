@@ -676,6 +676,30 @@ def test_detect_open_app_does_not_open_filename_as_website(monkeypatch):
     assert "test.txt" not in msg
 
 
+def test_detect_playback_control_intent_matches_bare_commands():
+    """Real bug: 'Pause music.'/'Resume the YouTube video.' etc. never triggered system_control
+    -- the weak model just ignored the request. Deterministic fast-path mirrors _detect_open_app."""
+    from charlie.core import _detect_playback_control_intent
+
+    assert _detect_playback_control_intent("Pause music.") == "play_pause"
+    assert _detect_playback_control_intent("Pause.") == "play_pause"
+    assert _detect_playback_control_intent("Pause the music.") == "play_pause"
+    assert _detect_playback_control_intent("Play the music.") == "play_pause"
+    assert _detect_playback_control_intent("Resume the YouTube video.") == "play_pause"
+    assert _detect_playback_control_intent("mute") == "mute"
+    assert _detect_playback_control_intent("volume up") == "volume_up"
+    assert _detect_playback_control_intent("volume down") == "volume_down"
+    assert _detect_playback_control_intent("next track") == "next_track"
+
+
+def test_detect_playback_control_intent_ignores_unrelated_text():
+    from charlie.core import _detect_playback_control_intent
+
+    assert _detect_playback_control_intent("play DL91 on youtube") is None
+    assert _detect_playback_control_intent("what is the weather") is None
+    assert _detect_playback_control_intent("play a game with me sometime") is None
+
+
 @pytest.mark.asyncio
 async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
     import subprocess

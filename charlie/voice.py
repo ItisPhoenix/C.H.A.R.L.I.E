@@ -541,8 +541,8 @@ class VoiceEngine:
         if not text or len(text) < _MIN_TEXT_LEN:
             return ""
 
+        # Not cleared here -- the worker loops self-clear it after draining; clearing here can race stop_tts().
         if len(text) > _LONG_SENTENCE_CHARS:
-            self.stop_tts_event.clear()
             chunks = _SENTENCE_SPLIT_RE.split(text)
             for chunk in chunks:
                 chunk = chunk.strip()
@@ -550,7 +550,6 @@ class VoiceEngine:
                     self.tts_queue.put((chunk, emotional_state))
             return
 
-        self.stop_tts_event.clear()
         self.tts_queue.put((text, emotional_state))
 
     # -----------------------------------------------------------------------

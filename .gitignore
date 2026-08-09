@@ -31,6 +31,7 @@ blackboard.json
 .charlie_background_task_state.json
 extensions_state.json
 pet_position.json
+browser_profile/
 
 # === ML Models (large files) ===
 models/

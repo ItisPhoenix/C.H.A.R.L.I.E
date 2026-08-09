@@ -700,8 +700,11 @@ async def main():
 
         is_first_flush = True
         turn_active = True
+        _turn_generation = brain._chat_generation
         try:
             async for chunk in brain.chat_stream(text, platform=platform, session_id=session_id):
+                if brain._chat_generation != _turn_generation:
+                    break  # cancelled mid-stream -- stop flushing/speaking chunks chat_stream had already buffered
                 if is_first_chunk:
                     print("\r" + " " * 30 + "\r", end="", flush=True)
                     is_first_chunk = False
@@ -1266,6 +1269,9 @@ async def main():
         def on_wake_word():
             if event_bus:
                 _emit_threadsafe(event_bus, loop, "wake_word", {})
+            if config.browser_enabled and config.browser_warm_on_wake:
+                from charlie.browser import controller as browser_controller
+                browser_controller.warm()
 
         voice.set_wake_word_callback(on_wake_word)
 

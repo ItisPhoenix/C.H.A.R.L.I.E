@@ -31,6 +31,8 @@ def test_registry_registration_and_schema():
     names = {d["function"]["name"] for d in definitions}
     assert names == {
         "spawn_agent",
+        "browser_task",
+        "browser_read",
         "web_search",
         "shell_execute",
         "wait_seconds",
@@ -649,6 +651,55 @@ def test_web_search_returns_fallback_without_api_keys(monkeypatch):
     result = web_search("unit-test-only-query")
     assert isinstance(result, str)
     assert len(result) > 0
+
+
+def test_duckduckgo_fallback_applies_freshness_filter_for_time_sensitive_query(monkeypatch):
+    """Regression: only the SearXNG tier applied a freshness filter -- a query falling through to
+    the DuckDuckGo fallback (no SearXNG/API keys configured) got stale, undated results even for
+    an explicit "latest"/"today" request."""
+    from charlie import tools
+
+    monkeypatch.setattr(tools.config, "searxng_url", "")
+    monkeypatch.setattr(tools.config, "tavily_api_key", "")
+    monkeypatch.setattr(tools.config, "exa_api_key", "")
+
+    captured_params = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '<td class="result-snippet">a fresh result</td>'
+
+    def fake_get(url, params=None, **kwargs):
+        captured_params.append(params)
+        return FakeResponse()
+
+    monkeypatch.setattr(tools.httpx, "get", fake_get)
+
+    tools._single_search("latest AI news today")
+    assert captured_params[0].get("df") == "d"
+
+
+def test_duckduckgo_fallback_omits_freshness_filter_for_non_time_sensitive_query(monkeypatch):
+    from charlie import tools
+
+    monkeypatch.setattr(tools.config, "searxng_url", "")
+    monkeypatch.setattr(tools.config, "tavily_api_key", "")
+    monkeypatch.setattr(tools.config, "exa_api_key", "")
+
+    captured_params = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '<td class="result-snippet">a result</td>'
+
+    def fake_get(url, params=None, **kwargs):
+        captured_params.append(params)
+        return FakeResponse()
+
+    monkeypatch.setattr(tools.httpx, "get", fake_get)
+
+    tools._single_search("history of the roman empire")
+    assert "df" not in captured_params[0]
 
 
 def test_memory_add_opinions(tmp_path, monkeypatch):
