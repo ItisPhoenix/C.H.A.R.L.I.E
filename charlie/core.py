@@ -15,9 +15,10 @@ from uuid import uuid4
 import httpx
 
 from charlie import prompt_builder, router, telemetry
+from charlie.autonomy import Requirement
+from charlie.autonomy import evaluate as autonomy_evaluate
 from charlie.budget import IterationBudget
 from charlie.events import EventMeta, EventSource
-from charlie.security import policy as security_policy
 from charlie.security.provenance import trust_level_for_tool
 from charlie.streaming import (
     FollowupStreamState,
@@ -26,7 +27,7 @@ from charlie.streaming import (
     parse_sse_stream,
     stream_followup_content,
 )
-from charlie.tools import is_shell_command_gated, pop_pending_vision_image
+from charlie.tools import pop_pending_vision_image
 from charlie.tools import registry as tool_registry
 from charlie.utils import build_auth_headers, make_id
 
@@ -1669,14 +1670,13 @@ class Brain:
                 # voice_mode is derived from the real turn platform, never trusted from the LLM-supplied call args.
                 call["arguments"]["voice_mode"] = platform == "voice"
 
-            # Gated keywords, sensitive paths, or commands lifted from untrusted output require approve/decline.
+            # Approve/decline gate only -- BLOCK-tier stays enforced inside shell_execute() itself.
             gate_reason: Optional[str] = None
-            if tool_name == "shell_execute":
-                gate_reason = is_shell_command_gated(call["arguments"].get("command", ""))
-            if not gate_reason:
-                policy_result = security_policy.check_tool_call(tool_name, call["arguments"], _turn_external_texts)
-                if policy_result.needs_approval:
-                    gate_reason = policy_result.reason
+            requirement, requirement_reason = autonomy_evaluate(
+                tool_name, call["arguments"], recent_external_texts=_turn_external_texts
+            )
+            if requirement == Requirement.APPROVE:
+                gate_reason = requirement_reason
 
             approved = True
             if gate_reason:
