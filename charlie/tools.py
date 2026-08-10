@@ -20,6 +20,7 @@ import httpx
 
 from charlie import recovery
 from charlie.config import config
+from charlie.events import EventMeta, EventSource
 from charlie.known_apps import APP_REGISTRY
 from charlie.session_store import SessionStore
 from charlie.utils import is_process_running
@@ -1521,7 +1522,7 @@ def _emit_desktop_frame(png_bytes: bytes, elements: List[Any]) -> None:
             ],
         }
         asyncio.run_coroutine_threadsafe(
-            _event_bus.emit("desktop_frame", payload), _event_loop
+            _event_bus.emit("desktop_frame", payload, meta=EventMeta(source=EventSource.BRAIN)), _event_loop
         )
     except Exception:
         logger.warning("desktop_frame emit failed", exc_info=True)

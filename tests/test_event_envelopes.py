@@ -25,6 +25,8 @@ from typing import Any, Dict, List
 
 import pytest
 
+from charlie.events import EventMeta, EventSource
+
 MAIN_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"
 )
@@ -47,8 +49,8 @@ def _run_callback(name: str, captured: List[Dict[str, Any]],
     # The real EventBus.emit is async, but the recording side-effect happens
     # at call time, so a synchronous emit captures the payload faithfully.
     class _CapturingBus:
-        def emit(self, event_type: str, payload: dict):
-            captured.append({"type": event_type, "payload": dict(payload)})
+        def emit(self, event_type: str, payload: dict, meta=None):
+            captured.append({"type": event_type, "payload": dict(payload), "meta": meta})
 
     bus = _CapturingBus()
 
@@ -69,6 +71,8 @@ def _run_callback(name: str, captured: List[Dict[str, Any]],
         "loop": None,
         "current_web_session_id": session_id,
         "asyncio": _FakeAsyncio,
+        "EventMeta": EventMeta,
+        "EventSource": EventSource,
     }
     exec(compile(src, f"<main.{name}>", "exec"), namespace)
     callback = namespace[name]
@@ -150,6 +154,29 @@ def _dict_has_session_id(node: ast.AST) -> bool:
         if isinstance(key, ast.Constant) and key.value == "session_id":
             return True
     return False
+
+
+@pytest.mark.asyncio
+async def test_tool_callbacks_emit_populated_event_meta():
+    """The Phase 1 typed-event migration (charlie/events.py) attaches an
+    EventMeta to every emit() call. Regression guard: main.py's nested
+    callbacks must actually pass one (source=brain, real timestamp), not
+    silently fall back to the meta=None default."""
+    session_id = "sess_meta_test"
+    captured: List[Dict[str, Any]] = []
+
+    _run_callback("on_tool_call", captured, session_id,
+                  ("web_search", {"query": "weather"}))
+    _run_callback("on_tts_start", captured, session_id, ())
+
+    by_type: Dict[str, Any] = {e["type"]: e["meta"] for e in captured}
+    expected_source = {"tool_call": EventSource.BRAIN, "speaking_start": EventSource.VOICE}
+
+    for etype, source in expected_source.items():
+        meta = by_type[etype]
+        assert isinstance(meta, EventMeta), f"{etype} did not pass an EventMeta"
+        assert meta.source == source, f"{etype} expected source={source}, got {meta.source}"
+        assert meta.ts, f"{etype} EventMeta has no timestamp"
 
 
 def test_transcript_emit_gated_to_voice_platform():

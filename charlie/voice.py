@@ -22,6 +22,7 @@ from kokoro_onnx import Kokoro
 
 from charlie.asr_worker import asr_worker_process
 from charlie.core import strip_internal_reasoning
+from charlie.events import EventMeta, EventSource
 from charlie.wake_word import WakeWordDetector
 
 logger = logging.getLogger("charlie.voice")
@@ -199,7 +200,7 @@ class VoiceEngine:
         self._last_level_emit = now
         try:
             asyncio.run_coroutine_threadsafe(
-                bus.emit("audio_level", {"level": level}), loop
+                bus.emit("audio_level", {"level": level}, meta=EventMeta(source=EventSource.VOICE)), loop
             )
         except Exception:
             logger.debug("audio_level emit failed", exc_info=True)
@@ -215,7 +216,9 @@ class VoiceEngine:
         if bus is None or loop is None:
             return
         try:
-            asyncio.run_coroutine_threadsafe(bus.emit("vad_start", {}), loop)
+            asyncio.run_coroutine_threadsafe(
+                bus.emit("vad_start", {}, meta=EventMeta(source=EventSource.VOICE)), loop
+            )
         except Exception:
             logger.debug("vad_start emit failed", exc_info=True)
 

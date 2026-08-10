@@ -16,6 +16,7 @@ import httpx
 
 from charlie import prompt_builder, router, telemetry
 from charlie.budget import IterationBudget
+from charlie.events import EventMeta, EventSource
 from charlie.security import policy as security_policy
 from charlie.security.provenance import trust_level_for_tool
 from charlie.streaming import (
@@ -1075,6 +1076,10 @@ class Brain:
                     "extension_proposed",
                     {"kind": "generated", "name": name, "source": "chat", "raw_text": code,
                      "description": description, "declared_tools": [name], "warnings": card.warnings},
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        rationale=f"drafted a new tool '{name}' from a chat request, pending review",
+                    ),
                 )
         except Exception:
             logger.warning("Failed to broadcast extension_proposed event", exc_info=True)
@@ -1116,6 +1121,7 @@ class Brain:
                         "reason": reason,
                         "session_id": None if self._is_background else recovery.get_active_session_id(),
                     },
+                    meta=EventMeta(source=EventSource.BRAIN, rationale=reason),
                 )
             elif self.on_thought_callback:
                 _active_voice_approval_id = request_id

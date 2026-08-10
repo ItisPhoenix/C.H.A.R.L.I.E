@@ -8,6 +8,7 @@ Default ports: 5555 (events), 5556 (commands).
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
 import sys
@@ -24,6 +25,8 @@ if sys.platform == "win32":
 
 import zmq
 import zmq.asyncio
+
+from charlie.events import EventMeta
 
 logger = logging.getLogger("charlie.ipc")
 
@@ -82,11 +85,19 @@ class EventBus:
         except Exception:
             pass
 
-    async def emit(self, event_type: str, payload: dict):
-        """Producer only. Publishes an event to all subscribers."""
+    async def emit(self, event_type: str, payload: dict, meta: Optional[EventMeta] = None):
+        """Producer only. Publishes an event to all subscribers.
+
+        meta is additive envelope metadata (source/task_id/rationale/ts, see
+        charlie/events.py) -- kept a keyword arg with a default so callers
+        that only pass (event_type, payload) are unaffected.
+        """
         if not self.is_producer or not self._pub_socket:
             return
-        data = json.dumps({"type": event_type, "payload": payload})
+        envelope = {"type": event_type, "payload": payload}
+        if meta is not None:
+            envelope.update(dataclasses.asdict(meta))
+        data = json.dumps(envelope)
         try:
             await self._pub_socket.send_string(data)
         except zmq.ZMQError:

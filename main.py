@@ -93,6 +93,7 @@ root_logger.addHandler(console_handler)
 # 3. NOW IMPORT CHARLIE MODULES
 from charlie.config import Config, config
 from charlie.core import Brain
+from charlie.events import EventMeta, EventSource
 from charlie.ipc import EventBus
 from charlie.memory_store import MemoryStore
 from charlie.personality import get_emotion_for_context, parse_voice_command, parse_yes_no
@@ -250,7 +251,10 @@ async def main():
     def on_tool_call(name, args):
         if event_bus:
             asyncio.run_coroutine_threadsafe(
-                event_bus.emit("tool_call", {"name": name, "args": args, "session_id": current_web_session_id}), loop
+                event_bus.emit(
+                    "tool_call", {"name": name, "args": args, "session_id": current_web_session_id},
+                    meta=EventMeta(source=EventSource.BRAIN),
+                ), loop
             )
 
     def on_tool_result(name, result):
@@ -259,6 +263,7 @@ async def main():
                 event_bus.emit(
                     "tool_result",
                     {"name": name, "text": result, "session_id": current_web_session_id},
+                    meta=EventMeta(source=EventSource.BRAIN),
                 ),
                 loop,
             )
@@ -270,7 +275,10 @@ async def main():
                 summary = str(args)[:80]
                 desc += f" with {summary}"
             asyncio.run_coroutine_threadsafe(
-                event_bus.emit("thinking_update", {"text": desc, "session_id": current_web_session_id}), loop
+                event_bus.emit(
+                    "thinking_update", {"text": desc, "session_id": current_web_session_id},
+                    meta=EventMeta(source=EventSource.BRAIN),
+                ), loop
             )
 
     try:
@@ -378,7 +386,8 @@ async def main():
             if event_bus:
                 asyncio.run_coroutine_threadsafe(
                     event_bus.emit(
-                        "session_updated", {"session_id": session_id, "title": candidate}
+                        "session_updated", {"session_id": session_id, "title": candidate},
+                        meta=EventMeta(source=EventSource.VOICE),
                     ),
                     loop,
                 )
@@ -530,6 +539,7 @@ async def main():
                 event_bus.emit(
                     "transcript",
                     {"text": text, "source": platform, "session_id": session_id},
+                    meta=EventMeta(source=EventSource.VOICE),
                 )
             )
 
@@ -568,7 +578,9 @@ async def main():
 
         # Emit thinking event
         if event_bus:
-            asyncio.create_task(event_bus.emit("thinking", {"session_id": session_id}))
+            asyncio.create_task(
+                event_bus.emit("thinking", {"session_id": session_id}, meta=EventMeta(source=EventSource.BRAIN))
+            )
 
         print("Charlie is thinking...", end="\r", flush=True)
 
@@ -611,6 +623,7 @@ async def main():
                                             "text": safe if safe.endswith((".", "!", "?")) else safe + ". ",
                                             "session_id": session_id,
                                         },
+                                        meta=EventMeta(source=EventSource.BRAIN),
                                     )
                                 )
                     web_buffer = parts[-1]
@@ -675,6 +688,7 @@ async def main():
                             ),
                             "session_id": session_id,
                         },
+                        meta=EventMeta(source=EventSource.BRAIN),
                     )
                 )
 
@@ -696,14 +710,20 @@ async def main():
             # Emit response_done event so the UI can stop its typing indicator.
             if event_bus:
                 asyncio.create_task(
-                    event_bus.emit("response_done", {"session_id": session_id})
+                    event_bus.emit(
+                        "response_done", {"session_id": session_id},
+                        meta=EventMeta(source=EventSource.BRAIN),
+                    )
                 )
         except Exception:
             # Turn failures used to be silent -- surface one, then re-raise.
             _safe_speak(voice, "Sorry, something went wrong on my end. Try again?", last_emotion, "turn-failed")
             if event_bus:
                 asyncio.create_task(
-                    event_bus.emit("response_done", {"session_id": session_id})
+                    event_bus.emit(
+                        "response_done", {"session_id": session_id},
+                        meta=EventMeta(source=EventSource.BRAIN, rationale="turn failed with an unhandled exception"),
+                    )
                 )
             raise
         finally:
@@ -877,11 +897,11 @@ async def main():
                         muted=payload.get("muted"),
                         volume=payload.get("volume"),
                     )
-                    await event_bus.emit("audio_state", state)
+                    await event_bus.emit("audio_state", state, meta=EventMeta(source=EventSource.VOICE))
                 elif cmd_type == "mic_control":
                     payload = cmd.get("payload", {})
                     mic_state = voice.set_mic_state(bool(payload.get("mic_muted", True)))
-                    await event_bus.emit("mic_state", mic_state)
+                    await event_bus.emit("mic_state", mic_state, meta=EventMeta(source=EventSource.VOICE))
                 elif cmd_type == "extension_installed":
                     # Mirrors charlie/web_server.py's confirm_extension(): the
                     # dashboard's Extensions tab only registers tools into that
@@ -982,10 +1002,13 @@ async def main():
                     await _reload_voice_engine()
                     brain.rebuild_stable_tier()
 
-                    await event_bus.emit("alert", {
-                        "severity": "success",
-                        "message": "System configuration successfully reloaded and engine restarted.",
-                    })
+                    await event_bus.emit(
+                        "alert", {
+                            "severity": "success",
+                            "message": "System configuration successfully reloaded and engine restarted.",
+                        },
+                        meta=EventMeta(source=EventSource.VOICE),
+                    )
                 elif cmd_type == "background_task_start":
                     payload = cmd.get("payload", {})
                     from charlie import background_task
@@ -995,7 +1018,10 @@ async def main():
                             session_store=store, memory_store=memory_store, voice=voice,
                         )
                     except RuntimeError as ex:
-                        await event_bus.emit("alert", {"severity": "warning", "message": str(ex)})
+                        await event_bus.emit(
+                            "alert", {"severity": "warning", "message": str(ex)},
+                            meta=EventMeta(source=EventSource.TASK, rationale=str(ex)),
+                        )
                 elif cmd_type == "background_task_cancel":
                     payload = cmd.get("payload", {})
                     from charlie import background_task
@@ -1027,13 +1053,19 @@ async def main():
         def on_tts_start():
             if event_bus:
                 asyncio.run_coroutine_threadsafe(
-                    event_bus.emit("speaking_start", {"session_id": current_web_session_id}), loop
+                    event_bus.emit(
+                        "speaking_start", {"session_id": current_web_session_id},
+                        meta=EventMeta(source=EventSource.VOICE),
+                    ), loop
                 )
 
         def on_tts_stop():
             if event_bus:
                 asyncio.run_coroutine_threadsafe(
-                    event_bus.emit("speaking_stop", {"session_id": current_web_session_id}), loop
+                    event_bus.emit(
+                        "speaking_stop", {"session_id": current_web_session_id},
+                        meta=EventMeta(source=EventSource.VOICE),
+                    ), loop
                 )
 
         voice = VoiceEngine(
@@ -1047,7 +1079,7 @@ async def main():
         def on_wake_word():
             if event_bus:
                 asyncio.run_coroutine_threadsafe(
-                    event_bus.emit("wake_word", {}), loop
+                    event_bus.emit("wake_word", {}, meta=EventMeta(source=EventSource.VOICE)), loop
                 )
 
         voice.set_wake_word_callback(on_wake_word)
@@ -1116,11 +1148,14 @@ async def main():
                 while True:
                     cpu_percent = psutil.cpu_percent()
                     ram_percent = psutil.virtual_memory().percent
-                    await bus.emit("system_status", {
-                        "cpu": cpu_percent,
-                        "ram": ram_percent,
-                        "gpu": await asyncio.to_thread(_read_gpu_percent),
-                    })
+                    await bus.emit(
+                        "system_status", {
+                            "cpu": cpu_percent,
+                            "ram": ram_percent,
+                            "gpu": await asyncio.to_thread(_read_gpu_percent),
+                        },
+                        meta=EventMeta(source=EventSource.VOICE),
+                    )
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 pass
@@ -1146,7 +1181,13 @@ async def main():
                     f"of {len(interrupted_task.get('steps', []))}."
                 )
                 logger.info(_interrupted_msg)
-                await bus.emit("alert", {"severity": "warning", "message": _interrupted_msg})
+                await bus.emit(
+                    "alert", {"severity": "warning", "message": _interrupted_msg},
+                    meta=EventMeta(
+                        source=EventSource.TASK,
+                        rationale="process restarted while a background task was still running",
+                    ),
+                )
                 voice.speak(_interrupted_msg, "neutral")
 
             def _read_cpu_ram_percent() -> Tuple[float, float]:
@@ -1159,7 +1200,13 @@ async def main():
                 logger.warning(f"Resource alert: {message}")
                 try:
                     asyncio.run_coroutine_threadsafe(
-                        bus.emit("alert", {"severity": "warning", "message": message}),
+                        bus.emit(
+                            "alert", {"severity": "warning", "message": message},
+                            meta=EventMeta(
+                                source=EventSource.WATCHER,
+                                rationale="CPU/RAM usage exceeded the configured threshold for 3 consecutive samples",
+                            ),
+                        ),
                         _monitor_loop,
                     )
                 except Exception:
@@ -1185,7 +1232,9 @@ async def main():
                         log_entry = self.format(record)
                         try:
                             loop = asyncio.get_running_loop()
-                            loop.create_task(bus.emit("log", {"line": log_entry}))
+                            loop.create_task(
+                                bus.emit("log", {"line": log_entry}, meta=EventMeta(source=EventSource.VOICE))
+                            )
                         except RuntimeError:
                             pass
                     except Exception:

@@ -17,6 +17,7 @@ class FailureClass(enum.Enum):
     UNKNOWN = "UNKNOWN"
 
 from charlie.config import config
+from charlie.events import EventMeta, EventSource
 
 system_root: str = config.system_root
 _BLOCKED_RECOVERY_PATHS: List[str] = [
@@ -199,7 +200,10 @@ async def request_recovery_approval(
 
     # Broadcast proposal to active dashboard
     if _event_bus:
-        await _event_bus.emit("recovery_proposal", proposal)
+        await _event_bus.emit(
+            "recovery_proposal", proposal,
+            meta=EventMeta(source=EventSource.BRAIN, rationale=explanation),
+        )
 
     # Create future to wait for client action
     loop = asyncio.get_running_loop()

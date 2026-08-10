@@ -32,7 +32,7 @@ class TestHandleProposeNewTool:
         emitted = {}
 
         class _FakeBus:
-            async def emit(self, event_type, payload):
+            async def emit(self, event_type, payload, meta=None):
                 emitted["type"] = event_type
                 emitted["payload"] = payload
 
@@ -54,7 +54,7 @@ class TestHandleProposeNewTool:
         emitted = {"called": False}
 
         class _FakeBus:
-            async def emit(self, event_type, payload):
+            async def emit(self, event_type, payload, meta=None):
                 emitted["called"] = True
 
         import charlie.recovery as recovery

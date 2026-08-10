@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from charlie.config import Config
 from charlie.core import Brain
+from charlie.events import EventMeta, EventSource
 from charlie.tools import get_path_gate_reason, is_shell_command_gated
 from charlie.utils import json_dumps, json_loads, make_id
 
@@ -100,7 +101,10 @@ def _save_state(task: BackgroundTask) -> None:
 
 async def _emit_task_event(event_bus, task: BackgroundTask) -> None:
     """WS event plus on-disk persist -- single choke point, see check_interrupted_task()."""
-    await event_bus.emit("background_task", task.to_event())
+    await event_bus.emit(
+        "background_task", task.to_event(),
+        meta=EventMeta(source=EventSource.TASK, task_id=task.id),
+    )
     _save_state(task)
 
 
@@ -147,7 +151,10 @@ def _scan_gated_steps(steps: List[str]) -> List[int]:
 async def _announce(event_bus, voice, severity: str, message: str) -> None:
     """Mirror main.py's resource-alert pattern: an "alert" event plus spoken TTS."""
     try:
-        await event_bus.emit("alert", {"severity": severity, "message": message})
+        await event_bus.emit(
+            "alert", {"severity": severity, "message": message},
+            meta=EventMeta(source=EventSource.TASK),
+        )
     except Exception:
         logger.warning("Failed to emit background-task alert event", exc_info=True)
     if voice is not None:

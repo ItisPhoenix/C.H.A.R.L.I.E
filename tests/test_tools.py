@@ -406,7 +406,7 @@ def test_emit_desktop_frame_bridges_to_event_bus_with_shaped_payload(monkeypatch
     calls = []
 
     class FakeBus:
-        async def emit(self, event_type, payload):
+        async def emit(self, event_type, payload, meta=None):
             calls.append((event_type, payload))
 
     monkeypatch.setattr(
@@ -446,7 +446,7 @@ def test_emit_desktop_frame_throttled_within_window(monkeypatch):
     calls = []
 
     class FakeBus:
-        async def emit(self, event_type, payload):
+        async def emit(self, event_type, payload, meta=None):
             calls.append((event_type, payload))
 
     monkeypatch.setattr(

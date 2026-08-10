@@ -30,7 +30,7 @@ class FakeEventBus:
     def __init__(self):
         self.events = []
 
-    async def emit(self, event_type, payload):
+    async def emit(self, event_type, payload, meta=None):
         self.events.append((event_type, dict(payload)))
 
 
@@ -304,7 +304,7 @@ async def test_background_approval_omits_session_id(monkeypatch, bg_config):
         def __init__(self):
             self.emitted = []
 
-        async def emit(self, event_type, payload):
+        async def emit(self, event_type, payload, meta=None):
             self.emitted.append((event_type, payload))
 
     fake_bus = FakeEventBusForApproval()
@@ -335,7 +335,7 @@ async def test_foreground_approval_uses_active_session_id(monkeypatch, bg_config
         def __init__(self):
             self.emitted = []
 
-        async def emit(self, event_type, payload):
+        async def emit(self, event_type, payload, meta=None):
             self.emitted.append((event_type, payload))
 
     fake_bus = FakeEventBusForApproval()
