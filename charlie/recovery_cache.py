@@ -2,11 +2,13 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from typing import Optional
 
 logger = logging.getLogger("charlie.recovery_cache")
 
 CACHE_FILE = ".charlie_recovery_cache.json"
+_cache_lock = threading.Lock()
 
 def _get_cache_key(command: str, failure_class: str, error_message: str) -> str:
     """Generates a stable unique hash key for a failure pattern."""
@@ -31,19 +33,20 @@ def get_cached_resolution(command: str, failure_class: str, error_message: str) 
 
 def set_cached_resolution(command: str, failure_class: str, error_message: str, resolved_command: str) -> None:
     """Saves a successfully recovered command mapping to the local cache."""
-    cache = {}
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                cache = json.load(f)
-        except Exception as e:
-            logger.warning("Failed to load recovery cache for writing: %s", e)
+    with _cache_lock:
+        cache = {}
+        if os.path.exists(CACHE_FILE):
+            try:
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                    cache = json.load(f)
+            except Exception as e:
+                logger.warning("Failed to load recovery cache for writing: %s", e)
 
-    try:
-        key = _get_cache_key(command, failure_class, error_message)
-        cache[key] = resolved_command
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache, f, indent=2, ensure_ascii=False)
-        logger.debug("Saved resolved command to recovery cache.")
-    except Exception as e:
-        logger.warning("Failed to save to recovery cache: %s", e)
+        try:
+            key = _get_cache_key(command, failure_class, error_message)
+            cache[key] = resolved_command
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(cache, f, indent=2, ensure_ascii=False)
+            logger.debug("Saved resolved command to recovery cache.")
+        except Exception as e:
+            logger.warning("Failed to save to recovery cache: %s", e)

@@ -13,9 +13,8 @@ from charlie.core import (
     _DESKTOP_COM_TOOLS,
     _DESKTOP_CONTROL_TOOLS,
     _SCREEN_QUERY_RE,
+    _VISION_MAX_TOKENS,
     Brain,
-    _payload_is_vision,
-    _with_vision_image,
 )
 from charlie.desktop import DESKTOP_AVAILABLE, UIA_EXECUTOR
 from charlie.desktop import actions as desktop_actions
@@ -155,72 +154,71 @@ def test_pending_vision_image_pops_once():
     assert pop_pending_vision_image() is None
 
 
-def test_build_payload_uses_instance_pending_image_not_shared_global():
-    """Regression: two concurrent Brain instances (e.g. foreground + a
-    background task) both calling desktop_screenshot used to race on one
-    shared tools.py global -- whichever Brain's _build_payload ran second
-    could steal or corrupt the other's image. _exec_one now pops the global
-    into self._pending_vision_image_url immediately after its own
-    desktop_screenshot call, so _build_payload only ever reads its own
-    Brain's value and never touches (or is affected by) the shared global."""
-    from charlie.config import Config
-    from charlie.core import Brain
+@pytest.mark.asyncio
+async def test_describe_image_sends_no_history_or_tools(brain_config, monkeypatch):
+    """Regression: the vision model used to receive the full conversation
+    history + tool schema via a 'follow-up route' swap, which could include
+    malformed history-sanitizer stub messages and caused both hallucinated
+    tool calls and, separately, non-terminating generation. _describe_image
+    is a single stateless call -- image in, text out -- with no history and
+    no tools, so neither failure mode has anything to latch onto."""
+    captured = {}
 
-    cfg = Config(
-        llm_url="https://example.com/v1",
-        llm_key="test-key",
-        llm_model="dummy",
-        native_tool_calling=True,
-        vision_enabled=True,
-    )
-    brain = Brain(cfg)
-    brain._pending_vision_image_url = "image-for-this-brain"
-    # Simulates a second, concurrent Brain instance's own desktop_screenshot
-    # call leaving its image in the shared global.
-    set_pending_vision_image("image-from-a-different-brain")
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
 
-    payload = brain._build_payload([{"role": "user", "content": "hi"}])
+        def json(self):
+            return {"choices": [{"message": {"content": "a red button"}}]}
 
-    content = payload["messages"][-1]["content"]
-    assert any(
-        isinstance(block, dict) and block.get("image_url", {}).get("url") == "image-for-this-brain"
-        for block in content
-    )
-    # The shared global is untouched by this Brain's payload build.
-    assert pop_pending_vision_image() == "image-from-a-different-brain"
+    class FakeVisionClient:
+        async def post(self, url, json):
+            captured["payload"] = json
+            return FakeResponse()
 
-
-def test_with_vision_image_rewrites_last_user_message_only():
-    messages = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "click OK"},
-    ]
-    out = _with_vision_image(messages, "data:image/png;base64,x")
-    assert out[0] == {"role": "system", "content": "sys"}
-    assert out[1]["content"] == [
-        {"type": "text", "text": "click OK"},
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
-    ]
-    # original list/dicts untouched -- history persistence stays string-only
-    assert messages[1]["content"] == "click OK"
-    assert _payload_is_vision({"messages": out}) is True
-    assert _payload_is_vision({"messages": messages}) is False
-
-
-def test_select_followup_route_prefers_vision_when_payload_carries_image(brain_config):
     brain = Brain(brain_config)
-    brain._vision_client = object()
+    brain._vision_client = FakeVisionClient()
     brain._vision_model = "vision-model"
-    payload = {"messages": [{"role": "user", "content": [{"type": "text", "text": "x"}]}]}
-    client, model, is_vision = brain._select_followup_route(payload)
-    assert (client, model, is_vision) == (brain._vision_client, "vision-model", True)
+
+    result = await brain._describe_image("data:image/png;base64,x")
+
+    assert result == "a red button"
+    payload = captured["payload"]
+    assert "tools" not in payload
+    assert "tool_choice" not in payload
+    assert payload["stream"] is False
+    assert payload["max_tokens"] == _VISION_MAX_TOKENS
+    assert payload["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe what is visible in this image factually and concisely."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+            ],
+        },
+    ]
 
 
-def test_select_followup_route_uses_llm_without_image(brain_config):
+@pytest.mark.asyncio
+async def test_describe_image_times_out_gracefully(brain_config, monkeypatch):
+    """Core regression check: a vision call that never returns must not hang
+    the turn forever -- it must resolve to a graceful message within the
+    configured deadline."""
+    import asyncio
+
+    class HangingVisionClient:
+        async def post(self, url, json):
+            await asyncio.sleep(10)
+
+    brain_config.vision_llm_timeout_s = 0.05
     brain = Brain(brain_config)
-    payload = {"messages": [{"role": "user", "content": "hi"}]}
-    client, model, is_vision = brain._select_followup_route(payload)
-    assert (client, model, is_vision) == (brain.client, brain_config.llm_model, False)
+    brain._vision_client = HangingVisionClient()
+    brain._vision_model = "vision-model"
+
+    async with asyncio.timeout(2):
+        result = await brain._describe_image("data:image/png;base64,x")
+
+    assert "timed out" in result
 
 
 def test_screen_query_phrase_matches():
@@ -272,6 +270,41 @@ def test_vision_annotate_handles_negative_and_swapped_bounds():
     assert annotated
 
 
+def test_to_data_url_downscales_oversized_screenshot():
+    """Regression: an unscaled full-resolution screenshot (~1.2MB base64)
+    silently produced empty responses from a local vision model instead of
+    a clean error -- almost certainly exceeding its practical image-size
+    handling. Downscaling on the long edge is the fix."""
+    if not desktop_vision.VISION_AVAILABLE:
+        pytest.skip("Pillow not installed in this environment")
+    import base64
+    import io as _io
+
+    from PIL import Image
+    img = Image.new("RGB", (1920, 1080), color="red")
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+
+    url = desktop_vision.to_data_url(buf.getvalue())
+    decoded = base64.b64decode(url.split(",", 1)[1])
+    resized = Image.open(_io.BytesIO(decoded))
+    assert max(resized.size) <= desktop_vision._MAX_VISION_DIMENSION
+
+
+def test_to_data_url_leaves_small_image_unscaled():
+    if not desktop_vision.VISION_AVAILABLE:
+        pytest.skip("Pillow not installed in this environment")
+    import io as _io
+
+    from PIL import Image
+    img = Image.new("RGB", (100, 100), color="blue")
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+
+    url = desktop_vision.to_data_url(buf.getvalue())
+    assert url.startswith("data:image/png;base64,")
+
+
 if __name__ == "__main__":
     test_desktop_control_tools_frozenset()
     test_desktop_tools_disabled_by_default()
@@ -282,9 +315,6 @@ if __name__ == "__main__":
     test_merge_ocr_elements_continues_mark_id_sequence()
     test_desktop_screenshot_disabled_by_default()
     test_pending_vision_image_pops_once()
-    test_with_vision_image_rewrites_last_user_message_only()
-    test_select_followup_route_prefers_vision_when_payload_carries_image(brain_config())
-    test_select_followup_route_uses_llm_without_image(brain_config())
     test_desktop_com_tools_covers_perception_and_effectors()
     test_uia_executor_matches_desktop_availability()
     test_vision_annotate_unavailable_without_pillow()

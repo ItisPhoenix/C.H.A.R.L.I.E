@@ -33,8 +33,12 @@ _ECHO_WINDOW_SEC = 2.0
 # been enqueued. Lets the playback worker distinguish "utterance fully spoken"
 # from momentary inter-chunk queue gaps.
 _TTS_RUN_END = object()
+# Marker tag for the (marker, text) 2-tuple carrying a run's sentence text to on_tts_start (live caption sync).
+_TTS_TEXT_MARKER = object()
 # Tags a chime item in playback_queue so it skips TTS state bookkeeping.
 _CHIME_ITEM = object()
+# Silence after a barge-in stop so the cut and the next reply aren't audibly spliced together.
+_BARGE_IN_PAUSE_S = 0.25
 _LONG_SENTENCE_CHARS = 250
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?,;])\s+")
 
@@ -56,10 +60,20 @@ _RE_DOUBLE_HYPHEN = re.compile(r"\s*--\s*")
 _RE_LIST_BULLET = re.compile(r"^[\s]*[-*+]\s+", re.MULTILINE)  # "- item" or "* item"
 _RE_NUMBERED_LIST = re.compile(r"^[\s]*\d+[.)]\s+", re.MULTILINE)  # "1. item"
 _RE_HASH_HEADER = re.compile(r"^#{1,6}\s+", re.MULTILINE)  # "## Header"
+_RE_TABLE_LINE = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)  # "| col | col |" row
 _RE_BOLD_ITALIC = re.compile(r"[*_]{1,3}(\S.*?\S)[*_]{1,3}")  # *bold* or _italic_
 _RE_INLINE_CODE = re.compile(r"`([^`]+)`")
 _RE_BACKTICK_WRAP = re.compile(r"^`|`$")
 _RE_TRAILING_PUNCT_NO_SPACE = re.compile(r"([.!?])([A-Z])")
+
+
+def _terminate_structural_line(line: str) -> str:
+    """Add a period to a list-item/header line missing terminal punctuation."""
+    is_structural = _RE_LIST_BULLET.match(line) or _RE_NUMBERED_LIST.match(line) or _RE_HASH_HEADER.match(line)
+    if is_structural and line.strip() and line.rstrip()[-1] not in ".!?:":
+        return line + "."
+    return line
+
 
 # Wrapper quotes from LLM output: "Hello world" -> Hello world
 _RE_WRAPPER_QUOTES = re.compile(r'^\s*["\u201c\u201d]\s*(.+?)\s*["\u201c\u201d]\s*$')
@@ -105,7 +119,7 @@ class VoiceEngine:
         self,
         config,
         on_speech: Callable[[str], None],
-        on_tts_start: Optional[Callable[[], None]] = None,
+        on_tts_start: Optional[Callable[[str], None]] = None,
         on_tts_stop: Optional[Callable[[], None]] = None,
     ):
         self.config = config
@@ -131,7 +145,6 @@ class VoiceEngine:
         # any part of it, not only the last one.
         self._recent_spoken_words: set = set()
         self.speech_echo_window = _ECHO_WINDOW_SEC
-        self._widget_callback = None
 
         # Speaker output state (driven by the dashboard audio controls).
         # `muted` silences TTS playback; `volume` is a 0.0-1.0 linear gain
@@ -162,10 +175,6 @@ class VoiceEngine:
         self._wake_word_active: bool = False  # True = in active session after wake word
         self._last_activity_time: float = 0.0
         self._on_wake_word: Optional[Callable[[], None]] = None
-
-    def set_widget_callback(self, cb: Callable[[str], None]) -> None:
-        """Register callback for mode changes (listening/speaking/idle)."""
-        self._widget_callback = cb
 
     def set_wake_word_callback(self, cb: Callable[[], None]) -> None:
         """Register callback for wake-word detection events."""
@@ -218,6 +227,19 @@ class VoiceEngine:
             asyncio.run_coroutine_threadsafe(bus.emit("vad_start", {}), loop)
         except Exception:
             logger.debug("vad_start emit failed", exc_info=True)
+
+    def _emit_alert(self, message: str, severity: str = "error") -> None:
+        """Publish a dashboard alert toast (mirrors background_task.py's pattern)."""
+        bus = getattr(self, "_event_bus", None)
+        loop = getattr(self, "_event_loop", None)
+        if bus is None or loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                bus.emit("alert", {"severity": severity, "message": message}), loop
+            )
+        except Exception:
+            logger.debug("alert emit failed", exc_info=True)
 
     @staticmethod
     def _rms(samples: "np.ndarray") -> float:
@@ -395,7 +417,10 @@ class VoiceEngine:
         text = _RE_EN_DASH.sub(", ", text)
         text = _RE_DOUBLE_HYPHEN.sub(", ", text)
 
-        # 4. Strip LLM formatting artifacts
+        # 4. Strip LLM formatting artifacts. Tables read cell-by-cell aloud are nonsense, so drop them.
+        text = _RE_TABLE_LINE.sub("", text)
+        # Terminal punctuation per structural line first, so its pause survives the newline-collapse below.
+        text = "\n".join(_terminate_structural_line(line) for line in text.split("\n"))
         text = _RE_LIST_BULLET.sub("", text)
         text = _RE_NUMBERED_LIST.sub("", text)
         text = _RE_HASH_HEADER.sub("", text)
@@ -488,9 +513,8 @@ class VoiceEngine:
         # Echo detection
         if self.is_echo(text):
             return ""
-        # A new reply (not a continuation chunk of one already being spoken)
-        # starts a fresh word set instead of carrying over the last reply's.
-        if not self.is_speaking.is_set():
+        # New reply starts fresh; is_speaking alone lags first-chunk playback, so also check the queues.
+        if not self.is_speaking.is_set() and self.tts_queue.empty() and self.playback_queue.empty():
             self._recent_spoken_words = set()
         self._last_speech_time = time.time()
 
@@ -557,7 +581,7 @@ class VoiceEngine:
                     mouth_values = []
                     return (samples, sample_rate, mouth_values)
                 except Exception as e:
-                    logger.error(f"synth_error | {e}")
+                    logger.error(f"synth_error | {e}", exc_info=True)
                     return None
         finally:
             phon_logger.setLevel(old_level)
@@ -610,7 +634,7 @@ class VoiceEngine:
             except queue.Empty:
                 continue
             except Exception as e:
-                logger.error(f"tts_worker_error | {e}")
+                logger.error(f"tts_worker_error | {e}", exc_info=True)
 
     async def _tts_stream_and_queue(self, text: str, speed: float):
         """Consume _synth_stream and push each chunk to playback_queue.
@@ -620,9 +644,18 @@ class VoiceEngine:
         span multiple chunks) is fully drained, rather than clearing
         is_speaking on the momentary gaps between chunks.
         """
+        _tts_start = time.time()
+        _first_chunk = True
+        self.playback_queue.put((_TTS_TEXT_MARKER, text))
         async for samples, sr in self._synth_stream(text, speed):
             if self.stop_tts_event.is_set():
                 break
+            if _first_chunk:
+                _first_chunk = False
+                logger.info(
+                    "pipeline_stage | stage=tts | latency_ms=%.1f",
+                    (time.time() - _tts_start) * 1000,
+                )
             self.playback_queue.put((samples, sr, []))
         if not self.stop_tts_event.is_set():
             self.playback_queue.put(_TTS_RUN_END)
@@ -630,6 +663,8 @@ class VoiceEngine:
     def _playback_worker(self):
         """Dedicated playback thread."""
         tts_started_fired = False
+        just_interrupted = False
+        current_chunk_text = ""
         while not self.stop_event.is_set():
             try:
                 if self.stop_tts_event.is_set():
@@ -649,11 +684,17 @@ class VoiceEngine:
                     self.is_speaking.clear()
                     self.tts_active.clear()
                     tts_started_fired = False
+                    just_interrupted = True
                     continue
 
                 try:
                     item = self.playback_queue.get(timeout=0.1)
                 except queue.Empty:
+                    continue
+
+                # 2-tuple text marker (see _TTS_TEXT_MARKER) -- stash it, no audio to play yet.
+                if isinstance(item, tuple) and len(item) == 2 and item[0] is _TTS_TEXT_MARKER:
+                    current_chunk_text = item[1]
                     continue
 
                 # Sentinel marking the true end of a TTS run.
@@ -688,12 +729,15 @@ class VoiceEngine:
 
                 # First chunk of a new TTS run
                 if not tts_started_fired:
+                    if just_interrupted:
+                        time.sleep(_BARGE_IN_PAUSE_S)
+                        just_interrupted = False
                     tts_started_fired = True
                     self.is_speaking.set()
                     self.tts_active.set()
                     if self._on_tts_start:
                         try:
-                            self._on_tts_start()
+                            self._on_tts_start(current_chunk_text)
                         except Exception:
                             pass
 
@@ -712,7 +756,7 @@ class VoiceEngine:
                 # after all chunks) signals the real end of the utterance.
 
             except Exception as e:
-                logger.error(f"playback_error | {e}")
+                logger.error(f"playback_error | {e}", exc_info=True)
                 if tts_started_fired and self._on_tts_stop:
                     try:
                         self._on_tts_stop()
@@ -880,8 +924,9 @@ class VoiceEngine:
         text = re.sub(
             r"\$(\d[\d,]*\.?\d*)\s*([BbMmTtKk])?(?!\w)", _replace_currency, text
         )
+        # (?!/) excludes unit slashes like "2.5 m/s" -- that "m" means meters, not million.
         text = re.sub(
-            r"(?<!\w)(\d[\d,]*\.?\d*)\s*([BbMmTtKk])(?!\w)", _replace_number, text
+            r"(?<!\w)(\d[\d,]*\.?\d*)\s*([BbMmTtKk])(?!\w)(?!/)", _replace_number, text
         )
         text = re.sub(r"(?<!\w)(\d{1,3}(?:,\d{3})+)(?!\w)", _replace_number, text)
 
@@ -922,6 +967,13 @@ class VoiceEngine:
     )
 
     def _symbols_to_words(self, text: str) -> str:
+        # ASCII-stripped later, so "30°C" silently lost the degree mark and read as bare "C" -- convert first.
+        text = re.sub(r"°\s*C\b", " degrees Celsius", text, flags=re.IGNORECASE)
+        text = re.sub(r"°\s*F\b", " degrees Fahrenheit", text, flags=re.IGNORECASE)
+        text = re.sub(r"°", " degrees", text)
+        # Numbers are already spelled out as words by this point, so no digit precedes "m/s" here.
+        text = re.sub(r"\bm/s\b", "meters per second", text)
+        text = re.sub(r"\bkm/h\b", "kilometers per hour", text)
         text = text.translate(self._SYMBOL_MAP)
         text = re.sub(r"(\d)\s+degrees\s+", r"\1 degrees ", text)
         return text
@@ -964,44 +1016,51 @@ class VoiceEngine:
         block_size = 1024
 
         def _callback(indata, frames, time_info, status):
-            # Mic muted: drop the frame before ASR and stop publishing its
-            # level so the VU meter reads flat instead of faking live audio.
-            if self.mic_muted:
-                return
-            # Avoid logging on the audio thread; check status flag silently or log on debug
             try:
-                self._audio_queue.put_nowait(indata.copy())
-            except queue.Full:
-                try:
-                    self._audio_queue.get_nowait()
-                except queue.Empty:
-                    pass
+                # Mic muted: drop frame before ASR so the VU meter reads flat instead of faking live audio.
+                if self.mic_muted:
+                    return
                 try:
                     self._audio_queue.put_nowait(indata.copy())
                 except queue.Full:
-                    pass  # drop oldest frame on overflow
-            # Publish live mic amplitude from every captured frame (throttled
-            # in _emit_audio_level). Near-zero when quiet, rises with speech.
-            self._emit_audio_level(self._rms(indata))
+                    try:
+                        self._audio_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._audio_queue.put_nowait(indata.copy())
+                    except queue.Full:
+                        pass  # drop oldest frame on overflow
+                # Publish live mic amplitude, throttled in _emit_audio_level.
+                self._emit_audio_level(self._rms(indata))
+            except Exception:
+                logger.error("Audio capture callback error", exc_info=True)
 
         self._audio_queue: queue.Queue = queue.Queue(maxsize=32)
 
         # Resolve input device: -1 -> system default
         input_device = None if self.config.mic_index == -1 else self.config.mic_index
 
-        try:
-            self.audio_stream = sd.InputStream(
-                samplerate=samplerate,
-                channels=1,
-                dtype="float32",
-                blocksize=block_size,
-                device=input_device,
-                callback=_callback,
-            )
-            self.audio_stream.start()
-        except Exception as e:
-            logger.error(f"Failed to open audio stream: {e}")
-            return
+        _MAX_OPEN_ATTEMPTS = 3
+        for attempt in range(1, _MAX_OPEN_ATTEMPTS + 1):
+            try:
+                self.audio_stream = sd.InputStream(
+                    samplerate=samplerate,
+                    channels=1,
+                    dtype="float32",
+                    blocksize=block_size,
+                    device=input_device,
+                    callback=_callback,
+                )
+                self.audio_stream.start()
+                break
+            except Exception as e:
+                logger.error(f"Failed to open audio stream (attempt {attempt}/{_MAX_OPEN_ATTEMPTS}): {e}",
+                             exc_info=True)
+                if attempt == _MAX_OPEN_ATTEMPTS:
+                    self._emit_alert(f"Microphone capture failed to start: {e}")
+                    return
+                time.sleep(2.0)
 
         try:
             dev_info = sd.query_devices(input_device)
@@ -1021,7 +1080,7 @@ class VoiceEngine:
             "beam_size": self.config.asr_beam_size,
             "best_of": self.config.asr_best_of,
             "repetition_penalty": self.config.asr_repetition_penalty,
-            "vad_threshold": self.config.vad_threshold,
+            "vad_threshold": self.config.asr_vad_threshold,
             "min_speech_duration_ms": self.config.vad_min_speech_duration_ms,
             "max_speech_duration_s": self.config.vad_max_speech_duration_s,
             "min_silence_duration_ms": self.config.vad_min_silence_duration_ms,
@@ -1205,4 +1264,4 @@ class VoiceEngine:
             except queue.Empty:
                 continue
             except Exception as e:
-                logger.error(f"asr_poller_error | {e}")
+                logger.error(f"asr_poller_error | {e}", exc_info=True)

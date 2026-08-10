@@ -127,6 +127,7 @@ class SessionStore:
                     ("source", "TEXT DEFAULT 'voice'"),
                     ("launch_id", "TEXT DEFAULT NULL"),
                     ("parent_session_id", "TEXT DEFAULT NULL"),
+                    ("project_id", "TEXT DEFAULT NULL"),
                 ):
                     try:
                         self.conn.execute(
@@ -134,6 +135,16 @@ class SessionStore:
                         )
                     except sqlite3.OperationalError:
                         pass  # Column already exists
+
+                # Migration: pre-fix DBs have non-ISO timestamps (no T/Z), misparsed by browsers as local time.
+                self.conn.execute(
+                    "UPDATE sessions SET created_at = REPLACE(created_at, ' ', 'T') || 'Z' "
+                    "WHERE created_at IS NOT NULL AND created_at NOT LIKE '%Z'"
+                )
+                self.conn.execute(
+                    "UPDATE sessions SET updated_at = REPLACE(updated_at, ' ', 'T') || 'Z' "
+                    "WHERE updated_at IS NOT NULL AND updated_at NOT LIKE '%Z'"
+                )
 
                 # Check for FTS5 support before creating virtual table
                 fts5_supported = True
@@ -194,11 +205,38 @@ class SessionStore:
                     """CREATE TABLE IF NOT EXISTS tool_events (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         session_id TEXT NOT NULL,
+                        turn_id TEXT,
                         kind TEXT NOT NULL,
                         name TEXT NOT NULL,
                         text TEXT,
                         created_at TEXT NOT NULL
                     )"""
+                )
+                # Migration: add turn_id to pre-existing tool_events tables
+                try:
+                    self.conn.execute("ALTER TABLE tool_events ADD COLUMN turn_id TEXT")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+                self.conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_tool_events_turn_id "
+                    "ON tool_events(turn_id)"
+                )
+                # Sub-agent run status, one row per agent_id, survives web_server restart
+                self.conn.execute(
+                    """CREATE TABLE IF NOT EXISTS agent_runs (
+                        agent_id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        task TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'running',
+                        last_tool TEXT,
+                        result TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )"""
+                )
+                self.conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_agent_runs_session_id "
+                    "ON agent_runs(session_id, created_at)"
                 )
         except sqlite3.Error as e:
             logger.error(f"Database initialization failed: {e}")
@@ -342,15 +380,16 @@ class SessionStore:
         source: str = "voice",
         launch_id: Optional[str] = None,
         parent_session_id: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> None:
         """Creates a session metadata row with origin tracking."""
         try:
             with self.conn:
                 self.conn.execute(
                     "INSERT OR IGNORE INTO sessions "
-                    "(session_id, title, source, launch_id, parent_session_id) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (session_id, title, source, launch_id, parent_session_id),
+                    "(session_id, title, source, launch_id, parent_session_id, project_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, title, source, launch_id, parent_session_id, project_id, utc_now_iso()),
                 )
                 # If the row already exists but source/launch_id were NULL,
                 # backfill them so filtering works for sessions created before this migration.
@@ -435,38 +474,125 @@ class SessionStore:
     def append_tool_event(
         self,
         session_id: str,
+        turn_id: Optional[str],
         kind: str,
         name: str,
         text: Optional[str] = None,
     ) -> None:
-        """Records a structured tool activity (call/result) for a session."""
+        """Records a structured tool activity (call/result) for a session/turn."""
         try:
             with self.conn:
                 self.conn.execute(
-                    "INSERT INTO tool_events (session_id, kind, name, text, created_at) "
-                    "VALUES (?,?,?,?,?)",
-                    (session_id, kind, name, text, utc_now_iso()),
+                    "INSERT INTO tool_events (session_id, turn_id, kind, name, text, created_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (session_id, turn_id, kind, name, text, utc_now_iso()),
                 )
         except sqlite3.Error as e:
             logger.error(f"append_tool_event failed: {e}")
 
-    def get_tool_events(self, session_id: str) -> List[Tuple[str, str, Optional[str]]]:
-        """Returns (kind, name, text) tool events for a session, oldest first."""
+    def get_tool_events(self, session_id: str) -> List[Tuple[Optional[str], str, str, Optional[str]]]:
+        """Returns (turn_id, kind, name, text) tool events for a session, oldest first."""
         try:
             rows = self.conn.execute(
-                "SELECT kind, name, text FROM tool_events WHERE session_id = ? ORDER BY id ASC",
+                "SELECT turn_id, kind, name, text FROM tool_events WHERE session_id = ? ORDER BY id ASC",
                 (session_id,),
             ).fetchall()
-            return [(r[0], r[1], r[2]) for r in rows]
+            return [(r[0], r[1], r[2], r[3]) for r in rows]
         except sqlite3.Error as e:
             logger.error(f"get_tool_events failed: {e}")
             return []
 
+    def get_session_messages_with_turn_id(
+        self, session_id: str, limit: int = 50
+    ) -> List[Tuple[str, str, Optional[int]]]:
+        """Returns (role, content, turn_id) for a session, oldest first.
+
+        Separate from get_session_messages/get_recent so Brain's history-loading
+        hot path (which unpacks 2-tuples) stays untouched -- this is REST-only.
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT role, content, turn_id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                (session_id, limit),
+            )
+            return list(reversed(cursor.fetchall()))
+        except sqlite3.Error as e:
+            logger.error(f"get_session_messages_with_turn_id failed: {e}")
+            return []
+
+    def create_agent_run(self, agent_id: str, task: str, session_id: str) -> None:
+        """Records a newly spawned sub-agent as 'running'."""
+        try:
+            with self.conn:
+                now = utc_now_iso()
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO agent_runs "
+                    "(agent_id, session_id, task, status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'running', ?, ?)",
+                    (agent_id, session_id, task, now, now),
+                )
+        except sqlite3.Error as e:
+            logger.error(f"create_agent_run failed: {e}")
+
+    def update_agent_run(
+        self,
+        agent_id: str,
+        last_tool: Optional[str] = None,
+        status: Optional[str] = None,
+        result: Optional[str] = None,
+    ) -> None:
+        """Updates an existing agent run's last-seen tool, status, and/or result."""
+        fields = ["updated_at = ?"]
+        params: List[object] = [utc_now_iso()]
+        if last_tool is not None:
+            fields.append("last_tool = ?")
+            params.append(last_tool)
+        if status is not None:
+            fields.append("status = ?")
+            params.append(status)
+        if result is not None:
+            fields.append("result = ?")
+            params.append(result)
+        params.append(agent_id)
+        try:
+            with self.conn:
+                self.conn.execute(
+                    f"UPDATE agent_runs SET {', '.join(fields)} WHERE agent_id = ?",
+                    params,
+                )
+        except sqlite3.Error as e:
+            logger.error(f"update_agent_run failed: {e}")
+
+    def get_agent_runs(
+        self, session_id: Optional[str] = None, limit: int = 100
+    ) -> List[Tuple[str, str, str, str, Optional[str], Optional[str], str, str]]:
+        """Returns (agent_id, session_id, task, status, last_tool, result, created_at,
+        updated_at) rows, most recently created first."""
+        try:
+            if session_id:
+                rows = self.conn.execute(
+                    "SELECT agent_id, session_id, task, status, last_tool, result, "
+                    "created_at, updated_at FROM agent_runs WHERE session_id = ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (session_id, limit),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT agent_id, session_id, task, status, last_tool, result, "
+                    "created_at, updated_at FROM agent_runs ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [tuple(r) for r in rows]
+        except sqlite3.Error as e:
+            logger.error(f"get_agent_runs failed: {e}")
+            return []
+
     def close(self) -> None:
-        """Closes connection cleanly."""
-        if self.conn:
+        """Closes connection cleanly, without lazily opening one first via the conn property."""
+        if getattr(self._local, "conn", None):
             try:
-                self.conn.close()
+                self._local.conn.close()
             except sqlite3.Error:
                 pass
-            self.conn = None
+            self._local.conn = None

@@ -10,7 +10,7 @@ interface FieldSpec {
   label: string;
   type: "bool" | "int" | "float" | "str" | "list";
   secret: boolean;
-  restart: "voice" | "mcp" | "plugins" | "process" | null;
+  restart: "voice" | "mcp" | "plugins" | "process" | "reload" | null;
   value: unknown;
   is_set: boolean | null;
 }
@@ -41,6 +41,7 @@ const GROUP_ORDER = [
   "Vector Memory",
   "Agentic OS",
   "Desktop Control",
+  "Companion",
   "Vision",
   "Plugins",
   "Server",
@@ -53,20 +54,22 @@ const GROUP_HELP: Record<string, string> = {
   "Chat Behavior": "Tool calling, context window, and history compression.",
   "Memory Files": "MEMORY.md / USER.md / OPINIONS.md and session history storage.",
   "Search Providers": "Web search fallback chain.",
-  "Wake Word": "Hands-free “Charlie” activation.",
+  "Wake Word": "Hands-free \"Charlie\" activation.",
   "Vector Memory": "Semantic recall and the knowledge graph.",
   "Agentic OS": "Swarm orchestration and MCP servers.",
   "Desktop Control": "Screen perception and UI automation.",
+  "Companion": "Desktop pet customization and color themes.",
   "Vision": "Separate vision-model endpoint for screenshots.",
   "Plugins": "Hybrid plugin sandbox.",
   "Server": "Bind address and settings that need a full restart.",
 };
 
 const RESTART_META: Record<string, { label: string; color: string; bg: string }> = {
-  voice: { label: "Voice · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "rgba(6, 182, 212, 0.1)" },
-  mcp: { label: "MCP · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "rgba(6, 182, 212, 0.1)" },
-  plugins: { label: "Plugins · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "rgba(6, 182, 212, 0.1)" },
-  process: { label: "Needs restart", color: "#f59e0b", bg: "rgba(245, 158, 11, 0.1)" },
+  voice: { label: "Voice · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "var(--color-accent-teal-dim)" },
+  mcp: { label: "MCP · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "var(--color-accent-teal-dim)" },
+  plugins: { label: "Plugins · Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "var(--color-accent-teal-dim)" },
+  reload: { label: "Reload", color: "var(--color-accent-teal, #06b6d4)", bg: "var(--color-accent-teal-dim)" },
+  process: { label: "Needs restart", color: "var(--color-status-warning)", bg: "var(--color-status-warning-dim)" },
 };
 
 const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
@@ -81,12 +84,36 @@ const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
     { value: "small", label: "small" },
     { value: "base", label: "base" },
   ],
+  // All English-language Kokoro voices (lang prefix a=American, b=British).
   KOKORO_VOICE: [
-    { value: "af_heart", label: "af_heart (warm female, default)" },
-    { value: "af_bella", label: "af_bella" },
-    { value: "af_nicole", label: "af_nicole" },
-    { value: "am_adam", label: "am_adam (warm male)" },
-    { value: "am_michael", label: "am_michael" },
+    { value: "af_heart", label: "af_heart (American female, default)" },
+    { value: "af_alloy", label: "af_alloy (American female)" },
+    { value: "af_aoede", label: "af_aoede (American female)" },
+    { value: "af_bella", label: "af_bella (American female)" },
+    { value: "af_jessica", label: "af_jessica (American female)" },
+    { value: "af_kore", label: "af_kore (American female)" },
+    { value: "af_nicole", label: "af_nicole (American female)" },
+    { value: "af_nova", label: "af_nova (American female)" },
+    { value: "af_river", label: "af_river (American female)" },
+    { value: "af_sarah", label: "af_sarah (American female)" },
+    { value: "af_sky", label: "af_sky (American female)" },
+    { value: "am_adam", label: "am_adam (American male)" },
+    { value: "am_echo", label: "am_echo (American male)" },
+    { value: "am_eric", label: "am_eric (American male)" },
+    { value: "am_fenrir", label: "am_fenrir (American male)" },
+    { value: "am_liam", label: "am_liam (American male)" },
+    { value: "am_michael", label: "am_michael (American male)" },
+    { value: "am_onyx", label: "am_onyx (American male)" },
+    { value: "am_puck", label: "am_puck (American male)" },
+    { value: "am_santa", label: "am_santa (American male)" },
+    { value: "bf_alice", label: "bf_alice (British female)" },
+    { value: "bf_emma", label: "bf_emma (British female)" },
+    { value: "bf_isabella", label: "bf_isabella (British female)" },
+    { value: "bf_lily", label: "bf_lily (British female)" },
+    { value: "bm_daniel", label: "bm_daniel (British male)" },
+    { value: "bm_fable", label: "bm_fable (British male)" },
+    { value: "bm_george", label: "bm_george (British male)" },
+    { value: "bm_lewis", label: "bm_lewis (British male)" },
   ],
 };
 
@@ -226,10 +253,10 @@ export default function SettingsPage(): ReactElement {
   };
 
   return (
-    <div className="h-full w-full bg-black text-[#f4f6fa] flex flex-col overflow-hidden font-sans">
+    <div className="h-full w-full bg-black text-[var(--color-text-primary)] flex flex-col overflow-hidden font-sans">
       
       {/* Header bar */}
-      <header className="px-8 py-4 border-b border-[rgba(255,255,255,0.07)] bg-zinc-950/80 backdrop-blur-md flex items-center justify-between shrink-0 select-none">
+      <header className="px-8 py-4 border-b border-[var(--color-glass-border)] bg-zinc-950/80 backdrop-blur-md flex items-center justify-between shrink-0 select-none">
         <div className="flex items-center gap-4">
           <Link
             href="/"
@@ -242,7 +269,7 @@ export default function SettingsPage(): ReactElement {
             <h1 className="font-display text-lg font-bold uppercase tracking-wide">
               Settings Config
             </h1>
-            <p className="text-[10px] text-slate-500 font-mono">
+            <p className="text-xs text-slate-500 font-mono">
               Charlie Engine Properties Editor
             </p>
           </div>
@@ -276,7 +303,7 @@ export default function SettingsPage(): ReactElement {
       <div className="flex-1 flex overflow-hidden">
         
         {/* Sticky sidebar category navigator */}
-        <nav className="w-60 border-r border-[rgba(255,255,255,0.07)] bg-zinc-950/20 p-4 shrink-0 flex flex-col gap-1 overflow-y-auto scrollbar select-none">
+        <nav className="w-60 border-r border-[var(--color-glass-border)] bg-zinc-950/20 p-4 shrink-0 flex flex-col gap-1 overflow-y-auto scrollbar select-none">
           <div className="relative flex items-center mb-3">
             <Search className="absolute left-2.5 w-3.5 h-3.5 text-slate-500" />
             <input
@@ -284,13 +311,13 @@ export default function SettingsPage(): ReactElement {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search properties..."
-              className="w-full rounded-lg bg-zinc-900/60 border border-[rgba(255,255,255,0.07)] pl-8 pr-2.5 py-1.5 text-xs text-[#f4f6fa] placeholder:text-slate-500 outline-none transition focus:border-[rgba(255,255,255,0.15)]"
+              className="w-full rounded-lg bg-zinc-900/60 border border-[var(--color-glass-border)] pl-8 pr-2.5 py-1.5 text-xs text-[var(--color-text-primary)] placeholder:text-slate-500 outline-none transition focus:border-[var(--color-glass-border-hover)]"
             />
           </div>
 
-          <h3 className="px-2 text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono mb-2">
+          <h2 className="px-2 text-xs font-bold text-slate-500 uppercase tracking-widest font-mono mb-2">
             Categories
-          </h3>
+          </h2>
 
           <div className="space-y-0.5">
             {visibleGroups.map((group) => (
@@ -375,19 +402,19 @@ function FieldRow({
     <div
       className={`${
         wide ? "col-span-1 md:col-span-2" : "col-span-1"
-      } flex flex-col justify-between p-4 bg-zinc-900/30 border border-[rgba(255,255,255,0.07)] rounded-xl transition hover:border-[rgba(255,255,255,0.12)] min-h-[110px]`}
+      } flex flex-col justify-between p-4 bg-zinc-900/30 border border-[var(--color-glass-border)] rounded-xl transition hover:border-[var(--color-glass-border-hover)] min-h-[110px]`}
     >
       <div>
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs font-semibold text-slate-200">{spec.label}</span>
-          {saveState === "saved" && <span className="text-[10px] font-mono text-emerald-400 uppercase font-bold">Saved</span>}
-          {saveState === "error" && <span className="text-[10px] font-mono text-red-400 uppercase font-bold">Failed</span>}
+          {saveState === "saved" && <span className="text-xs font-mono text-emerald-400 uppercase font-bold">Saved</span>}
+          {saveState === "error" && <span className="text-xs font-mono text-red-400 uppercase font-bold">Failed</span>}
         </div>
         <div className="flex items-center gap-1.5 flex-wrap mt-1">
-          <span className="text-[9px] font-mono text-slate-500 uppercase">{spec.key}</span>
+          <span className="text-xs font-mono text-slate-500 uppercase">{spec.key}</span>
           {restartMeta && (
             <span
-              className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full"
+              className="text-xs font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full"
               style={{ color: restartMeta.color, background: restartMeta.bg }}
             >
               {restartMeta.label}
@@ -429,6 +456,22 @@ function FieldRow({
             rows={2}
             className="w-full bg-zinc-950 border border-white/10 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-white/20 transition resize-y scrollbar"
           />
+        ) : spec.key === "PET_COLOR" ? (
+          <div className="flex items-center gap-2">
+            <input
+              type="color"
+              aria-label="Pet accent color"
+              value={String(value || "#00ffff")}
+              onChange={(e) => onChange(e.target.value)}
+              className="w-8 h-8 rounded cursor-pointer bg-transparent border-0 p-0"
+            />
+            <input
+              type="text"
+              value={String(value ?? "")}
+              onChange={(e) => onChange(e.target.value)}
+              className="flex-1 bg-zinc-950 border border-white/10 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-white/20 transition"
+            />
+          </div>
         ) : (
           <input
             type={spec.secret ? "password" : spec.type === "int" || spec.type === "float" ? "number" : "text"}

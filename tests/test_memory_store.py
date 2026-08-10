@@ -7,33 +7,34 @@ Mock chromadb at sys.modules level so its transitive dependencies
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # Pre-emptive module stubs — prevent torchvision/grpc from ever loading.
+# Scoped to each test via monkeypatch (auto-restored afterward) rather than a
+# raw sys.modules mutation at collection time -- test_memory_reembed.py needs
+# the real chromadb in the same pytest session, and a permanent module-level
+# swap either leaks the stub into that file's real imports or (if that file
+# collects first) never takes effect at all, depending on file collection
+# order. Neither failure mode is acceptable, hence per-test scoping.
 # ---------------------------------------------------------------------------
-def _install_stub(modname: str):
-    fake = MagicMock()
-    fake.__spec__ = MagicMock()
-    fake.__spec__.submodule_search_locations = []
-    sys.modules.setdefault(modname, fake)
-
-
-# ChromaDB and its tree
-for mod in [
-    "chromadb",
-    "chromadb.errors",
-    "chromadb.api",
-    "chromadb.api.client",
-    "chromadb.config",
-]:
-    _install_stub(mod)
-
-# Sentence-transformers (pulls torch)
-for mod in [
-    "sentence_transformers",
-    "sentence_transformers.SentenceTransformer",
-]:
-    _install_stub(mod)
+@pytest.fixture(autouse=True)
+def _stub_heavy_deps(monkeypatch):
+    for modname in [
+        "chromadb",
+        "chromadb.errors",
+        "chromadb.api",
+        "chromadb.api.client",
+        "chromadb.config",
+        "sentence_transformers",
+        "sentence_transformers.SentenceTransformer",
+    ]:
+        fake = MagicMock()
+        fake.__spec__ = MagicMock()
+        fake.__spec__.submodule_search_locations = []
+        monkeypatch.setitem(sys.modules, modname, fake)
+    yield
 
 
 # ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+import json
 import sys
 
 import pytest
@@ -17,6 +18,31 @@ def brain_config():
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_loads_full_turn_pairs_not_half(brain_config):
+    """Regression: history load passed limit=_history_max_turns (a message
+    count) to get_session_messages, but _history_max_turns means turns
+    (user+assistant pairs) everywhere else in this file -- silently loading
+    half the intended context on every turn."""
+    captured = {}
+
+    class FakeStore:
+        def get_session_messages(self, session_id, limit=50):
+            captured["limit"] = limit
+            return []
+
+    brain = Brain(brain_config)
+    brain.session_store = FakeStore()
+
+    try:
+        async for _ in brain.chat_stream("hi", skip_tools=True, skip_fast_paths=True):
+            break
+    except Exception:
+        pass
+
+    assert captured["limit"] == brain._history_max_turns * 2
+
+
+@pytest.mark.asyncio
 async def test_budget_exhaustion(monkeypatch, brain_config):
     brain = Brain(brain_config)
 
@@ -32,7 +58,17 @@ async def test_budget_exhaustion(monkeypatch, brain_config):
 
             async def aiter_lines(self):
                 if followup_count <= 4:
-                    yield 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"123","function":{"name":"web_search","arguments":"{\\"query\\":\\"test\\"}"}}]}}]}'  # noqa: E501
+                    # Distinct query per round -- identical calls are free and wouldn't exhaust budget.
+                    chunk = {
+                        "choices": [{"delta": {"tool_calls": [{
+                            "index": 0, "id": "123",
+                            "function": {
+                                "name": "web_search",
+                                "arguments": json.dumps({"query": f"test{followup_count}"}),
+                            },
+                        }]}}]
+                    }
+                    yield f"data: {json.dumps(chunk)}"
                 else:
                     yield 'data: {"choices":[{"delta":{"content":"done"}}]}'
                 yield "data: [DONE]"
@@ -142,17 +178,17 @@ def test_detect_close_app(monkeypatch):
     monkeypatch.setattr(subprocess, "run", mock_run)
     monkeypatch.setattr("sys.platform", "win32")
 
-    # 1. Test match and successful taskkill (single)
+    # Test match and successful taskkill (single)
     res = _detect_close_app("close chrome")
     assert res == "Chrome has been closed for you."
     assert "taskkill /IM chrome.exe /F" in called_cmds
 
-    # 2. Test direct .exe usage
+    # Test direct .exe usage
     res = _detect_close_app("charlie, close notepad.exe")
     assert res == "Notepad has been closed for you."
     assert "taskkill /IM notepad.exe /F" in called_cmds
 
-    # 3. Test closing multiple apps
+    # Test closing multiple apps
     called_cmds.clear()
     res = _detect_close_app("close chrome and notepad")
     assert "Notepad and Chrome" in res
@@ -160,7 +196,7 @@ def test_detect_close_app(monkeypatch):
     assert "taskkill /IM chrome.exe /F" in called_cmds
     assert "taskkill /IM notepad.exe /F" in called_cmds
 
-    # 4. Test closing running and not running mix
+    # Test closing running and not running mix
     called_cmds.clear()
 
     def mock_run_mix(cmd, *args, **kwargs):
@@ -178,7 +214,7 @@ def test_detect_close_app(monkeypatch):
     assert "Notepad has been closed for you." in res
     assert "Chrome is not currently running." in res
 
-    # 5. Test unknown app
+    # Test unknown app
     res = _detect_close_app("close unknownapp")
     assert res is None
 
@@ -419,7 +455,7 @@ def test_detect_open_app(monkeypatch):
     monkeypatch.setattr("sys.platform", "win32")
     monkeypatch.setattr("charlie.core.is_process_running", lambda name: False)
 
-    # 1. Test opening single app
+    # Test opening single app
     res = _detect_open_app("open calculator")
     msg, remaining = res
     assert msg == "I've opened Calculator for you."
@@ -433,7 +469,7 @@ def test_detect_open_app(monkeypatch):
     assert 'start "" chrome' in called_cmds
     assert 'start "" calc' in called_cmds
 
-    # 3. Test opening whitelisted websites by name
+    # Test opening whitelisted websites by name
     called_cmds.clear()
     res = _detect_open_app("open youtube and github")
     msg, remaining = res
@@ -442,29 +478,37 @@ def test_detect_open_app(monkeypatch):
     assert 'start "" https://youtube.com' in called_cmds
     assert 'start "" https://github.com' in called_cmds
 
-    # 4. Test opening generic domains/URLs
+    # Fuzzy fallback for ASR mis-transcriptions (e.g. "notepad" heard as "noteped")
+    called_cmds.clear()
+    res = _detect_open_app("open noteped")
+    msg, remaining = res
+    assert msg == "I've opened Notepad for you."
+    assert remaining is None
+
+    # Test opening generic domains/URLs
     called_cmds.clear()
     res = _detect_open_app("open reddit.com, wikipedia.org and https://neon.tech")
     msg, remaining = res
     assert "reddit.com" in msg
     assert "wikipedia.org" in msg
-    assert "https://neon.tech" in msg
+    assert "neon.tech" in msg
+    assert "https://neon.tech" not in msg
     assert remaining is None
     assert 'start "" https://reddit.com' in called_cmds
     assert 'start "" https://wikipedia.org' in called_cmds
     assert 'start "" https://neon.tech' in called_cmds
 
-    # 5. Test float/version number exclusion (must not match as domain)
+    # Test float/version number exclusion (must not match as domain)
     res = _detect_open_app("open version 3.5")
     assert res is None
 
-    # 6. Test unknown app
+    # Test unknown app
     res = _detect_open_app("open unknownapp")
     assert res is None
 
-    # 7. Compound instruction: the app still opens as a side effect (no more
-    # full bypass), and the leftover instruction comes back for the caller
-    # to hand to the LLM instead of the fast-path silently doing nothing extra.
+    # Compound instruction: the app still opens as a side effect (no more full
+    # bypass), and the leftover instruction comes back for the caller to hand
+    # to the LLM instead of the fast-path silently doing nothing extra.
     called_cmds.clear()
     res = _detect_open_app("open notepad and write hello")
     assert res is not None
@@ -552,7 +596,7 @@ def test_detect_open_app_focuses_already_running_instead_of_relaunching(monkeypa
     """Regression: several apps (Windows 11's modern Notepad included) allow
     multiple simultaneous instances, so a blind relaunch piles up duplicate
     windows instead of erroring like a single-instance app would -- found
-    live during Phase 3 background-task testing (4+ Notepad windows from
+    live during background-task testing (4+ Notepad windows from
     repeated "open notepad" calls). An already-running app gets focused via
     the same native focus_window() the desktop_focus tool uses, not relaunched."""
     import subprocess
@@ -894,3 +938,4 @@ def test_plugin_fs_search_has_extended_timeout():
     from charlie.core import _TOOL_TIMEOUT_SEC, _TOOL_TIMEOUTS
 
     assert _TOOL_TIMEOUTS["plugin_fs_search"] > _TOOL_TIMEOUT_SEC
+

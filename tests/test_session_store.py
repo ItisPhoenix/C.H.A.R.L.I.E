@@ -50,19 +50,17 @@ def test_session_metadata_ops():
 
     store = SessionStore(db_path)
     try:
-        # 1. Create a session
         store.create_session(
             "sess_1", title="New Chat", source="web", launch_id="launch_123"
         )
 
-        # 2. Get sessions and verify
         sessions = store.get_sessions()
         assert len(sessions) == 1
         assert sessions[0][0] == "sess_1"
         assert sessions[0][1] == "New Chat"
         assert sessions[0][3] is None  # updated_at initially None
 
-        # 3. Touch session and verify updated_at is populated
+        # Touch session and verify updated_at is populated
         store.touch_session("sess_1")
         sessions = store.get_sessions()
         assert sessions[0][3] is not None  # updated_at should now be set
@@ -71,12 +69,11 @@ def test_session_metadata_ops():
         with store.conn:
             store.conn.execute("UPDATE sessions SET updated_at = ? WHERE session_id = ?", (first_touch, "sess_1"))
 
-        # 4. Update session title and verify
         store.update_session_title("sess_1", "Updated Title")
         sessions = store.get_sessions()
         assert sessions[0][1] == "Updated Title"
         assert sessions[0][3] != first_touch  # updated_at should have changed
-        # 5. Delete session and verify
+        # Delete session and verify
         store.append("user", "test msg", session_id="sess_1")
         messages = store.get_session_messages("sess_1")
         assert len(messages) == 1
@@ -205,9 +202,9 @@ def _cleanup_db(db_path: str) -> None:
 def test_tool_events_roundtrip(tmp_path):
     store = SessionStore(db_path=str(tmp_path / "s.db"))
     store.create_session("s1", "t")
-    store.append_tool_event("s1", "tool_call", "web_search", "ran")
+    store.append_tool_event("s1", "turn-1", "tool_call", "web_search", "ran")
     rows = store.get_tool_events("s1")
-    assert rows == [("tool_call", "web_search", "ran")], rows
+    assert rows == [("turn-1", "tool_call", "web_search", "ran")], rows
     store.close()
 
 
@@ -244,6 +241,39 @@ def test_search_scoped_by_launch_id():
         all_hits_b = store.search("moonsculptor")
         assert len(all_hits_a) == 1
         assert len(all_hits_b) == 1
+    finally:
+        store.close()
+        _cleanup_db(db_path)
+
+
+def test_agent_run_lifecycle():
+    """spawn -> status update -> result must round-trip through get_agent_runs."""
+    db_path = "test_sessions_agents.db"
+    _cleanup_db(db_path)
+
+    store = SessionStore(db_path)
+    try:
+        store.create_agent_run("agent_1", "research the weather API", session_id="sess_a")
+        rows = store.get_agent_runs(session_id="sess_a")
+        assert len(rows) == 1
+        agent_id, session_id, task, status, last_tool, result, created_at, updated_at = rows[0]
+        assert (agent_id, session_id, task, status) == ("agent_1", "sess_a", "research the weather API", "running")
+        assert last_tool is None and result is None
+
+        store.update_agent_run("agent_1", last_tool="web_search")
+        rows = store.get_agent_runs(session_id="sess_a")
+        assert rows[0][4] == "web_search"
+        assert rows[0][3] == "running"
+
+        store.update_agent_run("agent_1", status="done", result="It is sunny.")
+        rows = store.get_agent_runs(session_id="sess_a")
+        assert rows[0][3] == "done"
+        assert rows[0][5] == "It is sunny."
+
+        # Session filter excludes other sessions' runs
+        store.create_agent_run("agent_2", "unrelated task", session_id="sess_b")
+        assert len(store.get_agent_runs(session_id="sess_a")) == 1
+        assert len(store.get_agent_runs()) == 2
     finally:
         store.close()
         _cleanup_db(db_path)

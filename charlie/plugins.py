@@ -19,7 +19,16 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
+import trafilatura
+
 logger = logging.getLogger("charlie.plugins")
+
+_FETCH_TIMEOUT_SEC = 15.0
+_JINA_TIMEOUT_SEC = 20.0
+_FETCH_MAX_CHARS = 50000
+# Below this, trafilatura's extraction is probably an empty JS-rendered shell, not real content.
+_MIN_EXTRACTED_CHARS = 200
 
 
 # ---------------------------------------------------------------------------
@@ -406,20 +415,32 @@ class BrowserPlugin(Plugin):
         raise ValueError(f"Unknown tool: {tool_name}")
 
     def _fetch(self, url: str) -> Dict[str, Any]:
-        """Fetch URL content using curl as fallback."""
+        """Fetch a URL and extract clean text. Raw HTML goes through trafilatura;
+        pages that come back near-empty (JS-rendered shells) fall back to Jina
+        Reader (r.jina.ai), which renders the page server-side, for free."""
         try:
-            result = subprocess.run(
-                ["curl", "-sL", "--max-time", "15", url],
-                capture_output=True,
-                text=True,
-                timeout=20,
+            resp = httpx.get(
+                url, timeout=_FETCH_TIMEOUT_SEC, follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; CharlieBot/1.0)"},
             )
-            if result.returncode == 0:
-                content = result.stdout[:50000]  # Cap at 50k chars
-                return {"url": url, "content": content, "length": len(content)}
-            return {"error": f"curl failed: {result.stderr[:200]}"}
+            resp.raise_for_status()
+            text = trafilatura.extract(resp.text) or ""
         except Exception as exc:
-            return {"error": str(exc)}
+            text = ""
+            logger.debug("Direct fetch failed for %s: %s", url, exc)
+
+        if len(text.strip()) < _MIN_EXTRACTED_CHARS:
+            try:
+                jina_resp = httpx.get(f"https://r.jina.ai/{url}", timeout=_JINA_TIMEOUT_SEC)
+                if jina_resp.status_code == 200 and jina_resp.text.strip():
+                    text = jina_resp.text
+            except Exception as exc:
+                logger.debug("Jina Reader fallback failed for %s: %s", url, exc)
+
+        if not text.strip():
+            return {"error": f"Could not extract content from {url}"}
+        content = text[:_FETCH_MAX_CHARS]
+        return {"url": url, "content": content, "length": len(content)}
 
     def _screenshot(self, url: str, output_path: str) -> Dict[str, Any]:
         """Take screenshot using playwright if available."""
@@ -592,26 +613,28 @@ class CodeExecPlugin(Plugin):
                     slc = node.slice
                     if isinstance(slc, ast.Constant) and isinstance(slc.value, str) and slc.value.startswith("__"):
                         return {"error": "Rejected: dunder index access not allowed."}
-                if isinstance(node, ast.Call):
-                    func = node.func
-                    if isinstance(func, ast.Name):
-                        if func.id in _BANNED_BUILTINS:
-                            return {"error": f"Rejected: call to dangerous builtin '{func.id}' is blocked."}
-                        if func.id.startswith("__"):
-                            return {"error": f"Rejected: call to dunder builtin '{func.id}' is blocked."}
+                if isinstance(node, ast.Name):
+                    if node.id in _BANNED_BUILTINS:
+                        return {"error": f"Rejected: reference to dangerous builtin '{node.id}' is blocked."}
+                    if node.id.startswith("__"):
+                        return {"error": f"Rejected: reference to dunder builtin '{node.id}' is blocked."}
         except SyntaxError as e:
             return {"error": f"SyntaxError: {e}"}
 
         try:
             wrapped = code + ("\n" if not code.endswith("\n") else "")
-            # Run with an empty environment so the parent's API keys and other
-            # secrets are never inherited by the sandboxed child process.
+            # Empty environment (plus PYTHONIOENCODING) so the parent's API keys
+            # and other secrets are never inherited by the sandboxed child
+            # process -- PYTHONIOENCODING is not a secret, it just keeps the
+            # child's own print() from defaulting to Windows' cp1252 console
+            # codepage and crashing on non-ASCII output.
             result = subprocess.run(
                 [sys.executable, "-c", wrapped],
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self._timeout,
-                env={},
+                env={"PYTHONIOENCODING": "utf-8"},
             )
             output = result.stdout
             if result.stderr:

@@ -14,13 +14,15 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import httpx
 
-from charlie import recovery
+from charlie import recovery, reminders
 from charlie.config import config
 from charlie.known_apps import APP_REGISTRY
+from charlie.projects import Projects
+from charlie.scratchpad import Scratchpad
 from charlie.session_store import SessionStore
 from charlie.utils import is_process_running
 
@@ -29,11 +31,11 @@ logger = logging.getLogger("charlie.tools")
 
 # --- Vector memory store (set via set_memory_store at init) ---
 _memory_store = None  # type: Optional[Any]
-# --- Knowledge graph store (set via set_memory_graph at init) ---
-_memory_graph = None  # type: Optional[Any]
 # --- Pending vision-tier screenshot: written by desktop_screenshot, consumed
 # --- once by Brain._build_payload for the very next outgoing payload. ---
-_pending_vision_image = None  # type: Optional[str]
+# FIFO -- concurrent desktop_screenshot calls (asyncio.gather in one turn, or a
+# sub-agent's own call) must not silently overwrite each other
+_pending_vision_images: List[str] = []
 # --- Search tuning ---
 SEARCH_RESULT_LIMIT = 5
 CONTENT_MAX_CHARS = 800
@@ -66,7 +68,7 @@ _DESKTOP_FRAME_FPS = 2.0
 _DESKTOP_FRAME_MAX_EDGE = 960
 
 # --- SearXNG keyword detection ---
-_TIME_SENSITIVE_KEYWORDS = ("today", "new", "recent", "latest", "breaking")
+_TIME_SENSITIVE_KEYWORDS = ("today", "new", "recent", "latest", "breaking", "happening")
 _NEWS_KEYWORDS = ("news", "headline", "story", "stories")
 
 # --- Query decomposition ---
@@ -134,7 +136,7 @@ class ToolRegistry:
         or is callable via execute_tool(). Returns whether it existed."""
         return self._tools.pop(name, None) is not None
 
-    def get_tool_definitions(self) -> List[Dict[str, Any]]:
+    def get_tool_definitions(self, exclude: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
         return [
             {
                 "type": "function",
@@ -145,6 +147,7 @@ class ToolRegistry:
                 },
             }
             for name, info in self._tools.items()
+            if not exclude or name not in exclude
         ]
 
     def is_interactive(self, name: str) -> bool:
@@ -166,10 +169,12 @@ class ToolRegistry:
             return None
         return list(info["schema"].get("properties", {}).keys())
 
-    def build_tool_prompt(self) -> str:
+    def build_tool_prompt(self, exclude: Optional[Set[str]] = None) -> str:
         """Build a plain-text tool description for the system prompt."""
         lines = []
         for name, info in self._tools.items():
+            if exclude and name in exclude:
+                continue
             params = info["schema"].get("properties", {})
             required = set(info["schema"].get("required", []))
             param_parts = [
@@ -184,9 +189,29 @@ class ToolRegistry:
     def execute_tool(self, name: str, arguments: Dict[str, Any]) -> str:
         if name not in self._tools:
             logger.error("Tool '%s' not found.", name)
-            return f"Error: Tool '{name}' is not registered."
+            valid = ", ".join(sorted(self._tools.keys()))
+            return f"Error: Tool '{name}' is not registered. Available tools: {valid}."
 
         func = self._tools[name]["func"]
+        schema = self._tools[name]["schema"]
+        missing = [p for p in schema.get("required", []) if p not in arguments]
+        if missing:
+            logger.warning("Tool '%s' called without required args: %s", name, missing)
+            params = ", ".join(schema.get("properties", {}).keys())
+            return (
+                f"Error: tool '{name}' is missing required argument(s) {missing}. "
+                f"Its parameters are: {params}."
+            )
+        for pname, value in arguments.items():
+            enum = schema.get("properties", {}).get(pname, {}).get("enum")
+            if enum and value not in enum:
+                logger.warning("Tool '%s' called with invalid %s=%r", name, pname, value)
+                return (
+                    f"Error: tool '{name}' argument '{pname}' must be one of {enum}, got {value!r}. "
+                    f"If you meant to search/recall a stored fact, use the 'vector_memory' tool instead."
+                    if name == "memory"
+                    else f"Error: tool '{name}' argument '{pname}' must be one of {enum}, got {value!r}."
+                )
         try:
             logger.info("Executing tool '%s' with arguments: %s", name, arguments)
             result = func(**arguments)
@@ -199,10 +224,6 @@ class ToolRegistry:
         """Inject vector memory store for vector_memory tool."""
         global _memory_store
         _memory_store = store
-    def set_memory_graph(self, graph: Any) -> None:
-        """Inject knowledge graph store for graph tools."""
-        global _memory_graph
-        _memory_graph = graph
 
 
 # Global tool registry
@@ -312,6 +333,29 @@ def _merge_search_results(results: List[str]) -> str:
 
 
 @registry.register_tool(
+    name="spawn_agent",
+    description=(
+        "Delegate a self-contained sub-task to an independent sub-agent that runs its own "
+        "tool loop and reports back a result. Use only for genuinely delegable work (e.g. an "
+        "independent research thread, a parallel multi-part job) -- most turns should not use "
+        "this at all and should just answer directly."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": "A clear, self-contained description of the sub-task to delegate.",
+            }
+        },
+        "required": ["task"],
+    },
+)
+def spawn_agent(task: str) -> str:
+    return "Error: spawn_agent must be dispatched through Brain.spawn_agent, not called directly."
+
+
+@registry.register_tool(
     name="web_search",
     description="Search the web for up-to-date information.",
     schema={
@@ -349,6 +393,32 @@ def web_search(query: str) -> str:
     return _single_search(query)
 
 
+def _searxng_request(base: str, params: Dict[str, str], query: str, cleaned: str) -> Optional[str]:
+    """One SearXNG query attempt. Returns formatted results, or None to let the caller retry/fall back."""
+    try:
+        logger.info("SearXNG search: original=%r cleaned=%r params=%r", query, cleaned, params)
+        response = httpx.get(f"{base}/search", params=params, timeout=SEARXNG_TIMEOUT)
+        if response.status_code == 200:
+            results = []
+            for item in response.json().get("results", [])[:SEARCH_RESULT_LIMIT]:
+                content = item.get("content", "") or ""
+                if not _is_ddg_result_valid(content):
+                    continue
+                results.append(
+                    f"Title: {item.get('title', 'No Title')}\n"
+                    f"URL: {item.get('url', 'No URL')}\n"
+                    f"Content: {_truncate(content)}"
+                )
+            if results:
+                return "\n\n".join(results)
+        logger.error(
+            "SearXNG failed with status %s for query %r: %s", response.status_code, cleaned, response.text,
+        )
+    except Exception:
+        logger.exception("SearXNG search error for query: %s", cleaned)
+    return None
+
+
 def _single_search(query: str) -> str:
     """Execute a single search query across all providers."""
     cleaned = _clean_search_query(query)
@@ -359,39 +429,25 @@ def _single_search(query: str) -> str:
 
     # Tier 1: SearXNG (self-hosted, no API key needed)
     if searxng_url:
-        try:
-            logger.info("SearXNG search: original=%r cleaned=%r", query, cleaned)
-            base = searxng_url.rstrip("/")
-            q_lower = cleaned.lower()
-            params: Dict[str, str] = {"q": cleaned, "format": "json", "language": "en"}
-            if any(kw in q_lower for kw in _TIME_SENSITIVE_KEYWORDS):
-                params["time_range"] = "day"
-            if any(kw in q_lower for kw in _NEWS_KEYWORDS):
-                params["categories"] = "news"
-            response = httpx.get(
-                f"{base}/search", params=params, timeout=SEARXNG_TIMEOUT
-            )
-            if response.status_code == 200:
-                results = []
-                for item in response.json().get("results", [])[:SEARCH_RESULT_LIMIT]:
-                    content = item.get("content", "") or ""
-                    if not _is_ddg_result_valid(content):
-                        continue
-                    results.append(
-                        f"Title: {item.get('title', 'No Title')}\n"
-                        f"URL: {item.get('url', 'No URL')}\n"
-                        f"Content: {_truncate(content)}"
-                    )
-                if results:
-                    return "\n\n".join(results)
-            logger.error(
-                "SearXNG failed with status %s for query %r: %s",
-                response.status_code,
-                cleaned,
-                response.text,
-            )
-        except Exception:
-            logger.exception("SearXNG search error for query: %s", cleaned)
+        base = searxng_url.rstrip("/")
+        q_lower = cleaned.lower()
+        params: Dict[str, str] = {"q": cleaned, "format": "json", "language": "en"}
+        if any(kw in q_lower for kw in _TIME_SENSITIVE_KEYWORDS):
+            params["time_range"] = "day"
+        is_news_query = any(kw in q_lower for kw in _NEWS_KEYWORDS)
+        if is_news_query:
+            params["categories"] = "news"
+
+        searxng_result = _searxng_request(base, params, query, cleaned)
+        if searxng_result is not None:
+            return searxng_result
+
+        # News category has few engines and can zero out when all are blocked at once -- general aggregates more.
+        if is_news_query:
+            general_params = {k: v for k, v in params.items() if k != "categories"}
+            searxng_result = _searxng_request(base, general_params, query, cleaned)
+            if searxng_result is not None:
+                return searxng_result
 
     # Tier 2: Exa
     if exa_key:
@@ -616,6 +672,189 @@ def _detect_app_launch(command: str):
         if entry.close_process and token_lower == entry.open_cmd.lower():
             return entry
     return None
+
+
+_MAX_WAIT_SECONDS = 10
+
+
+@registry.register_tool(
+    name="wait_seconds",
+    description=(
+        "Pause before re-checking something that needs time (a page still loading, "
+        "a download in progress). Use this then call the check tool again in the same "
+        "turn -- never promise the user you'll check again later, that follow-up never happens."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "seconds": {
+                "type": "number",
+                "description": f"How long to wait, max {_MAX_WAIT_SECONDS}.",
+            },
+        },
+        "required": ["seconds"],
+    },
+)
+def wait_seconds(seconds: float) -> str:
+    capped = max(0.0, min(float(seconds), _MAX_WAIT_SECONDS))
+    time.sleep(capped)
+    return f"Waited {capped}s."
+
+
+@registry.register_tool(
+    name="set_reminder",
+    description=(
+        "Set a one-off reminder that fires (spoken + dashboard toast) after a delay. "
+        f"Max {reminders.MAX_REMINDER_SECONDS}s (24h). Not recurring, lost on restart."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "What to remind the user of."},
+            "seconds": {"type": "number", "description": "Delay in seconds before firing."},
+        },
+        "required": ["text", "seconds"],
+    },
+)
+def set_reminder(text: str, seconds: float) -> str:
+    try:
+        reminder_id = reminders.set_reminder(text, float(seconds))
+    except ValueError as e:
+        return f"Reminder rejected: {e}"
+    return f"Reminder set (id={reminder_id}), fires in {seconds:g}s: {text}"
+
+
+@registry.register_tool(
+    name="list_reminders",
+    description="List all pending (not yet fired) reminders.",
+    schema={"type": "object", "properties": {}},
+)
+def list_reminders() -> str:
+    pending = reminders.list_reminders()
+    if not pending:
+        return "No pending reminders."
+    now = time.time()
+    lines = [
+        f"- {rid}: \"{entry['text']}\" (fires in {max(0, round(entry['fire_at'] - now))}s)"
+        for rid, entry in pending.items()
+    ]
+    return "\n".join(lines)
+
+
+@registry.register_tool(
+    name="cancel_reminder",
+    description="Cancel a pending reminder by its id (from set_reminder or list_reminders).",
+    schema={
+        "type": "object",
+        "properties": {
+            "reminder_id": {"type": "string", "description": "The reminder id to cancel."},
+        },
+        "required": ["reminder_id"],
+    },
+)
+def cancel_reminder(reminder_id: str) -> str:
+    if reminders.cancel_reminder(reminder_id):
+        return f"Reminder {reminder_id} cancelled."
+    return f"No pending reminder with id {reminder_id}."
+
+
+def _get_scratchpad() -> Scratchpad:
+    return Scratchpad(db_path=config.scratchpad_db_path)
+
+
+@registry.register_tool(
+    name="scratchpad_add",
+    description="Append a freeform note to the shared scratchpad (persists across sessions).",
+    schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The note text to add."},
+        },
+        "required": ["text"],
+    },
+)
+def scratchpad_add(text: str) -> str:
+    pad = _get_scratchpad()
+    try:
+        index = pad.add(text)
+    except ValueError as e:
+        return f"Error: {e}"
+    finally:
+        pad.close()
+    return f"Added as entry {index}."
+
+
+@registry.register_tool(
+    name="scratchpad_list",
+    description="List all entries currently in the shared scratchpad.",
+    schema={"type": "object", "properties": {}},
+)
+def scratchpad_list() -> str:
+    pad = _get_scratchpad()
+    try:
+        entries = pad.list()
+    finally:
+        pad.close()
+    if not entries:
+        return "Scratchpad is empty."
+    return "\n".join(f"{i}. {text}" for i, text, _created_at in entries)
+
+
+@registry.register_tool(
+    name="scratchpad_edit",
+    description="Replace the text of a scratchpad entry by its 1-based index (see scratchpad_list).",
+    schema={
+        "type": "object",
+        "properties": {
+            "index": {"type": "integer", "description": "1-based entry index."},
+            "text": {"type": "string", "description": "New text for that entry."},
+        },
+        "required": ["index", "text"],
+    },
+)
+def scratchpad_edit(index: int, text: str) -> str:
+    pad = _get_scratchpad()
+    try:
+        ok = pad.edit(int(index), text)
+    except ValueError as e:
+        return f"Error: {e}"
+    finally:
+        pad.close()
+    return f"Entry {index} updated." if ok else f"No entry at index {index}."
+
+
+@registry.register_tool(
+    name="scratchpad_delete",
+    description="Delete a scratchpad entry by its 1-based index (see scratchpad_list).",
+    schema={
+        "type": "object",
+        "properties": {
+            "index": {"type": "integer", "description": "1-based entry index."},
+        },
+        "required": ["index"],
+    },
+)
+def scratchpad_delete(index: int) -> str:
+    pad = _get_scratchpad()
+    try:
+        ok = pad.delete(int(index))
+    finally:
+        pad.close()
+    return f"Entry {index} deleted." if ok else f"No entry at index {index}."
+
+
+@registry.register_tool(
+    name="scratchpad_clear",
+    description="Delete all entries in the shared scratchpad.",
+    schema={"type": "object", "properties": {}},
+)
+def scratchpad_clear() -> str:
+    pad = _get_scratchpad()
+    try:
+        pad.clear()
+    finally:
+        pad.close()
+    return "Scratchpad cleared."
 
 
 @registry.register_tool(
@@ -1023,7 +1262,11 @@ def _memory_capacity_error(target: str, entries: list, max_chars: int, new_len: 
             "target": {
                 "type": "string",
                 "enum": ["memory", "user", "opinions"],
-                "description": "memory (max 2200), user (max 1375), opinions (max 800 chars).",
+                "description": (
+                    "memory (max 2200, global facts), user (max 1375, about the user), "
+                    "opinions (max 800). For facts scoped to one project workspace, use "
+                    "project_memory_add instead."
+                ),
             },
             "content": {
                 "type": "string",
@@ -1037,18 +1280,13 @@ def _memory_capacity_error(target: str, entries: list, max_chars: int, new_len: 
         "required": ["action", "target"],
     },
 )
-def memory(action: str, target: str, content: str = "", old_text: str = "") -> str:
+def memory(action: str, target: str, content: str = "", old_text: str = "", **kwargs: str) -> str:
+    content = content or kwargs.get("new_text", "")
     if target not in _MEMORY_MAX_CHARS:
-        return f"Error: target must be 'memory', 'user', or 'opinions', got '{target}'."
+        return f"Error: target must be one of {sorted(_MEMORY_MAX_CHARS)}, got '{target}'."
 
     max_chars = _MEMORY_MAX_CHARS[target]
-    path = (
-        config.memory_file
-        if target == "memory"
-        else config.opinions_file
-        if target == "opinions"
-        else config.user_file
-    )
+    path = getattr(config, f"{target}_file")
 
     try:
         existing = ""
@@ -1113,6 +1351,89 @@ def memory(action: str, target: str, content: str = "", old_text: str = "") -> s
     except Exception as e:
         logger.exception("Memory tool error: action=%s target=%s", action, target)
         return f"Error updating memory: {e}"
+
+
+def _get_projects() -> Projects:
+    return Projects(config.projects_dir)
+
+
+@registry.register_tool(
+    name="list_projects",
+    description="List all project workspaces and which one (if any) is active.",
+    schema={"type": "object", "properties": {}},
+)
+def list_projects() -> str:
+    store = _get_projects()
+    names = store.list()
+    if not names:
+        return "No projects exist yet. Use create_project to make one."
+    active = store.get_active()
+    lines = [f"{'* ' if n == active else '  '}{n}" for n in names]
+    return "Projects (* = active):\n" + "\n".join(lines)
+
+
+@registry.register_tool(
+    name="create_project",
+    description="Create a new project workspace and make it active.",
+    schema={
+        "type": "object",
+        "properties": {"name": {"type": "string", "description": "Project name, e.g. 'Charlie Dev'."}},
+        "required": ["name"],
+    },
+)
+def create_project(name: str) -> str:
+    store = _get_projects()
+    try:
+        slug = store.create(name)
+        store.set_active(slug)
+    except ValueError as e:
+        return f"Error: {e}"
+    return f"Created and switched to project '{slug}'."
+
+
+@registry.register_tool(
+    name="switch_project",
+    description="Switch the active project workspace, or pass 'none' to go back to global (no project).",
+    schema={
+        "type": "object",
+        "properties": {"name": {"type": "string", "description": "Project slug from list_projects, or 'none'."}},
+        "required": ["name"],
+    },
+)
+def switch_project(name: str) -> str:
+    store = _get_projects()
+    if name.strip().lower() == "none":
+        store.set_active(None)
+        return "Switched to global (no active project)."
+    try:
+        store.set_active(name)
+    except ValueError as e:
+        return f"Error: {e}"
+    return f"Switched to project '{name}'."
+
+
+@registry.register_tool(
+    name="project_memory_add",
+    description="Add a fact scoped to a project workspace. Defaults to the active project.",
+    schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The fact to remember."},
+            "project": {"type": "string", "description": "Project slug; omit to use the active project."},
+        },
+        "required": ["text"],
+    },
+)
+def project_memory_add(text: str, project: str = "") -> str:
+    store = _get_projects()
+    slug = project.strip() or store.get_active()
+    if not slug:
+        return "Error: no active project and none named. Use create_project or switch_project first."
+    try:
+        store.add_entry(slug, text)
+    except ValueError as e:
+        return f"Error: {e}"
+    return f"Added to project '{slug}'."
 
 
 @registry.register_tool(
@@ -1204,94 +1525,6 @@ def session_search(query: str) -> str:
         lines.append(f"- [{role}]: {message}")
     return "\n".join(lines)
 
-
-
-# ---------------------------------------------------------------------------
-# Knowledge graph tools
-# ---------------------------------------------------------------------------
-
-
-def _graph_available() -> bool:
-    """Check if the memory graph is loaded."""
-    return _memory_graph is not None
-
-
-@registry.register_tool(
-    name="graph_add_fact",
-    description=(
-        "Add a fact to the knowledge graph. "
-        "A fact is a relationship: subject -> predicate -> object."
-    ),
-    schema={
-        "type": "object",
-        "properties": {
-            "subject": {"type": "string", "description": "The subject entity (e.g. 'user')"},
-            "predicate": {"type": "string", "description": "The relationship (e.g. 'prefers')"},
-            "object": {"type": "string", "description": "The object entity (e.g. 'dark mode')"},
-        },
-        "required": ["subject", "predicate", "object"],
-    },
-)
-def graph_add_fact(subject: str, predicate: str, object: str) -> str:
-    if not _graph_available():
-        return "Knowledge graph is not available."
-    try:
-        _memory_graph.add_fact(subject, predicate, object)
-        return f"Added: {subject} -> {predicate} -> {object}"
-    except Exception as e:
-        logger.exception("graph_add_fact error")
-        return f"Error adding fact: {e}"
-
-
-@registry.register_tool(
-    name="graph_query",
-    description="Query the knowledge graph. Find facts related to a subject, object, or pattern.",
-    schema={
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "Search term to find in facts"},
-            "subject_filter": {"type": "string", "description": "Optional: filter by subject"},
-        },
-        "required": ["query"],
-    },
-)
-def graph_query(query: str, subject_filter: str = "") -> str:
-    if not _graph_available():
-        return "Knowledge graph is not available."
-    try:
-        results = _memory_graph.search_facts(query, subject_filter=subject_filter or None)
-        if not results:
-            return "No matching facts found."
-        lines = []
-        for s, p, o, score in results:
-            lines.append(f"- {s} -> {p} -> {o} (relevance: {score:.2f})")
-        return "\n".join(lines)
-    except Exception as e:
-        logger.exception("graph_query error")
-        return f"Error querying graph: {e}"
-
-
-@registry.register_tool(
-    name="graph_consolidate",
-    description=(
-        "Consolidate the knowledge graph: merge duplicates, "
-        "remove stale facts, and update importance scores."
-    ),
-    schema={
-        "type": "object",
-        "properties": {},
-        "required": [],
-    },
-)
-def graph_consolidate() -> str:
-    if not _graph_available():
-        return "Knowledge graph is not available."
-    try:
-        removed = _memory_graph.consolidate()
-        return f"Consolidated graph. Removed {removed} stale/duplicate facts."
-    except Exception as e:
-        logger.exception("graph_consolidate error")
-        return f"Error consolidating graph: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -1480,7 +1713,7 @@ def _emit_desktop_frame(png_bytes: bytes, elements: List[Any]) -> None:
     the dashboard's "Watch It Drive" live view. Never raises -- a failure
     here must not affect the calling tool's return value."""
     global _last_frame_emit_at
-    if _event_bus is None or _event_loop is None:
+    if _event_bus is None or _event_loop is None or not config.desktop_frame_capture_enabled:
         return
     now = time.time()
     if now - _last_frame_emit_at < 1.0 / _DESKTOP_FRAME_FPS:
@@ -1499,6 +1732,13 @@ def _emit_desktop_frame(png_bytes: bytes, elements: List[Any]) -> None:
         asyncio.run_coroutine_threadsafe(
             _event_bus.emit("desktop_frame", payload), _event_loop
         )
+        turn_platform, turn_session_id = recovery.get_current_turn()
+        if turn_platform == "telegram":
+            from charlie.telegram_bot import get_active_bot
+            bot = get_active_bot()
+            if bot is not None and turn_session_id and ":" in turn_session_id:
+                chat_id = turn_session_id.split(":", 1)[1]
+                asyncio.run_coroutine_threadsafe(bot.send_photo(chat_id, png_bytes), _event_loop)
     except Exception:
         logger.warning("desktop_frame emit failed", exc_info=True)
 
@@ -1814,11 +2054,22 @@ def desktop_scroll(notches: int) -> str:
         "Capture the foreground window as an annotated screenshot for the vision model, "
         "for graphical targets desktop_observe can't describe (icons, canvases, images). "
         "Always returns the current set-of-marks text; also queues the image for the next "
-        "reply if a vision model is configured."
+        "reply if a vision model is configured. On a multi-monitor setup this captures only "
+        "the monitor showing the foreground window by default -- pass all_monitors=true when "
+        "the user explicitly asks about another/other/both/all screens."
     ),
-    schema={"type": "object", "properties": {}, "required": []},
+    schema={
+        "type": "object",
+        "properties": {
+            "all_monitors": {
+                "type": "boolean",
+                "description": "Capture every monitor instead of just the active one.",
+            },
+        },
+        "required": [],
+    },
 )
-def desktop_screenshot() -> str:
+def desktop_screenshot(all_monitors: bool = False) -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
     from charlie.desktop.uia import serialize_marks, snapshot_tree
@@ -1832,7 +2083,7 @@ def desktop_screenshot() -> str:
     if not desktop_ocr.OCR_AVAILABLE or not desktop_vision.VISION_AVAILABLE:
         return text_result
     try:
-        png = desktop_ocr.capture()
+        png = desktop_ocr.capture(monitor=0) if all_monitors else desktop_ocr.capture()
         annotated = desktop_vision.annotate_som(png, elements)
         set_pending_vision_image(desktop_vision.to_data_url(annotated))
         _emit_desktop_frame(annotated, elements)
@@ -1950,16 +2201,14 @@ def system_control(action: str) -> str:
 
 
 def set_pending_vision_image(url: Optional[str]) -> None:
-    """Queue an image data URL for the very next outgoing LLM payload."""
-    global _pending_vision_image
-    _pending_vision_image = url
+    """Queue an image data URL for an upcoming outgoing LLM payload."""
+    if url is not None:
+        _pending_vision_images.append(url)
 
 
 def pop_pending_vision_image() -> Optional[str]:
-    """Read and clear the queued vision image -- consumed exactly once."""
-    global _pending_vision_image
-    url, _pending_vision_image = _pending_vision_image, None
-    return url
+    """Read and remove the oldest queued vision image -- FIFO, each consumed exactly once."""
+    return _pending_vision_images.pop(0) if _pending_vision_images else None
 
 
 def register_plugin_tools(cfg: Any = None) -> Optional[Any]:

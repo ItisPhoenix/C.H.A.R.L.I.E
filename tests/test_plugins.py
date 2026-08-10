@@ -221,6 +221,65 @@ class TestBrowserPlugin:
         with pytest.raises(ValueError, match="Unknown tool"):
             plugin.call_tool("nonexistent", {})
 
+    def test_fetch_uses_trafilatura_extraction(self, monkeypatch):
+        class FakeResponse:
+            text = "<html><body><p>real article text</p></body></html>"
+
+            def raise_for_status(self):
+                pass
+
+        monkeypatch.setattr("charlie.plugins.httpx.get", lambda *a, **k: FakeResponse())
+        monkeypatch.setattr("charlie.plugins.trafilatura.extract", lambda html: "x" * 300)
+
+        plugin = BrowserPlugin()
+        result = plugin.call_tool("browser_fetch", {"url": "https://example.com"})
+
+        assert result["content"] == "x" * 300
+
+    def test_fetch_falls_back_to_jina_when_extraction_thin(self, monkeypatch):
+        """Regression: curl-based raw HTML fetch returned near-empty JS-rendered
+        shells for sites like weather.com -- trafilatura extraction below
+        _MIN_EXTRACTED_CHARS now falls back to Jina Reader's server-rendered text."""
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, text, status_code=200):
+                self.text = text
+                self.status_code = status_code
+
+            def raise_for_status(self):
+                pass
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            if "r.jina.ai" in url:
+                return FakeResponse("full rendered article " * 20)
+            return FakeResponse("<html><body><div id='root'></div></body></html>")
+
+        monkeypatch.setattr("charlie.plugins.httpx.get", fake_get)
+        monkeypatch.setattr("charlie.plugins.trafilatura.extract", lambda html: "")
+
+        plugin = BrowserPlugin()
+        result = plugin.call_tool("browser_fetch", {"url": "https://weather.com/x"})
+
+        assert any("r.jina.ai" in c for c in calls)
+        assert "full rendered article" in result["content"]
+
+    def test_fetch_returns_error_when_both_sources_empty(self, monkeypatch):
+        class FakeResponse:
+            text = ""
+
+            def raise_for_status(self):
+                pass
+
+        monkeypatch.setattr("charlie.plugins.httpx.get", lambda *a, **k: FakeResponse())
+        monkeypatch.setattr("charlie.plugins.trafilatura.extract", lambda html: "")
+
+        plugin = BrowserPlugin()
+        result = plugin.call_tool("browser_fetch", {"url": "https://example.com"})
+
+        assert "error" in result
+
 
 class TestCalendarPlugin:
     def test_name_and_description(self):
@@ -266,9 +325,25 @@ class TestCodeExecPlugin:
         result = plugin.call_tool("code_exec_python", {"code": "raise ValueError('bad')"})
         assert result["returncode"] != 0
 
+    def test_exec_python_non_ascii_output_does_not_crash(self):
+        """Regression: text=True defaulted to cp1252 on Windows, which raises
+        UnicodeDecodeError on real non-cp1252 output instead of decoding it."""
+        plugin = CodeExecPlugin()
+        result = plugin.call_tool(
+            "code_exec_python", {"code": "print('caf\\u00e9 \\u4e2d\\u6587')"}
+        )
+        assert result["returncode"] == 0
+        assert "caf" in result["output"]
+
     def test_exec_rejects_dangerous_code(self):
         plugin = CodeExecPlugin()
         result = plugin.call_tool("code_exec_python", {"code": "import os; os.system('rm -rf /')"})
+        assert "error" in result
+        assert "Rejected" in result["error"]
+
+    def test_exec_rejects_aliased_dangerous_builtin(self):
+        plugin = CodeExecPlugin()
+        result = plugin.call_tool("code_exec_python", {"code": "e = eval\ne('1+1')"})
         assert "error" in result
         assert "Rejected" in result["error"]
 
@@ -350,7 +425,7 @@ class TestPluginToolBridge:
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 adapter #4: per-plugin runtime enable/disable
+# Per-plugin runtime enable/disable
 # ---------------------------------------------------------------------------
 
 class TestPluginRuntimeControl:

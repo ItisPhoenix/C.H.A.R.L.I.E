@@ -6,8 +6,10 @@ This tier only runs when snapshot_tree() found too little (charlie/tools.py).
 capture() is also reused by the future vision tier -- do not duplicate it.
 """
 
+import ctypes
 import io
 import logging
+import sys
 from typing import List, Optional, Tuple
 
 from charlie.config import config
@@ -27,17 +29,46 @@ except ImportError:
 _MIN_CONF_DEFAULT = 60
 
 
+def _foreground_monitor_bounds() -> Optional[Tuple[int, int, int, int]]:
+    """Win32 rect of the monitor showing the foreground window, or None off-Windows/on failure."""
+    if sys.platform != "win32":
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+
+        class _Rect(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long),
+            ]
+
+        class _MonitorInfo(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_ulong), ("rcMonitor", _Rect),
+                ("rcWork", _Rect), ("dwFlags", ctypes.c_ulong),
+            ]
+
+        _MONITOR_DEFAULTTONEAREST = 2
+        hmonitor = user32.MonitorFromWindow(hwnd, _MONITOR_DEFAULTTONEAREST)
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(_MonitorInfo)
+        if not user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+            return None
+        r = info.rcMonitor
+        return (r.left, r.top, r.right, r.bottom)
+    except Exception:
+        logger.debug("Foreground monitor lookup failed", exc_info=True)
+        return None
+
+
 def capture(
     region: Optional[Tuple[int, int, int, int]] = None,
     monitor: Optional[int] = None,
 ) -> bytes:
-    """Screenshot as PNG bytes via mss.
-
-    region: explicit (left, top, right, bottom) pixels to grab.
-    monitor: 1-indexed physical monitor (mss.monitors[1], [2], ...) to grab
-        in full, ignored if region is given. Neither given: full virtual
-        screen (mss.monitors[0]), the existing default behavior.
-    """
+    """Screenshot as PNG bytes; default is the foreground window's monitor, else the full virtual screen."""
     if not OCR_AVAILABLE:
         raise RuntimeError("mss/pytesseract/Pillow not installed -- OCR unavailable.")
     with mss.mss() as sct:
@@ -51,7 +82,12 @@ def capture(
         elif monitor is not None:
             grab_target = sct.monitors[monitor]
         else:
-            grab_target = sct.monitors[0]
+            fg_bounds = _foreground_monitor_bounds() if len(sct.monitors) > 2 else None
+            if fg_bounds is not None:
+                left, top, right, bottom = fg_bounds
+                grab_target = {"left": left, "top": top, "width": right - left, "height": bottom - top}
+            else:
+                grab_target = sct.monitors[0]
         if region is not None:
             bounds = region
         else:

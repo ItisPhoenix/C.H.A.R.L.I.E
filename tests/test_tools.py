@@ -30,17 +30,28 @@ def test_registry_registration_and_schema():
     definitions = registry.get_tool_definitions()
     names = {d["function"]["name"] for d in definitions}
     assert names == {
+        "spawn_agent",
         "web_search",
         "shell_execute",
+        "wait_seconds",
+        "set_reminder",
+        "list_reminders",
+        "cancel_reminder",
+        "scratchpad_add",
+        "scratchpad_list",
+        "scratchpad_edit",
+        "scratchpad_delete",
+        "scratchpad_clear",
+        "list_projects",
+        "create_project",
+        "switch_project",
+        "project_memory_add",
         "system_diagnostics",
         "file_read",
         "file_write",
         "memory",
         "vector_memory",
         "session_search",
-        "graph_add_fact",
-        "graph_query",
-        "graph_consolidate",
         "desktop_observe",
         "desktop_read_screen",
         "desktop_screenshot",
@@ -350,7 +361,7 @@ def test_shell_execute_blocks_metacharacters_and_keywords():
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 dashboard "desktop_frame" event -- downscale + throttle + emit bridge
+# Dashboard "desktop_frame" event -- downscale + throttle + emit bridge
 # ---------------------------------------------------------------------------
 
 def test_downscale_png_caps_long_edge_and_preserves_aspect():
@@ -609,10 +620,8 @@ def test_get_path_gate_reason(tmp_path):
 
 def test_tool_registry_unknown_tool_returns_error():
     local_registry = ToolRegistry()
-    assert (
-        local_registry.execute_tool("not-registered", {})
-        == "Error: Tool 'not-registered' is not registered."
-    )
+    result = local_registry.execute_tool("not-registered", {})
+    assert result.startswith("Error: Tool 'not-registered' is not registered.")
 
 
 def test_unregister_tool_removes_it():

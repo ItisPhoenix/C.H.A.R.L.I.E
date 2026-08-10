@@ -193,13 +193,6 @@ describe("useCharlieStore", () => {
       s.setLatestDesktopFrame(null);
       expect(useCharlieStore.getState().latestDesktopFrame).toBeNull();
     });
-
-    it("tracks the desktop-control-enabled flag", () => {
-      const s = useCharlieStore.getState();
-      expect(s.desktopControlEnabled).toBe(false);
-      s.setDesktopControlEnabled(true);
-      expect(useCharlieStore.getState().desktopControlEnabled).toBe(true);
-    });
   });
 
   describe("tool approval requests", () => {
@@ -218,27 +211,6 @@ describe("useCharlieStore", () => {
       expect(useCharlieStore.getState().activeToolApproval).toEqual(request);
       s.setActiveToolApproval(null);
       expect(useCharlieStore.getState().activeToolApproval).toBeNull();
-    });
-  });
-
-  describe("background task", () => {
-    it("manages background task state", () => {
-      const task = {
-        id: "bg_abc123",
-        text: "organize downloads folder",
-        steps: ["Open File Explorer", "Sort files by type"],
-        current_step: 0,
-        status: "awaiting_approval" as const,
-        flagged_steps: [0],
-        error: null,
-      };
-
-      const s = useCharlieStore.getState();
-      expect(s.backgroundTask).toBeNull();
-      s.setBackgroundTask(task);
-      expect(useCharlieStore.getState().backgroundTask).toEqual(task);
-      s.setBackgroundTask(null);
-      expect(useCharlieStore.getState().backgroundTask).toBeNull();
     });
   });
 });

@@ -21,12 +21,13 @@ from typing import List, Set
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from charlie.config import Config, config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
-from charlie.memory_graph import MemoryGraph
+from charlie.projects import Projects
+from charlie.scratchpad import Scratchpad
 from charlie.session_store import SessionStore
 from charlie.utils import build_auth_headers
 
@@ -69,13 +70,69 @@ async def _ensure_mcp_client_async():
     """Runs the lazy MCP start on a thread so it doesn't freeze this process's event loop."""
     return await asyncio.to_thread(_ensure_mcp_client)
 
-# In-process registry of installed extensions (Phase 5) -- see
+# In-process registry of installed extensions -- see
 # charlie/extensions/__init__.py's ExtensionManager docstring for the
 # propose()/confirm() gate this drives and the no-cross-restart-persistence
 # caveat.
 from charlie.extensions import ExtensionManager, InstalledExtension  # noqa: E402
 
 _extension_manager = ExtensionManager()
+
+
+def _save_extensions() -> None:
+    """Persist installed extensions to disk so they survive a web-server
+    restart -- see lifespan()'s startup reload for the counterpart."""
+    try:
+        data = [
+            {
+                "name": e.name,
+                "kind": e.kind,
+                "source": e.source,
+                "raw_text": e.raw_text,
+                "enabled": e.enabled,
+            }
+            for e in _extension_manager.list()
+        ]
+        with open(config.extensions_state_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        logger.warning("Failed to save extensions state", exc_info=True)
+
+
+def _load_extensions() -> None:
+    """Reload previously-installed extensions on web-server startup -- the
+    counterpart to _save_extensions(). Each entry was already approved once
+    (the propose/confirm gate ran at original install time), so a restart
+    restores prior state without re-prompting. One bad entry is logged and
+    skipped rather than blocking the rest or server startup."""
+    from charlie.extensions import build_skill_card
+
+    try:
+        with open(config.extensions_state_path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+    except FileNotFoundError:
+        return
+    except Exception:
+        logger.warning("Failed to read extensions state file", exc_info=True)
+        return
+
+    for entry in entries:
+        name = entry.get("name", "")
+        kind = entry.get("kind", "")
+        source = entry.get("source", "")
+        raw_text = entry.get("raw_text", "")
+        enabled = bool(entry.get("enabled", True))
+        try:
+            tool_names: List[str] = _install_extension(kind, name, source, raw_text) if enabled else []
+            card = build_skill_card(name, source or kind, tool_names, raw_text or name)
+            _extension_manager.record(
+                InstalledExtension(
+                    name=name, kind=kind, source=source, card=card,
+                    enabled=enabled, tool_names=tool_names, raw_text=raw_text,
+                )
+            )
+        except Exception:
+            logger.warning("Failed to reload extension '%s' on startup", name, exc_info=True)
 
 
 def _builtin_plugin(name: str):
@@ -136,10 +193,10 @@ async def _forward_to_voice(command_type: str, payload: dict) -> None:
 
 # Events that carry a session_id and must only reach clients subscribed to it.
 _SESSION_SCOPED_EVENTS = ("token", "transcript", "desktop_frame")
+_TOOL_EVENT_MAX_CHARS = 500  # cap persisted tool_event text, matches session_store's _TOOL_PERSIST_MAX_CHARS
 event_bus: EventBus | None = None
 LAUNCH_ID: str = config.charlie_launch_id
 _store: SessionStore | None = None
-_memory_graph_cache: "MemoryGraph | None" = None
 
 
 def _get_store() -> SessionStore:
@@ -149,16 +206,18 @@ def _get_store() -> SessionStore:
     return _store
 
 
-def _get_memory_graph() -> "MemoryGraph | None":
-    """Open the knowledge graph in this process (the web server runs in a child subprocess)."""
-    global _memory_graph_cache
-    if _memory_graph_cache is None:
-        try:
-            _memory_graph_cache = MemoryGraph(config.memory_graph_db)
-        except Exception as e:
-            logger.error(f"Failed to open MemoryGraph: {e}", exc_info=True)
-            return None
-    return _memory_graph_cache
+_scratchpad: Scratchpad | None = None
+
+
+def _get_scratchpad() -> Scratchpad:
+    global _scratchpad
+    if _scratchpad is None:
+        _scratchpad = Scratchpad(config.scratchpad_db_path)
+    return _scratchpad
+
+
+def _get_projects() -> Projects:
+    return Projects(config.projects_dir)
 
 
 pipeline_state: str = "idle"
@@ -179,6 +238,8 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Web plugin subsystem failed to initialize: %s", e)
 
+    _load_extensions()
+
     event_bus = EventBus(
         pub_port=DEFAULT_EVENT_PORT,
         pull_port=DEFAULT_COMMAND_PORT,
@@ -188,7 +249,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_event_bridge())
     logger.info("Web server started, event bridge active")
 
-    # ZMQ guard — suppress CancelledError traceback on Windows shutdown
+    # ZMQ guard -- suppress CancelledError traceback on Windows shutdown
     loop = asyncio.get_event_loop()
     _orig_call = loop.call_exception_handler
     def _guarded_call(context):
@@ -243,7 +304,7 @@ async def broadcast(data: dict):
     event_session = data.get("session_id") or (data.get("payload") or {}).get("session_id")
     scoped = etype in _SESSION_SCOPED_EVENTS and event_session is not None
     disconnected: list[WebSocket] = []
-    for ws in active_connections:
+    for ws in list(active_connections):
         if scoped and ws_sessions.get(ws) != event_session:
             continue
         try:
@@ -279,8 +340,9 @@ async def _event_bridge():
 
         # Keep web server cached state in sync
         if etype == "system_status":
-            global _system_status
+            global _system_status, _system_status_received_at
             _system_status = event.get("payload", {})
+            _system_status_received_at = time.time()
         elif etype == "audio_state":
             global _audio_state
             _audio_state = event.get("payload", {})
@@ -291,11 +353,64 @@ async def _event_bridge():
         elif etype == "mic_state":
             global _mic_state
             _mic_state = event.get("payload", {})
+        elif etype == "tool_call":
+            payload = event.get("payload", {})
+            _get_store().append_tool_event(
+                payload.get("session_id") or "default",
+                payload.get("turn_id"),
+                "tool_call",
+                payload.get("name", ""),
+                json.dumps(payload.get("args", {}), ensure_ascii=False)[:_TOOL_EVENT_MAX_CHARS],
+            )
+        elif etype == "tool_result":
+            payload = event.get("payload", {})
+            _get_store().append_tool_event(
+                payload.get("session_id") or "default",
+                payload.get("turn_id"),
+                "tool_result",
+                payload.get("name", ""),
+                (payload.get("text") or "")[:_TOOL_EVENT_MAX_CHARS],
+            )
+        elif etype == "agent_spawned":
+            payload = event.get("payload", {})
+            _get_store().create_agent_run(
+                payload.get("agent_id", ""), payload.get("task", ""), payload.get("session_id") or "default"
+            )
+        elif etype == "agent_status":
+            payload = event.get("payload", {})
+            _get_store().update_agent_run(payload.get("agent_id", ""), last_tool=payload.get("tool_name"))
+        elif etype == "agent_result":
+            payload = event.get("payload", {})
+            result = payload.get("result", "")
+            status = "timeout" if "timed out" in result else "cancelled" if "cancelled" in result else "done"
+            _get_store().update_agent_run(payload.get("agent_id", ""), status=status, result=result)
+        elif etype == "skill_installed":
+            from charlie.extensions import build_skill_card
+
+            payload = event.get("payload", {})
+            name, raw_text = payload.get("name", ""), payload.get("raw_text", "")
+            source = "auto-generated (spawn_agent)"
+            try:
+                tool_names = _install_extension("skill", name, source, raw_text)
+                card = build_skill_card(name, source, tool_names, raw_text)
+                _extension_manager.record(
+                    InstalledExtension(name=name, kind="skill", source=source, card=card,
+                                        tool_names=tool_names, raw_text=raw_text)
+                )
+                _save_extensions()
+            except Exception as e:
+                logger.error(f"Failed to mirror auto-drafted skill '{name}': {e}", exc_info=True)
 
         await broadcast(event)
 
+    async def on_event_guarded(event: dict) -> None:
+        try:
+            await on_event(event)
+        except Exception as e:
+            logger.error(f"Event bridge: error handling event {event.get('type')}: {e}", exc_info=True)
+
     try:
-        await event_bus.consume_events(on_event)
+        await event_bus.consume_events(on_event_guarded)
     except asyncio.CancelledError:
         pass
     except Exception as e:
@@ -348,6 +463,10 @@ async def websocket_endpoint(ws: WebSocket):
                     _active_frontend_session = msg.get("session_id") or msg.get("payload", {}).get("session_id")
                     ws_sessions[ws] = _active_frontend_session
                     logger.info("Active session synced: %s", _active_frontend_session)
+                    if event_bus:
+                        await event_bus.send_command(
+                            {"type": "session_active", "session_id": _active_frontend_session}
+                        )
                 elif event_bus:
                     await event_bus.send_command(msg)
                     logger.debug("WS forwarded command: %s", msg)
@@ -370,7 +489,7 @@ async def websocket_endpoint(ws: WebSocket):
 @app.get("/api/history")
 async def history(limit: int = 50):
     store = _get_store()
-    messages = store.get_recent(limit=limit)
+    messages = await asyncio.to_thread(store.get_recent, limit=limit)
     return {"messages": [{"role": r, "content": c} for r, c in messages]}
 
 
@@ -396,13 +515,94 @@ async def background_task_status():
     return {"task": task.to_event() if task is not None else None}
 
 
+@app.get("/api/scratchpad")
+async def list_scratchpad():
+    """List all scratchpad entries."""
+    pad = _get_scratchpad()
+    entries = await asyncio.to_thread(pad.list)
+    return {"entries": [{"index": i, "text": text, "created_at": c} for i, text, c in entries]}
+
+
+@app.post("/api/scratchpad")
+async def add_scratchpad(data: dict):
+    """Append a scratchpad entry."""
+    pad = _get_scratchpad()
+    try:
+        index = await asyncio.to_thread(pad.add, data.get("text", ""))
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    return {"index": index}
+
+
+@app.put("/api/scratchpad/{index}")
+async def edit_scratchpad(index: int, data: dict):
+    """Replace the text of a scratchpad entry by its 1-based index."""
+    pad = _get_scratchpad()
+    try:
+        ok = await asyncio.to_thread(pad.edit, index, data.get("text", ""))
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": f"No entry at index {index}"})
+    return {"index": index}
+
+
+@app.delete("/api/scratchpad/{index}")
+async def delete_scratchpad(index: int):
+    """Delete a scratchpad entry by its 1-based index."""
+    pad = _get_scratchpad()
+    ok = await asyncio.to_thread(pad.delete, index)
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": f"No entry at index {index}"})
+    return {"deleted": index}
+
+
+@app.delete("/api/scratchpad")
+async def clear_scratchpad():
+    """Delete all scratchpad entries."""
+    pad = _get_scratchpad()
+    await asyncio.to_thread(pad.clear)
+    return {"cleared": True}
+
+
+@app.get("/api/projects")
+async def list_projects():
+    """List project workspaces and which one is active."""
+    store = _get_projects()
+    names = await asyncio.to_thread(store.list)
+    active = await asyncio.to_thread(store.get_active)
+    return {"projects": names, "active": active}
+
+
+@app.post("/api/projects")
+async def create_project(data: dict):
+    """Create a new project workspace."""
+    store = _get_projects()
+    try:
+        slug = await asyncio.to_thread(store.create, data.get("name", ""))
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    return {"slug": slug}
+
+
+@app.put("/api/projects/active")
+async def switch_project(data: dict):
+    """Switch the active project workspace; pass slug=null to go back to global."""
+    store = _get_projects()
+    try:
+        await asyncio.to_thread(store.set_active, data.get("slug"))
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    return {"active": data.get("slug")}
+
+
 @app.get("/api/sessions")
 async def list_sessions(request: Request):
     """List sessions, optionally filtered by launch_id or source."""
     store = _get_store()
     launch_id = request.query_params.get("launch_id")
     source = request.query_params.get("source")
-    sessions = store.get_sessions(source=source, launch_id=launch_id)
+    sessions = await asyncio.to_thread(store.get_sessions, source=source, launch_id=launch_id)
     return {
         "sessions": [
             {
@@ -427,7 +627,7 @@ async def create_session(data: dict):
     # captured by the "This Launch" sidebar filter.
     launch_id = data.get("launch_id") or config.charlie_launch_id or None
     store = _get_store()
-    store.create_session(session_id, title, source=source, launch_id=launch_id)
+    await asyncio.to_thread(store.create_session, session_id, title, source=source, launch_id=launch_id)
     return {
         "session_id": session_id,
         "title": title,
@@ -445,12 +645,26 @@ async def session_messages(session_id: str, limit: int = 50):
     """
     _HIDDEN_ROLES = {"tool", "system"}
     store = _get_store()
-    messages = store.get_session_messages(session_id, limit=limit)
+    messages = await asyncio.to_thread(store.get_session_messages_with_turn_id, session_id, limit=limit)
     return {
         "messages": [
-            {"role": r, "content": c}
-            for r, c in messages
+            {"role": r, "content": c, "turnId": t}
+            for r, c, t in messages
             if r not in _HIDDEN_ROLES
+        ]
+    }
+
+
+@app.get("/api/sessions/{session_id}/tool_events")
+async def session_tool_events(session_id: str):
+    """Structured execution trace (tool calls/results) for a session, grouped
+    by turnId so the frontend can attach a 'Show Execution' trace per message."""
+    store = _get_store()
+    events = await asyncio.to_thread(store.get_tool_events, session_id)
+    return {
+        "events": [
+            {"turnId": turn_id, "kind": kind, "name": name, "text": text}
+            for turn_id, kind, name, text in events
         ]
     }
 
@@ -460,7 +674,7 @@ async def update_session(session_id: str, data: dict):
     """Update session title."""
     title = data.get("title", "New Chat")
     store = _get_store()
-    store.update_session_title(session_id, title)
+    await asyncio.to_thread(store.update_session_title, session_id, title)
     # Broadcast title update to all connected WebSocket clients
     await broadcast({
         "type": "session_updated",
@@ -474,7 +688,7 @@ async def update_session(session_id: str, data: dict):
 async def delete_session(session_id: str):
     """Delete a session and all its messages."""
     store = _get_store()
-    store.delete_session(session_id)
+    await asyncio.to_thread(store.delete_session, session_id)
     await broadcast(
         {
             "type": "session_updated",
@@ -487,15 +701,15 @@ async def delete_session(session_id: str):
 async def session_chat(session_id: str, data: dict):
     """HTTP fallback for chat when WebSocket is down.
 
-    Persists the user turn and forwards it to the voice process as a `chat`
-    command so the brain generates a reply and streams `token` events back
-    over the WebSocket, exactly like the live path.
+    Forwards the message to the voice process as a `chat` command, exactly
+    like the WS path -- main.py's _process() is the single place that
+    persists the user turn (touch_session, title update, then the append).
+    Persisting here too used to double-write every REST-originated message,
+    same bug the WS path never had since it never pre-persists either.
     """
     text = data.get("text", "").strip()
     if not text:
         return {"status": "error", "detail": "empty message"}
-    store = _get_store()
-    store.append("user", text, session_id=session_id)
     if event_bus:
         await event_bus.send_command(
             {"type": "chat", "session_id": session_id, "text": text}
@@ -507,6 +721,9 @@ _system_status: dict = {
     "ram": 0.0,
     "gpu": 0.0,
 }
+# Age of _system_status is a real liveness signal for the voice process --
+# it emits this roughly once/sec, so a stale value means that process is down.
+_system_status_received_at: float = 0.0
 _active_frontend_session: str | None = None
 _audio_state: dict = {
     "muted": False,
@@ -537,21 +754,25 @@ async def get_audio_level():
     return {"level": _audio_level}
 
 
-@app.get("/api/memory/facts")
-async def get_memory_facts():
-    """Retrieve all known facts (subject/predicate/object triples) from the
-    knowledge graph's edges, as stored by MemoryGraph.add_fact."""
-    graph = _get_memory_graph()
-    if graph:
-        try:
-            facts = [
-                {"subject": s, "predicate": p, "object": o}
-                for s, p, o in graph.get_all_facts()
-            ]
-            return {"facts": facts}
-        except Exception as e:
-            logger.error(f"Error fetching facts: {e}", exc_info=True)
-    return {"facts": []}
+@app.get("/api/tools")
+async def get_registered_tools():
+    """Return every tool in the shared registry -- unlike /api/mcp/tools
+    (MCP-prefixed subset only), this is the true total the dashboard's
+    Registered Tools count should reflect.
+
+    Must ensure the MCP client itself first -- the dashboard never calls
+    /api/mcp/tools or /api/mcp/status, so without this the MCP subprocess
+    never boots and mcp_-prefixed tools never join the registry, even with
+    MCP_ENABLED=true and servers configured."""
+    try:
+        from charlie.tools import registry
+
+        if config.mcp_enabled:
+            await _ensure_mcp_client_async()
+        return {"tools": registry.get_tool_definitions()}
+    except Exception as e:
+        logger.error(f"Error fetching registered tools: {e}")
+    return {"tools": []}
 
 
 @app.get("/api/mcp/tools")
@@ -570,7 +791,7 @@ async def get_mcp_tools():
         await _ensure_mcp_client_async()
         defs = [
             d for d in registry.get_tool_definitions()
-            if d.get("name", "").startswith("mcp_")
+            if d.get("function", {}).get("name", "").startswith("mcp_")
         ]
         return {"tools": defs}
     except Exception as e:
@@ -588,7 +809,7 @@ async def get_mcp_status():
         if enabled:
             await _ensure_mcp_client_async()
         connected = enabled and any(
-            d.get("name", "").startswith("mcp_")
+            d.get("function", {}).get("name", "").startswith("mcp_")
             for d in registry.get_tool_definitions()
         )
         return {"enabled": enabled, "connected": connected}
@@ -599,7 +820,7 @@ async def get_mcp_status():
 
 @app.get("/api/extensions")
 async def list_extensions():
-    """List installed extensions across all four Phase 5 adapters."""
+    """List installed extensions across all four adapters."""
     return {
         "extensions": [
             {
@@ -669,9 +890,11 @@ async def confirm_extension(data: dict):
 
     _extension_manager.record(
         InstalledExtension(
-            name=card.name, kind=kind, source=source, card=card, tool_names=tool_names
+            name=card.name, kind=kind, source=source, card=card, tool_names=tool_names,
+            raw_text=raw_text,
         )
     )
+    _save_extensions()
     await _forward_to_voice(
         "extension_installed",
         {"kind": kind, "name": card.name, "source": source, "raw_text": raw_text},
@@ -703,6 +926,7 @@ async def enable_extension(name: str):
 
     ext.enabled = True
     ext.tool_names = tool_names
+    _save_extensions()
     await _forward_to_voice("extension_enabled", {"kind": ext.kind, "name": name})
     return {"status": "ok", "tool_names": tool_names}
 
@@ -731,6 +955,7 @@ async def disable_extension(name: str):
     # doesn't do (see ExtensionManager's docstring).
 
     ext.enabled = False
+    _save_extensions()
     await _forward_to_voice("extension_disabled", {"kind": ext.kind, "name": name})
     return {"status": "ok"}
 
@@ -754,9 +979,41 @@ async def uninstall_extension(name: str):
             registry.unregister_tool(tool_name)
 
     _extension_manager.remove(name)
+    _save_extensions()
     await _forward_to_voice(
         "extension_uninstalled", {"kind": ext.kind, "name": name, "tool_names": ext.tool_names}
     )
+    return {"status": "ok"}
+
+
+@app.get("/api/agents")
+async def list_agents(session_id: str | None = None, limit: int = 100):
+    """List persisted sub-agent runs, most recent first."""
+    store = _get_store()
+    rows = await asyncio.to_thread(store.get_agent_runs, session_id=session_id, limit=limit)
+    return {
+        "agents": [
+            {
+                "agentId": r[0],
+                "sessionId": r[1],
+                "task": r[2],
+                "status": r[3],
+                "lastTool": r[4],
+                "result": r[5],
+                "spawnedAt": r[6],
+                "finishedAt": r[7] if r[3] != "running" else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.post("/api/agents/{agent_id}/cancel")
+async def cancel_agent(agent_id: str):
+    """Cancel a running sub-agent. Brain.spawn_agent's own on_agent_result
+    callback emits the graceful cancelled result -- no separate emit here."""
+    if event_bus:
+        await event_bus.send_command({"type": "cancel_agent", "payload": {"agent_id": agent_id}})
     return {"status": "ok"}
 
 
@@ -766,9 +1023,7 @@ async def set_active_session(data: dict):
     global _active_frontend_session
     _active_frontend_session = data.get("session_id")
     logger.info("Active frontend session: %s", _active_frontend_session)
-    # Also update WS client subscriptions and route the switch to the voice
-    # process so microphone speech lands in the right session. The WS
-    # `session_active` path already does this; the POST path must too.
+    # Also update WS client subscriptions and route the switch to the voice process for mic routing.
     for ws in active_connections:
         ws_sessions[ws] = _active_frontend_session
     if event_bus:
@@ -890,38 +1145,38 @@ async def reload_engine_config():
     return {"status": "ok"}
 
 
-@app.delete("/api/memory/facts")
-async def delete_memory_fact(subject: str, predicate: str, object: str):
-    """Delete a fact from the memory graph SQLite database."""
-    graph = _get_memory_graph()
-    if graph:
-        try:
-            success = graph.remove_fact(subject, predicate, object)
-            if success:
-                return {"status": "ok"}
-            else:
-                return {"status": "error", "message": "Failed to remove fact"}
-        except Exception as e:
-            logger.error(f"Error deleting fact: {e}", exc_info=True)
-            return {"status": "error", "message": str(e)}
+_WORKSPACE_IGNORED_DIRS = {"node_modules", "venv", "__pycache__", "dist", "out", ".next"}
+_WORKSPACE_ALLOWED_EXTS = {".py", ".md", ".json", ".css", ".ts", ".tsx", ".js", ".html"}
+
+
+def _scan_workspace_files() -> list[str]:
+    """os.walk with in-place dirname pruning -- never descends into node_modules/
+    .git/venv in the first place, unlike Path.rglob('*') which walks everything
+    and filters after (blocked the whole event loop on this repo's frontend/
+    node_modules tree, since this used to run inline in the async endpoint)."""
+    import os as _os
+    from pathlib import Path
+    root_dir = Path(__file__).parent.parent
+    files_list = []
+    for dirpath, dirnames, filenames in _os.walk(root_dir):
+        dirnames[:] = [
+            d for d in dirnames if not d.startswith(".") and d not in _WORKSPACE_IGNORED_DIRS
+        ]
+        for name in filenames:
+            if Path(name).suffix in _WORKSPACE_ALLOWED_EXTS:
+                rel = (Path(dirpath) / name).relative_to(root_dir).as_posix()
+                files_list.append(rel)
+    return sorted(files_list)
+
+
 @app.get("/api/workspace/files")
 async def list_workspace_files():
     """Return real tree structure of workspace files."""
-    from pathlib import Path
-    root_dir = Path(__file__).parent.parent
-    allowed_exts = {".py", ".md", ".json", ".css", ".ts", ".tsx", ".js", ".html"}
-    files_list = []
     try:
-        for p in root_dir.rglob("*"):
-            if p.is_file() and p.suffix in allowed_exts:
-                rel = p.relative_to(root_dir).as_posix()
-                parts = p.relative_to(root_dir).parts
-                ignored = (".", "node_modules", "venv", "__pycache__", "dist", "out")
-                if not any(part.startswith(".") or part in ignored for part in parts):
-                    files_list.append(rel)
+        return {"files": await asyncio.to_thread(_scan_workspace_files)}
     except Exception as e:
         logger.error(f"Error listing workspace files: {e}", exc_info=True)
-    return {"files": sorted(files_list)}
+    return {"files": []}
 
 
 @app.get("/api/workspace/file")
@@ -931,11 +1186,59 @@ async def get_workspace_file(path: str):
     from pathlib import Path
     root_dir = Path(__file__).parent.parent
     target = (root_dir / path).resolve()
-    if not str(target).startswith(str(root_dir)) or not target.exists() or not target.is_file():
+    if (
+        Path(path).suffix not in _WORKSPACE_ALLOWED_EXTS
+        or not str(target).startswith(str(root_dir) + os.sep)
+        or not target.exists()
+        or not target.is_file()
+    ):
         raise HTTPException(status_code=400, detail="Invalid path")
     try:
         content = target.read_text(encoding="utf-8", errors="ignore")
         return {"path": path, "content": content}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/workspace/file")
+async def put_workspace_file(data: dict):
+    """Create or overwrite a workspace file (edit-save and new-file share
+    this endpoint -- PUT is create-or-replace either way)."""
+    from fastapi import HTTPException
+    from pathlib import Path
+    path = data.get("path", "")
+    content = data.get("content", "")
+    if not path or Path(path).suffix not in _WORKSPACE_ALLOWED_EXTS:
+        raise HTTPException(status_code=400, detail="Invalid path or extension")
+    root_dir = Path(__file__).parent.parent
+    target = (root_dir / path).resolve()
+    if not str(target).startswith(str(root_dir) + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return {"path": path, "status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/workspace/file")
+async def delete_workspace_file(path: str):
+    """Delete a workspace file."""
+    from fastapi import HTTPException
+    from pathlib import Path
+    root_dir = Path(__file__).parent.parent
+    target = (root_dir / path).resolve()
+    if (
+        Path(path).suffix not in _WORKSPACE_ALLOWED_EXTS
+        or not str(target).startswith(str(root_dir) + os.sep)
+        or not target.exists()
+        or not target.is_file()
+    ):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    try:
+        target.unlink()
+        return {"path": path, "deleted": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -952,11 +1255,11 @@ async def get_docker_status():
             for line in lines:
                 try:
                     containers.append(json.loads(line))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Skipping unparseable docker ps line: {e}")
             return {"available": True, "containers": containers}
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Docker daemon unreachable: {e}")
     return {"available": False, "containers": []}
 
 
@@ -970,8 +1273,8 @@ async def get_ollama_status():
             if r.status_code == 200:
                 models = r.json().get("models", [])
                 return {"available": True, "models": [m.get("name") for m in models]}
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Ollama daemon unreachable: {e}")
     return {"available": False, "models": []}
 
 
@@ -984,7 +1287,7 @@ async def get_available_models():
     # Only seed the currently configured model - no phantom defaults
     models_set: set[str] = {current_model} if current_model else set()
 
-    # 1. Query configured LLM provider endpoint if API key is set
+    # Query configured LLM provider endpoint if API key is set
     if config.llm_key and config.llm_key not in ("no-key", "no_key") and config.llm_url:
         try:
             headers = build_auth_headers(config.llm_key)
@@ -1000,7 +1303,7 @@ async def get_available_models():
         except Exception as e:
             logger.warning(f"Could not fetch models from provider endpoint: {e}")
 
-    # 2. Discover local Ollama models (port 11434)
+    # Discover local Ollama models (port 11434)
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
             r = await client.get("http://127.0.0.1:11434/api/tags")
@@ -1008,10 +1311,10 @@ async def get_available_models():
                 for m in r.json().get("models", []):
                     if m.get("name"):
                         models_set.add(m["name"])
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Ollama model discovery unreachable: {e}")
 
-    # 3. Discover local LM Studio models (port 1234)
+    # Discover local LM Studio models (port 1234)
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
             r = await client.get("http://127.0.0.1:1234/v1/models")
@@ -1019,8 +1322,8 @@ async def get_available_models():
                 for item in r.json().get("data", []):
                     if isinstance(item, dict) and item.get("id"):
                         models_set.add(item["id"])
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"LM Studio model discovery unreachable: {e}")
 
     return {
         "active_model": current_model,
@@ -1031,53 +1334,194 @@ async def get_available_models():
 
 @app.get("/api/local_models")
 async def get_local_models():
-    """Return ONLY locally hosted models (Ollama :11434, LM Studio :1234)."""
+    """Return ONLY locally hosted models (Ollama :11434, LM Studio :1234),
+    each flagged with whether it's the model Charlie's LLM_MODEL config
+    currently points at, plus per-endpoint reachability/latency and
+    per-model specs (size, quantization, context length, VRAM-loaded
+    state where the server exposes it) -- real telemetry, not just a
+    static "here's what's installed" list."""
+    import time
+
     import httpx
 
+    active_name = config.llm_model.strip().lower()
     local_models = []
-    # 1. Discover local Ollama models (port 11434)
-    try:
-        async with httpx.AsyncClient(timeout=1.5) as client:
-            r = await client.get("http://127.0.0.1:11434/api/tags")
-            if r.status_code == 200:
-                for m in r.json().get("models", []):
-                    if m.get("name"):
-                        local_models.append({"name": m["name"], "source": "Ollama (:11434)"})
-    except Exception:
-        pass
+    endpoints = []
 
-    # 2. Discover local LM Studio models (port 1234)
+    # /api/ps reports what's actually loaded into VRAM right now, distinct from /api/tags' full catalog.
+    ollama_loaded: dict[str, int] = {}
+    t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
-            r = await client.get("http://127.0.0.1:1234/v1/models")
-            if r.status_code == 200:
-                for item in r.json().get("data", []):
-                    if isinstance(item, dict) and item.get("id"):
-                        local_models.append({"name": item["id"], "source": "LM Studio (:1234)"})
+            tags_resp = await client.get("http://127.0.0.1:11434/api/tags")
+            latency_ms = round((time.monotonic() - t0) * 1000)
+            if tags_resp.status_code == 200:
+                try:
+                    ps_resp = await client.get("http://127.0.0.1:11434/api/ps")
+                    if ps_resp.status_code == 200:
+                        for m in ps_resp.json().get("models", []):
+                            if m.get("name"):
+                                ollama_loaded[m["name"]] = m.get("size_vram", 0)
+                except Exception as e:
+                    logger.debug(f"Ollama /api/ps unavailable: {e}")
+                endpoints.append({"name": "Ollama", "url": ":11434", "reachable": True, "latency_ms": latency_ms})
+                for m in tags_resp.json().get("models", []):
+                    if not m.get("name"):
+                        continue
+                    details = m.get("details", {})
+                    local_models.append({
+                        "name": m["name"],
+                        "source": "Ollama (:11434)",
+                        "active": m["name"].strip().lower() == active_name,
+                        "size_bytes": m.get("size"),
+                        "parameter_size": details.get("parameter_size"),
+                        "quantization": details.get("quantization_level"),
+                        "context_length": None,
+                        "loaded_in_vram": m["name"] in ollama_loaded,
+                        "vram_bytes": ollama_loaded.get(m["name"], 0),
+                    })
+            else:
+                endpoints.append({"name": "Ollama", "url": ":11434", "reachable": False, "latency_ms": None})
     except Exception:
-        pass
+        endpoints.append({"name": "Ollama", "url": ":11434", "reachable": False, "latency_ms": None})
+
+    # Try LM Studio's richer /api/v0/models first, fall back to plain OpenAI-shaped /v1/models for older versions.
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            r = await client.get("http://127.0.0.1:1234/api/v0/models")
+            latency_ms = round((time.monotonic() - t0) * 1000)
+            if r.status_code == 200:
+                endpoints.append({"name": "LM Studio", "url": ":1234", "reachable": True, "latency_ms": latency_ms})
+                for item in r.json().get("data", []):
+                    if not (isinstance(item, dict) and item.get("id")):
+                        continue
+                    local_models.append({
+                        "name": item["id"],
+                        "source": "LM Studio (:1234)",
+                        "active": item["id"].strip().lower() == active_name,
+                        "size_bytes": item.get("size_bytes") or item.get("size"),
+                        "parameter_size": None,
+                        "quantization": item.get("quantization"),
+                        "context_length": item.get("max_context_length") or item.get("loaded_context_length"),
+                        "loaded_in_vram": item.get("state") == "loaded",
+                        "vram_bytes": None,
+                    })
+            else:
+                raise httpx.HTTPStatusError("v0 unavailable", request=r.request, response=r)
+    except Exception:
+        try:
+            t0 = time.monotonic()
+            async with httpx.AsyncClient(timeout=1.5) as client:
+                r = await client.get("http://127.0.0.1:1234/v1/models")
+                latency_ms = round((time.monotonic() - t0) * 1000)
+                if r.status_code == 200:
+                    endpoints.append({"name": "LM Studio", "url": ":1234", "reachable": True, "latency_ms": latency_ms})
+                    for item in r.json().get("data", []):
+                        if isinstance(item, dict) and item.get("id"):
+                            local_models.append({
+                                "name": item["id"],
+                                "source": "LM Studio (:1234)",
+                                "active": item["id"].strip().lower() == active_name,
+                                "size_bytes": None,
+                                "parameter_size": None,
+                                "quantization": None,
+                                "context_length": None,
+                                "loaded_in_vram": None,
+                                "vram_bytes": None,
+                            })
+                else:
+                    endpoints.append({"name": "LM Studio", "url": ":1234", "reachable": False, "latency_ms": None})
+        except Exception:
+            endpoints.append({"name": "LM Studio", "url": ":1234", "reachable": False, "latency_ms": None})
 
     return {
         "count": len(local_models),
         "models": local_models,
+        "active_model": config.llm_model,
+        "active_is_local": any(m["active"] for m in local_models),
+        "endpoints": endpoints,
     }
+
+
+_OLLAMA_PULL_TIMEOUT = 600.0  # model downloads can take minutes
+
+
+@app.post("/api/local_models/pull")
+async def pull_local_model(data: dict):
+    """Pull a model into local Ollama (POST :11434/api/pull, non-streaming)."""
+    from fastapi import HTTPException
+    import httpx
+
+    name = data.get("name", "")
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    try:
+        async with httpx.AsyncClient(timeout=_OLLAMA_PULL_TIMEOUT) as client:
+            r = await client.post(
+                "http://127.0.0.1:11434/api/pull", json={"name": name, "stream": False}
+            )
+            r.raise_for_status()
+            return {"status": "ok", "name": name}
+    except Exception as e:
+        logger.warning("Ollama pull failed for %s: %s", name, e)
+        raise HTTPException(status_code=502, detail=f"Ollama pull failed: {e}")
+
+
+@app.delete("/api/local_models/{name}")
+async def delete_local_model(name: str):
+    """Delete a model from local Ollama (DELETE :11434/api/delete)."""
+    from fastapi import HTTPException
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.request(
+                "DELETE", "http://127.0.0.1:11434/api/delete", json={"name": name}
+            )
+            r.raise_for_status()
+            return {"status": "ok", "name": name}
+    except Exception as e:
+        logger.warning("Ollama delete failed for %s: %s", name, e)
+        raise HTTPException(status_code=502, detail=f"Ollama delete failed: {e}")
+
+
+_VOICE_PROCESS_STALE_SECONDS = 5.0  # main.py emits system_status ~once/sec
 
 
 @app.get("/api/services/status")
 async def get_services_status():
-    """Return status of real Charlie system processes and services."""
+    """Return status of real Charlie system processes and services -- each
+    entry below is a real check, not a hardcoded literal."""
+    voice_alive = (time.time() - _system_status_received_at) < _VOICE_PROCESS_STALE_SECONDS
+    voice_status = "online" if voice_alive else "offline"
+
+    try:
+        _get_store().get_sessions()
+        session_store_status = "online"
+    except Exception:
+        session_store_status = "offline"
+
+    # ponytail: path-exists check, not a live query -- instantiating
+    # MemoryStore loads an embedding model, too expensive for a status poll.
+    # Upgrade to a real connectivity probe if this ever needs to catch a
+    # corrupt/locked store, not just a missing one.
+    memory_store_status = "online" if os.path.exists(config.memory_db_path) else "offline"
+
     return {
         "services": [
             {
                 "name": "Voice Pipeline Engine",
-                "status": "online",
-                "details": "sounddevice mic capture + Kokoro TTS synthesis",
+                "status": voice_status,
+                "details": "sounddevice mic capture + Kokoro TTS synthesis"
+                if voice_alive else "No recent system_status from the voice process",
                 "type": "audio",
             },
             {
                 "name": "Whisper ASR Worker",
-                "status": "online",
-                "details": "distil-large-v3 CUDA subprocess",
+                "status": voice_status,
+                "details": "distil-large-v3 CUDA subprocess (shares the voice "
+                "process's liveness signal with Voice Pipeline Engine above)",
                 "type": "speech_to_text",
             },
             {
@@ -1088,19 +1532,19 @@ async def get_services_status():
             },
             {
                 "name": "ZeroMQ EventBus Bridge",
-                "status": "online",
+                "status": "online" if event_bus is not None else "offline",
                 "details": f"PUB/SUB IPC ports {DEFAULT_EVENT_PORT}/{DEFAULT_COMMAND_PORT}",
                 "type": "ipc",
             },
             {
                 "name": "SQLite SessionStore",
-                "status": "online",
+                "status": session_store_status,
                 "details": "FTS5 isolated session history database",
                 "type": "database",
             },
             {
                 "name": "ChromaDB MemoryStore",
-                "status": "online",
+                "status": memory_store_status,
                 "details": "Vector memory embedding store",
                 "type": "vector_db",
             },

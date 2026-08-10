@@ -106,30 +106,51 @@ class TestBarePatternGating:
         assert calls[0]["name"] == "desktop_click"
         assert calls[0]["arguments"] == {"mark_id": "3"}
 
-    def test_graph_add_fact_multi_param_no_longer_drift(self):
+    def test_memory_multi_param_no_longer_drift(self):
         brain = _make_brain(use_native_tools=False)
         calls = brain._extract_tool_calls(
-            'TOOL: graph_add_fact("user", "prefers", "dark mode")'
+            'TOOL: memory("add", "user", "prefers dark mode")'
         )
-        assert calls[0]["name"] == "graph_add_fact"
+        assert calls[0]["name"] == "memory"
         assert calls[0]["arguments"] == {
-            "subject": "user",
-            "predicate": "prefers",
-            "object": "dark mode",
+            "action": "add",
+            "target": "user",
+            "content": "prefers dark mode",
         }
 
     def test_zero_arg_tool_gets_empty_arguments(self):
-        """graph_consolidate takes no parameters -- an empty-parens call must
+        """desktop_observe takes no parameters -- an empty-parens call must
         not synthesize a bogus `query` kwarg that would crash the call."""
         brain = _make_brain(use_native_tools=False)
-        calls = brain._extract_tool_calls("TOOL: graph_consolidate()")
-        assert calls[0]["name"] == "graph_consolidate"
+        calls = brain._extract_tool_calls("TOOL: desktop_observe()")
+        assert calls[0]["name"] == "desktop_observe"
         assert calls[0]["arguments"] == {}
 
     def test_unknown_tool_name_falls_back_to_query(self):
         brain = _make_brain(use_native_tools=False)
         calls = brain._extract_tool_calls('TOOL: totally_made_up_tool("something")')
         assert calls[0]["arguments"] == {"query": "something"}
+
+    def test_repeated_identical_tool_prefix_deduped(self):
+        """Small local models sometimes loop and repeat the same TOOL: line
+        verbatim in one completion -- must not execute the call twice."""
+        brain = _make_brain(use_native_tools=False)
+        text = (
+            'TOOL: shell_execute("dir C:\\\\Users")\n'
+            'TOOL: shell_execute("dir C:\\\\Users")\n'
+        )
+        calls = brain._extract_tool_calls(text)
+        assert len(calls) == 1
+        assert calls[0]["name"] == "shell_execute"
+
+    def test_repeated_calls_with_different_args_both_kept(self):
+        brain = _make_brain(use_native_tools=False)
+        text = (
+            'TOOL: shell_execute("dir C:\\\\Users")\n'
+            'TOOL: shell_execute("dir C:\\\\Windows")\n'
+        )
+        calls = brain._extract_tool_calls(text)
+        assert len(calls) == 2
 
 class TestGroundingRules:
     """Grounding rules must be present in the system prompt stable tier."""
@@ -193,7 +214,7 @@ class TestGroundingRules:
     def test_volatile_tier_includes_tool_catalog_when_provided(self):
         """Text-mode (local model) turns pass the live registry's tool
         catalog here every turn -- this is what makes Charlie aware of
-        desktop control, memory/graph tools, MCP, and plugins in text mode,
+        desktop control, memory tools, MCP, and plugins in text mode,
         instead of only the 3 tools _TEXT_TOOL_INSTRUCTIONS shows examples
         for."""
         from datetime import datetime
@@ -206,7 +227,7 @@ class TestGroundingRules:
         )
         assert "AVAILABLE TOOLS" in tier
         assert "desktop_click" in tier
-        assert "graph_add_fact" in tier
+        assert "vector_memory" in tier
 
     def test_volatile_tier_omits_idle_time_by_default(self):
         from datetime import datetime
@@ -272,42 +293,10 @@ class TestCancelGeneration:
         assert brain._chat_generation != generation_at_loop_top
 
 
-class TestHelmPersona:
-    """Helm persona text and auto-detect (Task A4 see-act-verify hardening)."""
-
-    def test_helm_persona_mentions_verify_and_raw_input(self):
-        from charlie.core import _HELM_PERSONA_TEXT
-        for phrase in ("desktop_click_at", "re-observe", "verify"):
-            assert phrase in _HELM_PERSONA_TEXT
-
-    def test_helm_persona_mentions_window_management(self):
-        from charlie.core import _HELM_PERSONA_TEXT
-        for phrase in ("desktop_windows", "desktop_focus"):
-            assert phrase in _HELM_PERSONA_TEXT
-
-    def test_operator_persona_auto_activates_on_desktop_intent(self):
-        from charlie.core import _detect_operator_persona
-        assert _detect_operator_persona("helm, open my editor")
-        assert _detect_operator_persona("click the save button on screen")
-        assert not _detect_operator_persona("what's the weather")
-
-    def test_operator_persona_avoids_drag_idiom_false_positives(self):
-        from charlie.core import _detect_operator_persona
-        assert not _detect_operator_persona("what's a good drag queen show")
-        assert not _detect_operator_persona("drag racing is fun")
-        assert not _detect_operator_persona("the meeting will drag on forever")
-
-    def test_operator_persona_still_detects_real_drag_intent(self):
-        from charlie.core import _detect_operator_persona
-        assert _detect_operator_persona("drag the file to the trash")
-        assert _detect_operator_persona("drag this to the folder")
-        assert _detect_operator_persona("drag and drop this icon")
-
-
 class TestCapabilitiesBlock:
-    """Stable-tier capability roster (Task A4b): stop Charlie from falsely
-    refusing when a tool/agent for the request already exists, and make a
-    live capability roster override any stale claim (e.g. in SOUL.md)."""
+    """Stable-tier capability roster: stop Charlie from falsely refusing
+    when a tool/agent for the request already exists, and make a live
+    capability roster override any stale claim (e.g. in SOUL.md)."""
 
     def test_capabilities_block_overrides_stale_claims(self):
         from charlie.config import Config
@@ -355,9 +344,9 @@ class TestCapabilitiesBlock:
 
 
 class TestRebuildStableTier:
-    """Task A4b fix 2: the dashboard's system_restart reload flow mutates
-    config in place but only rebuilt _context_tier -- capability claims baked
-    into _stable_tier kept describing the OLD config until process restart."""
+    """The dashboard's system_restart reload flow mutates config in place
+    but only rebuilt _context_tier -- capability claims baked into
+    _stable_tier kept describing the OLD config until process restart."""
 
     def test_rebuild_stable_tier_reflects_new_config(self):
         import charlie.core as core_module
@@ -379,8 +368,8 @@ class TestRebuildStableTier:
 
 
 class TestVisualContentQueryFastPath:
-    """Task D1: ambient "what am I looking at" fast-path queues a vision
-    screenshot for graphical content OCR/UIA marks can't describe.
+    """Ambient "what am I looking at" fast-path queues a vision screenshot
+    for graphical content OCR/UIA marks can't describe.
     _should_queue_visual_screenshot now also fires for _SCREEN_QUERY_RE's
     broader "what's on my screen" phrasing -- a real screenshot beats the
     UIA/OCR text summary whenever a vision model is actually configured."""
@@ -524,3 +513,28 @@ class TestMaybeInjectVisualScreenshotCall:
         result = _maybe_inject_visual_screenshot_call(real_calls, True)
         assert result == real_calls
         assert len(result) == 1
+
+    def test_injects_all_monitors_arg_when_requested(self):
+        from charlie.core import _maybe_inject_visual_screenshot_call
+        result = _maybe_inject_visual_screenshot_call([], True, all_monitors=True)
+        assert result[0]["arguments"] == {"all_monitors": True}
+
+
+class TestBothScreensDetection:
+    """_BOTH_SCREENS_RE gates all_monitors=True on the injected desktop_screenshot call."""
+
+    def test_both_screens_matches(self):
+        from charlie.core import _BOTH_SCREENS_RE
+        assert _BOTH_SCREENS_RE.search("what's on both my screens")
+
+    def test_all_monitors_matches(self):
+        from charlie.core import _BOTH_SCREENS_RE
+        assert _BOTH_SCREENS_RE.search("describe all monitors")
+
+    def test_other_screen_matches(self):
+        from charlie.core import _BOTH_SCREENS_RE
+        assert _BOTH_SCREENS_RE.search("what's on the other screen")
+
+    def test_single_screen_query_does_not_match(self):
+        from charlie.core import _BOTH_SCREENS_RE
+        assert not _BOTH_SCREENS_RE.search("what's on my screen right now")

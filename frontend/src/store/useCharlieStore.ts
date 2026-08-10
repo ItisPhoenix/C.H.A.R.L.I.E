@@ -18,6 +18,7 @@ export interface Message {
   id?: string;
   role: "user" | "assistant" | "system";
   content: string;
+  turnId?: string;
 }
 
 export interface RecoveryProposal {
@@ -54,10 +55,30 @@ export interface MicState {
   mic_muted: boolean;
 }
 
+export interface QueueState {
+  count: number;
+  ids: string[];
+  texts: string[];
+  sessionIds: string[];
+}
+
 export interface ToolActivityEntry {
-  kind: "tool_call" | "tool_result" | "thinking_update";
+  kind: "tool_call" | "tool_result" | "thinking_update" | "agent_spawned" | "agent_status" | "agent_result";
   name: string;
   text: string;
+  sessionId?: string;
+}
+
+export type AgentRunStatus = "running" | "done" | "timeout" | "cancelled";
+
+export interface AgentRun {
+  agentId: string;
+  task: string;
+  status: AgentRunStatus;
+  lastTool?: string;
+  result?: string;
+  spawnedAt: number;
+  finishedAt?: number;
   sessionId?: string;
 }
 
@@ -80,16 +101,6 @@ export interface DesktopFrame {
   receivedAt: number;
 }
 
-export interface BackgroundTask {
-  id: string;
-  text: string;
-  steps: string[];
-  current_step: number;
-  status: "planning" | "awaiting_approval" | "running" | "paused" | "done" | "failed" | "cancelled";
-  flagged_steps: number[];
-  error: string | null;
-}
-
 interface CharlieState {
   connected: boolean;
   systemStatus: SystemStatus;
@@ -103,10 +114,16 @@ interface CharlieState {
   listeningTrigger: ListeningTrigger;
   audio: AudioState;
   mic: MicState;
+  queue: QueueState;
   audioLevel: number;
+  currentSpeechChunk: string | null;
   toolActivity: ToolActivityEntry[];
-  launchId: string;
-  sessionScope: "all" | "this_launch";
+  agentRuns: AgentRun[];
+  // Persisted per-turn execution trace, keyed by turnId -- backs the "Show
+  // Execution" expander on past messages (toolActivity/clearToolActivity is
+  // the live in-flight version only, wiped on response_done).
+  executionTraces: Record<string, ToolActivityEntry[]>;
+  setExecutionTraces: (traces: Record<string, ToolActivityEntry[]>) => void;
   accentColor: string;
 
   setConnected: (c: boolean) => void;
@@ -123,11 +140,13 @@ interface CharlieState {
   setListeningTrigger: (t: ListeningTrigger) => void;
   setAudio: (a: AudioState) => void;
   setMic: (m: MicState) => void;
+  setQueue: (q: QueueState) => void;
   setAudioLevel: (level: number) => void;
+  setCurrentSpeechChunk: (text: string | null) => void;
   appendToolActivity: (e: ToolActivityEntry) => void;
   clearToolActivity: () => void;
-  setLaunchId: (id: string) => void;
-  setSessionScope: (scope: "all" | "this_launch") => void;
+  upsertAgentRun: (patch: Partial<AgentRun> & { agentId: string }) => void;
+  setAgentRuns: (runs: AgentRun[]) => void;
   setAccentColor: (color: string) => void;
   activeProposal: RecoveryProposal | null;
   setActiveProposal: (p: RecoveryProposal | null) => void;
@@ -135,12 +154,10 @@ interface CharlieState {
   setActiveToolApproval: (r: ToolApprovalRequest | null) => void;
   latestDesktopFrame: DesktopFrame | null;
   setLatestDesktopFrame: (f: DesktopFrame | null) => void;
-  desktopControlEnabled: boolean;
-  setDesktopControlEnabled: (enabled: boolean) => void;
-  backgroundTask: BackgroundTask | null;
-  setBackgroundTask: (t: BackgroundTask | null) => void;
-  selectedFileContent: string;
-  setSelectedFileContent: (content: string) => void;
+  activeModel: string;
+  setActiveModel: (model: string) => void;
+  visionModel: string;
+  setVisionModel: (model: string) => void;
 }
 
 export const useCharlieStore = create<CharlieState>((set) => ({
@@ -156,10 +173,12 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   listeningTrigger: null,
   audio: { muted: false, volume: 1.0 },
   mic: { mic_muted: false },
+  queue: { count: 0, ids: [], texts: [], sessionIds: [] },
   audioLevel: 0,
+  currentSpeechChunk: null,
   toolActivity: [],
-  launchId: "",
-  sessionScope: "all",
+  agentRuns: [],
+  executionTraces: {},
   // Always starts at the default; the persisted value (if any) is applied after mount
   // (see page.tsx) so the first client render matches the server-rendered HTML.
   accentColor: "#a855f7",
@@ -193,14 +212,35 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setListeningTrigger: (listeningTrigger: ListeningTrigger) => set({ listeningTrigger }),
   setAudio: (audio) => set({ audio }),
   setMic: (mic) => set({ mic }),
+  setQueue: (queue) => set({ queue }),
   setAudioLevel: (audioLevel) => set({ audioLevel }),
+  setCurrentSpeechChunk: (currentSpeechChunk) => set({ currentSpeechChunk }),
   appendToolActivity: (e) => set((st) => ({ toolActivity: [...st.toolActivity, e] })),
   clearToolActivity: () => set({ toolActivity: [] }),
-  setLaunchId: (launchId) => set({ launchId }),
-  setSessionScope: (sessionScope) => set({ sessionScope }),
+  // Merge-by-agentId so agent_spawned/agent_status/agent_result updates the same
+  // run entry instead of appending duplicates; caps history like alerts/logs.
+  upsertAgentRun: (patch) => set((st) => {
+    const idx = st.agentRuns.findIndex((r) => r.agentId === patch.agentId);
+    if (idx === -1) {
+      const created: AgentRun = {
+        task: "",
+        status: "running",
+        spawnedAt: Date.now(),
+        ...patch,
+      };
+      return { agentRuns: [created, ...st.agentRuns].slice(0, 100) };
+    }
+    const copy = [...st.agentRuns];
+    copy[idx] = { ...copy[idx], ...patch };
+    return { agentRuns: copy };
+  }),
+  // Bulk replace on hydrate from /api/agents; upsertAgentRun handles live WS updates.
+  setAgentRuns: (agentRuns) => set({ agentRuns }),
+  setExecutionTraces: (executionTraces) => set({ executionTraces }),
   setAccentColor: (color) => set(() => {
     if (typeof window !== "undefined") {
       localStorage.setItem("charlie_accent", color);
+      applyAccentColor(color);
     }
     return { accentColor: color };
   }),
@@ -210,12 +250,10 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   setActiveToolApproval: (activeToolApproval) => set({ activeToolApproval }),
   latestDesktopFrame: null,
   setLatestDesktopFrame: (latestDesktopFrame) => set({ latestDesktopFrame }),
-  desktopControlEnabled: false,
-  setDesktopControlEnabled: (desktopControlEnabled) => set({ desktopControlEnabled }),
-  backgroundTask: null,
-  setBackgroundTask: (backgroundTask) => set({ backgroundTask }),
-  selectedFileContent: "",
-  setSelectedFileContent: (selectedFileContent) => set({ selectedFileContent }),
+  activeModel: "",
+  setActiveModel: (activeModel) => set({ activeModel }),
+  visionModel: "",
+  setVisionModel: (visionModel) => set({ visionModel }),
 }));
 
 export function hexToRgb(hex: string) {
@@ -234,4 +272,35 @@ export function lighten(hex: string, amt: number): string {
   const { r, g, b } = hexToRgb(hex);
   const l = (c: number) => Math.min(255, Math.round(c + (255 - c) * amt));
   return `rgb(${l(r)},${l(g)},${l(b)})`;
+}
+
+export interface McpToolLike {
+  type: string;
+  function?: { name: string; description?: string };
+}
+
+export interface McpServerGroup {
+  name: string;
+  count: number;
+  tools: string[];
+}
+
+/** Groups /api/mcp/tools results by server, parsed from the "mcp_<server>_<tool>" name prefix. */
+export function groupMcpTools(tools: McpToolLike[]): McpServerGroup[] {
+  const servers: Record<string, string[]> = {};
+  tools.forEach((tool) => {
+    const name = tool.function?.name ?? tool.type;
+    const server = name.startsWith("mcp_") ? name.split("_")[1] : "local";
+    (servers[server] ||= []).push(name);
+  });
+  return Object.entries(servers).map(([name, names]) => ({ name, count: names.length, tools: names }));
+}
+
+/** Writes the live accent color onto :root as real CSS custom properties, so every bg-accent/text-accent/border-accent utility updates together. */
+export function applyAccentColor(color: string): void {
+  const root = document.documentElement.style;
+  root.setProperty("--accent", color);
+  root.setProperty("--accent-dim", rgba(color, 0.12));
+  root.setProperty("--accent-border", rgba(color, 0.25));
+  root.setProperty("--accent-soft", lighten(color, 0.35));
 }

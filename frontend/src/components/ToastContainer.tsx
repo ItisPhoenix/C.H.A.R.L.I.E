@@ -8,7 +8,8 @@ interface ActiveToast extends Alert {
   id: string;
 }
 
-const AUTO_DISMISS_MS = 2000;
+const INFO_DISMISS_MS = 4000;
+const WARN_ERROR_DISMISS_MS = 6000;
 
 export function ToastContainer(): ReactElement {
   const alerts = useCharlieStore((s) => s.alerts);
@@ -30,10 +31,13 @@ export function ToastContainer(): ReactElement {
 
     setToasts((prev) => [newToast, ...prev].slice(0, 3));
 
-    // Auto-dismiss after 2 seconds (stable: doesn't depend on toasts state)
+    const dismissMs =
+      latest.severity === "error" || latest.severity === "warn"
+        ? WARN_ERROR_DISMISS_MS
+        : INFO_DISMISS_MS;
     const timer = setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== newToast.id));
-    }, AUTO_DISMISS_MS);
+    }, dismissMs);
 
     return () => clearTimeout(timer);
   }, [alerts]);
@@ -47,7 +51,7 @@ export function ToastContainer(): ReactElement {
   return (
     <div className="fixed top-20 right-6 z-50 flex flex-col gap-3 w-80 pointer-events-none select-none">
       {toasts.map((toast) => {
-        let borderClass = "border-[rgba(255,255,255,0.07)]";
+        let borderClass = "border-[var(--color-glass-border)]";
         let textClass = "text-slate-100";
         let icon = <Info className="w-4 h-4 text-cyan-400" />;
 
@@ -60,7 +64,7 @@ export function ToastContainer(): ReactElement {
           textClass = "text-amber-200";
           icon = <AlertTriangle className="w-4 h-4 text-amber-500" />;
         } else {
-          borderClass = `border-[rgba(6,182,212,0.3)]`;
+          borderClass = `border-[var(--color-accent-teal)]/30`;
           icon = <Info className="w-4 h-4 text-[var(--color-accent-teal)]" />;
         }
 
@@ -74,7 +78,7 @@ export function ToastContainer(): ReactElement {
               <p className={`text-xs font-sans leading-relaxed ${textClass} break-words`}>
                 {toast.message}
               </p>
-              <span className="text-[9px] font-mono text-slate-500 mt-1 block">
+              <span className="text-xs font-mono text-slate-500 mt-1 block">
                 {toast.timestamp}
               </span>
             </div>

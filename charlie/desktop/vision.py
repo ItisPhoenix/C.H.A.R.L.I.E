@@ -49,7 +49,24 @@ def annotate_som(png_bytes: bytes, elements: List[Element]) -> bytes:
     return buf.getvalue()
 
 
+_MAX_VISION_DIMENSION = 1280  # ponytail: fixed cap, make configurable if a model needs more detail
+
+
 def to_data_url(png_bytes: bytes) -> str:
-    """Base64 `data:image/png;base64,...` URL for an LLM image_url payload."""
+    """Base64 `data:image/png;base64,...` URL for an LLM image_url payload.
+
+    Downscales to _MAX_VISION_DIMENSION on the long edge first -- an
+    unscaled full-resolution screenshot (~1.2MB base64) silently produced
+    empty responses from a local vision model instead of a clean error,
+    almost certainly exceeding its practical image-size handling."""
+    if VISION_AVAILABLE:
+        img = Image.open(io.BytesIO(png_bytes))
+        if max(img.size) > _MAX_VISION_DIMENSION:
+            scale = _MAX_VISION_DIMENSION / max(img.size)
+            new_size = (round(img.width * scale), round(img.height * scale))
+            img = img.convert("RGB").resize(new_size, Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            png_bytes = buf.getvalue()
     encoded = base64.b64encode(png_bytes).decode("ascii")
     return f"data:image/png;base64,{encoded}"

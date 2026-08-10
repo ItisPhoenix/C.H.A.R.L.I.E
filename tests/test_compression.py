@@ -72,7 +72,7 @@ async def test_compression_threshold_from_config_is_honored():
 
     # High threshold (0.8 of a 1000-token window = 800): must NOT compress.
     high_config = Config(
-        context_window=1000, compression_threshold=0.8,
+        context_window=1000, compression_soft_threshold=0.8, compression_threshold=0.8,
         history_keep_recent=2, llm_url="",
     )
     result_high = await _compress_messages(messages, high_config)
@@ -80,7 +80,7 @@ async def test_compression_threshold_from_config_is_honored():
 
     # Low threshold (0.1 of a 1000-token window = 100): must compress.
     low_config = Config(
-        context_window=1000, compression_threshold=0.1,
+        context_window=1000, compression_soft_threshold=0.1, compression_threshold=0.1,
         history_keep_recent=2, llm_url="",
     )
     result_low = await _compress_messages(messages, low_config)

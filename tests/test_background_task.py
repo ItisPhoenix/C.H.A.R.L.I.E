@@ -35,7 +35,8 @@ class FakeEventBus:
 
 
 async def _fake_plan_chat_stream(
-    self, user_input, platform="voice", skip_pre_search=False, session_id="default", skip_tools=False
+    self, user_input, platform="voice", skip_pre_search=False, session_id="default",
+    skip_tools=False, skip_fast_paths=False,
 ):
     if "Break the following task" in user_input:
         yield "1. Step one\n2. Step two\n"
@@ -295,8 +296,8 @@ async def test_background_approval_omits_session_id(monkeypatch, bg_config):
     tool_approval_request by "is this the session I'm currently viewing" --
     a background task has no open chat tab, so tagging it with the
     foreground session silently drops the event and the approval hangs
-    forever (approval_timeout=None has no fallback). Found live in Phase 3
-    testing: a real task parked indefinitely with no visible approval UI."""
+    forever (approval_timeout=None has no fallback). Found live in testing:
+    a real task parked indefinitely with no visible approval UI."""
     monkeypatch.setattr(recovery, "get_active_ws_count", lambda: 1)
     monkeypatch.setattr(recovery, "get_active_session_id", lambda: "some-foreground-session")
 

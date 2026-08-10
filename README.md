@@ -57,8 +57,7 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 | | |
 |---|---|
 | **Persistent memory** | Remembers facts across sessions via `MEMORY.md` and `USER.md`. |
-| **Episodic + semantic memory** | Session history, a ChromaDB vector store, and a SQLite knowledge graph of facts. |
-| **Reflection engine** | Periodic self-reflection (every ~5 turns) consolidates memory and updates the knowledge graph. |
+| **Episodic + semantic memory** | Session history plus a ChromaDB vector store. |
 | **Single-LLM architecture** | One text model handles everything (no fast/small vs. big/slow split) plus a separate, opt-in vision model for screen/image understanding. |
 
 ### 🪟 Dashboard
@@ -91,7 +90,6 @@ Every tool the Brain can call lives in `charlie/tools.py`, grouped by area:
 - `session_search` -- full-text (FTS5) search over past conversation history
 - `memory` -- add/replace/remove/consolidate entries in `MEMORY.md`/`USER.md`/`OPINIONS.md`
 - `vector_memory` -- semantic remember/recall across sessions (ChromaDB)
-- `graph_add_fact` / `graph_query` / `graph_consolidate` -- knowledge-graph triples
 
 **System & shell**
 - `shell_execute` -- runs a command; voice mode restricts to an allowlist, risky keywords/metacharacters are always blocked, gated keywords need approval, and a bare launch of an already-running known app focuses it instead of relaunching
@@ -253,7 +251,6 @@ See `.env.example` for the complete, commented list. The most commonly tuned one
 │   ├── personality.py         # Emotion classification + voice command parsing
 │   ├── session_store.py       # SQLite + FTS5 session history
 │   ├── memory_store.py        # ChromaDB vector memory
-│   ├── memory_graph.py        # SQLite knowledge graph
 │   ├── ipc.py                  # ZeroMQ EventBus bridging the voice process and web process
 │   ├── mcp_client.py          # MCP client (external tool servers)
 │   ├── plugins.py             # Hybrid plugin system (filesystem/browser/calendar/code-exec)
@@ -323,7 +320,6 @@ Charlie also understands a couple of typed directives:
 | Command | Effect |
 |---|---|
 | `!search <query>` | Search your past conversations (full-text) and read back the matches |
-| `/memory-review` (or `!memory-review`) | Print a summary of the knowledge graph Charlie has built from memory |
 
 ---
 

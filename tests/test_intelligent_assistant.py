@@ -8,10 +8,11 @@ from charlie.core import (
     _assess_tool_result_relevance,
     _build_volatile_tier,
     _detect_correction,
-    _detect_operator_persona,
     _detect_set_goal,
+    _detect_standing_instruction,
     _detect_verbosity_feedback,
     _is_followup,
+    _needs_web_search,
     _strip_vocatives,
 )
 
@@ -54,6 +55,33 @@ class TestCorrectionDetection:
 
     def test_positive_feedback(self):
         assert _detect_correction("that's great") is False
+
+
+class TestStandingInstructionDetection:
+    """Verify _detect_standing_instruction catches forward-looking directives
+    that _detect_opinion_teaching's narrower pattern doesn't cover."""
+
+    def test_when_i_ask(self):
+        text = (
+            "when i ask for weather, temperature, time, day, date and anything "
+            "related with this answer in 10 words unless i ask you to describe or go in detail."
+        )
+        assert _detect_standing_instruction(text) == text
+
+    def test_from_now_on(self):
+        assert _detect_standing_instruction("from now on keep replies short") is not None
+
+    def test_always_answer(self):
+        assert _detect_standing_instruction("always answer in one sentence") is not None
+
+    def test_going_forward(self):
+        assert _detect_standing_instruction("going forward, skip the small talk") is not None
+
+    def test_normal_question_not_matched(self):
+        assert _detect_standing_instruction("what's the weather in Paris") is None
+
+    def test_normal_greeting_not_matched(self):
+        assert _detect_standing_instruction("hey Charlie, how are you") is None
 
 
 class TestApplyCorrectionToMemory:
@@ -138,6 +166,17 @@ class TestCorrectionFastPath:
     def test_followup_what_was_that(self):
         assert _is_followup("what was that") is True
 
+    def test_what_question_not_a_followup(self):
+        # Regression: unanchored "what" match let real questions false-positive as follow-ups.
+        assert _is_followup("what's the current stock price of tsla") is False
+        assert _is_followup("what's the tech news?") is False
+
+    def test_news_questions_trigger_web_search(self):
+        # Regression: neither "what's happening"/"tech news" phrasing triggered pre-search at all.
+        assert _needs_web_search("what's happening in ai world?") is True
+        assert _needs_web_search("what's the tech news?") is True
+        assert _needs_web_search("what's the current stock price of tsla") is True
+
 
 # ---------------------------------------------------------------------------
 # Step 3: Post-Tool Confidence Gate
@@ -178,6 +217,15 @@ class TestConfidenceGate:
         assert _assess_tool_result_relevance(
             "web_search", "Error: Tool 'web_search' timed out after 15s"
         ) is False
+
+    def test_short_non_search_result_accepted(self):
+        """The length/junk heuristic is tuned for search noise; a short but
+        legitimate result from a non-search tool (e.g. a skill script's
+        whoami output) must not be discarded."""
+        assert _assess_tool_result_relevance("skill_qa_whoami_whoami", "DESKTOP\\user") is True
+
+    def test_short_query_tool_result_still_gated(self):
+        assert _assess_tool_result_relevance("session_search", "Error") is False
 
 
 # ---------------------------------------------------------------------------
@@ -286,46 +334,3 @@ class TestVolatilityTierGoal:
         )
         assert "Current goal: plan vacation" in tier
         assert "Stay focused" in tier
-
-
-# ---------------------------------------------------------------------------
-# Phase 4: Helm desktop-control operator persona
-# ---------------------------------------------------------------------------
-
-class TestOperatorPersonaDetection:
-    """Verify _detect_operator_persona catches Helm address."""
-
-    def test_helm_with_comma(self):
-        assert _detect_operator_persona("Helm, open my email") is True
-
-    def test_helm_lowercase_no_punctuation(self):
-        assert _detect_operator_persona("helm open my email") is True
-
-    def test_helm_not_at_start(self):
-        assert _detect_operator_persona("ask helm to open my email") is False
-
-    def test_no_match(self):
-        assert _detect_operator_persona("what's the weather") is False
-
-
-class TestVolatileTierOperatorPersona:
-    """Verify _build_volatile_tier injects the Helm persona block.
-
-    A bare "Helm" mention is no longer sufficient to prove the (token-
-    heavy) narration persona is active -- these tests check for the persona
-    block's own marker ("[Helm MODE]") instead of the bare name.
-    """
-
-    def test_no_persona(self):
-        from datetime import datetime
-        tier = _build_volatile_tier("voice", datetime.now(), 5)
-        assert "[Helm MODE]" not in tier
-
-    def test_with_persona(self):
-        from datetime import datetime
-        tier = _build_volatile_tier(
-            "voice", datetime.now(), 5, operator_persona=True
-        )
-        assert "[Helm MODE]" in tier
-        assert "desktop_observe" in tier
-        assert "desktop_observe" in tier

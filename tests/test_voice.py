@@ -68,6 +68,30 @@ class TestHumanizeText:
         assert "Title" in result
         assert "##" not in result
 
+    def test_list_items_get_a_pause_between_them(self):
+        """Regression: list-item newlines used to vanish into the final
+        whitespace collapse with zero punctuation, running every item
+        together as one unbroken clause instead of a pause per item."""
+        result = VoiceEngine._humanize_text("- Spain\n- Morocco\n- Dodgers")
+        assert result == "Spain. Morocco. Dodgers."
+
+    def test_numbered_list_items_get_a_pause_between_them(self):
+        result = VoiceEngine._humanize_text("1. First step\n2. Second step")
+        assert result == "First step. Second step."
+
+    def test_header_separated_from_following_text(self):
+        result = VoiceEngine._humanize_text("## Summary\nToday is sunny")
+        assert result == "Summary. Today is sunny."
+
+    def test_markdown_table_is_dropped_entirely(self):
+        """Reading a table cell-by-cell aloud is nonsense -- drop it, matching
+        established voice-AI text filters (e.g. Pipecat's MarkdownTextFilter)."""
+        text = "Prices:\n| City | Price |\n|------|-------|\n| Delhi | 102 |\n"
+        result = VoiceEngine._humanize_text(text)
+        assert "|" not in result
+        assert "Delhi" not in result
+        assert "Prices" in result
+
     def test_strips_wrapper_quotes_and_adds_period(self):
         """_humanize_text strips wrapping quotes but adds sentence-ending period."""
         result = VoiceEngine._humanize_text('"Hello world"')
@@ -120,6 +144,47 @@ class TestHumanizeText:
         assert result.endswith("?")
 
 
+
+
+class TestUnitPronunciation:
+    """Regression: '30 C' spoken as the letter 'C', and '2.5 m/s' spoken as
+    'million' -- degree symbol was silently ASCII-stripped, and the B/M/T/K
+    magnitude-suffix regex misread the 'm' in 'm/s' as a million suffix."""
+
+    def _make_engine(self):
+        with patch("charlie.voice.Kokoro"), \
+             patch("charlie.voice.sd"), \
+             patch("charlie.voice.mp.Queue"):
+            return VoiceEngine(FakeConfig(), on_speech=lambda _: None)
+
+    def test_degrees_celsius(self):
+        engine = self._make_engine()
+        result = engine._symbols_to_words(engine._numbers_to_words("30°C"))
+        assert "degrees Celsius" in result
+        assert "°" not in result
+
+    def test_degrees_fahrenheit(self):
+        engine = self._make_engine()
+        result = engine._symbols_to_words(engine._numbers_to_words("86°F"))
+        assert "degrees Fahrenheit" in result
+
+    def test_meters_per_second_not_million(self):
+        engine = self._make_engine()
+        result = engine._symbols_to_words(engine._numbers_to_words("2.5 m/s"))
+        assert "million" not in result
+        assert "meters per second" in result
+
+    def test_kilometers_per_hour_not_thousand(self):
+        engine = self._make_engine()
+        result = engine._symbols_to_words(engine._numbers_to_words("30 km/h"))
+        assert "thousand" not in result
+        assert "kilometers per hour" in result
+
+    def test_plain_million_suffix_still_works(self):
+        """The (?!/) fix must not break real magnitude suffixes."""
+        engine = self._make_engine()
+        result = engine._numbers_to_words("2.5M users")
+        assert "million" in result
 
 
 class TestHumanizeContractions:
@@ -250,13 +315,6 @@ class TestVoiceEngineInit:
         assert engine.muted
         engine.muted = False
         assert not engine.muted
-
-    def test_set_widget_callback(self):
-        engine = self._make_engine()
-        def cb(x):
-            return None
-        engine.set_widget_callback(cb)
-        assert engine._widget_callback is cb
 
     def test_set_wake_word_callback(self):
         engine = self._make_engine()

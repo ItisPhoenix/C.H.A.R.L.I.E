@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import tempfile
 import time
 from typing import Callable, Dict, Tuple
 
@@ -21,7 +22,6 @@ from charlie.text_utils import normalize_app_list as _normalize_app_list
 from pathlib import Path
 
 
-# 1. SETUP ENVIRONMENT FIRST
 class SafeStreamWrapper:
     def __init__(self, stream):
         self.stream = stream
@@ -64,9 +64,9 @@ else:
     sys.stderr = SafeStreamWrapper(sys.stderr)
 
 os.makedirs("logs", exist_ok=True)
-LOG_FILE = "logs/charlie.log"
+# pytest importing this module must not attach a FileHandler to the real log.
+LOG_FILE = "logs/test_charlie.log" if "pytest" in sys.modules else "logs/charlie.log"
 
-# 2. CONFIGURE SPLIT LOGGING
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)
 
@@ -86,14 +86,17 @@ console_handler.setFormatter(console_formatter)
 root_logger.handlers = []
 root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
+# Telegram's Bot API embeds the token in request URLs -- both httpx and telegram log it below.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.INFO)
 
-# 3. NOW IMPORT CHARLIE MODULES
 from charlie.config import Config, config
 from charlie.core import Brain
 from charlie.ipc import EventBus
 from charlie.memory_store import MemoryStore
 from charlie.personality import get_emotion_for_context, parse_voice_command, parse_yes_no
 from charlie.session_store import SessionStore
+from charlie.utils import make_id
 from charlie.voice import VoiceEngine
 from charlie.monitors import start_monitor_thread
 
@@ -105,10 +108,15 @@ _LAUNCH_ID: str = str(uuid.uuid4())
 
 # Streaming TTS flush thresholds (chars, not words)
 # First sentence: speak after first sentence boundary. Force-flush at 200 chars if no boundary.
-_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+# Also split before a new list item's newline (numbered "\n2. " or bulleted "\n- ")
+# so items get Kokoro's natural inter-utterance gap instead of running together.
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+|\n+(?=\s*(?:\d+[.)]|[-*•])\s)")
 _CLAUSE_BOUNDARY = re.compile(r"(?<=[,;])\s+")
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _MAX_FLUSH_CHARS = 200  # Force-flush at word boundary if no sentence boundary seen
+# First-flush gate: clause boundary or this many chars, whichever comes first.
+# 20 chars outran this deployment's slow remote LLM, causing an audible gap.
+_FIRST_FLUSH_MAX_CHARS = 60
 
 
 def _flush_complete_sentences(
@@ -154,13 +162,24 @@ def _strip_tool_lines(text: str) -> str:
     return "\n".join(kept).strip()
 
 
-def _safe_speak(voice, text: str, emotion: str, label: str = "") -> None:
+def _safe_speak(
+    voice, text: str, emotion: str, label: str = "", platform: str = "voice", session_id: str = ""
+) -> None:
     """Speak text, logging (not swallowing) any TTS failure.
 
     A mid-stream TTS error must never abort the answer generation loop --
     the UI token stream and message persistence downstream must still run.
+    Telegram turns have no local listener; the same incremental chunk instead
+    feeds the Telegram message-edit stream (see charlie.telegram_bot.TelegramBot.stream_append).
     """
     if not text or not text.strip():
+        return
+    if platform == "telegram":
+        from charlie.telegram_bot import get_active_bot
+        bot = get_active_bot()
+        if bot is not None and session_id:
+            chat_id = session_id.split(":", 1)[1]
+            asyncio.ensure_future(bot.stream_append(chat_id, text))
         return
     try:
         voice.speak(text.strip(), emotion)
@@ -170,6 +189,29 @@ def _safe_speak(voice, text: str, emotion: str, label: str = "") -> None:
             f" ({label})" if label else "",
             exc_info=True,
         )
+
+
+async def _relay_written_file_to_telegram(bot, session_id: str, path: str) -> None:
+    """A file_write call on a Telegram turn also gets sent as a document attachment, artifact-style."""
+    if not path:
+        return
+    try:
+        with open(path, "rb") as f:
+            content = f.read()
+    except Exception as e:
+        logger.warning(f"Failed to read file for Telegram relay: {e}")
+        return
+    chat_id = session_id.split(":", 1)[1]
+    await bot.send_document(chat_id, os.path.basename(path), content)
+
+
+def _emit_threadsafe(event_bus, loop, event_type, payload):
+    """Fire-and-forget event_bus.emit from any thread; logs failures the future would otherwise swallow."""
+    fut = asyncio.run_coroutine_threadsafe(event_bus.emit(event_type, payload), loop)
+    fut.add_done_callback(
+        lambda f: logger.warning(f"Event emit '{event_type}' failed: {f.exception()}") if f.exception() else None
+    )
+    return fut
 
 
 def _schedule_process(coro, loop):
@@ -225,6 +267,8 @@ async def main():
     # True while a chat turn's LLM/tool loop runs -- see _dispatch_or_queue.
     turn_active = False
     pending_turns: list = []
+    # Set below, only when a token + user ID are configured -- see the Telegram startup block.
+    telegram_bot = None
 
     try:
         store = SessionStore(config.session_db_path)
@@ -244,20 +288,49 @@ async def main():
 
     loop = asyncio.get_running_loop()
 
-    def on_tool_call(name, args):
+    def on_tool_call(name, args, turn_id=None, session_id=None):
         if event_bus:
-            asyncio.run_coroutine_threadsafe(
-                event_bus.emit("tool_call", {"name": name, "args": args, "session_id": current_web_session_id}), loop
+            _emit_threadsafe(
+                event_bus, loop, "tool_call",
+                {
+                    "name": name, "args": args, "turn_id": turn_id,
+                    "session_id": session_id or current_web_session_id,
+                },
             )
 
-    def on_tool_result(name, result):
+    def on_tool_result(name, result, turn_id=None, session_id=None, arguments=None):
         if event_bus:
-            asyncio.run_coroutine_threadsafe(
-                event_bus.emit(
-                    "tool_result",
-                    {"name": name, "text": result, "session_id": current_web_session_id},
-                ),
-                loop,
+            _emit_threadsafe(
+                event_bus, loop, "tool_result",
+                {
+                    "name": name, "text": result, "turn_id": turn_id,
+                    "session_id": session_id or current_web_session_id,
+                },
+            )
+        if (
+            name == "file_write"
+            and session_id
+            and session_id.startswith("telegram:")
+            and arguments
+            and not str(result).startswith("Error")
+        ):
+            from charlie.telegram_bot import get_active_bot
+            bot = get_active_bot()
+            if bot is not None:
+                asyncio.run_coroutine_threadsafe(
+                    _relay_written_file_to_telegram(bot, session_id, arguments.get("path", "")), loop
+                )
+
+    def on_queue_update():
+        if event_bus:
+            _emit_threadsafe(
+                event_bus, loop, "queue_update",
+                {
+                    "count": len(pending_turns),
+                    "ids": [i for i, _, _, _ in pending_turns][:5],
+                    "texts": [t for _, t, _, _ in pending_turns][:5],
+                    "session_ids": [s for _, _, s, _ in pending_turns][:5],
+                },
             )
 
     def on_thinking_update(name, args):
@@ -266,9 +339,32 @@ async def main():
             if args:
                 summary = str(args)[:80]
                 desc += f" with {summary}"
-            asyncio.run_coroutine_threadsafe(
-                event_bus.emit("thinking_update", {"text": desc, "session_id": current_web_session_id}), loop
+            _emit_threadsafe(event_bus, loop, "thinking_update", {"text": desc, "session_id": current_web_session_id})
+
+    def on_agent_spawned(agent_id, task):
+        if event_bus:
+            _emit_threadsafe(
+                event_bus, loop, "agent_spawned",
+                {"agent_id": agent_id, "task": task, "session_id": current_web_session_id},
             )
+
+    def on_agent_status(agent_id, tool_name):
+        if event_bus:
+            _emit_threadsafe(
+                event_bus, loop, "agent_status",
+                {"agent_id": agent_id, "tool_name": tool_name, "session_id": current_web_session_id},
+            )
+
+    def on_agent_result(agent_id, result):
+        if event_bus:
+            _emit_threadsafe(
+                event_bus, loop, "agent_result",
+                {"agent_id": agent_id, "result": result, "session_id": current_web_session_id},
+            )
+
+    def on_skill_installed(name, raw_text):
+        if event_bus:
+            _emit_threadsafe(event_bus, loop, "skill_installed", {"name": name, "raw_text": raw_text})
 
     try:
         brain = Brain(
@@ -279,6 +375,10 @@ async def main():
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_thinking_update=on_thinking_update,
+            on_agent_spawned=on_agent_spawned,
+            on_agent_status=on_agent_status,
+            on_agent_result=on_agent_result,
+            on_skill_installed=on_skill_installed,
         )
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")
@@ -286,13 +386,12 @@ async def main():
             store.close()
         return
 
+    asyncio.create_task(brain.prewarm())
+
     # Wire vector memory store into tool registry
     from charlie.tools import registry as tool_registry
     if memory_store is not None:
         tool_registry.set_memory_store(memory_store)
-    # Wire knowledge graph into tool registry
-    if brain is not None and hasattr(brain, "memory_graph"):
-        tool_registry.set_memory_graph(brain.memory_graph)
 
     # Wire the plugin system into the tool registry (no-op unless enabled).
     # The SAME registry the LLM calls, so when PLUGINS_ENABLED=true the
@@ -340,6 +439,55 @@ async def main():
 
     mcp_start_task = asyncio.create_task(_start_mcp_task())
 
+    async def _reload_extensions_task():
+        """Boot-time counterpart to charlie/web_server.py's _load_extensions():
+        that function only restores the web-server process's own registry, so
+        without this the voice process's Brain -- where the real chat
+        tool-calling loop runs -- starts every restart with zero previously
+        installed extensions until each one is reinstalled by hand. Awaits
+        mcp_start_task first so a config-driven MCP client (if any) is already
+        in place before mcp-kind entries potentially replace it."""
+        nonlocal mcp_client
+        await mcp_start_task
+        import json
+
+        try:
+            with open(config.extensions_state_path, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+        except FileNotFoundError:
+            return
+        except Exception:
+            logger.warning("Failed to read extensions state file", exc_info=True)
+            return
+
+        from charlie.extensions.install import install_extension
+        from charlie.tools import registry as _ext_registry
+
+        for entry in entries:
+            if not entry.get("enabled", True):
+                continue
+            kind = entry.get("kind", "")
+            name = entry.get("name", "")
+            source = entry.get("source", "")
+            raw_text = entry.get("raw_text", "")
+            try:
+                tool_names, mcp_client = install_extension(
+                    kind, name, source, raw_text,
+                    registry=_ext_registry, plugin_manager=plugin_manager, mcp_client=mcp_client,
+                    plugin_allow_dirs=config.plugin_allow_dirs,
+                )
+                if kind == "skill":
+                    from charlie.extensions.skills import format_skill_block, parse_skill_md
+                    manifest = parse_skill_md(raw_text)
+                    brain.add_installed_skill_block(name, format_skill_block(manifest))
+                logger.info(
+                    "Reloaded extension '%s' (%s) into voice process on boot: %s", name, kind, tool_names,
+                )
+            except Exception:
+                logger.warning("Failed to reload extension '%s' on boot", name, exc_info=True)
+
+    extensions_reload_task = asyncio.create_task(_reload_extensions_task())
+
     # Placeholder for event_bus (set later in async context)
     event_bus = None
     # Per-launch fallback, not the old shared "default" bucket across all launches.
@@ -373,12 +521,7 @@ async def main():
                 return
             store.update_session_title(session_id, candidate)
             if event_bus:
-                asyncio.run_coroutine_threadsafe(
-                    event_bus.emit(
-                        "session_updated", {"session_id": session_id, "title": candidate}
-                    ),
-                    loop,
-                )
+                _emit_threadsafe(event_bus, loop, "session_updated", {"session_id": session_id, "title": candidate})
         except Exception as exc:
             logger.debug(f"update_session_title_from_text skipped: {exc}")
 
@@ -418,9 +561,13 @@ async def main():
         # spoken yes/no -- that answer must reach _process() immediately
         # (it routes to resolve_tool_approval), never queued behind the
         # very turn it's meant to unblock.
-        if turn_active and not voice.is_speaking.is_set() and not get_active_voice_approval():
-            pending_turns.append((text, session_id, platform))
+        # is_speaking gates voice barge-in only -- a web user has no TTS to
+        # interrupt, so their follow-up must queue purely on turn_active.
+        not_speaking_or_web = platform != "voice" or not voice.is_speaking.is_set()
+        if turn_active and not_speaking_or_web and not get_active_voice_approval():
+            pending_turns.append((make_id(8), text, session_id, platform))
             logger.info(f"Queued utterance (a turn is already running tool calls): {text}")
+            on_queue_update()
             return
         await _process(text, brain, voice, session_id=session_id, platform=platform)
 
@@ -447,6 +594,10 @@ async def main():
             return
 
         print(f"\rHeard: {text}", flush=True)
+        # Unconditional so is_echo()'s post-speech grace window actually fires, not just mid-speech.
+        if voice.is_echo(text):
+            logger.info(f"Echo suppressed: {text}")
+            return
         if config.enable_barge_in and voice.is_speaking.is_set():
             # Barge-in detection: command words always interrupt immediately
             _BARGE_COMMANDS = {
@@ -465,10 +616,6 @@ async def main():
                 brain.cancel_chat()
                 speech_echo_cooldown = time.time() + 1.5
             else:
-                # Echo detection: is this a subset of what Charlie is currently saying?
-                if voice.is_echo(text):
-                    logger.info(f"Echo suppressed (during TTS): {text}")
-                    return
                 # New content during TTS -- barge in (cancel current turn)
                 logger.info("Barge-in: New user input during TTS. Canceling.")
                 voice.stop_tts()
@@ -487,30 +634,6 @@ async def main():
                 for role, content in results:
                     truncated = content[:120] + "..." if len(content) > 120 else content
                     response_str += f"- [{role}]: {truncated}\n"
-            print(f"\n{response_str}", flush=True)
-            voice.speak(response_str, last_emotion)
-            return
-        # Route /memory-review command
-        if text.strip().lower() in ("/memory-review", "!memory-review"):
-            if brain is None:
-                response_str = "Brain not initialized."
-            else:
-                graph = brain.memory_graph
-                facts = graph.get_all_facts()
-                if not facts:
-                    response_str = "Knowledge graph is empty."
-                else:
-                    # Build summary
-                    subjects = {}
-                    for s, p, o in facts:
-                        subjects.setdefault(s, []).append(f"{p} -> {o}")
-                    response_str = f"Knowledge graph: {len(facts)} facts.\n"
-                    for subj, preds in sorted(subjects.items()):
-                        response_str += f"  {subj}:\n"
-                        for pred in preds[:3]:
-                            response_str += f"    {pred}\n"
-                        if len(preds) > 3:
-                            response_str += f"    ... +{len(preds)-3} more\n"
             print(f"\n{response_str}", flush=True)
             voice.speak(response_str, last_emotion)
             return
@@ -578,7 +701,7 @@ async def main():
         is_first_flush = True
         turn_active = True
         try:
-            async for chunk in brain.chat_stream(text, platform=platform):
+            async for chunk in brain.chat_stream(text, platform=platform, session_id=session_id):
                 if is_first_chunk:
                     print("\r" + " " * 30 + "\r", end="", flush=True)
                     is_first_chunk = False
@@ -615,26 +738,46 @@ async def main():
                 # Progressive flush: sentence boundary > clause boundary > force-flush.
                 flushed = False
 
-                # Early first-flush: wait for first sentence boundary, or force at 150 chars
+                # Early first-flush: sentence > clause > force at _FIRST_FLUSH_MAX_CHARS.
                 if is_first_flush:
+                    def _speak_first(part: str) -> None:
+                        nonlocal sparkle
+                        _safe_speak(voice, sparkle + part, detected_emotion, "first-flush", platform, session_id)
+                        sparkle = ""
+
                     sentence_buffer, flushed = _flush_complete_sentences(
-                        sentence_buffer,
-                        lambda part: _safe_speak(voice, part, detected_emotion, "first-flush"),
+                        sentence_buffer, _speak_first
                     )
                     if flushed:
                         is_first_flush = False
-                    elif len(sentence_buffer) >= 150:
-                        idx = sentence_buffer.rfind(" ", 0, 150)
-                        if idx > 0:
-                            _safe_speak(voice, sentence_buffer[:idx], detected_emotion, "first-force")
-                            sentence_buffer = sentence_buffer[idx:].lstrip()
-                        is_first_flush = False
-                        flushed = True
+                    else:
+                        clause_idx = _CLAUSE_BOUNDARY.search(sentence_buffer)
+                        if clause_idx:
+                            flush_end = clause_idx.end()
+                            _safe_speak(
+                                voice, sparkle + sentence_buffer[:flush_end], detected_emotion,
+                                "first-clause", platform, session_id,
+                            )
+                            sparkle = ""
+                            sentence_buffer = sentence_buffer[flush_end:].lstrip()
+                            is_first_flush = False
+                            flushed = True
+                        elif len(sentence_buffer) >= _FIRST_FLUSH_MAX_CHARS:
+                            idx = sentence_buffer.rfind(" ", 0, _FIRST_FLUSH_MAX_CHARS)
+                            if idx > 0:
+                                _safe_speak(
+                                    voice, sparkle + sentence_buffer[:idx], detected_emotion,
+                                    "first-force", platform, session_id,
+                                )
+                                sparkle = ""
+                                sentence_buffer = sentence_buffer[idx:].lstrip()
+                            is_first_flush = False
+                            flushed = True
 
                 if not flushed:
                     sentence_buffer, flushed = _flush_complete_sentences(
                         sentence_buffer,
-                        lambda part: _safe_speak(voice, part, detected_emotion, "sentence"),
+                        lambda part: _safe_speak(voice, part, detected_emotion, "sentence", platform, session_id),
                     )
 
                 if not flushed and len(sentence_buffer) >= _MAX_FLUSH_CHARS:
@@ -643,12 +786,16 @@ async def main():
                     clause_idx = _CLAUSE_BOUNDARY.search(sentence_buffer[:_MAX_FLUSH_CHARS])
                     if clause_idx:
                         flush_end = clause_idx.end()
-                        _safe_speak(voice, sentence_buffer[:flush_end], detected_emotion, "clause")
+                        _safe_speak(
+                            voice, sentence_buffer[:flush_end], detected_emotion, "clause", platform, session_id
+                        )
                         sentence_buffer = sentence_buffer[flush_end:].lstrip()
                     else:
                         word_idx = sentence_buffer.rfind(" ", 0, _MAX_FLUSH_CHARS)
                         if word_idx > 0:
-                            _safe_speak(voice, sentence_buffer[:word_idx], detected_emotion, "word")
+                            _safe_speak(
+                                voice, sentence_buffer[:word_idx], detected_emotion, "word", platform, session_id
+                            )
                             sentence_buffer = sentence_buffer[word_idx:].lstrip()
                         elif sentence_buffer.strip():
                             _safe_speak(
@@ -656,6 +803,8 @@ async def main():
                                 sentence_buffer[:_MAX_FLUSH_CHARS],
                                 detected_emotion,
                                 "force",
+                                platform,
+                                session_id,
                             )
                             sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
 
@@ -677,7 +826,7 @@ async def main():
 
             # Final TTS
             if sentence_buffer.strip():
-                _safe_speak(voice, sparkle + sentence_buffer, detected_emotion, "final")
+                _safe_speak(voice, sparkle + sentence_buffer, detected_emotion, "final", platform, session_id)
 
             # Persist the generated reply, falling back to web_buffer if cancelled.
             final_reply = full_reply_buffer.strip() or web_buffer.strip()
@@ -689,6 +838,8 @@ async def main():
                     logger.warning(
                         f"Failed to archive assistant message or touch session: {e}"
                     )
+                if platform == "telegram" and telegram_bot is not None:
+                    asyncio.create_task(telegram_bot.stream_finish(session_id.split(":", 1)[1], quick_actions=True))
 
             # Emit response_done event so the UI can stop its typing indicator.
             if event_bus:
@@ -697,7 +848,12 @@ async def main():
                 )
         except Exception:
             # Turn failures used to be silent -- surface one, then re-raise.
-            _safe_speak(voice, "Sorry, something went wrong on my end. Try again?", last_emotion, "turn-failed")
+            _safe_speak(
+                voice, "Sorry, something went wrong on my end. Try again?", last_emotion,
+                "turn-failed", platform, session_id,
+            )
+            if platform == "telegram" and telegram_bot is not None:
+                asyncio.create_task(telegram_bot.stream_finish(session_id.split(":", 1)[1]))
             if event_bus:
                 asyncio.create_task(
                     event_bus.emit("response_done", {"session_id": session_id})
@@ -706,8 +862,9 @@ async def main():
         finally:
             turn_active = False
             if pending_turns:
-                next_text, next_session, next_platform = pending_turns.pop(0)
+                _next_id, next_text, next_session, next_platform = pending_turns.pop(0)
                 logger.info(f"Dequeuing pending turn: {next_text}")
+                on_queue_update()
                 _schedule_process(
                     _dispatch_or_queue(next_text, next_session, next_platform), loop
                 )
@@ -717,8 +874,13 @@ async def main():
         # whatever's on screen at that moment, never a genuine user preference,
         # and storing it as one pollutes memory with stale screen snapshots that
         # resurface on later "what's on my screen" queries.
+        from charlie.core import _is_deterministic_reply
         from charlie.core import _SCREEN_QUERY_RE as _screen_query_re
-        if full_reply_buffer.strip() and text.strip() and not _screen_query_re.search(text):
+        if (
+            full_reply_buffer.strip() and text.strip()
+            and not _screen_query_re.search(text)
+            and not _is_deterministic_reply(text)
+        ):
 
             async def _background_learn(user_text: str, reply_text: str):
                 try:
@@ -730,7 +892,7 @@ async def main():
                     )
                     learning = ""
                     async for chunk in brain.chat_stream(
-                        learning_prompt, skip_pre_search=True, skip_tools=True
+                        learning_prompt, skip_pre_search=True, skip_tools=True, skip_fast_paths=True
                     ):
                         learning += chunk
                     learning = learning.strip()
@@ -747,7 +909,7 @@ async def main():
                         existing = u_path.read_text(encoding="utf-8")
 
                     if learning not in existing:
-                        await asyncio.get_running_loop().run_in_executor(
+                        result = await asyncio.get_running_loop().run_in_executor(
                             None,
                             tool_registry.execute_tool,
                             "memory",
@@ -757,7 +919,10 @@ async def main():
                                 "content": learning,
                             },
                         )
-                        logger.info(f"Learning: {learning}")
+                        if result.startswith("Error") or result.startswith("Memory full"):
+                            logger.warning(f"Learning write failed: {result}")
+                        else:
+                            logger.info(f"Learning: {learning}")
                 except Exception as e:
                     logger.debug(f"Learning loop skipped: {e}")
 
@@ -772,11 +937,13 @@ async def main():
         change alone never reaches them -- only recreating the engine does.
         """
         nonlocal voice
-        try:
-            voice.stop()
-        except Exception as ex:
-            logger.warning(f"Error stopping voice engine on reload: {ex}")
-        try:
+
+        def _rebuild():
+            nonlocal voice
+            try:
+                voice.stop()
+            except Exception as ex:
+                logger.warning(f"Error stopping voice engine on reload: {ex}")
             voice = VoiceEngine(
                 config,
                 on_speech=on_speech,
@@ -785,6 +952,10 @@ async def main():
             )
             voice.start()
             voice.set_wake_word_callback(on_wake_word)
+
+        try:
+            # Off-thread: VoiceEngine.__init__ loading the ONNX model inline froze the event loop live.
+            await asyncio.to_thread(_rebuild)
             logger.info("VoiceEngine reloaded.")
         except Exception as ex:
             logger.error(f"Error reloading VoiceEngine: {ex}", exc_info=True)
@@ -813,6 +984,47 @@ async def main():
             except Exception as ex:
                 logger.warning(f"Error registering plugins on reload: {ex}")
 
+    async def _do_system_restart():
+        """Reload off the command queue -- an inline hung reload step froze chat behind it live."""
+        try:
+            async with asyncio.timeout(90.0):
+                from dotenv import load_dotenv
+                load_dotenv(override=True)
+
+                env_values = {
+                    spec["key"]: os.getenv(spec["key"])
+                    for spec in Config.editable_field_specs()
+                    if os.getenv(spec["key"]) is not None
+                }
+                config.apply_env_updates(env_values)
+
+                await _reload_mcp_client()
+                await asyncio.to_thread(_reload_plugin_tools)
+                await _reload_voice_engine()
+                await brain.refresh_llm_client()
+                await brain.refresh_vision_client()
+                brain.rebuild_stable_tier()
+
+            if event_bus:
+                await event_bus.emit("alert", {
+                    "severity": "success",
+                    "message": "System configuration successfully reloaded and engine restarted.",
+                })
+        except asyncio.TimeoutError:
+            logger.error("System restart timed out after 90s -- one reload step hung.")
+            if event_bus:
+                await event_bus.emit("alert", {
+                    "severity": "error",
+                    "message": "Reload timed out after 90s. Restart Charlie to be safe.",
+                })
+        except Exception:
+            logger.error("System restart failed", exc_info=True)
+            if event_bus:
+                await event_bus.emit("alert", {
+                    "severity": "error",
+                    "message": "Reload failed. Check logs.",
+                })
+
     async def consume_web_commands(event_bus, brain):
         """Read commands from the web UI and dispatch them."""
         nonlocal current_web_session_id, voice, mcp_client
@@ -828,6 +1040,12 @@ async def main():
                     set_active_session_id(current_web_session_id)
                     chat_text = cmd.get("text") or cmd.get("payload", {}).get("text", "")
                     await _dispatch_or_queue(chat_text, current_web_session_id, platform="web")
+                elif cmd_type == "queue_cancel":
+                    cancel_id = cmd.get("payload", {}).get("id")
+                    before = len(pending_turns)
+                    pending_turns[:] = [t for t in pending_turns if t[0] != cancel_id]
+                    if len(pending_turns) != before:
+                        on_queue_update()
                 elif cmd_type == "session_active":
                     payload_sid = cmd.get("payload", {}).get("session_id")
                     current_web_session_id = cmd.get("session_id") or payload_sid or _voice_fallback_session_id
@@ -868,6 +1086,17 @@ async def main():
                 elif cmd_type == "stop":
                     voice.stop_tts()
                     brain.cancel_chat()
+                elif cmd_type == "cancel_agent":
+                    payload = cmd.get("payload", {})
+                    agent_id = payload.get("agent_id")
+                    if agent_id:
+                        found = brain.cancel_agent(agent_id)
+                        # cancel_agent() returning True only means the task was signalled --
+                        # a sub-agent blocked inside a run_in_executor tool call won't
+                        # actually stop until that call returns, asyncio can't interrupt it.
+                        # This ack tells the UI whether cancellation was even possible,
+                        # not that it already happened.
+                        await event_bus.emit("agent_cancel_ack", {"agent_id": agent_id, "found": found})
                 elif cmd_type == "audio_control":
                     payload = cmd.get("payload", {})
                     state = voice.set_audio_state(
@@ -963,26 +1192,7 @@ async def main():
                         logger.warning(f"Failed to mirror extension uninstall '{ext_name}': {ex}", exc_info=True)
                 elif cmd_type == "system_restart":
                     logger.info("System restart command received. Reloading configuration and engine...")
-
-                    from dotenv import load_dotenv
-                    load_dotenv(override=True)
-
-                    env_values = {
-                        spec["key"]: os.getenv(spec["key"])
-                        for spec in Config.editable_field_specs()
-                        if os.getenv(spec["key"]) is not None
-                    }
-                    config.apply_env_updates(env_values)
-
-                    await _reload_mcp_client()
-                    await asyncio.to_thread(_reload_plugin_tools)
-                    await _reload_voice_engine()
-                    brain.rebuild_stable_tier()
-
-                    await event_bus.emit("alert", {
-                        "severity": "success",
-                        "message": "System configuration successfully reloaded and engine restarted.",
-                    })
+                    asyncio.create_task(_do_system_restart())
                 elif cmd_type == "background_task_start":
                     payload = cmd.get("payload", {})
                     from charlie import background_task
@@ -1018,20 +1228,32 @@ async def main():
     except Exception as e:
         logger.warning(f"Failed to start web server: {e}")
 
+    # Start floating pet subprocess (Windows-only, PySide6)
+    if config.pet_enabled and sys.platform == "win32":
+        try:
+            pet_entry = os.path.join(
+                os.path.dirname(__file__), "charlie", "pet_entry.py"
+            )
+            pet_proc = subprocess.Popen(
+                [sys.executable, pet_entry],
+                cwd=os.path.dirname(__file__),
+                env=_web_env,
+            )
+            logger.info(f"Pet subprocess started (PID: {pet_proc.pid})")
+        except Exception as e:
+            logger.warning(f"Failed to start pet window: {e}")
+
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
         # TTS lifecycle callbacks for IPC events
-        def on_tts_start():
+        def on_tts_start(text: str = ""):
             if event_bus:
-                asyncio.run_coroutine_threadsafe(
-                    event_bus.emit("speaking_start", {"session_id": current_web_session_id}), loop
-                )
+                payload = {"session_id": current_web_session_id, "text": text}
+                _emit_threadsafe(event_bus, loop, "speaking_start", payload)
 
         def on_tts_stop():
             if event_bus:
-                asyncio.run_coroutine_threadsafe(
-                    event_bus.emit("speaking_stop", {"session_id": current_web_session_id}), loop
-                )
+                _emit_threadsafe(event_bus, loop, "speaking_stop", {"session_id": current_web_session_id})
 
         voice = VoiceEngine(
             config,
@@ -1043,9 +1265,7 @@ async def main():
 
         def on_wake_word():
             if event_bus:
-                asyncio.run_coroutine_threadsafe(
-                    event_bus.emit("wake_word", {}), loop
-                )
+                _emit_threadsafe(event_bus, loop, "wake_word", {})
 
         voice.set_wake_word_callback(on_wake_word)
 
@@ -1059,7 +1279,7 @@ async def main():
                     "Give me a very brief, one-sentence startup welcome. Be warm, natural, "
                     "and speak like a human colleague (not an AI assistant). "
                     "Do NOT say 'How can I help you' or 'How can I assist'. Speak only in English.",
-                    skip_tools=True
+                    skip_tools=True, skip_fast_paths=True
                 ):
                     welcome_msg += chunk
         except asyncio.TimeoutError:
@@ -1134,6 +1354,92 @@ async def main():
             import charlie.tools
             charlie.tools.set_event_bus(bus, asyncio.get_running_loop())
 
+            from charlie import reminders as _reminders
+            _reminders.set_loop(asyncio.get_running_loop())
+
+            def _on_reminder_fired(reminder_id: str, text: str) -> None:
+                msg = f"Reminder: {text}"
+                _safe_speak(voice, msg, "neutral", "reminder")
+                asyncio.ensure_future(bus.emit("alert", {"severity": "info", "message": msg}))
+
+            _reminders.set_fire_callback(_on_reminder_fired)
+
+            if config.telegram_bot_token and config.telegram_user_id:
+                from charlie.telegram_bot import TelegramBot, set_active_bot
+
+                async def _on_telegram_message(text: str, chat_id: str) -> None:
+                    session_id = f"telegram:{chat_id}"
+                    store.create_session(session_id, source="telegram")
+                    await telegram_bot.stream_start(chat_id)
+                    async with telegram_bot.typing(chat_id):
+                        await _dispatch_or_queue(text, session_id, platform="telegram")
+
+                async def _on_telegram_approval(approval_id: str, approved: bool) -> None:
+                    from charlie.core import resolve_tool_approval
+                    resolve_tool_approval(approval_id, approved)
+
+                async def _on_telegram_voice(audio_bytes: bytes, _caption: str, chat_id: str) -> None:
+                    from charlie import asr_worker
+                    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+                        f.write(audio_bytes)
+                        tmp_path = f.name
+                    try:
+                        text = await asyncio.to_thread(
+                            asr_worker.transcribe_file, tmp_path,
+                            config.whisper_model, config.gpu_device, config.default_language,
+                        )
+                    finally:
+                        os.unlink(tmp_path)
+                    if not text.strip():
+                        await telegram_bot.send_message(chat_id, "I couldn't make out any speech in that voice note.")
+                        return
+                    session_id = f"telegram:{chat_id}"
+                    store.create_session(session_id, source="telegram")
+                    await telegram_bot.stream_start(chat_id)
+                    async with telegram_bot.typing(chat_id):
+                        await _dispatch_or_queue(text, session_id, platform="telegram")
+
+                async def _on_telegram_photo(photo_bytes: bytes, caption: str, chat_id: str) -> None:
+                    from charlie.desktop.vision import to_data_url
+                    description = await brain._describe_image(to_data_url(photo_bytes))
+                    photo_note = f"[Photo attached -- {description}]"
+                    text = f"{caption}\n\n{photo_note}" if caption else photo_note
+                    session_id = f"telegram:{chat_id}"
+                    store.create_session(session_id, source="telegram")
+                    await telegram_bot.stream_start(chat_id)
+                    async with telegram_bot.typing(chat_id):
+                        await _dispatch_or_queue(text, session_id, platform="telegram")
+
+                telegram_bot = TelegramBot(
+                    config.telegram_bot_token,
+                    config.telegram_user_id,
+                    on_message=_on_telegram_message,
+                    on_approval=_on_telegram_approval,
+                    on_voice=_on_telegram_voice,
+                    on_photo=_on_telegram_photo,
+                )
+                try:
+                    await telegram_bot.start()
+                    set_active_bot(telegram_bot)
+                except Exception as e:
+                    logger.warning(f"Failed to start Telegram bot: {e}")
+                    telegram_bot = None
+
+            _monitor_loop = asyncio.get_running_loop()
+
+            def _push_telegram_alert(message: str) -> None:
+                """Best-effort proactive push to Telegram -- alerts you wouldn't otherwise see away from the PC.
+
+                Uses run_coroutine_threadsafe (not ensure_future) because this is also called from
+                _on_resource_alert, which runs on the charlie-monitors background thread with no event
+                loop of its own -- ensure_future there raised "no current event loop in thread".
+                """
+                if telegram_bot is None or not config.telegram_user_id:
+                    return
+                asyncio.run_coroutine_threadsafe(
+                    telegram_bot.send_message(config.telegram_user_id, message), _monitor_loop
+                )
+
             from charlie import background_task as _background_task
             interrupted_task = _background_task.check_interrupted_task()
             if interrupted_task is not None:
@@ -1145,12 +1451,11 @@ async def main():
                 logger.info(_interrupted_msg)
                 await bus.emit("alert", {"severity": "warning", "message": _interrupted_msg})
                 voice.speak(_interrupted_msg, "neutral")
+                _push_telegram_alert(_interrupted_msg)
 
             def _read_cpu_ram_percent() -> Tuple[float, float]:
                 import psutil
                 return psutil.cpu_percent(), psutil.virtual_memory().percent
-
-            _monitor_loop = asyncio.get_running_loop()
 
             def _on_resource_alert(message: str) -> None:
                 logger.warning(f"Resource alert: {message}")
@@ -1165,6 +1470,7 @@ async def main():
                     voice.speak(message, "neutral")
                 except Exception:
                     logger.warning("Failed to speak resource alert", exc_info=True)
+                _push_telegram_alert(message)
 
             try:
                 start_monitor_thread(
@@ -1201,6 +1507,7 @@ async def main():
                     consume_web_commands(bus, brain),
                     _emit_system_status(bus),
                     mcp_start_task,
+                    extensions_reload_task,
                 )
             finally:
                 logging.getLogger().removeHandler(zmq_handler)
@@ -1223,6 +1530,11 @@ async def main():
                 logger.info("MCP subsystem stopped")
             except Exception as e:
                 logger.warning(f"MCP subsystem stop error: {e}")
+        if "telegram_bot" in locals() and telegram_bot is not None:
+            try:
+                await telegram_bot.stop()
+            except Exception as e:
+                logger.warning(f"Telegram bot stop error: {e}")
         if web_proc is not None:
             web_proc.terminate()
             try:
