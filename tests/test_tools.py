@@ -40,6 +40,8 @@ def test_registry_registration_and_schema():
         "memory",
         "propose_new_tool",
         "start_background_task",
+        "browser_task",
+        "browser_read",
         "vector_memory",
         "session_search",
         "graph_add_fact",

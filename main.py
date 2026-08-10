@@ -1115,6 +1115,9 @@ async def main():
                 asyncio.run_coroutine_threadsafe(
                     event_bus.emit("wake_word", {}, meta=EventMeta(source=EventSource.VOICE)), loop
                 )
+            if config.browser_enabled and config.browser_warm_on_wake:
+                from charlie.browser import controller as browser_controller
+                browser_controller.warm()
 
         voice.set_wake_word_callback(on_wake_word)
 

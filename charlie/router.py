@@ -189,6 +189,25 @@ def close_process_for(app: str) -> Optional[str]:
     return _CLOSE_APP_MAP.get(app)
 
 
+_BROWSER_TASK_VERB_RE = re.compile(r"^\s*(?:play|watch|search|find|look up|browse|check)\b", re.IGNORECASE)
+_BROWSER_TASK_ON_SITE_RE = re.compile(r"\bon\s+([a-z0-9][\w.]*)", re.IGNORECASE)
+
+
+def match_browser_task(query: str) -> Optional[str]:
+    """Pure: deterministic '<verb> ... on <site>' detection -- models skip prompted tool calls (CLAUDE.md 11.2)."""
+    q = query.lower().strip()
+    if not _BROWSER_TASK_VERB_RE.match(q):
+        return None
+    on_match = _BROWSER_TASK_ON_SITE_RE.search(q)
+    if not on_match:
+        return None
+    site = on_match.group(1).strip(".,!?")
+    entry = _APP_REGISTRY.get(site)
+    if not entry or not entry.is_website:
+        return None
+    return query.strip()
+
+
 _URL_RE = re.compile(
     r"\b((?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+)\b", re.IGNORECASE
 )
@@ -243,6 +262,7 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
 
     matched_apps: List[str] = []
     launched_commands: List[str] = []
+    is_website_flags: List[bool] = []
     remaining_text = " " + target_text + " "
 
     for match in _URL_RE.findall(remaining_text):
@@ -250,6 +270,7 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
             matched_apps.append(match)
             cmd_url = match if match.startswith(("http://", "https://")) else f"https://{match}"
             launched_commands.append(cmd_url)
+            is_website_flags.append(True)
             remaining_text = re.sub(r"\b" + re.escape(match) + r"\b", " ", remaining_text)
 
     sorted_keys = sorted(_OPEN_APP_MAP.keys(), key=len, reverse=True)
@@ -258,6 +279,8 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
         if re.search(pattern, remaining_text):
             matched_apps.append(key)
             launched_commands.append(_OPEN_APP_MAP[key])
+            entry = _APP_REGISTRY.get(key)
+            is_website_flags.append(bool(entry and entry.is_website))
             remaining_text = re.sub(pattern, " ", remaining_text)
 
     if not matched_apps:
@@ -268,7 +291,15 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
         " ", remaining_text, flags=re.IGNORECASE,
     ).strip()
     leftover_instruction = remaining_text.strip() if cleaned_remaining else None
+
     if leftover_instruction:
+        # Website + leftover text is a "do X on this site" request -- defer to browser_task, don't launch a bare tab.
+        kept = [(a, c) for a, c, w in zip(matched_apps, launched_commands, is_website_flags) if not w]
+        if not kept:
+            logger.info("Deferring website+leftover query to browser_task: '%s'", query)
+            return [], [], query.strip()
+        matched_apps = [a for a, _ in kept]
+        launched_commands = [c for _, c in kept]
         logger.info(
             "Compound open-app query: '%s' -- opening app(s) now, continuing with: '%s'",
             query, leftover_instruction,

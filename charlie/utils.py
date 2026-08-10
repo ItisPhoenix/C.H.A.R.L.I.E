@@ -53,3 +53,14 @@ def is_process_running(process_name: str) -> bool:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     return False
+
+
+def open_url_in_browser(url: str) -> bool:
+    """Open url in the user's real default browser via `start ""`, same mechanism as router.py's app opener."""
+    import subprocess
+
+    try:
+        subprocess.Popen(f'start "" {url}', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False

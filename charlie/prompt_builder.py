@@ -12,6 +12,11 @@ try:
 except ImportError:  # pragma: no cover - guard mirrors charlie/desktop/__init__.py
     _DESKTOP_AVAILABLE = False
 
+try:
+    from charlie.browser import BROWSER_AVAILABLE as _BROWSER_AVAILABLE
+except ImportError:  # pragma: no cover - guard mirrors charlie/browser/__init__.py
+    _BROWSER_AVAILABLE = False
+
 if TYPE_CHECKING:
     from charlie.config import Config
 
@@ -172,6 +177,13 @@ def build_capabilities_block(config: "Config") -> str:
         "longer-term store (vector search + a knowledge graph of facts). "
         "You are not limited to only what's in the current conversation."
     )
+    if config.browser_enabled and _BROWSER_AVAILABLE:
+        lines.append(
+            "- Headless browsing: you can search/click/navigate inside websites "
+            "offscreen via browser_task, and read one specific URL's text via "
+            "browser_read. This is real, not hypothetical -- use it instead of "
+            "opening a bare tab and stopping."
+        )
     if config.mcp_enabled or config.plugins_enabled:
         lines.append(
             "- You have access to additional external tools via MCP servers "

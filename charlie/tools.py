@@ -2007,6 +2007,63 @@ def system_control(action: str) -> str:
     return _system_control(action)
 
 
+# --- Headless browser tools (Playwright + Chrome) -- gated, off by default.
+
+_BROWSER_DISABLED_MSG = (
+    "Browser control is disabled (set BROWSER_ENABLED=true and install the "
+    "browser extra: uv sync --extra browser)."
+)
+
+
+def _browser_ready() -> bool:
+    if not config.browser_enabled:
+        return False
+    from charlie.browser import BROWSER_AVAILABLE
+    return BROWSER_AVAILABLE
+
+
+@registry.register_tool(
+    name="browser_task",
+    description=(
+        "Do something inside a website in a headless browser -- search, click through, play a "
+        "video, fill a form -- and report back. Opens the user's real browser only when the "
+        "request implies it (play/watch/listen, or 'show me'/'open it'). Use for anything that "
+        "requires being on a site; use web_search for questions answerable from search snippets, "
+        "and browser_read to read one specific known URL."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "task": {"type": "string", "description": "A clear, self-contained description of the browsing task."},
+        },
+        "required": ["task"],
+    },
+)
+def browser_task(task: str) -> str:
+    return "Error: browser_task must be dispatched through Brain.browser_task, not called directly."
+
+
+@registry.register_tool(
+    name="browser_read",
+    description="Fetch one specific known URL and return its extracted text content.",
+    schema={
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "URL to fetch."},
+        },
+        "required": ["url"],
+    },
+)
+def browser_read(url: str) -> str:
+    if not _browser_ready():
+        return _BROWSER_DISABLED_MSG
+    from charlie.browser.actions import read_url
+    result = read_url(url)
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return f"URL: {result['url']}\n\n{result['content']}"
+
+
 def set_pending_vision_image(url: Optional[str]) -> None:
     """Queue an image data URL for the very next outgoing LLM payload."""
     global _pending_vision_image

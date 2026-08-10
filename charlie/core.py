@@ -44,6 +44,11 @@ except ImportError:  # pragma: no cover - guard mirrors charlie/desktop/__init__
     desktop_session = None
     desktop_uia = None
 
+try:
+    from charlie.browser import BROWSER_AVAILABLE as _BROWSER_AVAILABLE
+except ImportError:  # pragma: no cover - guard mirrors charlie/browser/__init__.py
+    _BROWSER_AVAILABLE = False
+
 logger = logging.getLogger("charlie.core")
 if TYPE_CHECKING:
     from charlie.config import Config
@@ -108,7 +113,9 @@ _TOOL_TIMEOUTS = {
     # access) needs far more than the 15s default -- scanning a whole drive
     # tree routinely takes longer than that.
     "plugin_fs_search": 120.0,
+    "browser_read": 20.0,
 }
+_BROWSER_TASK_TIMEOUT_SEC = 100.0  # headroom above browser_task's own internal deadline (up to 90s)
 _TOOL_RESULT_MAX_CHARS = 2000
 # Router classifier fallback (0.1): must fit well inside the ~1s time-to-first-audio budget.
 _ROUTER_CLASSIFIER_TIMEOUT_S = 0.6
@@ -1070,6 +1077,75 @@ class Brain:
         )
         return f"Background task started (id={task.id}, status={task.status}): {text}"
 
+    async def _browser_task_bounded(self, task: str, platform: str) -> str:
+        """Fast-path callers' safety net -- same timeout bound _exec_one already gives the LLM-dispatched path."""
+        try:
+            return await asyncio.wait_for(self.browser_task(task, platform=platform), timeout=_BROWSER_TASK_TIMEOUT_SEC)
+        except asyncio.TimeoutError:
+            logger.warning("Fast-path browser_task timed out after %.0fs: %s", _BROWSER_TASK_TIMEOUT_SEC, task)
+            return "That's taking too long -- I gave up on it."
+
+    async def browser_task(self, task: str, platform: str = "voice") -> str:
+        """Resolve `task` through charlie.browser's tier cascade and report back.
+
+        Tiers 0-2 need no LLM; tier 3 uses this Brain's own client/model via
+        _stream_completion; tier 4 is a last-resort stealth retry after a
+        detected block. Opens the user's real browser only when the task
+        carries open-intent. No vision fallback yet -- this branch's Brain
+        has no _describe_image equivalent (see docstring note in module docs).
+        """
+        if not self.config.browser_enabled or not _BROWSER_AVAILABLE:
+            return "Browser control is disabled (set BROWSER_ENABLED=true and install the browser extra)."
+
+        from charlie.browser import intent as browser_intent
+        from charlie.browser.actions import open_in_real_browser
+        from charlie.browser.session import get_session
+        from charlie.browser.task import resolve as resolve_browser_task
+
+        loop = asyncio.get_running_loop()
+        open_intent = browser_intent.has_open_intent(task)
+
+        if browser_intent.is_bare_followup(task):
+            last_url = get_session().last_url
+            if not last_url:
+                return "I don't have a page to reopen yet."
+            opened = await loop.run_in_executor(None, open_in_real_browser, last_url)
+            return f"Opened {last_url}." if opened else f"Found {last_url} but couldn't open your browser."
+
+        max_steps = self.config.browser_max_steps if platform == "voice" else 8
+        deadline_s = float(self.config.browser_deadline_s if platform == "voice" else 90)
+        generation = self._chat_generation
+
+        async def _complete(prompt: str) -> str:
+            payload = self._build_payload([{"role": "user", "content": prompt}], skip_tools=True)
+            text, _ = await self._stream_completion(payload, generation)
+            return text
+
+        async def _approve_click(name: str, url: str) -> bool:
+            return await self.request_tool_approval(
+                "browser_task", {"action": f'click "{name}"', "url": url}, f'click "{name}" on {url}',
+            )
+
+        def _on_progress() -> None:
+            if self.on_thinking_update:
+                self.on_thinking_update("browser_task", {"task": task})
+
+        result = await resolve_browser_task(
+            task, _complete, None, _approve_click, max_steps, deadline_s, _on_progress,
+        )
+
+        if result.url and open_intent:
+            opened = await loop.run_in_executor(None, open_in_real_browser, result.url)
+            parts = ([result.answer] if result.answer else []) + [
+                f"Opened {result.url}." if opened else f"Found {result.url} but couldn't open your browser."
+            ]
+            return " ".join(parts)
+        if result.answer:
+            return result.answer
+        if result.url:
+            return f"Found it: {result.url}"
+        return "I couldn't complete that."
+
     async def _handle_propose_new_tool(self, arguments: Dict[str, Any]) -> str:
         """Tier-3 self-extension: validate the authored code, then queue it on
         the dashboard's pending-extensions state -- never runs it, never waits
@@ -1450,19 +1526,33 @@ class Brain:
         open_match = await asyncio.to_thread(router.match_open_app, user_input)
         if open_match is not None:
             open_apps, open_commands, open_remaining = open_match
-            open_msg = await asyncio.to_thread(router.execute_open_app, open_apps, open_commands)
-            self.world_model.record_event("app_open", open_msg)
-            if open_remaining is None:
-                logger.info("Fast-path open app result: %s -> %s", user_input, open_msg)
-                yield open_msg
-                return
-            # Compound instruction: apps are already open, stream confirmation and keep going with the leftover text.
-            logger.info(
-                "Fast-path partial open: %s -> opened=%s, continuing with: %s",
-                user_input, open_msg, open_remaining,
-            )
-            yield open_msg + " "
-            user_input = open_remaining
+            if not open_apps and open_remaining:
+                if self.config.browser_enabled:
+                    logger.info("Fast-path browser task (deferred open): %s", open_remaining)
+                    yield await self._browser_task_bounded(open_remaining, platform)
+                    return
+                user_input = open_remaining
+            else:
+                open_msg = await asyncio.to_thread(router.execute_open_app, open_apps, open_commands)
+                self.world_model.record_event("app_open", open_msg)
+                if open_remaining is None:
+                    logger.info("Fast-path open app result: %s -> %s", user_input, open_msg)
+                    yield open_msg
+                    return
+                # Compound instruction: apps already open, confirm and continue with the leftover text.
+                logger.info(
+                    "Fast-path partial open: %s -> opened=%s, continuing with: %s",
+                    user_input, open_msg, open_remaining,
+                )
+                yield open_msg + " "
+                user_input = open_remaining
+
+        # --- Fast-path: browser task ("play/watch/search X on <site>") bypasses the LLM's tool-call decision ---
+        browser_task_query = router.match_browser_task(user_input)
+        if browser_task_query is not None and self.config.browser_enabled:
+            logger.info("Fast-path browser task: %s", browser_task_query)
+            yield await self._browser_task_bounded(browser_task_query, platform)
+            return
 
         # --- Fast-path: live background-task progress query (deterministic, no LLM needed) ---
         task_status_res = router.answer_background_task_status(user_input)
@@ -1707,6 +1797,8 @@ class Brain:
                 r = await self._handle_propose_new_tool(call["arguments"])
             elif tool_name == "start_background_task":
                 r = await self._handle_start_background_task(call["arguments"])
+            elif tool_name == "browser_task":
+                r = await self.browser_task(call["arguments"].get("task", ""), platform=platform)
             elif tool_name in _DESKTOP_CONTROL_TOOLS and self._is_desktop_halted():
                 r = "Error: Desktop control is halted (panic or repeated failure). Say 'continue' to resume."
             elif tool_name in _DESKTOP_CONTROL_TOOLS and _desktop_action_count[0] >= self.config.desktop_max_actions:
