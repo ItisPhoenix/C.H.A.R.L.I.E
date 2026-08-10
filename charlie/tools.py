@@ -22,6 +22,7 @@ from charlie import recovery
 from charlie.config import config
 from charlie.events import EventMeta, EventSource
 from charlie.known_apps import APP_REGISTRY
+from charlie.results import ResultsStore
 from charlie.session_store import SessionStore
 from charlie.utils import is_process_running
 
@@ -1260,6 +1261,45 @@ def session_search(query: str) -> str:
     lines = []
     for role, message in results:
         lines.append(f"- [{role}]: {message}")
+    return "\n".join(lines)
+
+
+@registry.register_tool(
+    name="recall_results",
+    description=(
+        "Recall what a background task found or accomplished earlier. Use for "
+        "'what did you find' / 'how did that task go' style questions."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "How many recent results to return. Default 5.",
+            }
+        },
+        "required": [],
+    },
+)
+def recall_results(limit: int = 5) -> str:
+    store = None
+    try:
+        store = ResultsStore(db_path=config.session_db_path)
+        results = store.get_recent(limit=limit)
+    except Exception as e:
+        logger.exception("recall_results error")
+        return f"Error recalling results: {e}"
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                logger.debug("Results store close failed", exc_info=True)
+
+    if not results:
+        return "No task results recorded yet."
+
+    lines = [f"- [{r.created_at}] {r.summary} -- {r.full_result[:200]}" for r in results]
     return "\n".join(lines)
 
 

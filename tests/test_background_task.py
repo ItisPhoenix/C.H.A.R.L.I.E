@@ -18,7 +18,7 @@ def _reset_state():
 
 
 @pytest.fixture
-def bg_config():
+def bg_config(tmp_path):
     return Config(
         llm_url="http://localhost:11434",
         llm_key="no-key",
@@ -26,6 +26,7 @@ def bg_config():
         iteration_budget_max=3,
         background_iteration_budget_max=5,
         background_max_actions=10,
+        session_db_path=str(tmp_path / "bg_sessions_test.db"),
     )
 
 
@@ -114,6 +115,26 @@ async def test_lifecycle_alerts_speak_and_emit_start_and_complete(monkeypatch, b
     assert any("Starting background task" in m for m in fake_voice.spoken)
     assert any("Background task complete" in m for m in fake_voice.spoken)
     assert task.status == "done"
+
+
+@pytest.mark.asyncio
+async def test_completed_task_persists_a_result(monkeypatch, bg_config):
+    from charlie.results import ResultsStore
+
+    monkeypatch.setattr(Brain, "chat_stream", _fake_plan_chat_stream)
+    monkeypatch.setattr(background_task, "_DESKTOP_AVAILABLE", False)
+    bus = FakeEventBus()
+    task = await background_task.start(bg_config, bus, "do the thing")
+    await asyncio.sleep(0.05)  # let _run_loop finish both fake steps
+    assert task.status == "done"
+
+    store = ResultsStore(db_path=bg_config.session_db_path)
+    recent = store.get_recent(limit=5)
+    store.close()
+
+    assert len(recent) == 1
+    assert recent[0].task_id == task.id
+    assert "done" in recent[0].summary
 
 
 @pytest.mark.asyncio

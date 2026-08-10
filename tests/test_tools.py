@@ -19,6 +19,7 @@ from charlie.tools import (
     is_shell_command_blocked,
     is_shell_command_gated,
     memory,
+    recall_results,
     registry,
     session_search,
     shell_execute,
@@ -44,6 +45,7 @@ def test_registry_registration_and_schema():
         "browser_read",
         "vector_memory",
         "session_search",
+        "recall_results",
         "graph_add_fact",
         "graph_query",
         "graph_consolidate",
@@ -767,6 +769,30 @@ def test_session_search_formatting(tmp_path, monkeypatch):
         for f in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
             if os.path.exists(f):
                 os.remove(f)
+
+
+def test_recall_results_formatting(tmp_path, monkeypatch):
+    from charlie.results import ResultsStore
+
+    db_path = str(tmp_path / "tool_results_test.db")
+    monkeypatch.setattr("charlie.tools.config.session_db_path", db_path)
+    store = ResultsStore(db_path)
+    try:
+        store.store("t1", "found the answer", "the full answer text", attention_level=2)
+        formatted = recall_results()
+        assert "found the answer" in formatted
+        assert "the full answer text" in formatted
+    finally:
+        store.close()
+        for f in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
+            if os.path.exists(f):
+                os.remove(f)
+
+
+def test_recall_results_reports_none_recorded(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "tool_results_empty_test.db")
+    monkeypatch.setattr("charlie.tools.config.session_db_path", db_path)
+    assert recall_results() == "No task results recorded yet."
 
 
 class _FakeMemoryStore:

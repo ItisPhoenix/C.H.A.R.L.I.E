@@ -24,9 +24,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
+from charlie.attention import decide as _attention_decide
 from charlie.config import Config
 from charlie.core import Brain
-from charlie.events import EventMeta, EventSource
+from charlie.events import EventMeta, EventSource, EventType
+from charlie.results import ResultsStore
 from charlie.tasks import TaskManager
 from charlie.tools import get_path_gate_reason, is_shell_command_gated
 from charlie.utils import json_dumps, json_loads, make_id
@@ -174,6 +176,20 @@ def _scan_gated_steps(steps: List[str]) -> List[int]:
     return flagged
 
 
+def _store_result(task: BackgroundTask, full_result: str) -> None:
+    """Persist one row per terminal task (charlie/results.py, Phase 6) -- attention_level
+    reuses charlie.attention's own BACKGROUND_TASK status table, same source of truth
+    the live event stream already scores this status against."""
+    level, _ = _attention_decide({"type": EventType.BACKGROUND_TASK, "payload": {"status": task.status}})
+    store = ResultsStore(db_path=task.brain.config.session_db_path)
+    try:
+        store.store(task.id, f"Background task '{task.text}' {task.status}.", full_result, int(level))
+    except Exception:
+        logger.warning("Failed to persist background-task result", exc_info=True)
+    finally:
+        store.close()
+
+
 async def _announce(event_bus, voice, severity: str, message: str) -> None:
     """Mirror main.py's resource-alert pattern: an "alert" event plus spoken TTS."""
     try:
@@ -279,6 +295,7 @@ async def _wait_until_clear(task: BackgroundTask, config: Config, event_bus) -> 
 
 async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
     config = task.brain.config
+    step_outputs: List[str] = []
     try:
         while task.current_step < len(task.steps):
             if task.current_step in task.flagged_steps:
@@ -293,14 +310,17 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
                     task.error = "Desktop control halted (panic hotkey)."
                     await _announce(event_bus, voice, "error", f"Background task failed: {task.error}")
                 await _emit_task_event(event_bus, task)
+                _store_result(task, "\n".join(step_outputs) or task.error or "")
                 return
 
             if _DESKTOP_AVAILABLE:
                 desktop_session.acquire_desktop(_OWNER_ID)
             try:
                 step_text = task.steps[task.current_step]
-                async for _ in task.brain.chat_stream(step_text, session_id=task.session_id):
-                    pass
+                step_output = ""
+                async for chunk in task.brain.chat_stream(step_text, session_id=task.session_id):
+                    step_output += chunk
+                step_outputs.append(step_output)
             finally:
                 if _DESKTOP_AVAILABLE:
                     desktop_session.release_desktop(_OWNER_ID)
@@ -311,11 +331,13 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
         task.status = "done"
         await _emit_task_event(event_bus, task)
         await _announce(event_bus, voice, "success", f"Background task complete: {task.text}")
+        _store_result(task, "\n".join(step_outputs))
     except Exception as e:
         logger.error("Background task %s failed at step %d: %s", task.id, task.current_step, e, exc_info=True)
         task.status = "failed"
         task.error = str(e)
         await _emit_task_event(event_bus, task)
         await _announce(event_bus, voice, "error", f"Background task failed: {e}")
+        _store_result(task, "\n".join(step_outputs) or task.error or "")
     finally:
         await task.brain.close()
