@@ -245,6 +245,7 @@ async def main():
     recent_turn_texts: Dict[str, float] = {}
     _DEDUPE_WINDOW_SEC = 20.0
     web_proc = None
+    pet_proc = None
     # True while a chat turn's LLM/tool loop runs -- see _dispatch_or_queue.
     turn_active = False
     pending_turns: list = []
@@ -1066,6 +1067,20 @@ async def main():
     except Exception as e:
         logger.warning(f"Failed to start web server: {e}")
 
+    # Start desktop companion subprocess (Windows-only, PySide6)
+    if config.pet_enabled:
+        try:
+            pet_entry = os.path.join(
+                os.path.dirname(__file__), "charlie", "pet_entry.py"
+            )
+            pet_proc = subprocess.Popen(
+                [sys.executable, pet_entry],
+                cwd=os.path.dirname(__file__),
+            )
+            logger.info(f"Companion subprocess started (PID: {pet_proc.pid})")
+        except Exception as e:
+            logger.warning(f"Failed to start companion: {e}")
+
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
         # TTS lifecycle callbacks for IPC events
@@ -1306,6 +1321,12 @@ async def main():
                 web_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 web_proc.kill()
+        if pet_proc is not None:
+            pet_proc.terminate()
+            try:
+                pet_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pet_proc.kill()
 
         logging.shutdown()
         # Force exit to ensure background threads don't hang the process on Windows

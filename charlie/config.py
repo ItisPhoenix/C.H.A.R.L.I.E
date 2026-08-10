@@ -356,6 +356,16 @@ class Config:
         metadata=_meta("ALERT_RAM_PCT", "Monitoring"),
     )
 
+    # --- Desktop companion (pet_window.py) ---
+    pet_enabled: bool = field(
+        default=os.getenv("PET_ENABLED", "true").lower() == "true",
+        metadata=_meta("PET_ENABLED", "Companion", restart="process"),
+    )
+    pet_position_path: str = field(
+        default=os.getenv("PET_POSITION_PATH", "pet_position.json"),
+        metadata=_meta("PET_POSITION_PATH", "Companion", restart="process"),
+    )
+
     charlie_host: str = field(
         default=os.getenv("CHARLIE_HOST", "127.0.0.1"),
         metadata=_meta("CHARLIE_HOST", "Server", restart="process"),
