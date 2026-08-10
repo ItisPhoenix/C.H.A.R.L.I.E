@@ -5,11 +5,14 @@ import pytest
 from charlie import background_task, recovery
 from charlie.config import Config
 from charlie.core import _TOOL_APPROVAL_TIMEOUT_SEC, Brain
+from charlie.tasks import TaskManager
 
 
 @pytest.fixture(autouse=True)
 def _reset_state():
     background_task._current_task = None
+    background_task._active_event_bus = None
+    background_task._manager = TaskManager(max_parallel=1, on_status_change=background_task._on_manager_status_change)
     yield
     background_task._current_task = None
 
@@ -59,14 +62,16 @@ async def test_start_plans_and_runs_immediately(monkeypatch, bg_config):
 
 
 @pytest.mark.asyncio
-async def test_second_start_refused_while_one_active(monkeypatch, bg_config):
+async def test_second_start_queues_behind_first_active_task(monkeypatch, bg_config):
     monkeypatch.setattr(Brain, "chat_stream", _fake_plan_chat_stream)
     monkeypatch.setattr(background_task, "_DESKTOP_AVAILABLE", False)
     bus = FakeEventBus()
-    task = await background_task.start(bg_config, bus, "first")
-    with pytest.raises(RuntimeError):
-        await background_task.start(bg_config, bus, "second")
-    background_task.cancel(task.id)
+    first = await background_task.start(bg_config, bus, "first")
+    assert first.status == "running"
+    second = await background_task.start(bg_config, bus, "second")
+    assert second.status == "queued"
+    background_task.cancel(first.id)
+    background_task.cancel(second.id)
     await asyncio.sleep(0.05)
 
 
@@ -109,6 +114,19 @@ async def test_lifecycle_alerts_speak_and_emit_start_and_complete(monkeypatch, b
     assert any("Starting background task" in m for m in fake_voice.spoken)
     assert any("Background task complete" in m for m in fake_voice.spoken)
     assert task.status == "done"
+
+
+@pytest.mark.asyncio
+async def test_count_active_tasks_reflects_queue_depth(monkeypatch, bg_config):
+    monkeypatch.setattr(Brain, "chat_stream", _fake_plan_chat_stream)
+    monkeypatch.setattr(background_task, "_DESKTOP_AVAILABLE", False)
+    bus = FakeEventBus()
+    first = await background_task.start(bg_config, bus, "first")
+    second = await background_task.start(bg_config, bus, "second")
+    assert background_task.count_active_tasks() == 2
+    background_task.cancel(first.id)
+    background_task.cancel(second.id)
+    await asyncio.sleep(0.05)
 
 
 # --- restart persistence ---

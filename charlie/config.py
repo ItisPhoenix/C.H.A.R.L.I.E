@@ -294,8 +294,7 @@ class Config:
         default=int(os.getenv("DESKTOP_MAX_ACTIONS", "40")),
         metadata=_meta("DESKTOP_MAX_ACTIONS", "Desktop Control"),
     )
-    # Seconds of no real user input required before Helm may start/continue
-    # an unattended background desktop task (charlie.desktop.session.user_idle_seconds).
+    # Seconds of no real input before Charlie may start/continue an unattended background task.
     desktop_idle_threshold_s: float = field(
         default=float(os.getenv("DESKTOP_IDLE_THRESHOLD_S", "120.0")),
         metadata=_meta("DESKTOP_IDLE_THRESHOLD_S", "Desktop Control"),
@@ -312,6 +311,11 @@ class Config:
     background_max_actions: int = field(
         default=int(os.getenv("BACKGROUND_MAX_ACTIONS", "100")),
         metadata=_meta("BACKGROUND_MAX_ACTIONS", "Desktop Control"),
+    )
+    # How many background tasks charlie.tasks.TaskManager may run at once -- rest queue.
+    background_max_parallel_tasks: int = field(
+        default=int(os.getenv("BACKGROUND_MAX_PARALLEL_TASKS", "1")),
+        metadata=_meta("BACKGROUND_MAX_PARALLEL_TASKS", "Desktop Control"),
     )
     tesseract_cmd: str = field(
         default=os.getenv("TESSERACT_CMD", ""),

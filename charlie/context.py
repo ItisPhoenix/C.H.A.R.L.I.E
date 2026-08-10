@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from charlie.background_task import ACTIVE_STATUSES, get_current_task
+from charlie.background_task import count_active_tasks
 from charlie.desktop.session import user_idle_seconds
 from charlie.desktop.windows import get_foreground_window
 from charlie.known_apps import APP_REGISTRY
@@ -71,8 +71,7 @@ def build_context(
     else:
         focus_mode = _is_productive(foreground_app) and idle_seconds < _TYPING_ACTIVITY_THRESHOLD_S
 
-    task = get_current_task()
-    running_task_count = 1 if task is not None and task.status in ACTIVE_STATUSES else 0
+    running_task_count = count_active_tasks()
 
     conversation_age_seconds = (
         max(0.0, now - last_turn_ended_at) if last_turn_ended_at is not None else None

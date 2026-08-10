@@ -1,10 +1,12 @@
-"""Lean background-task runner: plan -> gate-scan -> approve once -> execute.
+"""Background-task runner: plan -> gate-scan -> execute, scheduled through charlie.tasks.TaskManager.
 
-Single active task at a time, not a queue/kanban board -- matches the "lean
-rebuild" scope in plans/here-is-a-draft-witty-frost.md. Runs on its own
-Brain instance (see charlie.core.Brain's register_panic_hotkey/
-approval_timeout params) so it never touches the foreground chat's history,
-cancel generation, or panic hotkey registration.
+Queue/priority/dependencies/bounded-parallelism (Phase 5) all live in
+charlie.tasks -- this module supplies the domain logic (planning via a Brain,
+gated-step scanning, pause-on-user-activity) that TaskManager schedules as
+one run_fn per BackgroundTask. Each task runs on its own Brain instance (see
+charlie.core.Brain's register_panic_hotkey/approval_timeout params) so it
+never touches the foreground chat's history, cancel generation, or panic
+hotkey registration.
 
 Pause-on-user-activity: charlie.desktop.actions.last_action_tick_ms() records
 the automation's own last click/keypress; charlie.desktop.session.
@@ -25,6 +27,7 @@ from typing import Any, Dict, List, Literal, Optional
 from charlie.config import Config
 from charlie.core import Brain
 from charlie.events import EventMeta, EventSource
+from charlie.tasks import TaskManager
 from charlie.tools import get_path_gate_reason, is_shell_command_gated
 from charlie.utils import json_dumps, json_loads, make_id
 
@@ -51,10 +54,10 @@ _DESKTOP_KEYWORD_RE = re.compile(
 )
 
 TaskStatus = Literal[
-    "planning", "awaiting_approval", "running", "paused", "done", "failed", "cancelled"
+    "planning", "queued", "awaiting_approval", "running", "paused", "done", "failed", "cancelled"
 ]
 # Statuses counted as "a task is actively running" by charlie.state and charlie.context.
-ACTIVE_STATUSES = frozenset({"planning", "running", "paused"})
+ACTIVE_STATUSES = frozenset({"planning", "queued", "running", "paused"})
 
 
 @dataclass
@@ -69,6 +72,8 @@ class BackgroundTask:
     brain: Optional[Brain] = None
     session_id: str = ""
     cancel_requested: bool = field(default=False, repr=False)
+    priority: int = 0
+    depends_on: List[str] = field(default_factory=list)
 
     def to_event(self) -> Dict[str, Any]:
         return {
@@ -87,10 +92,29 @@ class BackgroundTask:
 
 
 _current_task: Optional[BackgroundTask] = None
+_active_event_bus: Optional[Any] = None
+
+
+def _on_manager_status_change(task: "BackgroundTask") -> None:
+    """TaskManager-driven transitions (queued/running/cancelled) have no emit of their own -- fire one here."""
+    if _active_event_bus is not None:
+        asyncio.create_task(_emit_task_event(_active_event_bus, task))
+
+
+_manager = TaskManager(max_parallel=1, on_status_change=_on_manager_status_change)
 
 
 def get_current_task() -> Optional[BackgroundTask]:
+    """Most recently created task -- may be queued, running, or already terminal."""
     return _current_task
+
+
+def count_active_tasks() -> int:
+    return _manager.active_count()
+
+
+def list_tasks() -> List[BackgroundTask]:
+    return _manager.list()
 
 
 def _save_state(task: BackgroundTask) -> None:
@@ -168,16 +192,23 @@ async def _announce(event_bus, voice, severity: str, message: str) -> None:
 
 async def start(
     config: Config, event_bus, text: str, session_store=None, memory_store=None, voice=None,
+    priority: int = 0, depends_on: Optional[List[str]] = None,
 ) -> BackgroundTask:
-    """Plan a background task and start running it immediately -- no upfront
-    approval gate. Returns once the plan is generated and the run loop is
-    scheduled; does not await task completion. _run_loop reports progress
-    asynchronously via "background_task" events."""
-    global _current_task
-    if _current_task is not None and _current_task.status not in ("done", "failed", "cancelled"):
-        raise RuntimeError(f"A background task is already {_current_task.status}: {_current_task.text}")
+    """Plan a background task and hand it to the TaskManager queue -- no
+    upfront approval gate. Runs immediately if a slot is free (the common
+    case at the default max_parallel=1), otherwise queues behind whatever is
+    already running/queued, per priority then submission order. Returns once
+    the plan is generated and the task is submitted to the queue; does not
+    await task completion. _run_loop reports progress asynchronously via
+    "background_task" events."""
+    global _current_task, _active_event_bus
+    _active_event_bus = event_bus
+    _manager.max_parallel = config.background_max_parallel_tasks
 
-    task = BackgroundTask(id=make_id(8), text=text, session_id=f"bg:{make_id(6)}")
+    task = BackgroundTask(
+        id=make_id(8), text=text, session_id=f"bg:{make_id(6)}",
+        priority=priority, depends_on=list(depends_on or []),
+    )
     _current_task = task
 
     bg_config = dataclasses.replace(
@@ -207,18 +238,13 @@ async def start(
     task.steps = _parse_steps(plan_text) or [text]
     task.flagged_steps = _scan_gated_steps(task.steps)
 
-    task.status = "running"
-    await _emit_task_event(event_bus, task)
+    _manager.submit(task, lambda: _run_loop(task, event_bus, voice))
     await _announce(event_bus, voice, "info", f"Starting background task: {text}")
-    asyncio.create_task(_run_loop(task, event_bus, voice))
     return task
 
 
 def cancel(task_id: str) -> bool:
-    if _current_task is None or _current_task.id != task_id:
-        return False
-    _current_task.cancel_requested = True
-    return True
+    return _manager.cancel(task_id)
 
 
 async def _wait_until_clear(task: BackgroundTask, config: Config, event_bus) -> bool:
