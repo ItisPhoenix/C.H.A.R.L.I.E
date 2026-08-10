@@ -317,6 +317,15 @@ class Config:
         default=int(os.getenv("BACKGROUND_MAX_PARALLEL_TASKS", "1")),
         metadata=_meta("BACKGROUND_MAX_PARALLEL_TASKS", "Desktop Control"),
     )
+    # Surface Engine cap: a surface beyond this evicts the lowest-priority-oldest of its class.
+    surface_widget_cap: int = field(
+        default=int(os.getenv("SURFACE_WIDGET_CAP", "3")),
+        metadata=_meta("SURFACE_WIDGET_CAP", "Surfaces"),
+    )
+    surface_workspace_cap: int = field(
+        default=int(os.getenv("SURFACE_WORKSPACE_CAP", "1")),
+        metadata=_meta("SURFACE_WORKSPACE_CAP", "Surfaces"),
+    )
     # Headless browser (Playwright + Chrome), optional -- off by default, needs the browser extra.
     browser_enabled: bool = field(
         default=os.getenv("BROWSER_ENABLED", "false").lower() == "true",

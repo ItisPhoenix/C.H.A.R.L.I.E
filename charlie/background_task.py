@@ -176,18 +176,27 @@ def _scan_gated_steps(steps: List[str]) -> List[int]:
     return flagged
 
 
-def _store_result(task: BackgroundTask, full_result: str) -> None:
+async def _store_result(task: BackgroundTask, event_bus, full_result: str) -> None:
     """Persist one row per terminal task (charlie/results.py, Phase 6) -- attention_level
     reuses charlie.attention's own BACKGROUND_TASK status table, same source of truth
-    the live event stream already scores this status against."""
+    the live event stream already scores this status against. Emits RESULT_STORED so
+    Phase 7's Surface Engine can react (e.g. route an ARCHIVED-persistence surface)."""
     level, _ = _attention_decide({"type": EventType.BACKGROUND_TASK, "payload": {"status": task.status}})
+    summary = f"Background task '{task.text}' {task.status}."
     store = ResultsStore(db_path=task.brain.config.session_db_path)
     try:
-        store.store(task.id, f"Background task '{task.text}' {task.status}.", full_result, int(level))
+        store.store(task.id, summary, full_result, int(level))
     except Exception:
         logger.warning("Failed to persist background-task result", exc_info=True)
     finally:
         store.close()
+    try:
+        await event_bus.emit(
+            EventType.RESULT_STORED, {"task_id": task.id, "summary": summary, "attention_level": int(level)},
+            meta=EventMeta(source=EventSource.TASK, task_id=task.id),
+        )
+    except Exception:
+        logger.warning("Failed to emit result_stored event", exc_info=True)
 
 
 async def _announce(event_bus, voice, severity: str, message: str) -> None:
@@ -310,7 +319,7 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
                     task.error = "Desktop control halted (panic hotkey)."
                     await _announce(event_bus, voice, "error", f"Background task failed: {task.error}")
                 await _emit_task_event(event_bus, task)
-                _store_result(task, "\n".join(step_outputs) or task.error or "")
+                await _store_result(task, event_bus, "\n".join(step_outputs) or task.error or "")
                 return
 
             if _DESKTOP_AVAILABLE:
@@ -331,13 +340,13 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
         task.status = "done"
         await _emit_task_event(event_bus, task)
         await _announce(event_bus, voice, "success", f"Background task complete: {task.text}")
-        _store_result(task, "\n".join(step_outputs))
+        await _store_result(task, event_bus, "\n".join(step_outputs))
     except Exception as e:
         logger.error("Background task %s failed at step %d: %s", task.id, task.current_step, e, exc_info=True)
         task.status = "failed"
         task.error = str(e)
         await _emit_task_event(event_bus, task)
         await _announce(event_bus, voice, "error", f"Background task failed: {e}")
-        _store_result(task, "\n".join(step_outputs) or task.error or "")
+        await _store_result(task, event_bus, "\n".join(step_outputs) or task.error or "")
     finally:
         await task.brain.close()

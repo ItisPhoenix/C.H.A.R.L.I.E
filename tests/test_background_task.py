@@ -136,6 +136,10 @@ async def test_completed_task_persists_a_result(monkeypatch, bg_config):
     assert recent[0].task_id == task.id
     assert "done" in recent[0].summary
 
+    result_stored_events = [payload for etype, payload in bus.events if etype == "result_stored"]
+    assert len(result_stored_events) == 1
+    assert result_stored_events[0]["task_id"] == task.id
+
 
 @pytest.mark.asyncio
 async def test_count_active_tasks_reflects_queue_depth(monkeypatch, bg_config):
