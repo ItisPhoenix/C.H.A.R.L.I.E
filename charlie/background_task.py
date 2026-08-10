@@ -53,6 +53,8 @@ _DESKTOP_KEYWORD_RE = re.compile(
 TaskStatus = Literal[
     "planning", "awaiting_approval", "running", "paused", "done", "failed", "cancelled"
 ]
+# Statuses counted as "a task is actively running" by charlie.state and charlie.context.
+ACTIVE_STATUSES = frozenset({"planning", "running", "paused"})
 
 
 @dataclass

@@ -122,3 +122,67 @@ def test_focus_window_fallback_degrades_gracefully_without_pyautogui(monkeypatch
     assert mock_user32.SetForegroundWindow.call_count == 2
     assert "could not bring" in result
     assert "Test" in result
+
+
+def test_get_foreground_window_returns_app_identity(monkeypatch):
+    mock_user32 = MagicMock()
+    mock_user32.GetForegroundWindow.return_value = 42
+    mock_user32.GetWindowTextLengthW.return_value = 5
+
+    def fake_gettext(hwnd, buf, n):
+        buf.value = "Notep"
+
+    mock_user32.GetWindowTextW.side_effect = fake_gettext
+
+    def fake_gwtpid(hwnd, pid_ptr):
+        pid_ptr._obj.value = 1234
+        return 999
+
+    mock_user32.GetWindowThreadProcessId.side_effect = fake_gwtpid
+    monkeypatch.setattr(windows, "_user32", mock_user32)
+
+    mock_process = MagicMock()
+    mock_process.name.return_value = "notepad.exe"
+    monkeypatch.setattr(
+        windows, "psutil", MagicMock(Process=MagicMock(return_value=mock_process)), raising=False
+    )
+
+    result = windows.get_foreground_window()
+    assert result == {"hwnd": 42, "title": "Notep", "pid": 1234, "process_name": "notepad.exe"}
+
+
+def test_get_foreground_window_returns_none_off_windows(monkeypatch):
+    monkeypatch.setattr(windows, "_user32", None)
+    assert windows.get_foreground_window() is None
+
+
+def test_get_foreground_window_returns_none_hwnd(monkeypatch):
+    mock_user32 = MagicMock()
+    mock_user32.GetForegroundWindow.return_value = 0
+    monkeypatch.setattr(windows, "_user32", mock_user32)
+    assert windows.get_foreground_window() is None
+
+
+def test_get_foreground_window_survives_psutil_failure(monkeypatch):
+    mock_user32 = MagicMock()
+    mock_user32.GetForegroundWindow.return_value = 42
+    mock_user32.GetWindowTextLengthW.return_value = 5
+
+    def fake_gettext(hwnd, buf, n):
+        buf.value = "Notep"
+
+    mock_user32.GetWindowTextW.side_effect = fake_gettext
+
+    def fake_gwtpid(hwnd, pid_ptr):
+        pid_ptr._obj.value = 1234
+        return 999
+
+    mock_user32.GetWindowThreadProcessId.side_effect = fake_gwtpid
+    monkeypatch.setattr(windows, "_user32", mock_user32)
+
+    mock_psutil = MagicMock()
+    mock_psutil.Process.side_effect = Exception("process exited")
+    monkeypatch.setattr(windows, "psutil", mock_psutil, raising=False)
+
+    result = windows.get_foreground_window()
+    assert result == {"hwnd": 42, "title": "Notep", "pid": 1234, "process_name": None}

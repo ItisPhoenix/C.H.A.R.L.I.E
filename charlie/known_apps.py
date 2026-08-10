@@ -15,6 +15,7 @@ class AppEntry:
     open_cmd: str
     close_process: Optional[str] = None  # None for websites -- nothing to taskkill
     is_website: bool = False
+    is_productive: bool = False  # feeds charlie.context's focus-mode heuristic
 
 
 APP_REGISTRY: Dict[str, AppEntry] = {
@@ -30,19 +31,19 @@ APP_REGISTRY: Dict[str, AppEntry] = {
     "spotify": AppEntry("spotify", "spotify.exe"),
     "discord": AppEntry("discord", "discord.exe"),
     "slack": AppEntry("slack", "slack.exe"),
-    "vs code": AppEntry("code", "code.exe"),
-    "vscode": AppEntry("code", "code.exe"),
-    "code": AppEntry("code", "code.exe"),
-    "terminal": AppEntry("wt", "WindowsTerminal.exe"),
-    "powershell": AppEntry("powershell", "powershell.exe"),
-    "cmd": AppEntry("cmd", "cmd.exe"),
-    "command prompt": AppEntry("cmd", "cmd.exe"),
+    "vs code": AppEntry("code", "code.exe", is_productive=True),
+    "vscode": AppEntry("code", "code.exe", is_productive=True),
+    "code": AppEntry("code", "code.exe", is_productive=True),
+    "terminal": AppEntry("wt", "WindowsTerminal.exe", is_productive=True),
+    "powershell": AppEntry("powershell", "powershell.exe", is_productive=True),
+    "cmd": AppEntry("cmd", "cmd.exe", is_productive=True),
+    "command prompt": AppEntry("cmd", "cmd.exe", is_productive=True),
     "paint": AppEntry("mspaint", "mspaint.exe"),
     "mspaint": AppEntry("mspaint", "mspaint.exe"),
     "task manager": AppEntry("taskmgr", "taskmgr.exe"),
     "taskmgr": AppEntry("taskmgr", "taskmgr.exe"),
-    "word": AppEntry("winword", "winword.exe"),
-    "excel": AppEntry("excel", "excel.exe"),
+    "word": AppEntry("winword", "winword.exe", is_productive=True),
+    "excel": AppEntry("excel", "excel.exe", is_productive=True),
     # Websites -- open_cmd is the full URL, no process to close.
     "instagram": AppEntry("https://instagram.com", is_website=True),
     "facebook": AppEntry("https://facebook.com", is_website=True),

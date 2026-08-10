@@ -12,6 +12,8 @@ import logging
 import sys
 from typing import Dict, List, Optional
 
+import psutil
+
 logger = logging.getLogger("charlie.desktop.windows")
 
 # ctypes.windll only exists on win32 (backend CI job runs on ubuntu-latest,
@@ -99,6 +101,31 @@ def manage_window(title_substr: str, action: str) -> str:
         _user32.PostMessageW(w["hwnd"], _WM_CLOSE, 0, 0)
         return f"Sent close to: {w['title']}"
     return f"Error: unknown action '{action}'. Valid: minimize, maximize, restore, close."
+
+
+def get_foreground_window() -> Optional[Dict]:
+    """Currently focused top-level window: hwnd, title, pid, process_name.
+
+    process_name is None (not a raised error) if psutil can't resolve it --
+    e.g. the process exited between the win32 call and the lookup -- the
+    hwnd/title/pid are still useful to a caller on their own.
+    """
+    if _user32 is None:
+        return None
+    hwnd = _user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    length = _user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(length + 1)
+    _user32.GetWindowTextW(hwnd, buf, length + 1)
+    pid = ctypes.wintypes.DWORD()
+    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    process_name = None
+    try:
+        process_name = psutil.Process(pid.value).name()
+    except Exception:
+        logger.debug("Could not resolve process name for pid %s", pid.value, exc_info=True)
+    return {"hwnd": hwnd, "title": buf.value, "pid": pid.value, "process_name": process_name}
 
 
 def move_resize_window(title_substr: str, x: int, y: int, width: int, height: int) -> str:

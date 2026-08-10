@@ -8,6 +8,7 @@ import time
 from enum import StrEnum
 from typing import FrozenSet, Optional
 
+from charlie.background_task import ACTIVE_STATUSES as _BACKGROUND_TASK_ACTIVE_STATUSES
 from charlie.events import EventType
 from charlie.utils import utc_now_iso
 
@@ -48,7 +49,6 @@ _BACKGROUND_TASK_STATUS_TO_STATE = {
     "cancelled": CoreState.COMPLETED,
     "failed": CoreState.ERROR,
 }
-_BACKGROUND_TASK_ACTIVE_STATUSES = frozenset({"planning", "running", "paused"})
 
 _ALERT_SEVERITY_TO_STATE = {
     "error": CoreState.ERROR,
