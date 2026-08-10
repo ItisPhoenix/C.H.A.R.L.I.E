@@ -138,11 +138,14 @@ class TestMemoryStore:
         store = self._make_store(monkeypatch)
         assert store.search("") == []
 
-    def test_search_failure_returns_empty(self, monkeypatch):
+    def test_search_failure_returns_none(self, monkeypatch):
+        """None (search itself broke) must stay distinguishable from [] (search
+        ran fine, found nothing) -- callers use this to avoid telling the user
+        'no memories found' when the real problem is a dead embedding service."""
         store = self._make_store(monkeypatch)
         store._collection = MagicMock()
         store._collection.query.side_effect = RuntimeError("chromadb down")
-        assert store.search("test") == []
+        assert store.search("test") is None
 
     def test_search_when_unavailable(self, monkeypatch):
         monkeypatch.setattr(

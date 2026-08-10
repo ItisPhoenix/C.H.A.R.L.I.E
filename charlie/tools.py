@@ -1210,6 +1210,8 @@ def vector_memory(action: str, content: str) -> str:
 
     elif action == "recall":
         results = _memory_store.search(content, n_results=3)
+        if results is None:
+            return "Memory search failed -- the embedding service may be down. Try again shortly."
         if not results:
             return "No relevant memories found."
         lines = []

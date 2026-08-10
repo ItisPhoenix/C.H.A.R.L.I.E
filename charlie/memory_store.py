@@ -241,11 +241,12 @@ class MemoryStore:
         query: str,
         n_results: int = 3,
         threshold: Optional[float] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> Optional[List[Dict[str, Any]]]:
         """Semantic search over stored memories.
 
-        Returns list of dicts with keys: text, distance, metadata.
-        Only returns results with distance below threshold.
+        Returns list of dicts with keys: text, distance, metadata. None means
+        the search itself failed (backend/embedding error) -- distinct from an
+        empty list, which means it ran fine and found nothing relevant.
         """
         if not self.is_available or not query.strip():
             return []
@@ -259,7 +260,7 @@ class MemoryStore:
             )
         except Exception as e:
             logger.warning("Memory search failed: %s", e, exc_info=True)
-            return []
+            return None
 
         if not results or not results.get("documents"):
             return []

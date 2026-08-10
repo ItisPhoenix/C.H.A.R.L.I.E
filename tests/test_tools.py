@@ -5,6 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import os
 
+import charlie.tools as tools_module
 from charlie.session_store import SessionStore
 from charlie.tools import (
     _DIAGNOSTIC_COMMANDS,
@@ -22,6 +23,7 @@ from charlie.tools import (
     session_search,
     shell_execute,
     system_diagnostics,
+    vector_memory,
     web_search,
 )
 
@@ -763,3 +765,33 @@ def test_session_search_formatting(tmp_path, monkeypatch):
         for f in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
             if os.path.exists(f):
                 os.remove(f)
+
+
+class _FakeMemoryStore:
+    def __init__(self, search_result):
+        self.is_available = True
+        self._search_result = search_result
+
+    def search(self, content, n_results=3):
+        return self._search_result
+
+    def add_memory(self, **kw):
+        return 1
+
+
+def test_vector_memory_recall_reports_search_failure_not_empty(monkeypatch):
+    monkeypatch.setattr(tools_module, "_memory_store", _FakeMemoryStore(None))
+    result = vector_memory("recall", "anything")
+    assert "failed" in result.lower()
+
+
+def test_vector_memory_recall_reports_no_matches(monkeypatch):
+    monkeypatch.setattr(tools_module, "_memory_store", _FakeMemoryStore([]))
+    result = vector_memory("recall", "anything")
+    assert result == "No relevant memories found."
+
+
+def test_vector_memory_recall_formats_results(monkeypatch):
+    monkeypatch.setattr(tools_module, "_memory_store", _FakeMemoryStore([{"text": "fact one"}]))
+    result = vector_memory("recall", "anything")
+    assert result == "- fact one"
