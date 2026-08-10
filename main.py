@@ -1,5 +1,6 @@
 # ruff: noqa: E402, I001
 import asyncio
+import dataclasses
 import io
 import logging
 import logging.handlers
@@ -7,7 +8,7 @@ import os
 import re
 import sys
 import time
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 # Windows event-loop policy (must precede zmq/asyncio imports)
 from charlie.runtime import configure as _configure_platform
@@ -93,18 +94,36 @@ root_logger.addHandler(console_handler)
 # 3. NOW IMPORT CHARLIE MODULES
 from charlie.config import Config, config
 from charlie.core import Brain
-from charlie.events import EventMeta, EventSource
+from charlie.events import EventMeta, EventSource, EventType
 from charlie.ipc import EventBus
 from charlie.memory_store import MemoryStore
 from charlie.personality import get_emotion_for_context, parse_voice_command, parse_yes_no
 from charlie.session_store import SessionStore
+from charlie.state import StateMachine
 from charlie.voice import VoiceEngine
 from charlie.monitors import start_monitor_thread
 
 logger = logging.getLogger("charlie.main")
-# Unique launch identity -- every main() invocation gets one so the sidebar can
-# filter "this launch" vs "all history".
-_LAUNCH_ID: str = str(uuid.uuid4())
+_LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
+_state_machine = StateMachine()  # single authoritative CoreState instance for this process
+
+
+def _charlie_state_envelope() -> dict:
+    return {
+        "type": EventType.CHARLIE_STATE.value,
+        "payload": {
+            "state": _state_machine.state.value,
+            "activities": sorted(_state_machine.activities()),
+            "since": _state_machine.since,
+        },
+        **dataclasses.asdict(EventMeta(source=EventSource.VOICE)),
+    }
+
+
+def _on_event_for_state(envelope: dict) -> Optional[dict]:
+    if _state_machine.apply(envelope) is None:
+        return None
+    return _charlie_state_envelope()
 
 
 # Streaming TTS flush thresholds (chars, not words)
@@ -1156,6 +1175,11 @@ async def main():
                         },
                         meta=EventMeta(source=EventSource.VOICE),
                     )
+                    if _state_machine.expire_if_due() is not None:
+                        envelope = _charlie_state_envelope()
+                        await bus.emit(
+                            envelope["type"], envelope["payload"], meta=EventMeta(source=EventSource.VOICE)
+                        )
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 pass
@@ -1165,6 +1189,7 @@ async def main():
         # Run voice loop + web command consumer concurrently via ZeroMQ
         async with EventBus(pub_port=5555, pull_port=5556, is_producer=True) as bus:
             event_bus = bus
+            bus.set_state_listener(_on_event_for_state)
             voice.set_event_bus(bus)
             import charlie.recovery
             charlie.recovery._event_bus = bus

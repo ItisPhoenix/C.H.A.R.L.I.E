@@ -289,17 +289,8 @@ async def _event_bridge():
         logger.debug(f"Event received: {event}")
         global pipeline_state
         etype = event.get("type", "")
-        # Update pipeline state for status endpoint
-        if etype == "vad_start":
-            pipeline_state = "listening"
-        elif etype == "thinking":
-            pipeline_state = "thinking"
-        elif etype == "speaking_start":
-            pipeline_state = "speaking"
-        elif etype in ("speaking_stop", "response_done"):
-            pipeline_state = "idle"
-        elif etype == "wake_word":
-            pipeline_state = "listening"
+        if etype == "charlie_state":
+            pipeline_state = event.get("payload", {}).get("state", pipeline_state)
 
         # Keep web server cached state in sync
         if etype == "system_status":

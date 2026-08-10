@@ -51,6 +51,15 @@ class EventBus:
         self._sub_socket: Optional[zmq.asyncio.Socket] = None
         self._push_socket: Optional[zmq.asyncio.Socket] = None
         self._pull_socket: Optional[zmq.asyncio.Socket] = None
+        self._state_listener: Optional[Callable[[dict], Optional[dict]]] = None
+
+    def set_state_listener(self, fn: Callable[[dict], Optional[dict]]) -> None:
+        """Producer only. fn receives every published envelope; a non-None return is republished as-is.
+
+        Lets a single in-process consumer (Phase 2 charlie/state.py StateMachine) derive
+        and emit a new event from the stream without EventBus knowing what that logic is.
+        """
+        self._state_listener = fn
 
     async def __aenter__(self):
         if self.is_producer:
@@ -102,6 +111,14 @@ class EventBus:
             await self._pub_socket.send_string(data)
         except zmq.ZMQError:
             logger.debug("emit_dropped_socket_closed | type=%s", event_type)
+            return
+        if self._state_listener is not None:
+            derived = self._state_listener(envelope)
+            if derived is not None:
+                try:
+                    await self._pub_socket.send_string(json.dumps(derived))
+                except zmq.ZMQError:
+                    logger.debug("emit_dropped_socket_closed | type=%s", derived.get("type"))
 
     async def next_command(self) -> dict:
         """Producer only. Blocks until a command arrives from the web process."""

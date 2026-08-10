@@ -459,17 +459,29 @@ class PetWindow(QWidget):
             logger.warning("Failed to save pet position: %s", e, exc_info=True)
 
 
-def _map_event_to_state(event_type: str) -> Optional[str]:
-    """Map an EventBus event type to a pet visual state, or None if irrelevant."""
-    if event_type in ("vad_start", "wake_word"):
-        return "listening"
-    if event_type == "thinking":
-        return "thinking"
-    if event_type == "speaking_start":
-        return "speaking"
-    if event_type in ("speaking_stop", "response_done"):
-        return "idle"
-    return None
+_CORE_STATE_TO_PET_STATE = {
+    "idle": "idle",
+    "listening": "listening",
+    "thinking": "thinking",
+    "speaking": "speaking",
+    "working": "thinking",
+    "waiting": "thinking",
+    "attention": "thinking",
+    "completed": "idle",
+    "error": "idle",
+}
+
+
+def _map_event_to_state(event: dict) -> Optional[str]:
+    """Map the authoritative charlie_state event to one of the pet's 4 rendered visual states.
+
+    The pet only renders idle/listening/thinking/speaking today; charlie/state.py's other
+    5 CoreState values collapse onto the closest of those until Phase 11's companion upgrade.
+    """
+    if event.get("type") != "charlie_state":
+        return None
+    core_state = (event.get("payload") or {}).get("state")
+    return _CORE_STATE_TO_PET_STATE.get(core_state)
 
 
 def _map_event_to_caption(event: dict) -> tuple[Optional[str], Optional[str]]:
@@ -515,7 +527,7 @@ def _sub_loop(window: PetWindow, stop_event: threading.Event):
             except Exception:
                 continue
 
-            state = _map_event_to_state(event.get("type", ""))
+            state = _map_event_to_state(event)
             if state is not None:
                 window.state_changed.emit(state)
 
