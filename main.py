@@ -995,7 +995,7 @@ async def main():
                             session_store=store, memory_store=memory_store, voice=voice,
                         )
                     except RuntimeError as ex:
-                        await event_bus.emit("alert", {"severity": "warn", "message": str(ex)})
+                        await event_bus.emit("alert", {"severity": "warning", "message": str(ex)})
                 elif cmd_type == "background_task_cancel":
                     payload = cmd.get("payload", {})
                     from charlie import background_task

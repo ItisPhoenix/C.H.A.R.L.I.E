@@ -21,8 +21,6 @@ from typing import List, Set
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 from charlie.config import Config, config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
@@ -310,10 +308,6 @@ async def _event_bridge():
         elif etype == "audio_state":
             global _audio_state
             _audio_state = event.get("payload", {})
-        elif etype == "audio_level":
-            global _audio_level
-            payload = event.get("payload", {})
-            _audio_level = float(payload.get("level", 0.0))
         elif etype == "mic_state":
             global _mic_state
             _mic_state = event.get("payload", {})
@@ -571,8 +565,6 @@ _audio_state: dict = {
 _mic_state: dict = {
     "mic_muted": False,
 }
-_audio_level: float = 0.0
-
 
 
 @app.get("/api/audio")
@@ -585,12 +577,6 @@ async def get_audio_state():
 async def get_mic_state():
     """Return current microphone mute state."""
     return _mic_state
-
-
-@app.get("/api/audio-level")
-async def get_audio_level():
-    """Return the latest real-time audio amplitude (0.0-1.0)."""
-    return {"level": _audio_level}
 
 
 @app.get("/api/memory/facts")
@@ -632,25 +618,6 @@ async def get_mcp_tools():
     except Exception as e:
         logger.error(f"Error fetching tools: {e}")
     return {"tools": []}
-
-
-@app.get("/api/mcp/status")
-async def get_mcp_status():
-    """Report whether MCP is enabled and whether tools are connected."""
-    try:
-        from charlie.tools import registry
-
-        enabled = config.mcp_enabled
-        if enabled:
-            await _ensure_mcp_client_async()
-        connected = enabled and any(
-            d.get("name", "").startswith("mcp_")
-            for d in registry.get_tool_definitions()
-        )
-        return {"enabled": enabled, "connected": connected}
-    except Exception as e:
-        logger.error(f"Error fetching MCP status: {e}")
-    return {"enabled": False, "connected": False}
 
 
 @app.get("/api/extensions")
@@ -834,12 +801,6 @@ async def set_active_session(data: dict):
     return {"active_session": _active_frontend_session}
 
 
-@app.get("/api/session/active")
-async def get_active_session():
-    """Get the currently active frontend session."""
-    return {"active_session": _active_frontend_session}
-
-
 def _update_env_file(updates: dict):
     from pathlib import Path
     env_path = Path(".env")
@@ -996,41 +957,6 @@ async def get_workspace_file(path: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/docker/status")
-async def get_docker_status():
-    """Check if docker daemon is reachable and list containers."""
-    import subprocess
-    try:
-        res = subprocess.run(["docker", "ps", "--format", "{{json .}}"], capture_output=True, text=True, timeout=2)
-        if res.returncode == 0:
-            lines = [line.strip() for line in res.stdout.strip().split("\n") if line.strip()]
-            containers = []
-            for line in lines:
-                try:
-                    containers.append(json.loads(line))
-                except Exception:
-                    pass
-            return {"available": True, "containers": containers}
-    except Exception:
-        pass
-    return {"available": False, "containers": []}
-
-
-@app.get("/api/ollama/status")
-async def get_ollama_status():
-    """Check if local Ollama daemon is running."""
-    import httpx
-    try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            r = await client.get("http://127.0.0.1:11434/api/tags")
-            if r.status_code == 200:
-                models = r.json().get("models", [])
-                return {"available": True, "models": [m.get("name") for m in models]}
-    except Exception:
-        pass
-    return {"available": False, "models": []}
-
-
 @app.get("/api/models")
 async def get_available_models():
     """Return live configured model plus auto-discovered local & provider API key models."""
@@ -1162,62 +1088,6 @@ async def get_services_status():
             },
         ]
     }
-
-
-# Serve frontend static files if they exist (checking both 'out' for NextJS and 'dist' for Vite)
-_FRONTEND_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "frontend", "out"
-)
-if not os.path.exists(_FRONTEND_DIR):
-    _FRONTEND_DIR = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "frontend", "dist"
-    )
-if os.path.exists(_FRONTEND_DIR):
-    assets_dir = os.path.join(_FRONTEND_DIR, "assets")
-    if os.path.exists(assets_dir):
-        app.mount(
-            "/assets",
-            StaticFiles(directory=assets_dir),
-            name="assets",
-        )
-    next_dir = os.path.join(_FRONTEND_DIR, "_next")
-    if os.path.exists(next_dir):
-        app.mount(
-            "/_next",
-            StaticFiles(directory=next_dir),
-            name="_next",
-        )
-
-    @app.get("/{rest_of_path:path}")
-    async def serve_frontend(request: Request, rest_of_path: str):
-        if rest_of_path.startswith("api/") or rest_of_path == "ws":
-            from fastapi import HTTPException
-            raise HTTPException(status_code=404, detail="Not Found")
-
-        # Path traversal containment: resolve the candidate and verify its
-        # realpath stays inside the frontend directory before serving it.
-        # Next.js static export writes nested routes as <path>.html or
-        # <path>/index.html, so a hard refresh on e.g. /settings needs both
-        # tried before falling back to the SPA shell.
-        real_frontend_dir = os.path.realpath(_FRONTEND_DIR)
-        rel_candidates = [rest_of_path]
-        if rest_of_path and not rest_of_path.endswith(".html"):
-            rel_candidates += [f"{rest_of_path}.html", f"{rest_of_path}/index.html"]
-        for rel in rel_candidates:
-            candidate = os.path.realpath(os.path.join(real_frontend_dir, rel))
-            contained = os.path.isfile(candidate) and (
-                candidate == real_frontend_dir
-                or candidate.startswith(real_frontend_dir + os.sep)
-            )
-            if contained:
-                return FileResponse(candidate)
-
-        return FileResponse(
-            os.path.join(_FRONTEND_DIR, "index.html"),
-            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
-        )
-else:
-    logger.warning("Frontend dist directory not found. Web UI will not be served.")
 
 
 def start_server(
