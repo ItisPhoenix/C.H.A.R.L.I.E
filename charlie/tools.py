@@ -1141,6 +1141,37 @@ def propose_new_tool(name: str, description: str, code: str) -> str:
 
 
 @registry.register_tool(
+    name="start_background_task",
+    description=(
+        "Start a multi-step goal running in the background while you keep talking normally -- "
+        "for tasks worth minutes, not a single instant action another tool already covers. "
+        "Reports progress via alerts; ask 'how's the task going' to check status."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The goal to accomplish, in plain language."},
+            "priority": {
+                "type": "integer",
+                "description": "Higher runs first if another task is already queued. Default 0.",
+            },
+            "depends_on": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Task ids that must finish first, if any.",
+            },
+        },
+        "required": ["text"],
+    },
+)
+def start_background_task(text: str, priority: int = 0, depends_on=None) -> str:
+    """Never actually reached -- charlie.core._exec_one intercepts this tool name before
+    dispatch here (it needs Brain/event-bus access this plain registry func doesn't have),
+    same pattern as propose_new_tool."""
+    return "Error: start_background_task must be intercepted by the tool loop, not executed directly."
+
+
+@registry.register_tool(
     name="vector_memory",
     description=(
         "Semantic memory: remember facts or recall them across sessions. "

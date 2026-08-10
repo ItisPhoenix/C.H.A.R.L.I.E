@@ -1051,6 +1051,25 @@ class Brain:
         """True if the physical panic hotkey or this instance's own turn-halt tripped."""
         return (desktop_actions is not None and desktop_actions.is_halted()) or self._turn_halted
 
+    async def _handle_start_background_task(self, arguments: Dict[str, Any]) -> str:
+        """Kicks a task into charlie.tasks.TaskManager's queue via background_task.start() --
+        needs Brain/event-bus access the plain registry stub doesn't have, same interception
+        pattern as propose_new_tool."""
+        from charlie import background_task, recovery  # lazy: background_task imports Brain from charlie.core
+
+        text = arguments.get("text", "").strip()
+        if not text:
+            return "Error: 'text' argument is required."
+        if recovery._event_bus is None:
+            return "Error: background tasks require the event bus to be running."
+
+        task = await background_task.start(
+            self.config, recovery._event_bus, text,
+            session_store=self.session_store, memory_store=self.memory_store,
+            priority=arguments.get("priority", 0), depends_on=arguments.get("depends_on") or [],
+        )
+        return f"Background task started (id={task.id}, status={task.status}): {text}"
+
     async def _handle_propose_new_tool(self, arguments: Dict[str, Any]) -> str:
         """Tier-3 self-extension: validate the authored code, then queue it on
         the dashboard's pending-extensions state -- never runs it, never waits
@@ -1686,6 +1705,8 @@ class Brain:
                 r = f"Error: Command declined by user (required approval: {gate_reason})."
             elif tool_name == "propose_new_tool":
                 r = await self._handle_propose_new_tool(call["arguments"])
+            elif tool_name == "start_background_task":
+                r = await self._handle_start_background_task(call["arguments"])
             elif tool_name in _DESKTOP_CONTROL_TOOLS and self._is_desktop_halted():
                 r = "Error: Desktop control is halted (panic or repeated failure). Say 'continue' to resume."
             elif tool_name in _DESKTOP_CONTROL_TOOLS and _desktop_action_count[0] >= self.config.desktop_max_actions:
