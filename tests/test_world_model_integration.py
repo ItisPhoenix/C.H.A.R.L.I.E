@@ -72,6 +72,126 @@ class TestMachineEventWriters:
         assert len(events) == 1
 
 
+class TestOutcomeFeedback:
+    def test_unreliable_tool_gets_a_rule(self, brain_config):
+        from collections import deque
+
+        from charlie import telemetry
+        telemetry._tool_calls = deque(maxlen=telemetry._MAX_SAMPLES)
+
+        brain = Brain(brain_config)
+        for _ in range(6):
+            telemetry.record_tool_call("flaky_tool", success=False)
+        brain._check_outcome_feedback()
+        rules = brain.world_model.active_rules()
+        assert any("flaky_tool" in text for _id, text in rules)
+
+    def test_no_duplicate_rule_on_repeat_check(self, brain_config):
+        from collections import deque
+
+        from charlie import telemetry
+        telemetry._tool_calls = deque(maxlen=telemetry._MAX_SAMPLES)
+
+        brain = Brain(brain_config)
+        for _ in range(6):
+            telemetry.record_tool_call("flaky_tool", success=False)
+        brain._check_outcome_feedback()
+        brain._check_outcome_feedback()
+        rules = [text for _id, text in brain.world_model.active_rules() if "flaky_tool" in text]
+        assert len(rules) == 1
+
+    def test_reliable_tool_gets_no_rule(self, brain_config):
+        from collections import deque
+
+        from charlie import telemetry
+        telemetry._tool_calls = deque(maxlen=telemetry._MAX_SAMPLES)
+
+        brain = Brain(brain_config)
+        for _ in range(6):
+            telemetry.record_tool_call("solid_tool", success=True)
+        brain._check_outcome_feedback()
+        rules = brain.world_model.active_rules()
+        assert not any("solid_tool" in text for _id, text in rules)
+
+
+class TestObservedPatterns:
+    def test_repeated_sequence_gets_proposed_not_active(self, brain_config):
+        brain = Brain(brain_config)
+        for _ in range(3):
+            brain.world_model.record_event("app_open", "I've opened chrome for you.")
+            brain.world_model.record_event("app_open", "I've opened spotify for you.")
+        brain._check_observed_patterns()
+        rules = brain.world_model.list_rules(include_decayed=True)
+        proposed = [r for r in rules if "chrome" in r[1] and "spotify" in r[1]]
+        assert len(proposed) == 1
+        assert proposed[0][4] == "proposed"
+        assert proposed[0][0] not in [r[0] for r in brain.world_model.active_rules()]
+
+    def test_no_pattern_proposes_nothing(self, brain_config):
+        brain = Brain(brain_config)
+        brain._check_observed_patterns()
+        assert brain.world_model.list_rules(include_decayed=True) == []
+
+    def test_no_duplicate_proposal_on_repeat_check(self, brain_config):
+        brain = Brain(brain_config)
+        for _ in range(3):
+            brain.world_model.record_event("app_open", "I've opened chrome for you.")
+            brain.world_model.record_event("app_open", "I've opened spotify for you.")
+        brain._check_observed_patterns()
+        brain._check_observed_patterns()
+        rules = [r for r in brain.world_model.list_rules(include_decayed=True) if "chrome" in r[1]]
+        assert len(rules) == 1
+
+
+class TestReviewAndForgetCommands:
+    @pytest.mark.asyncio
+    async def test_review_lists_learned_rules(self, monkeypatch, brain_config):
+        brain = Brain(brain_config)
+        brain.world_model.add_rule("always reply short on Telegram", "teaching")
+
+        def fail_if_called(*a, **kw):
+            raise AssertionError("Review-rules fast-path must not call the LLM")
+
+        monkeypatch.setattr(brain.client, "stream", fail_if_called)
+        result = await _collect(brain, "what have you learned about me")
+        assert "reply short on Telegram" in result
+
+    @pytest.mark.asyncio
+    async def test_review_empty_state(self, monkeypatch, brain_config):
+        brain = Brain(brain_config)
+        result = await _collect(brain, "what have you learned about me")
+        assert "haven't learned" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_forget_deletes_matching_rule(self, monkeypatch, brain_config):
+        brain = Brain(brain_config)
+        rid = brain.world_model.add_rule("always reply short on Telegram", "teaching")
+        result = await _collect(brain, "forget that Telegram")
+        assert "forgot" in result.lower()
+        assert rid not in [r[0] for r in brain.world_model.list_rules(include_decayed=True)]
+
+    @pytest.mark.asyncio
+    async def test_forget_no_match(self, monkeypatch, brain_config):
+        brain = Brain(brain_config)
+        result = await _collect(brain, "forget that Discord thing")
+        assert "couldn't find" in result.lower()
+
+
+class TestStandingInstructionWritesRule:
+    @pytest.mark.asyncio
+    async def test_always_phrasing_writes_rule_never_calls_llm(self, monkeypatch, brain_config):
+        brain = Brain(brain_config)
+
+        def fail_if_called(*a, **kw):
+            raise AssertionError("Standing-instruction fast-path must not call the LLM")
+
+        monkeypatch.setattr(brain.client, "stream", fail_if_called)
+        result = await _collect(brain, "always reply short on Telegram")
+        assert "remember" in result.lower()
+        rules = brain.world_model.active_rules()
+        assert any("reply short on Telegram" in text for _id, text in rules)
+
+
 class TestWorldModelSliceInPrompt:
     @pytest.mark.asyncio
     async def test_open_thread_reaches_system_prompt(self, monkeypatch, brain_config):

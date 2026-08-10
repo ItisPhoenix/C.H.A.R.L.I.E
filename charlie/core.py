@@ -235,6 +235,41 @@ _OPINION_EXTRACT_RE = re.compile(
     r"(?:you\s+(?:should|must|need\s+to)\s+)(like|prefer|love|enjoy|favor)\s+(.+)",
     re.IGNORECASE,
 )
+# Behavior-rule teaching ("always reply short on Telegram"), distinct from opinion phrasing above.
+_STANDING_INSTRUCTION_RE = re.compile(
+    rf"^{_CHARLIE_ADDR}?\s*(?:always|from\s+now\s+on|in\s+the\s+future|whenever\s+(?:i|you)\b)",
+    re.IGNORECASE,
+)
+
+
+def _detect_standing_instruction(query: str) -> Optional[str]:
+    """Detect a general behavior-rule teaching phrase. Returns the rule text or None."""
+    if not _STANDING_INSTRUCTION_RE.search(query) or _OPINION_TEACH_RE.search(query):
+        return None
+    cleaned = re.sub(rf"^{_CHARLIE_ADDR}?\s*", "", query, flags=re.IGNORECASE).strip().rstrip(".")
+    return cleaned or None
+
+
+_REVIEW_RULES_RE = re.compile(
+    r"what (?:have you|'ve you) learned about me"
+    r"|what do you know about me"
+    r"|show me what you'?ve learned"
+    r"|list (?:your|the) (?:rules|things you'?ve learned)",
+    re.IGNORECASE,
+)
+_FORGET_RULE_RE = re.compile(
+    r"forget (?:that|what you learned about|the rule about)\s+(.+)", re.IGNORECASE
+)
+
+
+def _detect_review_rules(query: str) -> bool:
+    return bool(_REVIEW_RULES_RE.search(query))
+
+
+def _detect_forget_rule(query: str) -> Optional[str]:
+    """Extracts the search text from a 'forget that/about X' command, or None."""
+    m = _FORGET_RULE_RE.search(query.strip())
+    return m.group(1).strip().rstrip(".") if m else None
 # --- Correction detection (auto-learn from user corrections) ---
 _CORRECTION_RE = re.compile(
     r"(?:"
@@ -293,9 +328,12 @@ def _detect_correction(query: str) -> bool:
 
 
 def _apply_correction_to_memory(
-    query: str, assistant_response: str, opinions_path: str = "OPINIONS.md"
+    query: str, assistant_response: str, opinions_path: str = "OPINIONS.md", world_model: Optional[Any] = None
 ) -> Optional[str]:
-    """Write a correction entry to OPINIONS.md. Returns the entry or None."""
+    """Write a correction entry to OPINIONS.md, plus a structural rules-table
+    row when world_model is given -- a queryable, confidence-scored row
+    beats an unstructured markdown line. Returns the entry or None.
+    """
     if not _detect_correction(query):
         return None
     short_resp = assistant_response[:120].strip()
@@ -314,6 +352,8 @@ def _apply_correction_to_memory(
                 f.write("\n")
             f.write(f"{entry}\n")
         logger.info("Correction stored: %s", entry[:80])
+        if world_model is not None:
+            world_model.add_rule(f"Corrected: {query.strip()}", "correction")
         return entry
     except Exception as exc:
         logger.warning("Failed to store correction: %s", exc)
@@ -1267,6 +1307,7 @@ class Brain:
                     user_input,
                     last_assistant,
                     self.config.opinions_file,
+                    self.world_model,
                 )
 
 
@@ -1300,6 +1341,34 @@ class Brain:
             except Exception as e:
                 logger.error("Failed to store opinion: %s", e, exc_info=True)
                 yield "I tried to remember that, but something went wrong."
+            return
+        # --- Fast-path: standing instruction (behavior rule, no LLM needed) ---
+        instruction = _detect_standing_instruction(user_input)
+        if instruction is not None:
+            self.world_model.add_rule(instruction, "teaching")
+            logger.info("Standing instruction learned: %s", instruction)
+            yield "Got it, I'll remember that."
+            return
+        # --- Fast-path: review learned rules (deterministic, no LLM needed) ---
+        if _detect_review_rules(user_input):
+            rules = self.world_model.list_rules(include_decayed=True)
+            if not rules:
+                yield "I haven't learned anything from you yet."
+            else:
+                lines = [f"{text} ({status}, {source})" for _id, text, _conf, source, status in rules[:10]]
+                yield "Here's what I've learned: " + "; ".join(lines) + "."
+            return
+        # --- Fast-path: forget a learned rule (deterministic, no LLM needed) ---
+        forget_text = _detect_forget_rule(user_input)
+        if forget_text is not None:
+            matches = self.world_model.find_rules_matching(forget_text)
+            for rule_id, _text in matches:
+                self.world_model.delete_rule(rule_id)
+            if matches:
+                logger.info("Forgot %d rule(s) matching '%s'", len(matches), forget_text)
+                yield f"Forgot {len(matches)} thing{'s' if len(matches) != 1 else ''} about that."
+            else:
+                yield "I couldn't find anything matching that to forget."
             return
         # --- Fast-path: set goal (deterministic, no LLM needed) ---
         goal_text = _detect_set_goal(user_input)
@@ -1826,6 +1895,9 @@ class Brain:
             self._reflect_turn_counter += 1
             if self._reflect_turn_counter % self._reflect_interval == 0:
                 asyncio.ensure_future(self._reflect_and_consolidate())
+                self._check_outcome_feedback()
+                self._check_observed_patterns()
+                self.world_model.decay_stale_rules()
             # Trim history to max turns (keep pairs: user + assistant)
             max_messages = self._history_max_turns * 2
             if len(self.history) > max_messages:
@@ -1873,6 +1945,42 @@ class Brain:
             self.world_model.update_thread(thread_id, summary, resolved=False)
         elif action == "resolve" and thread_id:
             self.world_model.update_thread(thread_id, summary, resolved=True)
+
+    def _check_outcome_feedback(self) -> None:
+        """Outcome-feedback learning signal: a tool that keeps failing earns a
+        rule flagging it, sourced from telemetry.py's rolling error rates.
+        Sync and cheap (in-memory deque scan + a few sqlite rows) -- called
+        on the same periodic cadence as memory reflection, not per-turn.
+        """
+        existing_texts = [text for _id, text, _c, _s, _st in self.world_model.list_rules(include_decayed=True)]
+        for tool_name, error_rate, calls in telemetry.unreliable_tools():
+            marker = f"Tool '{tool_name}'"
+            if any(t.startswith(marker) for t in existing_texts):
+                continue
+            self.world_model.add_rule(
+                f"{marker} has failed {error_rate:.0%} of its last {calls} calls -- "
+                "double-check its result or prefer an alternative when one exists.",
+                "outcome",
+            )
+
+    def _check_observed_patterns(self) -> None:
+        """Observed-pattern learning signal: an app-open sequence repeated
+        often enough gets proposed as a candidate rule, never auto-applied
+        (see WorldModel.propose_rule) -- the highest-risk signal earns the
+        most caution, per the plan's propose-don't-apply design.
+        """
+        pattern = self.world_model.detect_app_sequence_pattern()
+        if pattern is None:
+            return
+        app_a, app_b, _count = pattern
+        marker = f"open {app_b} shortly after {app_a}"
+        existing_texts = [text for _id, text, _c, _s, _st in self.world_model.list_rules(include_decayed=True)]
+        if any(marker in t for t in existing_texts):
+            return
+        self.world_model.propose_rule(
+            f"You often {marker} -- want me to do that automatically when you open {app_a}?",
+            "pattern",
+        )
 
     def _save_to_memory(self, text: str, source: str) -> None:
         """Fire-and-forget: extract and store facts from assistant response."""

@@ -10,7 +10,11 @@ real data.
 import time
 from collections import deque
 from threading import Lock
-from typing import Deque, Dict, Tuple
+from typing import Deque, Dict, List, Tuple
+
+# Outcome-feedback signal (Phase 1c): min samples + error rate before a tool earns a rule.
+_UNRELIABLE_MIN_CALLS = 5
+_UNRELIABLE_ERROR_THRESHOLD = 0.5
 
 _lock = Lock()
 _MAX_SAMPLES = 200
@@ -66,3 +70,15 @@ def tool_error_rate_by_name() -> Dict[str, Dict[str, float]]:
         name: {"calls": calls, "errors": errors, "error_rate": errors / calls}
         for name, (calls, errors) in by_name.items()
     }
+
+
+def unreliable_tools() -> List[Tuple[str, float, int]]:
+    """Tools with enough samples and a high enough error rate to be worth a
+    learned rule: (tool_name, error_rate, call_count), highest error first."""
+    stats = tool_error_rate_by_name()
+    flagged = [
+        (name, s["error_rate"], s["calls"])
+        for name, s in stats.items()
+        if s["calls"] >= _UNRELIABLE_MIN_CALLS and s["error_rate"] >= _UNRELIABLE_ERROR_THRESHOLD
+    ]
+    return sorted(flagged, key=lambda t: t[1], reverse=True)

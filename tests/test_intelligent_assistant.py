@@ -7,8 +7,11 @@ from charlie.core import (
     _apply_correction_to_memory,
     _assess_tool_result_relevance,
     _detect_correction,
+    _detect_forget_rule,
     _detect_operator_persona,
+    _detect_review_rules,
     _detect_set_goal,
+    _detect_standing_instruction,
     _detect_verbosity_feedback,
     _is_followup,
     _strip_vocatives,
@@ -95,6 +98,27 @@ class TestApplyCorrectionToMemory:
                 "what's the weather", "I don't know", opinions_path=path
             )
             assert result is None
+        finally:
+            os.unlink(path)
+
+    def test_writes_structural_rule_when_world_model_given(self):
+        from charlie.world_model import WorldModel
+        wm = WorldModel(db_path=":memory:")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            path = f.name
+        try:
+            _apply_correction_to_memory("no, I meant blue", "The sky is green", opinions_path=path, world_model=wm)
+            rules = wm.active_rules()
+            assert any("no, I meant blue" in text for _id, text in rules)
+        finally:
+            os.unlink(path)
+
+    def test_no_rule_written_without_world_model(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            path = f.name
+        try:
+            result = _apply_correction_to_memory("no, I meant blue", "The sky is green", opinions_path=path)
+            assert result is not None
         finally:
             os.unlink(path)
 
@@ -288,10 +312,70 @@ class TestVolatilityTierGoal:
         assert "Stay focused" in tier
 
 
-# ---------------------------------------------------------------------------
-# Phase 4: Helm desktop-control operator persona
-# ---------------------------------------------------------------------------
+class TestStandingInstructionDetection:
+    """Verify _detect_standing_instruction catches behavior-rule teaching."""
 
+    def test_always_prefix(self):
+        assert _detect_standing_instruction("always reply short on Telegram") == "always reply short on Telegram"
+
+    def test_from_now_on(self):
+        assert _detect_standing_instruction("from now on use metric units") == "from now on use metric units"
+
+    def test_in_the_future(self):
+        assert _detect_standing_instruction("in the future skip the small talk") is not None
+
+    def test_whenever_i(self):
+        assert _detect_standing_instruction("whenever I ask for news, include security") is not None
+
+    def test_strips_vocative_prefix(self):
+        assert _detect_standing_instruction("Charlie, always be brief") == "always be brief"
+
+    def test_strips_trailing_period(self):
+        assert _detect_standing_instruction("always be brief.") == "always be brief"
+
+    def test_no_match(self):
+        assert _detect_standing_instruction("what's the weather") is None
+
+    def test_opinion_teaching_not_captured(self):
+        assert _detect_standing_instruction("you should like jazz") is None
+
+
+class TestReviewRulesDetection:
+    """Verify _detect_review_rules catches the 'what have you learned' command."""
+
+    def test_what_have_you_learned(self):
+        assert _detect_review_rules("what have you learned about me") is True
+
+    def test_what_do_you_know(self):
+        assert _detect_review_rules("what do you know about me") is True
+
+    def test_list_rules(self):
+        assert _detect_review_rules("list your rules") is True
+
+    def test_no_match(self):
+        assert _detect_review_rules("what's the weather") is False
+
+
+class TestForgetRuleDetection:
+    """Verify _detect_forget_rule extracts the search text."""
+
+    def test_forget_that(self):
+        assert _detect_forget_rule("forget that I like short replies") == "I like short replies"
+
+    def test_forget_what_you_learned_about(self):
+        assert _detect_forget_rule("forget what you learned about Telegram") == "Telegram"
+
+    def test_forget_the_rule_about(self):
+        assert _detect_forget_rule("forget the rule about spotify") == "spotify"
+
+    def test_strips_trailing_period(self):
+        assert _detect_forget_rule("forget that Telegram thing.") == "Telegram thing"
+
+    def test_no_match(self):
+        assert _detect_forget_rule("what's the weather") is None
+
+
+# Phase 4: Helm desktop-control operator persona
 class TestOperatorPersonaDetection:
     """Verify _detect_operator_persona catches Helm address."""
 
