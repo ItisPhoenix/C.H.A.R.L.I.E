@@ -3,14 +3,15 @@ import sys
 
 import pytest
 
+from charlie import resource_locks
 from charlie.desktop import session
 
 
 @pytest.fixture(autouse=True)
 def _reset_owner():
-    session._owner = None
+    resource_locks._owners.pop("desktop", None)
     yield
-    session._owner = None
+    resource_locks._owners.pop("desktop", None)
 
 
 def test_mutex_exclusive():

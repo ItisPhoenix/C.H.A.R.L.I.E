@@ -88,6 +88,8 @@ def register_skill_scripts(
                     },
                 },
             },
+            owner="extensions",
+            risk_class="reversible",
         )(_invoke)
         registered.append(tool_name)
     return registered

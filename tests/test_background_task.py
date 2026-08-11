@@ -297,6 +297,64 @@ async def test_wait_until_clear_cancel_returns_false(monkeypatch, bg_config):
     assert result is False
 
 
+# --- desktop capability lock (charlie.resource_locks) ---
+
+
+@pytest.mark.asyncio
+async def test_wait_for_desktop_acquires_immediately_when_free(monkeypatch, bg_config):
+    from charlie import resource_locks
+    monkeypatch.setattr(background_task, "_DESKTOP_AVAILABLE", True)
+    resource_locks._owners.pop("desktop", None)
+    task = background_task.BackgroundTask(id="t1", text="x")
+
+    assert await background_task._wait_for_desktop(task) is True
+    assert resource_locks.current_owner("desktop") == "t1"
+    resource_locks.release("desktop", "t1")
+
+
+@pytest.mark.asyncio
+async def test_wait_for_desktop_serializes_two_concurrent_tasks(monkeypatch, bg_config):
+    from charlie import resource_locks
+    monkeypatch.setattr(background_task, "_DESKTOP_AVAILABLE", True)
+    monkeypatch.setattr(background_task, "_POLL_INTERVAL_SEC", 0.01)
+    resource_locks._owners.pop("desktop", None)
+    resource_locks.acquire("desktop", "t1")  # simulate a first task already holding it
+    task2 = background_task.BackgroundTask(id="t2", text="x")
+
+    async def _release_after_one_poll():
+        await asyncio.sleep(0.02)
+        resource_locks.release("desktop", "t1")
+
+    releaser = asyncio.create_task(_release_after_one_poll())
+    result = await background_task._wait_for_desktop(task2)
+    await releaser
+
+    assert result is True
+    assert resource_locks.current_owner("desktop") == "t2"
+    resource_locks.release("desktop", "t2")
+
+
+@pytest.mark.asyncio
+async def test_wait_for_desktop_gives_up_when_cancelled_while_waiting(monkeypatch, bg_config):
+    from charlie import resource_locks
+    monkeypatch.setattr(background_task, "_DESKTOP_AVAILABLE", True)
+    monkeypatch.setattr(background_task, "_POLL_INTERVAL_SEC", 0.01)
+    resource_locks._owners.pop("desktop", None)
+    resource_locks.acquire("desktop", "t1")
+    task2 = background_task.BackgroundTask(id="t2", text="x")
+
+    async def _cancel_after_one_poll():
+        await asyncio.sleep(0.02)
+        task2.cancel_requested = True
+
+    canceller = asyncio.create_task(_cancel_after_one_poll())
+    result = await background_task._wait_for_desktop(task2)
+    await canceller
+
+    assert result is False
+    resource_locks.release("desktop", "t1")
+
+
 # --- Brain re-entrancy params (core.py 2.1) ---
 
 

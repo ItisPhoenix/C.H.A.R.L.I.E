@@ -312,6 +312,8 @@ class MCPClient:
                 name=full_name,
                 description=f"[{tool.server_name}] {tool.description}",
                 schema=tool.input_schema or {"type": "object", "properties": {}},
+                owner="mcp",
+                risk_class="reversible",
             )(_invoke)
             registered.append(full_name)
         self._registered_tools.setdefault(server_name, []).extend(registered)

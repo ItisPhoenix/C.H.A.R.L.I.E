@@ -106,6 +106,42 @@ _OSCRIPT_VOL_RE = re.compile(
     r"osascript\s.*[Ss]et\s+[Vv]olume\s+([\d.]+)", re.IGNORECASE
 )
 
+# Baseline (owner, risk_class) per tool, read by autonomy.classify_action() -- plain strings to avoid a circular import.
+_DEFAULT_TOOL_METADATA: Dict[str, tuple] = {
+    "web_search": ("tools", "safe"),
+    "shell_execute": ("tools", "reversible"),
+    "system_diagnostics": ("tools", "safe"),
+    "file_read": ("tools", "safe"),
+    "file_write": ("tools", "reversible"),
+    "memory": ("memory", "reversible"),
+    "propose_new_tool": ("tools", "safe"),
+    "start_background_task": ("tools", "reversible"),
+    "vector_memory": ("memory", "safe"),
+    "session_search": ("memory", "safe"),
+    "recall_results": ("memory", "safe"),
+    "graph_add_fact": ("memory", "reversible"),
+    "graph_query": ("memory", "safe"),
+    "graph_consolidate": ("memory", "reversible"),
+    "desktop_observe": ("desktop", "safe"),
+    "desktop_read_screen": ("desktop", "safe"),
+    "desktop_click": ("desktop", "safe"),
+    "desktop_type": ("desktop", "safe"),
+    "desktop_invoke": ("desktop", "safe"),
+    "desktop_key": ("desktop", "safe"),
+    "desktop_click_at": ("desktop", "safe"),
+    "desktop_move": ("desktop", "safe"),
+    "desktop_drag": ("desktop", "safe"),
+    "desktop_scroll": ("desktop", "safe"),
+    "desktop_screenshot": ("desktop", "safe"),
+    "desktop_windows": ("desktop", "safe"),
+    "desktop_focus": ("desktop", "safe"),
+    "desktop_window": ("desktop", "safe"),
+    "desktop_move_window": ("desktop", "safe"),
+    "system_control": ("desktop", "safe"),
+    "browser_task": ("browser", "reversible"),
+    "browser_read": ("browser", "safe"),
+}
+
 
 class ToolRegistry:
     """Registry of tools the LLM can call."""
@@ -119,17 +155,33 @@ class ToolRegistry:
         description: str,
         schema: Dict[str, Any],
         is_interactive: bool = False,
+        owner: str = "",
+        risk_class: Optional[str] = None,
     ):
+        """owner/risk_class are plain strings (not charlie.autonomy.RiskClass) so this module
+        never has to import autonomy.py, which already imports from here. A caller who omits
+        both falls back to _DEFAULT_TOOL_METADATA's per-name entry, if one exists."""
+        default_owner, default_risk = _DEFAULT_TOOL_METADATA.get(name, ("", None))
+        self._tools[name] = {
+            "func": None,
+            "description": description,
+            "schema": schema,
+            "is_interactive": is_interactive,
+            "owner": owner or default_owner,
+            "risk_class": risk_class or default_risk,
+        }
+
         def decorator(func: Callable[..., Any]):
-            self._tools[name] = {
-                "func": func,
-                "description": description,
-                "schema": schema,
-                "is_interactive": is_interactive,
-            }
+            self._tools[name]["func"] = func
             return func
 
         return decorator
+
+    def get_owner(self, name: str) -> str:
+        return self._tools.get(name, {}).get("owner", "")
+
+    def get_risk_class(self, name: str) -> Optional[str]:
+        return self._tools.get(name, {}).get("risk_class")
 
     def unregister_tool(self, name: str) -> bool:
         """Remove a tool so it no longer appears in get_tool_definitions()

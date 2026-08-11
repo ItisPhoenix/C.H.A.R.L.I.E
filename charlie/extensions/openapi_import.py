@@ -163,6 +163,8 @@ def register_openapi_operations(
             name=tool_name,
             description=f"[{spec.title}] {op.description or f'{op.method} {op.path}'}",
             schema=_operation_schema(op),
+            owner="extensions",
+            risk_class="reversible",
         )(_invoke)
         registered.append(tool_name)
     return registered

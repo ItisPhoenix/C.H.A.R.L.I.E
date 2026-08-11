@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from charlie.security import policy as security_policy
 from charlie.tools import is_shell_command_blocked, is_shell_command_gated
+from charlie.tools import registry as _tool_registry
 
 
 class RiskClass(StrEnum):
@@ -75,6 +76,9 @@ def classify_action(
     if policy_result.needs_approval:
         return RiskClass.SECURITY_SENSITIVE, policy_result.reason or ""
 
+    default_risk = _tool_registry.get_risk_class(tool_name)
+    if default_risk is not None:
+        return RiskClass(default_risk), ""
     return RiskClass.SAFE, ""
 
 

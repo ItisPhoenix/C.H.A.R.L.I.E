@@ -44,7 +44,6 @@ except ImportError:  # pragma: no cover - guard mirrors charlie/desktop/__init__
 
 logger = logging.getLogger("charlie.background_task")
 
-_OWNER_ID = "background_task"
 _POLL_INTERVAL_SEC = 2.0
 _STEP_RE = re.compile(r"^\s*\d+[.)]\s+(.+)$")
 # Mirrors charlie/recovery_cache.py's dotfile-in-cwd convention.
@@ -304,6 +303,18 @@ async def _wait_until_clear(task: BackgroundTask, config: Config, event_bus) -> 
         await asyncio.sleep(_POLL_INTERVAL_SEC)
 
 
+async def _wait_for_desktop(task: BackgroundTask) -> bool:
+    """Poll until this task owns the desktop capability, keyed by task.id so two concurrent
+    background tasks genuinely serialize instead of racing under one shared owner id."""
+    if not _DESKTOP_AVAILABLE:
+        return True
+    while not desktop_session.acquire_desktop(task.id):
+        if task.cancel_requested:
+            return False
+        await asyncio.sleep(_POLL_INTERVAL_SEC)
+    return True
+
+
 async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
     config = task.brain.config
     step_outputs: List[str] = []
@@ -324,8 +335,12 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
                 await _store_result(task, event_bus, "\n".join(step_outputs) or task.error or "")
                 return
 
-            if _DESKTOP_AVAILABLE:
-                desktop_session.acquire_desktop(_OWNER_ID)
+            if not await _wait_for_desktop(task):
+                task.status = "cancelled"
+                await _emit_task_event(event_bus, task)
+                await _store_result(task, event_bus, "\n".join(step_outputs))
+                return
+
             try:
                 step_text = task.steps[task.current_step]
                 step_output = ""
@@ -334,7 +349,7 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
                 step_outputs.append(step_output)
             finally:
                 if _DESKTOP_AVAILABLE:
-                    desktop_session.release_desktop(_OWNER_ID)
+                    desktop_session.release_desktop(task.id)
 
             task.current_step += 1
             await _emit_task_event(event_bus, task)

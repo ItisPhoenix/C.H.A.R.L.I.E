@@ -63,7 +63,7 @@ class _FakeRegistry:
     def __init__(self):
         self.registered = {}
 
-    def register_tool(self, name, description, schema):
+    def register_tool(self, name, description, schema, **_):
         def decorator(func):
             self.registered[name] = {"description": description, "schema": schema, "func": func}
             return func

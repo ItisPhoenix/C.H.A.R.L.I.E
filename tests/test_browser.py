@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 
@@ -365,6 +366,77 @@ async def test_resolve_reports_when_stealth_also_fails(monkeypatch):
 
     result = await task.resolve("find quantum computing news", complete)
     assert "blocked" in result.answer.lower()
+
+
+# --- browser capability lock (charlie.resource_locks) -------------------------
+
+@pytest.mark.asyncio
+async def test_resolve_holds_and_releases_the_browser_capability(monkeypatch):
+    from charlie import resource_locks
+    resource_locks._owners.pop("browser", None)
+    owner_seen = {}
+
+    async def fake_agent_run_task(*a, **k):
+        owner_seen["owner"] = resource_locks.current_owner("browser")
+        return BrowserResult(answer="ok")
+
+    monkeypatch.setattr(task.agent, "run_task", fake_agent_run_task)
+
+    async def complete(prompt):
+        return ""
+
+    await task.resolve("find a good recipe for tacos", complete)
+
+    assert owner_seen["owner"] is not None  # held during the call
+    assert resource_locks.current_owner("browser") is None  # released after
+
+
+@pytest.mark.asyncio
+async def test_resolve_serializes_two_concurrent_browser_tasks(monkeypatch):
+    from charlie import resource_locks
+    resource_locks._owners.pop("browser", None)
+    monkeypatch.setattr(task, "_LOCK_POLL_INTERVAL_S", 0.01)
+    resource_locks.acquire("browser", "someone-else")
+
+    async def fake_agent_run_task(*a, **k):
+        return BrowserResult(answer="ok")
+
+    monkeypatch.setattr(task.agent, "run_task", fake_agent_run_task)
+
+    async def complete(prompt):
+        return ""
+
+    async def _release_after_one_poll():
+        await asyncio.sleep(0.02)
+        resource_locks.release("browser", "someone-else")
+
+    releaser = asyncio.create_task(_release_after_one_poll())
+    result = await task.resolve("find a good recipe for lasagna", complete, deadline_s=5.0)
+    await releaser
+
+    assert result.answer == "ok"
+    assert resource_locks.current_owner("browser") is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_fails_open_when_lock_wait_exceeds_deadline(monkeypatch):
+    from charlie import resource_locks
+    resource_locks._owners.pop("browser", None)
+    monkeypatch.setattr(task, "_LOCK_POLL_INTERVAL_S", 0.01)
+    resource_locks.acquire("browser", "someone-else")  # never released this test
+
+    async def fake_agent_run_task(*a, **k):
+        return BrowserResult(answer="proceeded anyway")
+
+    monkeypatch.setattr(task.agent, "run_task", fake_agent_run_task)
+
+    async def complete(prompt):
+        return ""
+
+    result = await task.resolve("find a good recipe for soup", complete, deadline_s=0.03)
+
+    assert result.answer == "proceeded anyway"
+    resource_locks.release("browser", "someone-else")
 
 
 # --- tools.py gate -----------------------------------------------------------

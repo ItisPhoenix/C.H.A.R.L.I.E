@@ -641,6 +641,39 @@ def test_unregister_tool_missing_returns_false():
     assert local_registry.unregister_tool("never-existed") is False
 
 
+def test_register_tool_owner_and_risk_class_are_queryable():
+    local_registry = ToolRegistry()
+    local_registry.register_tool(
+        name="temp", description="d", schema={"type": "object", "properties": {}},
+        owner="tools", risk_class="reversible",
+    )(lambda: "x")
+    assert local_registry.get_owner("temp") == "tools"
+    assert local_registry.get_risk_class("temp") == "reversible"
+
+
+def test_register_tool_defaults_owner_and_risk_class_when_unspecified():
+    local_registry = ToolRegistry()
+    local_registry.register_tool(name="temp", description="d", schema={"type": "object", "properties": {}})(
+        lambda: "x"
+    )
+    assert local_registry.get_owner("temp") == ""
+    assert local_registry.get_risk_class("temp") is None
+
+
+def test_get_owner_and_risk_class_none_for_unregistered_tool():
+    local_registry = ToolRegistry()
+    assert local_registry.get_owner("nope") == ""
+    assert local_registry.get_risk_class("nope") is None
+
+
+def test_builtin_tools_carry_real_registry_metadata():
+    from charlie.tools import registry as builtin_registry
+    assert builtin_registry.get_owner("shell_execute") == "tools"
+    assert builtin_registry.get_risk_class("shell_execute") == "reversible"
+    assert builtin_registry.get_owner("desktop_click") == "desktop"
+    assert builtin_registry.get_risk_class("web_search") == "safe"
+
+
 def test_web_search_returns_fallback_without_api_keys(monkeypatch):
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("EXA_API_KEY", raising=False)

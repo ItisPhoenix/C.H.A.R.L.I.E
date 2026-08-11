@@ -138,7 +138,7 @@ class _FakeRegistry:
     def __init__(self) -> None:
         self._tools: Dict[str, Dict[str, Any]] = {}
 
-    def register_tool(self, name: str, description: str, schema: Dict[str, Any]) -> Callable:
+    def register_tool(self, name: str, description: str, schema: Dict[str, Any], **_: Any) -> Callable:
         def decorator(func: Callable) -> Callable:
             self._tools[name] = {
                 "name": name,

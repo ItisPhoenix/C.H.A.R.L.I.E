@@ -9,11 +9,28 @@ import asyncio
 import logging
 from typing import Optional
 
+from charlie import resource_locks
 from charlie.browser import agent, fastpath, intent, recipes, session, stealth
 from charlie.browser.recipes import BrowserResult
 from charlie.known_apps import APP_REGISTRY
+from charlie.utils import make_id
 
 logger = logging.getLogger("charlie.browser")
+
+_CAPABILITY = "browser"
+_LOCK_POLL_INTERVAL_S = 0.5
+
+
+async def _acquire_browser(owner_id: str, max_wait_s: float) -> bool:
+    """Poll for the browser capability; fails open after max_wait_s so a stuck lock can't hang a caller forever."""
+    elapsed = 0.0
+    while not resource_locks.acquire(_CAPABILITY, owner_id):
+        if elapsed >= max_wait_s:
+            logger.warning("Browser capability lock wait timed out after %.1fs, proceeding anyway", max_wait_s)
+            return False
+        await asyncio.sleep(_LOCK_POLL_INTERVAL_S)
+        elapsed += _LOCK_POLL_INTERVAL_S
+    return True
 
 
 def _resolve_known_site(task: str) -> Optional[str]:
@@ -41,33 +58,39 @@ async def resolve(
         if cached is not None:
             return cached
 
-    loop = asyncio.get_running_loop()
-    result: Optional[BrowserResult] = None
-    lowered = task.lower()
+    owner_id = make_id()
+    acquired = await _acquire_browser(owner_id, max_wait_s=deadline_s)
+    try:
+        loop = asyncio.get_running_loop()
+        result: Optional[BrowserResult] = None
+        lowered = task.lower()
 
-    if "youtube" in lowered:
-        url = await loop.run_in_executor(None, fastpath.youtube_play, task)
-        result = BrowserResult(url=url) if url else await loop.run_in_executor(
-            None, recipes.youtube_play, task
-        )
-
-    if result is None:
-        site = _resolve_known_site(task)
-        if site:
-            result = await loop.run_in_executor(None, recipes.site_search, site, task)
-
-    if result is None:
-        result = await agent.run_task(
-            task, complete, describe_image, approve_click, max_steps, deadline_s, on_progress
-        )
-        if result.answer == "blocked":
-            blocked_url = session.get_session().last_url
-            retried = (
-                await loop.run_in_executor(None, stealth.retry_blocked, blocked_url)
-                if blocked_url else None
+        if "youtube" in lowered:
+            url = await loop.run_in_executor(None, fastpath.youtube_play, task)
+            result = BrowserResult(url=url) if url else await loop.run_in_executor(
+                None, recipes.youtube_play, task
             )
-            result = retried or BrowserResult(answer="That site blocked me and I couldn't get through.")
 
-    if result is not None and not freshness_sensitive:
-        session.cache_set(task, result)
-    return result
+        if result is None:
+            site = _resolve_known_site(task)
+            if site:
+                result = await loop.run_in_executor(None, recipes.site_search, site, task)
+
+        if result is None:
+            result = await agent.run_task(
+                task, complete, describe_image, approve_click, max_steps, deadline_s, on_progress
+            )
+            if result.answer == "blocked":
+                blocked_url = session.get_session().last_url
+                retried = (
+                    await loop.run_in_executor(None, stealth.retry_blocked, blocked_url)
+                    if blocked_url else None
+                )
+                result = retried or BrowserResult(answer="That site blocked me and I couldn't get through.")
+
+        if result is not None and not freshness_sensitive:
+            session.cache_set(task, result)
+        return result
+    finally:
+        if acquired:
+            resource_locks.release(_CAPABILITY, owner_id)

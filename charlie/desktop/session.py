@@ -3,7 +3,9 @@
 The physical mouse/keyboard is one shared resource. Foreground chat turns
 and background operator tasks must acquire it; background tasks also
 require the user to be idle (GetLastInputInfo) and pause the moment real
-input arrives.
+input arrives. The mutex itself is charlie.resource_locks, keyed "desktop" --
+this module is a thin, capability-named wrapper so existing callers keep
+their exact acquire_desktop/release_desktop/current_owner signatures.
 
 Limitation: pyautogui's own synthetic input also bumps GetLastInputInfo's
 timestamp on Windows, so user_idle_seconds() alone cannot tell "the user
@@ -21,11 +23,11 @@ functions below are never actually called there.
 """
 import ctypes
 import sys
-import threading
 from typing import Optional
 
-_lock = threading.Lock()
-_owner: Optional[str] = None
+from charlie import resource_locks
+
+_CAPABILITY = "desktop"
 
 _kernel32 = ctypes.windll.kernel32 if sys.platform == "win32" else None
 if _kernel32 is not None:
@@ -61,21 +63,12 @@ def external_input_since(tick_ms: int) -> bool:
 
 
 def acquire_desktop(owner_id: str) -> bool:
-    global _owner
-    with _lock:
-        if _owner is None or _owner == owner_id:
-            _owner = owner_id
-            return True
-        return False
+    return resource_locks.acquire(_CAPABILITY, owner_id)
 
 
 def release_desktop(owner_id: str) -> None:
-    global _owner
-    with _lock:
-        if _owner == owner_id:
-            _owner = None
+    resource_locks.release(_CAPABILITY, owner_id)
 
 
 def current_owner() -> Optional[str]:
-    with _lock:
-        return _owner
+    return resource_locks.current_owner(_CAPABILITY)

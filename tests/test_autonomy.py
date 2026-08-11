@@ -16,9 +16,10 @@ class TestClassifyActionShell:
         assert risk == RiskClass.DESTRUCTIVE
         assert "taskkill" in reason
 
-    def test_safe_command_is_safe(self):
+    def test_unmatched_command_falls_back_to_the_tool_registry_baseline(self):
+        # shell_execute's registry baseline is REVERSIBLE, which still maps to Requirement.ALLOW same as SAFE.
         risk, reason = classify_action("shell_execute", {"command": "echo hello"})
-        assert risk == RiskClass.SAFE
+        assert risk == RiskClass.REVERSIBLE
         assert reason == ""
 
 
@@ -43,13 +44,13 @@ class TestClassifyActionInjection:
         )
         assert risk == RiskClass.SECURITY_SENSITIVE
 
-    def test_unrelated_command_with_external_text_present_is_safe(self):
+    def test_unrelated_command_with_external_text_present_is_not_escalated(self):
         risk, reason = classify_action(
             "shell_execute",
             {"command": "echo hello"},
             recent_external_texts=["completely unrelated search result content here"],
         )
-        assert risk == RiskClass.SAFE
+        assert risk == RiskClass.REVERSIBLE  # registry baseline, not escalated to SECURITY_SENSITIVE
 
 
 class TestClassifyActionDesktop:
@@ -89,6 +90,18 @@ class TestEvaluate:
     def test_ctx_and_prefs_are_accepted_but_optional(self):
         req, _ = evaluate("web_search", {"query": "weather"}, ctx=None, prefs=None)
         assert req == Requirement.ALLOW
+
+
+class TestClassifyActionRegistryFallback:
+    def test_unregistered_tool_defaults_to_safe(self):
+        risk, reason = classify_action("not_a_real_tool", {})
+        assert risk == RiskClass.SAFE
+        assert reason == ""
+
+    def test_registered_baseline_wins_over_hardcoded_safe(self):
+        # browser_task has no dynamic branch of its own -- REVERSIBLE must come from the registry.
+        risk, reason = classify_action("browser_task", {"task": "look something up"})
+        assert risk == RiskClass.REVERSIBLE
 
 
 def test_action_class_enum_has_four_values():
