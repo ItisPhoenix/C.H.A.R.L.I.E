@@ -100,11 +100,15 @@ from charlie.memory_store import MemoryStore
 from charlie.personality import get_emotion_for_context, parse_voice_command, parse_yes_no
 from charlie.session_store import SessionStore
 from charlie.state import StateMachine
+from charlie.surfaces import SurfaceEngine
 from charlie.voice import VoiceEngine
 from charlie.monitors import start_monitor_thread
 
 logger = logging.getLogger("charlie.main")
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
+_hud_surface_engine = SurfaceEngine(
+    widget_cap=config.surface_widget_cap, workspace_cap=config.surface_workspace_cap
+)
 _state_machine = StateMachine()  # single authoritative CoreState instance for this process
 
 
@@ -246,6 +250,7 @@ async def main():
     _DEDUPE_WINDOW_SEC = 20.0
     web_proc = None
     pet_proc = None
+    hud_proc = None
     # True while a chat turn's LLM/tool loop runs -- see _dispatch_or_queue.
     turn_active = False
     pending_turns: list = []
@@ -911,6 +916,23 @@ async def main():
                 elif cmd_type == "stop":
                     voice.stop_tts()
                     brain.cancel_chat()
+                elif cmd_type == "hud_invoke":
+                    # Manual hotkey summon -- spawns a demo widget surface until Phase 10 wires a real event source.
+                    from charlie.surfaces import Persistence, PresentationMode, SurfaceSpec
+                    from charlie.utils import make_id
+                    surface_id = make_id()
+                    spec = SurfaceSpec(
+                        presentation=PresentationMode.WIDGET,
+                        persistence=Persistence.EPHEMERAL,
+                        density=2,
+                        rationale="manual hud_invoke summon",
+                    )
+                    _hud_surface_engine.spawn(surface_id, spec)
+                    spawn_event = _hud_surface_engine.spawn_event(surface_id, spec)
+                    await event_bus.emit(
+                        spawn_event["type"], spawn_event["payload"],
+                        meta=EventMeta(source=EventSource.SURFACE),
+                    )
                 elif cmd_type == "audio_control":
                     payload = cmd.get("payload", {})
                     state = voice.set_audio_state(
@@ -1080,6 +1102,20 @@ async def main():
             logger.info(f"Companion subprocess started (PID: {pet_proc.pid})")
         except Exception as e:
             logger.warning(f"Failed to start companion: {e}")
+
+    # Start HUD surface shell subprocess (Windows-only, PySide6 + QtWebEngine)
+    if config.hud_enabled:
+        try:
+            hud_entry = os.path.join(
+                os.path.dirname(__file__), "charlie", "hud_entry.py"
+            )
+            hud_proc = subprocess.Popen(
+                [sys.executable, hud_entry],
+                cwd=os.path.dirname(__file__),
+            )
+            logger.info(f"HUD subprocess started (PID: {hud_proc.pid})")
+        except Exception as e:
+            logger.warning(f"Failed to start HUD shell: {e}")
 
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
@@ -1330,6 +1366,12 @@ async def main():
                 pet_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pet_proc.kill()
+        if hud_proc is not None:
+            hud_proc.terminate()
+            try:
+                hud_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                hud_proc.kill()
 
         logging.shutdown()
         # Force exit to ensure background threads don't hang the process on Windows

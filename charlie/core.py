@@ -814,7 +814,7 @@ class Brain:
             try:
                 from pynput import keyboard as _pynput_keyboard
                 hotkey_str = "+".join(
-                    f"<{p}>" if p in ("ctrl", "alt", "shift", "cmd") else p
+                    f"<{p}>" if len(p) > 1 else p
                     for p in self.config.desktop_panic_hotkey.lower().split("+")
                 )
                 self._panic_hotkey_listener = _pynput_keyboard.GlobalHotKeys(

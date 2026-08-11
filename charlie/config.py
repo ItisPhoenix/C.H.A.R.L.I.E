@@ -326,6 +326,15 @@ class Config:
         default=int(os.getenv("SURFACE_WORKSPACE_CAP", "1")),
         metadata=_meta("SURFACE_WORKSPACE_CAP", "Surfaces"),
     )
+    hud_enabled: bool = field(
+        default=os.getenv("HUD_ENABLED", "true").lower() == "true",
+        metadata=_meta("HUD_ENABLED", "Surfaces", restart="process"),
+    )
+    # Read once into a pynput GlobalHotKeys listener at hud process start -- needs a full restart to re-arm.
+    hud_invoke_hotkey: str = field(
+        default=os.getenv("HUD_INVOKE_HOTKEY", "ctrl+shift+space"),
+        metadata=_meta("HUD_INVOKE_HOTKEY", "Surfaces", restart="process"),
+    )
     # Headless browser (Playwright + Chrome), optional -- off by default, needs the browser extra.
     browser_enabled: bool = field(
         default=os.getenv("BROWSER_ENABLED", "false").lower() == "true",
