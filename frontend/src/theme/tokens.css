@@ -1,0 +1,13 @@
+@theme {
+  --color-glass-bg: rgba(20, 20, 30, 0.72);
+  --color-glass-bg-2: rgba(255, 255, 255, 0.04);
+  --color-glass-border: rgba(255, 255, 255, 0.08);
+  --color-text-primary: #f4f6fa;
+  --color-text-secondary: #c7cbd6;
+  --color-text-muted: #8b8fa3;
+  --color-status-success: #34d399;
+  --color-status-error: #f87171;
+  --color-status-error-dim: rgba(248, 113, 113, 0.12);
+  --color-status-warning: #fbbf24;
+  --color-accent: #7c9eff;
+}

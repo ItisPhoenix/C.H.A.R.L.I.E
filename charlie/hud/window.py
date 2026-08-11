@@ -1,5 +1,4 @@
 """SurfaceWindow: frameless, translucent, always-on-top window hosting one QWebEngineView."""
-from pathlib import Path
 from typing import Optional, Tuple
 
 from PySide6.QtCore import QPoint, Qt
@@ -23,7 +22,7 @@ class SurfaceWindow(QWidget):
     the corners is future work if it's ever needed.
     """
 
-    def __init__(self, html_path: Path, rect: Tuple[int, int, int, int], draggable: bool = True) -> None:
+    def __init__(self, url: str, rect: Tuple[int, int, int, int], draggable: bool = True) -> None:
         super().__init__()
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -39,7 +38,7 @@ class SurfaceWindow(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, _DRAG_STRIP_HEIGHT, 0, 0)
-        layout.addWidget(build_webview(html_path))
+        layout.addWidget(build_webview(url))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if self._draggable and event.button() == Qt.MouseButton.LeftButton:
@@ -54,10 +53,12 @@ class SurfaceWindow(QWidget):
 
 
 def main() -> None:
-    """Live spike: show one floating translucent web surface for manual verification."""
+    """Live spike: show one floating translucent web surface for manual verification, no backend needed."""
+    from pathlib import Path
+
     app = QApplication([])
     html_path = Path(__file__).parent / "_spike.html"
-    window = SurfaceWindow(html_path, rect=(100, 100, 360, 200))
+    window = SurfaceWindow(html_path.as_uri(), rect=(100, 100, 360, 200))
     window.show()
     app.exec()
 

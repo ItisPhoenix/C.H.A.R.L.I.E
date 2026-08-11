@@ -1,63 +1,32 @@
-# Charlie Frontend
+# React + TypeScript + Vite
 
-Next.js 16 + React 19 + Zustand dashboard for the Charlie voice-first AI assistant.
+This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
-## Stack
+Currently, two official plugins are available:
 
-- **Next.js 16** with `output: "export"` (static site)
-- **React 19** with TypeScript 5
-- **Zustand** for state management
-- **Tailwind CSS v4** for styling
-- **WebSocket** for real-time sync with `web_server.py`
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
-## Architecture
+## React Compiler
 
-```
-src/
-  app/page.tsx          # Main page - WebSocket, layout orchestration
-  components/
-    VoiceDock.tsx       # Bottom dock with voice state and waveform
-    Sidebar.tsx         # Session list with active session sync
-    SmartPanel.tsx      # Activity feed, tools, memory, knowledge graph
-    MainWorkspace.tsx   # Chat display and message input
-    WaveformBar.tsx     # Audio waveform visualization
-    ErrorBoundary.tsx   # Production error boundary with fallback UI
-  store/
-    useCharlieStore.ts  # Zustand store (sessions, messages, voice)
-```
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
-## Development
+## Expanding the Oxlint configuration
 
-```bash
-# Install dependencies
-npm install
+If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
 
-# Type-check
-npx tsc --noEmit
-
-# Dev server (port 3000)
-npm run dev
-
-# Test
-npm test
+```json
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "oxc"],
+  "options": {
+    "typeAware": true
+  },
+  "rules": {
+    "react/rules-of-hooks": "error",
+    "react/only-export-components": ["warn", { "allowConstantExport": true }]
+  }
+}
 ```
 
-## Key Features
-
-- **Real-time WebSocket sync** with Charlie's backend (`web_server.py`)
-- **Three-column layout**: Sidebar (sessions), Main (chat), Smart Panel (activity)
-- **Voice dock** with waveform visualization and voice state display
-- **Session management**: Create, switch, rename, delete sessions
-- **Activity feed**: Real-time tool calls and thinking updates
-- **Glassmorphism design**: Frosted glass panels with electric blue accent (#0066ff)
-
-## WebSocket Events
-
-The frontend listens for these events from `web_server.py`:
-
-| Event | Purpose |
-|-------|---------|
-| `chat_response` | LLM streaming tokens |
-| `thinking_update` | Agent thinking updates |
-| `system_status` | Health and diagnostics |
-| `session_active` | Active session sync (frontend -> backend) |
+See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.

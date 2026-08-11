@@ -1,5 +1,3 @@
-"use client";
-
 import type { ReactElement, ReactNode } from "react";
 
 interface ModalProps {
@@ -7,18 +5,11 @@ interface ModalProps {
   labelledBy: string;
 }
 
-// Shared shell for interruption dialogs (recovery proposals, tool approvals).
-// Relies on the .glass utility for background/border/shadow -- don't add a
-// second border or shadow on top of it, that's how these drifted apart before.
+// Shared shell for interruption dialogs (recovery proposals, tool approvals). Ported from frontend@c7aa7df~1.
 export function Modal({ children, labelledBy }: ModalProps): ReactElement {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={labelledBy}
-        className="w-full max-w-lg glass p-6 flex flex-col gap-5"
-      >
+      <div role="dialog" aria-modal="true" aria-labelledby={labelledBy} className="w-full max-w-lg glass p-6 flex flex-col gap-5">
         {children}
       </div>
     </div>
@@ -41,10 +32,7 @@ const TONE_COLOR: Record<string, string> = {
 export function ModalField({ label, tone = "muted", children }: ModalFieldProps): ReactElement {
   return (
     <div>
-      <span
-        className="text-xs uppercase tracking-wider font-semibold"
-        style={{ color: TONE_COLOR[tone] }}
-      >
+      <span className="text-xs uppercase tracking-wider font-semibold" style={{ color: TONE_COLOR[tone] }}>
         {label}
       </span>
       <div className="mt-1 text-sm text-[var(--color-text-secondary)]">{children}</div>
@@ -60,13 +48,7 @@ interface ModalActionsProps {
   busy?: boolean;
 }
 
-export function ModalActions({
-  rejectLabel,
-  approveLabel,
-  onReject,
-  onApprove,
-  busy,
-}: ModalActionsProps): ReactElement {
+export function ModalActions({ rejectLabel, approveLabel, onReject, onApprove, busy }: ModalActionsProps): ReactElement {
   return (
     <div className="flex justify-end gap-3 mt-2">
       <button

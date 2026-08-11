@@ -1,0 +1,15 @@
+import type { ReactElement } from "react";
+import type { SurfaceSpec } from "../../store/charlie";
+import { Frame } from "./Frame";
+import { StreamingMarkdown } from "../../components/StreamingMarkdown";
+
+export function Workspace({ spec }: { spec: SurfaceSpec }): ReactElement {
+  return (
+    <Frame spec={spec} showRationale={false}>
+      <span className="text-sm font-medium text-[var(--color-text-primary)]">Workspace</span>
+      <div className="flex-1 overflow-y-auto">
+        <StreamingMarkdown content={spec.rationale} />
+      </div>
+    </Frame>
+  );
+}

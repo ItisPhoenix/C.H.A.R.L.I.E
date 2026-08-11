@@ -16,7 +16,8 @@ from charlie.hud.shell import Shell, sub_loop
 
 def main() -> None:
     app = QApplication([])
-    shell = Shell()
+    host = "127.0.0.1" if config.charlie_host == "0.0.0.0" else config.charlie_host
+    shell = Shell(base_url=f"http://{host}:{config.charlie_port}")
     stop_event = threading.Event()
     thread = threading.Thread(target=sub_loop, args=(shell, stop_event), daemon=True)
     thread.start()

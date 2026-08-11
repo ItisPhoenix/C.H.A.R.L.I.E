@@ -17,10 +17,13 @@ import logging
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import List, Set
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, WebSocketException
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from charlie.config import Config, config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
@@ -253,6 +256,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+if _FRONTEND_DIST.is_dir():
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="surface-assets")
+
+
+@app.get("/surface/{surface_id}")
+async def serve_surface(surface_id: str) -> FileResponse:
+    """Single-page app entry for a QWebEngineView surface window; surface_id is read client-side via the router."""
+    index_path = _FRONTEND_DIST / "index.html"
+    if not index_path.is_file():
+        raise HTTPException(status_code=404, detail="frontend not built -- run `npm run build` in frontend/")
+    return FileResponse(index_path)
 
 
 async def broadcast(data: dict):

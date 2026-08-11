@@ -2,7 +2,6 @@
 import json
 import logging
 import threading
-from pathlib import Path
 from typing import Dict
 
 import zmq
@@ -16,7 +15,6 @@ from charlie.ipc import DEFAULT_EVENT_PORT
 
 logger = logging.getLogger("charlie.hud.shell")
 
-_SPIKE_HTML = Path(__file__).parent / "_spike.html"
 _POLL_TIMEOUT_MS = 500
 _DRAGGABLE_MODES = frozenset({"widget", "notification", "floating"})
 
@@ -27,8 +25,9 @@ class Shell(QObject):
     spawn_requested = Signal(str, dict)
     dismiss_requested = Signal(str)
 
-    def __init__(self) -> None:
+    def __init__(self, base_url: str) -> None:
         super().__init__()
+        self._base_url = base_url
         self._windows: Dict[str, SurfaceWindow] = {}
         self.spawn_requested.connect(self._on_spawn)
         self.dismiss_requested.connect(self._on_dismiss)
@@ -44,7 +43,8 @@ class Shell(QObject):
         self._on_dismiss(surface_id)
         region = payload.get("region") or "top_right"
         rect = placement.region_to_rect(region, self._screen_rect(), mode)
-        window = SurfaceWindow(_SPIKE_HTML, rect, draggable=mode in _DRAGGABLE_MODES)
+        url = f"{self._base_url}/surface/{surface_id}"
+        window = SurfaceWindow(url, rect, draggable=mode in _DRAGGABLE_MODES)
         window.show()
         self._windows[surface_id] = window
         ttl = payload.get("ttl_seconds")
