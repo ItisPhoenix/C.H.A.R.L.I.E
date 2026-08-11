@@ -357,6 +357,20 @@ class Config:
         default=int(os.getenv("BROWSER_DEADLINE_S", "25")),
         metadata=_meta("BROWSER_DEADLINE_S", "Browser", restart="reload"),
     )
+    # Long-polling DM bridge, optional -- off by default, needs the telegram extra + a bot token.
+    telegram_enabled: bool = field(
+        default=os.getenv("TELEGRAM_ENABLED", "false").lower() == "true",
+        metadata=_meta("TELEGRAM_ENABLED", "Telegram", restart="process"),
+    )
+    telegram_bot_token: str = field(
+        default=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+        metadata=_meta("TELEGRAM_BOT_TOKEN", "Telegram", restart="process", secret=True),
+    )
+    # Single-owner DM gate -- messages from any other user id are ignored.
+    telegram_user_id: int = field(
+        default=int(os.getenv("TELEGRAM_USER_ID", "0")),
+        metadata=_meta("TELEGRAM_USER_ID", "Telegram", restart="process"),
+    )
     browser_headless: bool = field(
         default=os.getenv("BROWSER_HEADLESS", "true").lower() == "true",
         metadata=_meta("BROWSER_HEADLESS", "Browser", restart="process"),

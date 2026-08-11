@@ -251,6 +251,7 @@ async def main():
     web_proc = None
     pet_proc = None
     hud_proc = None
+    telegram_bot = None
     # True while a chat turn's LLM/tool loop runs -- see _dispatch_or_queue.
     turn_active = False
     pending_turns: list = []
@@ -306,6 +307,31 @@ async def main():
                 ), loop
             )
 
+    _CONVERSATION_SUMMON_RE = re.compile(r"\b(?:show|open) (?:me )?(?:the )?(?:chat|conversation)\b", re.IGNORECASE)
+
+    async def _summon_conversation_workspace():
+        """Real conversation workspace via decide(), shared by the hud_invoke hotkey and this voice phrase."""
+        from charlie.surfaces import UserIntent
+        from charlie.utils import make_id
+        if event_bus is None:
+            return
+        surface_id = make_id()
+        spec = _hud_surface_engine.decide({"type": "conversation_summon", "payload": {}}, user_intent=UserIntent.SHOW)
+        if spec is None:
+            return
+        _hud_surface_engine.spawn(surface_id, spec)
+        spawn_event = _hud_surface_engine.spawn_event(surface_id, spec)
+        await event_bus.emit(
+            spawn_event["type"], spawn_event["payload"], meta=EventMeta(source=EventSource.SURFACE)
+        )
+
+    def on_tool_approval_request(request_id, tool_name, reason):
+        # telegram_bot is None until its startup block below runs -- read at call time, not def time.
+        if telegram_bot and config.telegram_user_id:
+            asyncio.run_coroutine_threadsafe(
+                telegram_bot.send_approval_request(config.telegram_user_id, request_id, tool_name, reason), loop
+            )
+
     try:
         brain = Brain(
             config,
@@ -315,6 +341,7 @@ async def main():
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_thinking_update=on_thinking_update,
+            on_tool_approval_request=on_tool_approval_request,
         )
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")
@@ -551,6 +578,11 @@ async def main():
             print(f"\n{response_str}", flush=True)
             voice.speak(response_str, last_emotion)
             return
+        # Route "show me the chat" / "open the conversation" -- summons the same workspace as the hud_invoke hotkey.
+        if _CONVERSATION_SUMMON_RE.search(text):
+            await _summon_conversation_workspace()
+            voice.speak("Here you go.", last_emotion)
+            return
 
         # Emit transcript event for voice-originated turns only. The web
         # client already renders its own optimistic user bubble the instant
@@ -731,6 +763,11 @@ async def main():
                     logger.warning(
                         f"Failed to archive assistant message or touch session: {e}"
                     )
+                if platform == "telegram" and telegram_bot:
+                    try:
+                        await telegram_bot.send_message(config.telegram_user_id, final_reply)
+                    except Exception:
+                        logger.warning("Failed to send Telegram reply", exc_info=True)
 
             # Emit response_done event so the UI can stop its typing indicator.
             if event_bus:
@@ -917,22 +954,7 @@ async def main():
                     voice.stop_tts()
                     brain.cancel_chat()
                 elif cmd_type == "hud_invoke":
-                    # Manual hotkey summon -- spawns a demo widget surface until Phase 10 wires a real event source.
-                    from charlie.surfaces import Persistence, PresentationMode, SurfaceSpec
-                    from charlie.utils import make_id
-                    surface_id = make_id()
-                    spec = SurfaceSpec(
-                        presentation=PresentationMode.WIDGET,
-                        persistence=Persistence.EPHEMERAL,
-                        density=2,
-                        rationale="manual hud_invoke summon",
-                    )
-                    _hud_surface_engine.spawn(surface_id, spec)
-                    spawn_event = _hud_surface_engine.spawn_event(surface_id, spec)
-                    await event_bus.emit(
-                        spawn_event["type"], spawn_event["payload"],
-                        meta=EventMeta(source=EventSource.SURFACE),
-                    )
+                    await _summon_conversation_workspace()
                 elif cmd_type == "audio_control":
                     payload = cmd.get("payload", {})
                     state = voice.set_audio_state(
@@ -1117,6 +1139,26 @@ async def main():
         except Exception as e:
             logger.warning(f"Failed to start HUD shell: {e}")
 
+    # Telegram runs in-process (needs direct access to _dispatch_or_queue), not a subprocess like web/pet/hud.
+    if config.telegram_enabled:
+        try:
+            from charlie.telegram_bot import TelegramBot
+
+            async def on_telegram_message(text, chat_id):
+                await _dispatch_or_queue(text, current_web_session_id, platform="telegram")
+
+            def on_telegram_approval(request_id, approved):
+                from charlie.core import resolve_tool_approval
+                resolve_tool_approval(request_id, approved)
+
+            telegram_bot = TelegramBot(
+                config.telegram_bot_token, config.telegram_user_id, on_telegram_message, on_telegram_approval
+            )
+            await telegram_bot.start()
+            logger.info("Telegram bot started")
+        except Exception as e:
+            logger.warning(f"Failed to start Telegram bot: {e}")
+
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
         # TTS lifecycle callbacks for IPC events
@@ -1250,6 +1292,8 @@ async def main():
             charlie.recovery.set_active_session_id(current_web_session_id)
             import charlie.tools
             charlie.tools.set_event_bus(bus, asyncio.get_running_loop())
+            import charlie.mcp_client
+            charlie.mcp_client.set_event_bus(bus, asyncio.get_running_loop())
 
             from charlie import background_task as _background_task
             interrupted_task = _background_task.check_interrupted_task()
@@ -1372,6 +1416,11 @@ async def main():
                 hud_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 hud_proc.kill()
+        if telegram_bot is not None:
+            try:
+                await telegram_bot.stop()
+            except Exception as e:
+                logger.warning(f"Telegram bot stop error: {e}")
 
         logging.shutdown()
         # Force exit to ensure background threads don't hang the process on Windows

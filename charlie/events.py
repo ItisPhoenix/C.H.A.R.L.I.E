@@ -55,6 +55,12 @@ class EventType(StrEnum):
     SURFACE_SPAWN = "surface_spawn"          # Phase 7-8
     SURFACE_UPDATE = "surface_update"        # Phase 7-8
     SURFACE_DISMISS = "surface_dismiss"      # Phase 7-8
+    BROWSER_TASK_STARTED = "browser_task_started"  # Phase 10
+    BROWSER_TASK_DONE = "browser_task_done"        # Phase 10
+    MCP_STATUS_CHANGED = "mcp_status_changed"      # Phase 10
+    MEMORY_UPDATED = "memory_updated"              # Phase 10
+    VISION_OBSERVED = "vision_observed"            # Phase 10
+    CONVERSATION_SUMMON = "conversation_summon"    # Phase 10
 
 
 class EventSource(StrEnum):

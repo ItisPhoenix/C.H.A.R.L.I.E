@@ -76,6 +76,8 @@ class BackgroundTask:
     cancel_requested: bool = field(default=False, repr=False)
     priority: int = 0
     depends_on: List[str] = field(default_factory=list)
+    # Read by charlie.surfaces._categorize to route "workspace" hints to a sustained-interaction surface.
+    visibility_hint: str = ""
 
     def to_event(self) -> Dict[str, Any]:
         return {
@@ -217,7 +219,7 @@ async def _announce(event_bus, voice, severity: str, message: str) -> None:
 
 async def start(
     config: Config, event_bus, text: str, session_store=None, memory_store=None, voice=None,
-    priority: int = 0, depends_on: Optional[List[str]] = None,
+    priority: int = 0, depends_on: Optional[List[str]] = None, visibility_hint: str = "",
 ) -> BackgroundTask:
     """Plan a background task and hand it to the TaskManager queue -- no
     upfront approval gate. Runs immediately if a slot is free (the common
@@ -232,7 +234,7 @@ async def start(
 
     task = BackgroundTask(
         id=make_id(8), text=text, session_id=f"bg:{make_id(6)}",
-        priority=priority, depends_on=list(depends_on or []),
+        priority=priority, depends_on=list(depends_on or []), visibility_hint=visibility_hint,
     )
     _current_task = task
 

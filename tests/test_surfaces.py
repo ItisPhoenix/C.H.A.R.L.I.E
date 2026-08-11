@@ -72,6 +72,16 @@ def test_decide_sustained_interaction_task_is_workspace_and_persistent():
     assert result.task_id == "t1"
 
 
+def test_decide_conversation_summon_is_workspace_and_persistent():
+    engine = SurfaceEngine()
+    event = {"type": EventType.CONVERSATION_SUMMON, "payload": {}}
+
+    result = engine.decide(event, attention=AttentionLevel.INTERRUPT)
+
+    assert result.presentation == PresentationMode.WORKSPACE
+    assert result.persistence == Persistence.PERSISTENT
+
+
 def test_decide_information_only_is_background_and_ephemeral():
     engine = SurfaceEngine()
     event = {"type": EventType.ALERT, "payload": {"severity": "warning"}}

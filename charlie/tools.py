@@ -1206,6 +1206,7 @@ def vector_memory(action: str, content: str) -> str:
             auto_extract=False,
         )
         if count > 0:
+            emit_memory_updated("vector_memory", content)
             return f"Remembered: {content[:100]}"
         return "Failed to store memory."
 
@@ -1335,6 +1336,7 @@ def graph_add_fact(subject: str, predicate: str, object: str) -> str:
         return "Knowledge graph is not available."
     try:
         _memory_graph.add_fact(subject, predicate, object)
+        emit_memory_updated("memory_graph", f"{subject} -> {predicate} -> {object}")
         return f"Added: {subject} -> {predicate} -> {object}"
     except Exception as e:
         logger.exception("graph_add_fact error")
@@ -1622,6 +1624,32 @@ def _capture_and_emit_frame(elements: List[Any]) -> None:
     threading.Thread(target=_work, daemon=True).start()
 
 
+def _emit_vision_observed(uia_count: int, ocr_count: int) -> None:
+    """Fire-and-forget signal that a real OCR/vision pass ran -- event-driven, no polling loop anywhere."""
+    if _event_bus is None or _event_loop is None:
+        return
+    try:
+        payload = {"session_id": recovery.get_active_session_id(), "uia_count": uia_count, "ocr_count": ocr_count}
+        asyncio.run_coroutine_threadsafe(
+            _event_bus.emit("vision_observed", payload, meta=EventMeta(source=EventSource.BRAIN)), _event_loop
+        )
+    except Exception:
+        logger.warning("vision_observed emit failed", exc_info=True)
+
+
+def emit_memory_updated(store: str, summary: str) -> None:
+    """Fire-and-forget: stays invisible unless explicitly commanded (see charlie.attention)."""
+    if _event_bus is None or _event_loop is None:
+        return
+    try:
+        payload = {"store": store, "summary": summary[:120]}
+        asyncio.run_coroutine_threadsafe(
+            _event_bus.emit("memory_updated", payload, meta=EventMeta(source=EventSource.BRAIN)), _event_loop
+        )
+    except Exception:
+        logger.warning("memory_updated emit failed", exc_info=True)
+
+
 def _ocr_fallback_marks(uia_elements: List[Any]) -> List[Any]:
     """Merge an OCR pass into uia_elements.
 
@@ -1641,6 +1669,7 @@ def _ocr_fallback_marks(uia_elements: List[Any]) -> List[Any]:
     except Exception:
         logger.warning("OCR fallback pass failed", exc_info=True)
         return uia_elements
+    _emit_vision_observed(len(uia_elements), len(ocr_elements))
     return merge_ocr_elements(uia_elements, ocr_elements) if ocr_elements else uia_elements
 
 

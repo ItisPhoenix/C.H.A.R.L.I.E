@@ -12,6 +12,7 @@ discovery and invocation. It does not implement the full MCP protocol
 spec -- just enough for Charlie to extend its toolset via MCP servers.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -22,6 +23,31 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("charlie.mcp_client")
+
+# Cross-thread bridge (start/stop run off-loop via asyncio.to_thread) -- same pattern as charlie.tools.
+_event_bus: Optional[Any] = None
+_event_loop: Optional[Any] = None
+
+
+def set_event_bus(bus: Any, loop: Any) -> None:
+    """Wire the producer-side EventBus + its asyncio loop, called once from main.py at startup."""
+    global _event_bus, _event_loop
+    _event_bus = bus
+    _event_loop = loop
+
+
+def _emit_mcp_status(server_name: str, status: str, tool_count: int = 0) -> None:
+    """Fire-and-forget: never raises, a failure here must not affect start()/stop()."""
+    if _event_bus is None or _event_loop is None:
+        return
+    try:
+        from charlie.events import EventMeta, EventSource
+        payload = {"server_name": server_name, "status": status, "tool_count": tool_count}
+        asyncio.run_coroutine_threadsafe(
+            _event_bus.emit("mcp_status_changed", payload, meta=EventMeta(source=EventSource.BRAIN)), _event_loop
+        )
+    except Exception:
+        logger.warning("mcp_status_changed emit failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -150,16 +176,19 @@ class MCPClient:
                     name,
                     len(tools),
                 )
+                _emit_mcp_status(name, "connected", len(tools))
             except Exception:
                 logger.warning(
                     "Failed to start MCP server '%s'", name, exc_info=True
                 )
+                _emit_mcp_status(name, "failed")
 
     def stop(self) -> None:
         """Stop all servers and clean up."""
         for name, server in self._servers.items():
             try:
                 server.stop()
+                _emit_mcp_status(name, "stopped")
             except Exception:
                 logger.debug("Error stopping server '%s'", name, exc_info=True)
         self._tools.clear()

@@ -363,6 +363,8 @@ def _apply_correction_to_memory(
         logger.info("Correction stored: %s", entry[:80])
         if world_model is not None:
             world_model.add_rule(f"Corrected: {query.strip()}", "correction")
+            from charlie.tools import emit_memory_updated
+            emit_memory_updated("world_model", f"Corrected: {query.strip()}")
         return entry
     except Exception as exc:
         logger.warning("Failed to store correction: %s", exc)
@@ -784,6 +786,7 @@ class Brain:
         on_tool_call: Optional[callable] = None,
         on_tool_result: Optional[callable] = None,
         on_thinking_update: Optional[callable] = None,
+        on_tool_approval_request: Optional[callable] = None,
         register_panic_hotkey: bool = True,
         approval_timeout: Optional[float] = _TOOL_APPROVAL_TIMEOUT_SEC,
         is_background: bool = False,
@@ -796,6 +799,7 @@ class Brain:
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
         self.on_thinking_update = on_thinking_update
+        self.on_tool_approval_request = on_tool_approval_request
         self._approval_timeout = approval_timeout
         llm_headers: Dict[str, str] = build_auth_headers(config.llm_key)
         self.client = httpx.AsyncClient(
@@ -1130,9 +1134,20 @@ class Brain:
             if self.on_thinking_update:
                 self.on_thinking_update("browser_task", {"task": task})
 
+        from charlie import recovery
+        if recovery._event_bus:
+            await recovery._event_bus.emit(
+                "browser_task_started", {"task": task}, meta=EventMeta(source=EventSource.TASK)
+            )
+
         result = await resolve_browser_task(
             task, _complete, None, _approve_click, max_steps, deadline_s, _on_progress,
         )
+
+        if recovery._event_bus:
+            await recovery._event_bus.emit(
+                "browser_task_done", {"task": task, "url": result.url}, meta=EventMeta(source=EventSource.TASK)
+            )
 
         if result.url and open_intent:
             opened = await loop.run_in_executor(None, open_in_real_browser, result.url)
@@ -1205,6 +1220,10 @@ class Brain:
         loop = asyncio.get_running_loop()
         fut: "asyncio.Future[bool]" = loop.create_future()
         pending_tool_approvals[request_id] = fut
+
+        # Telegram is additional, not a replacement -- fires alongside whichever of web/voice below is primary.
+        if self.on_tool_approval_request:
+            self.on_tool_approval_request(request_id, tool_name, reason)
 
         try:
             if recovery.get_active_ws_count() > 0 and recovery._event_bus:
@@ -1448,6 +1467,8 @@ class Brain:
         instruction = _detect_standing_instruction(user_input)
         if instruction is not None:
             self.world_model.add_rule(instruction, "teaching")
+            from charlie.tools import emit_memory_updated
+            emit_memory_updated("world_model", instruction)
             logger.info("Standing instruction learned: %s", instruction)
             yield "Got it, I'll remember that."
             return
@@ -2076,11 +2097,13 @@ class Brain:
             marker = f"Tool '{tool_name}'"
             if any(t.startswith(marker) for t in existing_texts):
                 continue
-            self.world_model.add_rule(
+            rule_text = (
                 f"{marker} has failed {error_rate:.0%} of its last {calls} calls -- "
-                "double-check its result or prefer an alternative when one exists.",
-                "outcome",
+                "double-check its result or prefer an alternative when one exists."
             )
+            self.world_model.add_rule(rule_text, "outcome")
+            from charlie.tools import emit_memory_updated
+            emit_memory_updated("world_model", rule_text)
 
     def _check_observed_patterns(self) -> None:
         """Observed-pattern learning signal: an app-open sequence repeated
@@ -2169,6 +2192,8 @@ class Brain:
                     if len(parts) == 3 and all(parts):
                         try:
                             self.memory_graph.add_fact(parts[0], parts[1], parts[2])
+                            from charlie.tools import emit_memory_updated
+                            emit_memory_updated("memory_graph", f"{parts[0]} -> {parts[1]} -> {parts[2]}")
                             added += 1
                         except Exception:
                             logger.debug("Failed to add fact: %s", line)

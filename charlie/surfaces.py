@@ -58,6 +58,7 @@ _CATEGORY_TO_MODE: Dict[str, PresentationMode] = {
     "approval": PresentationMode.MODAL,
     "result_interaction": PresentationMode.MODAL,
     "sustained_interaction": PresentationMode.WORKSPACE,
+    "conversation": PresentationMode.WORKSPACE,
     "information_only": PresentationMode.BACKGROUND,
     "no_involvement": PresentationMode.BACKGROUND,
 }
@@ -65,6 +66,7 @@ _CATEGORY_TO_MODE: Dict[str, PresentationMode] = {
 _CATEGORY_TO_PERSISTENCE: Dict[str, Persistence] = {
     "approval": Persistence.PERSISTENT,
     "sustained_interaction": Persistence.PERSISTENT,
+    "conversation": Persistence.PERSISTENT,
     "result_interaction": Persistence.ARCHIVED,
     "information_only": Persistence.EPHEMERAL,
     "no_involvement": Persistence.EPHEMERAL,
@@ -91,6 +93,8 @@ def _categorize(event: Dict[str, Any], task: Optional[Any]) -> str:
         return "approval"
     if etype in _RESULT_EVENT_TYPES:
         return "result_interaction"
+    if etype == EventType.CONVERSATION_SUMMON:
+        return "conversation"
     if task is not None and getattr(task, "visibility_hint", None) == "workspace":
         return "sustained_interaction"
     if etype in _INFO_EVENT_TYPES:
