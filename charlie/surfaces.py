@@ -1,12 +1,12 @@
-"""Surface Engine (Phase 7): pure presentation-mode decision logic, no GUI import.
+"""Surface Engine: pure presentation-mode decision logic, no GUI import.
 
 Decides where/how a result surfaces -- never renders anything, runs headless
 in CI. Two orthogonal axes per SurfaceSpec: PresentationMode (where/how) and
 density 0-4 (how much is visible); Persistence is a third, independent
 lifecycle class. Decision order, highest priority first: explicit
 user_intent -> attention-level gate (approvals exempt, same as
-charlie.attention's own INTERRUPT-always design) -> event/task category
-(plan's section-48 table). Explicit intent short-circuits everything below it.
+charlie.attention's own INTERRUPT-always design) -> event/task category.
+Explicit intent short-circuits everything below it.
 """
 
 from dataclasses import dataclass
@@ -28,7 +28,7 @@ _INFO_EVENT_TYPES = frozenset({EventType.ALERT, EventType.SYSTEM_STATUS})
 _WIDGET_MODES = frozenset({"widget", "floating", "notification"})
 _WORKSPACE_MODES = frozenset({"workspace"})
 
-# Priority-ordered abstract regions (Phase 8's placement.py maps these to real screen rects); overflow wraps.
+# Priority-ordered abstract regions (charlie/hud/placement.py maps these to real screen rects); overflow wraps.
 _REGION_ORDER = ("top_right", "bottom_right", "top_left", "bottom_left")
 _EPHEMERAL_SPAWN_TTL_SECONDS = 30.0
 

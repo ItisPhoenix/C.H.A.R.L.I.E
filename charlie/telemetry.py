@@ -12,7 +12,7 @@ from collections import deque
 from threading import Lock
 from typing import Deque, Dict, List, Tuple
 
-# Outcome-feedback signal (Phase 1c): min samples + error rate before a tool earns a rule.
+# Outcome-feedback signal: min samples + error rate before a tool earns a rule.
 _UNRELIABLE_MIN_CALLS = 5
 _UNRELIABLE_ERROR_THRESHOLD = 0.5
 

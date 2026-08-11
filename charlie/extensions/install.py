@@ -1,4 +1,4 @@
-"""Shared extension-install logic (Phase 5 adapters: mcp/skill/openapi/plugin).
+"""Shared extension-install logic (adapters: mcp/skill/openapi/plugin).
 
 Extracted from charlie/web_server.py so the exact same parse-and-register
 code can run in both OS processes: the web server (where the dashboard's

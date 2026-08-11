@@ -1,4 +1,4 @@
-"""SKILL.md adapter (Phase 5, adapter #2).
+"""SKILL.md adapter.
 
 Parses the Claude Agent Skills format (frontmatter + Markdown body) used
 across Claude Code, Cursor, and the wider Skills Hub ecosystem, so skills

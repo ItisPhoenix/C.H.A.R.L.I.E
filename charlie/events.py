@@ -1,10 +1,8 @@
 """Typed EventBus envelope metadata: EventType vocabulary + EventMeta.
 
-Values are the exact wire strings already used across the codebase (see
-CLAUDE.md section 8.5) plus the small set of new types introduced ahead of
-the phases that emit them (Phase 2 charlie_state, Phase 6 result_stored,
-Phase 7-8 surface_*). EventMeta is additive to EventBus.emit()'s existing
-2-arg envelope, not a signature change -- see charlie/ipc.py.
+Values are the exact wire strings already used across the codebase, plus a
+small set of newer types. EventMeta is additive to EventBus.emit()'s
+existing 2-arg envelope, not a signature change -- see charlie/ipc.py.
 """
 
 from dataclasses import dataclass, field
@@ -49,18 +47,18 @@ class EventType(StrEnum):
     EXTENSION_PENDING = "extension_pending"
     BACKGROUND_TASK = "background_task"
 
-    # Adaptive Agentic OS additions (see plans/curried-meandering-dolphin.md)
-    CHARLIE_STATE = "charlie_state"          # Phase 2
-    RESULT_STORED = "result_stored"          # Phase 6
-    SURFACE_SPAWN = "surface_spawn"          # Phase 7-8
-    SURFACE_UPDATE = "surface_update"        # Phase 7-8
-    SURFACE_DISMISS = "surface_dismiss"      # Phase 7-8
-    BROWSER_TASK_STARTED = "browser_task_started"  # Phase 10
-    BROWSER_TASK_DONE = "browser_task_done"        # Phase 10
-    MCP_STATUS_CHANGED = "mcp_status_changed"      # Phase 10
-    MEMORY_UPDATED = "memory_updated"              # Phase 10
-    VISION_OBSERVED = "vision_observed"            # Phase 10
-    CONVERSATION_SUMMON = "conversation_summon"    # Phase 10
+    # Adaptive Agentic OS additions
+    CHARLIE_STATE = "charlie_state"
+    RESULT_STORED = "result_stored"
+    SURFACE_SPAWN = "surface_spawn"
+    SURFACE_UPDATE = "surface_update"
+    SURFACE_DISMISS = "surface_dismiss"
+    BROWSER_TASK_STARTED = "browser_task_started"
+    BROWSER_TASK_DONE = "browser_task_done"
+    MCP_STATUS_CHANGED = "mcp_status_changed"
+    MEMORY_UPDATED = "memory_updated"
+    VISION_OBSERVED = "vision_observed"
+    CONVERSATION_SUMMON = "conversation_summon"
 
 
 class EventSource(StrEnum):
@@ -78,8 +76,8 @@ class EventMeta:
     """Envelope metadata injected into EventBus.emit()'s payload dict.
 
     ts defaults to now at construction time. rationale is a one-line "why"
-    for an autonomous action (section 36) -- leave it None for pure relays
-    (streamed tokens, state mirrors) where there's no decision to explain.
+    for an autonomous action -- leave it None for pure relays (streamed
+    tokens, state mirrors) where there's no decision to explain.
     """
 
     source: EventSource

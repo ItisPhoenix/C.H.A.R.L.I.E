@@ -27,7 +27,7 @@ def make_id(length: int = 12) -> str:
 def build_auth_headers(api_key: str) -> Dict[str, str]:
     """Build an Authorization header for a configured API key.
 
-    Uses the exact ``("no-key", "no_key")`` tuple per AGENTS.md §5 so a
+    Uses the exact ``("no-key", "no_key")`` tuple so a
     sentinel key never produces a bogus Bearer header. Returns an empty
     dict when no real key is configured.
     """

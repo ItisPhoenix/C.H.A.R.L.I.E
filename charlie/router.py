@@ -194,7 +194,7 @@ _BROWSER_TASK_ON_SITE_RE = re.compile(r"\bon\s+([a-z0-9][\w.]*)", re.IGNORECASE)
 
 
 def match_browser_task(query: str) -> Optional[str]:
-    """Pure: deterministic '<verb> ... on <site>' detection -- models skip prompted tool calls (CLAUDE.md 11.2)."""
+    """Pure: deterministic '<verb> ... on <site>' detection -- models skip prompted tool calls."""
     q = query.lower().strip()
     if not _BROWSER_TASK_VERB_RE.match(q):
         return None

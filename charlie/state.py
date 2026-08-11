@@ -1,4 +1,4 @@
-"""Authoritative CoreState machine for the voice process (Phase 2, plan section "Phase 2").
+"""Authoritative CoreState machine for the voice process.
 
 Single instance lives in main.py. web_server.py and pet_window.py stop re-deriving
 state from raw events and become consumers of the charlie_state event this emits.

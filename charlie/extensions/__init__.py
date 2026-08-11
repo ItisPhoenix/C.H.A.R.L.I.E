@@ -1,5 +1,5 @@
-"""Extension system (Phase 5): shared gated-install flow for future MCP/
-SKILL.md/OpenAPI/plugin adapters. No new execution engine -- every adapter
+"""Extension system: shared gated-install flow for MCP/SKILL.md/OpenAPI/
+plugin adapters. No new execution engine -- every adapter
 still registers ordinary tools into charlie.tools.registry. This module only
 provides the shared safety gate: build a provenance "Skill Card", scan its
 content for red flags, and route the install/enable decision through

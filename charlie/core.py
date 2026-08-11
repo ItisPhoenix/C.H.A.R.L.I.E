@@ -887,7 +887,7 @@ class Brain:
         from charlie.memory_graph import MemoryGraph
         self.memory_graph = MemoryGraph(db_path=config.memory_graph_db)
 
-        # --- World model: open threads + machine events (Phase 1a) ---
+        # --- World model: open threads + machine events ---
         from charlie.world_model import WorldModel
         self.world_model = WorldModel(db_path=config.world_model_db_path)
 
@@ -1269,18 +1269,23 @@ class Brain:
         generation: int,
     ) -> tuple:
         """Stream a chat completion. Returns (accumulated_text, tool_calls_list)."""
-        async with self.client.stream(
-            "POST", "chat/completions", json=payload
-        ) as response:
-            response.raise_for_status()
-            accumulated, tc_by_index, cancelled = await parse_sse_stream(
-                response, generation, lambda: self._chat_generation
-            )
-            if cancelled:
-                logger.info("Chat generation cancelled (barge-in)")
-                return ("", [])
-            tool_calls = collect_tool_calls(tc_by_index)
-            return (accumulated, tool_calls)
+        try:
+            async with self.client.stream(
+                "POST", "chat/completions", json=payload
+            ) as response:
+                response.raise_for_status()
+                accumulated, tc_by_index, cancelled = await parse_sse_stream(
+                    response, generation, lambda: self._chat_generation
+                )
+        except httpx.TransportError:
+            # No response ever arrived, so the client's "response" event hook never fires -- record it here.
+            telemetry.record_llm_call(success=False)
+            raise
+        if cancelled:
+            logger.info("Chat generation cancelled (barge-in)")
+            return ("", [])
+        tool_calls = collect_tool_calls(tc_by_index)
+        return (accumulated, tool_calls)
 
     def _build_payload(
         self,

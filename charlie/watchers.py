@@ -1,4 +1,4 @@
-"""Watcher registry (Phase 12): polled check() functions, output always routed through
+"""Watcher registry: polled check() functions, output always routed through
 charlie.attention.decide before a caller reacts -- watchers never spawn a surface directly.
 """
 

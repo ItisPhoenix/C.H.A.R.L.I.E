@@ -1,6 +1,6 @@
 """Background-task runner: plan -> gate-scan -> execute, scheduled through charlie.tasks.TaskManager.
 
-Queue/priority/dependencies/bounded-parallelism (Phase 5) all live in
+Queue/priority/dependencies/bounded-parallelism all live in
 charlie.tasks -- this module supplies the domain logic (planning via a Brain,
 gated-step scanning, pause-on-user-activity) that TaskManager schedules as
 one run_fn per BackgroundTask. Each task runs on its own Brain instance (see
@@ -179,10 +179,10 @@ def _scan_gated_steps(steps: List[str]) -> List[int]:
 
 
 async def _store_result(task: BackgroundTask, event_bus, full_result: str) -> None:
-    """Persist one row per terminal task (charlie/results.py, Phase 6) -- attention_level
+    """Persist one row per terminal task (charlie/results.py) -- attention_level
     reuses charlie.attention's own BACKGROUND_TASK status table, same source of truth
     the live event stream already scores this status against. Emits RESULT_STORED so
-    Phase 7's Surface Engine can react (e.g. route an ARCHIVED-persistence surface)."""
+    the Surface Engine can react (e.g. route an ARCHIVED-persistence surface)."""
     level, _ = _attention_decide({"type": EventType.BACKGROUND_TASK, "payload": {"status": task.status}})
     summary = f"Background task '{task.text}' {task.status}."
     store = ResultsStore(db_path=task.brain.config.session_db_path)

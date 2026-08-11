@@ -1,4 +1,4 @@
-"""Generalized autonomy policy (Phase 4, plan section "Phase 4 -- Autonomy policy + attention engine").
+"""Generalized autonomy policy: risk x action x context -> an approval requirement.
 
 Risk x action x preferences x context -> Requirement. Reuses the existing
 rule sources instead of duplicating their keyword/path/injection lists:
@@ -6,8 +6,7 @@ tools.py's hard-block/gated-keyword shell checks and charlie.security.policy's
 path-containment + injection-heuristic checks become RiskClass values here,
 not separate architecture.
 
-Standalone this phase, per plan -- core.py's _exec_one still computes
-gate_reason inline; wiring evaluate() in as its replacement is deferred.
+core.py's _exec_one calls evaluate() to compute gate_reason.
 """
 
 from enum import StrEnum

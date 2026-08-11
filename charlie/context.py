@@ -1,8 +1,8 @@
-"""UserContext snapshot for the attention/autonomy engines (Phase 3, plan section "Phase 3").
+"""UserContext snapshot for the attention/autonomy engines.
 
-Pure sampling, cached, never on the hot path. Consumers (Phase 4's
-charlie/autonomy.py and charlie/attention.py) read a UserContext instead of
-querying idle time, foreground app, or task state independently.
+Pure sampling, cached, never on the hot path. Consumers (charlie/autonomy.py
+and charlie/attention.py) read a UserContext instead of querying idle time,
+foreground app, or task state independently.
 """
 
 import time

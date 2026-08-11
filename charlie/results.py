@@ -1,11 +1,11 @@
-"""Task result persistence + idle-return catch-up (Phase 6).
+"""Task result persistence + idle-return catch-up.
 
 New table in sessions.db, reusing session_store.py's connection/retry
 pattern and charlie.utils.utc_now_iso(). Producer is background_task.py
 (stores one row per terminal task); consumers are the recall_results tool
-(tools.py) and consume_catchup(), which the companion will call once
-surfaces exist (Phase 7+) -- a live idle-return trigger needs UserContext
-wired into main.py first (still charlie/context.py's noted gap).
+(tools.py) and consume_catchup(), which the companion will call once a live
+idle-return trigger exists -- needs UserContext wired into main.py first
+(still charlie/context.py's noted gap).
 """
 
 import logging

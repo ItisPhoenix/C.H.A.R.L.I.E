@@ -56,7 +56,7 @@ class EventBus:
     def set_state_listener(self, fn: Callable[[dict], Optional[dict]]) -> None:
         """Producer only. fn receives every published envelope; a non-None return is republished as-is.
 
-        Lets a single in-process consumer (Phase 2 charlie/state.py StateMachine) derive
+        Lets a single in-process consumer (charlie/state.py's StateMachine) derive
         and emit a new event from the stream without EventBus knowing what that logic is.
         """
         self._state_listener = fn

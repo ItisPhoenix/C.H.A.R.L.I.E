@@ -1,6 +1,6 @@
 """Tier 1 (known-site recipes) and tier 2 (generic searchbox flow) -- no LLM involved.
 
-Deterministic beats prompted tool calls on latency-critical paths (CLAUDE.md 11.2); these run
+Deterministic beats prompted tool calls on latency-critical paths; these run
 before the agent loop (tier 3) ever gets a turn. Each function drives its own controller.run()
 call, so callers invoke them directly without wrapping.
 """

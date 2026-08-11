@@ -70,7 +70,7 @@ async def _ensure_mcp_client_async():
     """Runs the lazy MCP start on a thread so it doesn't freeze this process's event loop."""
     return await asyncio.to_thread(_ensure_mcp_client)
 
-# In-process registry of installed extensions (Phase 5) -- see
+# In-process registry of installed extensions -- see
 # charlie/extensions/__init__.py's ExtensionManager docstring for the
 # propose()/confirm() gate this drives and the no-cross-restart-persistence
 # caveat.
@@ -629,7 +629,7 @@ async def get_mcp_tools():
 
 @app.get("/api/extensions")
 async def list_extensions():
-    """List installed extensions across all four Phase 5 adapters."""
+    """List installed extensions across all four adapters."""
     return {
         "extensions": [
             {

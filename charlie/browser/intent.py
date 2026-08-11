@@ -1,6 +1,6 @@
 """Deterministic phrase detection for the browser subsystem -- no LLM, matches core.py's
-_detect_open_app style of fast-path (CLAUDE.md 11.2: local/remote models both ignore prompted
-tool instructions on latency-critical paths more often than a plain keyword check misses).
+_detect_open_app style of fast-path (local/remote models both ignore prompted tool instructions
+on latency-critical paths more often than a plain keyword check misses).
 """
 
 _OPEN_VERBS = ("play", "watch", "listen", "put on")

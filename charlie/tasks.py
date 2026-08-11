@@ -1,4 +1,4 @@
-"""Generic task scheduler (Phase 5): queue, priority, dependencies, bounded parallelism, cancel.
+"""Generic task scheduler: queue, priority, dependencies, bounded parallelism, cancel.
 
 Domain-agnostic -- no charlie.core/Brain import -- so charlie/background_task.py
 can wire its own planning/execution logic in via a run_fn closure per task. A

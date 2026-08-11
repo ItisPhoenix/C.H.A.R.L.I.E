@@ -93,6 +93,7 @@ root_logger.addHandler(console_handler)
 
 # 3. NOW IMPORT CHARLIE MODULES
 from charlie import background_task, telemetry
+from charlie.errors import ErrorClass, classify_exception
 from charlie.config import Config, config
 from charlie.core import Brain
 from charlie.events import EventMeta, EventSource, EventType
@@ -787,10 +788,18 @@ async def main():
                         meta=EventMeta(source=EventSource.BRAIN),
                     )
                 )
-        except Exception:
-            # Turn failures used to be silent -- surface one, then re-raise.
-            _safe_speak(voice, "Sorry, something went wrong on my end. Try again?", last_emotion, "turn-failed")
+        except Exception as exc:
+            logger.error("Turn failed", exc_info=True)
+            error_class, message = classify_exception(exc)
+            _safe_speak(voice, message, last_emotion, "turn-failed")
             if event_bus:
+                severity = "error" if error_class == ErrorClass.CRITICAL else "warning"
+                asyncio.create_task(
+                    event_bus.emit(
+                        "alert", {"severity": severity, "message": message},
+                        meta=EventMeta(source=EventSource.BRAIN, rationale=f"turn failed: {error_class.value}"),
+                    )
+                )
                 asyncio.create_task(
                     event_bus.emit(
                         "response_done", {"session_id": session_id},

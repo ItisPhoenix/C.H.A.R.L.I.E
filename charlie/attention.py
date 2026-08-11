@@ -1,7 +1,7 @@
-"""Deterministic attention scoring (Phase 4, plan section "Phase 4 -- Autonomy policy + attention engine").
+"""Deterministic attention scoring.
 
 No LLM call anywhere in this module, ever -- must work at full speed with
-the cloud LLM unreachable (see CLAUDE.md section 6). decide() is a pure
+the cloud LLM unreachable. decide() is a pure
 function; a caller owns the cooldowns dict across calls (same explicit-state
 style as charlie/monitors.py's evaluate_sample()), so this module has no
 hidden module-level mutable state to reset between tests or processes.
@@ -76,7 +76,7 @@ def decide(
 ) -> Tuple[AttentionLevel, str]:
     """Attention level + rationale for one event.
 
-    ctx.focus_mode (Phase 3's UserContext) caps any non-INTERRUPT level at INFORM.
+    ctx.focus_mode (charlie.context's UserContext) caps any non-INTERRUPT level at INFORM.
     cooldowns, if passed, dedupes repeats of the same event+reason within
     _COOLDOWN_S -- never applied to INTERRUPT, so an approval is never stranded.
     """

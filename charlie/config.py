@@ -542,7 +542,7 @@ config = Config()
 
 # onnxruntime reads ORT_LOG_LEVEL from the process environment at import time.
 # Propagate the configured value once, here, as the single sanctioned env-write
-# site (AGENTS.md §4). This replaces the prior os.environ write in voice.py.
+# site. This replaces the prior os.environ write in voice.py.
 os.environ.setdefault("ORT_LOG_LEVEL", config.ort_log_level)
 
 # Load SOUL.md into config.soul at startup
