@@ -4,7 +4,6 @@ import json
 import logging
 import math
 import threading
-import webbrowser
 from pathlib import Path
 from typing import Optional
 
@@ -24,7 +23,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QApplication, QWidget
 
 from charlie.config import config
-from charlie.ipc import DEFAULT_EVENT_PORT
+from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT
 from charlie.utils import json_loads
 
 logger = logging.getLogger("charlie.pet")
@@ -41,6 +40,11 @@ _STATE_COLORS = {
     "listening": "#06b6d4",
     "thinking": "#a855f7",
     "speaking": "#10b981",
+    "working": "#f59e0b",
+    "waiting": "#64748b",
+    "attention": "#ef4444",
+    "completed": "#22c55e",
+    "error": "#dc2626",
 }
 # Eyes stay cyan to match EMO aesthetic, but we can modulate alpha
 _EYE_COLOR = "#00ffff"
@@ -49,6 +53,24 @@ _EYE_GLOW_ALPHA = {
     "listening": 255,
     "thinking": 200,
     "speaking": 220,
+    "working": 200,
+    "waiting": 120,
+    "attention": 255,
+    "completed": 220,
+    "error": 255,
+}
+
+# Only 4 states have hand-drawn eye shapes; the other 5 borrow the closest one, own color/pulse instead.
+_EYE_SHAPE_FOR_STATE = {
+    "idle": "idle",
+    "listening": "listening",
+    "thinking": "thinking",
+    "speaking": "speaking",
+    "working": "thinking",
+    "waiting": "idle",
+    "attention": "listening",
+    "completed": "speaking",
+    "error": "idle",
 }
 
 _BOUNCE_AMPLITUDE_PX = {
@@ -56,19 +78,59 @@ _BOUNCE_AMPLITUDE_PX = {
     "listening": 4.0,
     "thinking": 1.5,
     "speaking": 3.0,
+    "working": 1.5,
+    "waiting": 1.0,
+    "attention": 5.0,
+    "completed": 3.0,
+    "error": 1.0,
 }
 _PULSE_SPEED = {
     "idle": 0.04,
     "listening": 0.1,
     "thinking": 0.15,
     "speaking": 0.2,
+    "working": 0.15,
+    "waiting": 0.03,
+    "attention": 0.3,
+    "completed": 0.2,
+    "error": 0.05,
 }
 _BLINK_PERIOD_TICKS = 120
 _BLINK_DURATION_TICKS = 5
 
+def _send_summon_command() -> None:
+    """Click-to-summon: same hud_invoke command hud/invocation.py's hotkey sends, context-sensitive server-side."""
+    ctx = zmq.Context()
+    sock = ctx.socket(zmq.PUSH)
+    sock.connect(f"tcp://127.0.0.1:{DEFAULT_COMMAND_PORT}")
+    try:
+        sock.send_string(json.dumps({"type": "hud_invoke", "payload": {}}))
+    except Exception:
+        logger.warning("Failed to send summon command", exc_info=True)
+    finally:
+        sock.close(linger=0)
+        ctx.term()
+
+
+def _track_workspace_surface(active_ids: set, event: dict) -> Optional[bool]:
+    """Update active_ids in place for a surface_spawn/dismiss event; return an edge-triggered emit value."""
+    etype = event.get("type")
+    payload = event.get("payload") or {}
+    sid = payload.get("surface_id")
+    if etype == "surface_spawn" and payload.get("presentation") == "workspace" and sid:
+        was_empty = not active_ids
+        active_ids.add(sid)
+        return True if was_empty else None
+    if etype == "surface_dismiss" and sid in active_ids:
+        active_ids.discard(sid)
+        return False if not active_ids else None
+    return None
+
+
 class PetWindow(QWidget):
     state_changed = Signal(str)
     caption_changed = Signal(str, str) # title, desc
+    workspace_surface_changed = Signal(bool)
 
     def __init__(self):
         super().__init__()
@@ -103,8 +165,11 @@ class PetWindow(QWidget):
         self._card_h = 0
         self._chevron_rect = QRectF()
 
+        self._pre_workspace_pos: Optional[QPoint] = None
+
         self.state_changed.connect(self._on_state_changed)
         self.caption_changed.connect(self._on_caption_changed)
+        self.workspace_surface_changed.connect(self._on_workspace_surface_changed)
         self._restore_position()
 
         self._pulse_timer = QTimer(self)
@@ -148,6 +213,15 @@ class PetWindow(QWidget):
             self._caption_fade_dir = 1
             self._caption_time_left = 5000 // _PULSE_INTERVAL_MS # 5 seconds
         self.update()
+
+    def _on_workspace_surface_changed(self, active: bool):
+        screen = QApplication.primaryScreen().availableGeometry()
+        if active:
+            self._pre_workspace_pos = self.pos()
+            self.move(screen.left() + 24, screen.top() + 24)
+        elif self._pre_workspace_pos is not None:
+            self.move(self._pre_workspace_pos)
+            self._pre_workspace_pos = None
 
     def _tick(self):
         self._phase += _PULSE_SPEED.get(self._state, 0.04)
@@ -300,12 +374,13 @@ class PetWindow(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(eye_color)
 
+        eye_shape = _EYE_SHAPE_FOR_STATE.get(self._state, "idle")
         if self._is_blinking():
             eye_y += eye_h / 2 - 2
             eye_h = 4
             painter.drawRoundedRect(left_eye_x, eye_y, eye_w, eye_h, 2, 2)
             painter.drawRoundedRect(right_eye_x, eye_y, eye_w, eye_h, 2, 2)
-        elif self._state == "thinking":
+        elif eye_shape == "thinking":
             # Squint and look around (scanning)
             eye_w = 32
             eye_h = 24
@@ -317,7 +392,7 @@ class PetWindow(QWidget):
             eye_y += shift_y
             painter.drawRoundedRect(left_eye_x, eye_y, eye_w, eye_h, 8, 8)
             painter.drawRoundedRect(right_eye_x, eye_y, eye_w, eye_h, 8, 8)
-        elif self._state == "listening":
+        elif eye_shape == "listening":
             # Widen and angle
             eye_w = 30
             eye_h = 40
@@ -333,7 +408,7 @@ class PetWindow(QWidget):
             painter.rotate(15)
             painter.drawRoundedRect(-eye_w/2, -eye_h/2, eye_w, eye_h, 10, 10)
             painter.restore()
-        elif self._state == "speaking":
+        elif eye_shape == "speaking":
             # Happy bounce / arches
             mod = 4 * math.sin(self._phase * 3)
             eye_h = 28 - mod
@@ -421,19 +496,11 @@ class PetWindow(QWidget):
                 return
 
             if not self._dragged:
-                # Click on the pet opens dashboard
-                self._open_dashboard()
+                _send_summon_command()
             else:
                 self._save_position()
             self._drag_origin = None
             self._press_pos = None
-
-    def _open_dashboard(self):
-        url = f"http://{config.charlie_host}:{config.charlie_port}"
-        try:
-            webbrowser.open(url)
-        except Exception as e:
-            logger.warning("Failed to open dashboard: %s", e, exc_info=True)
 
     def _restore_position(self):
         screen = QApplication.primaryScreen().availableGeometry()
@@ -459,29 +526,15 @@ class PetWindow(QWidget):
             logger.warning("Failed to save pet position: %s", e, exc_info=True)
 
 
-_CORE_STATE_TO_PET_STATE = {
-    "idle": "idle",
-    "listening": "listening",
-    "thinking": "thinking",
-    "speaking": "speaking",
-    "working": "thinking",
-    "waiting": "thinking",
-    "attention": "thinking",
-    "completed": "idle",
-    "error": "idle",
-}
+_ALL_CORE_STATES = frozenset(_STATE_COLORS)
 
 
 def _map_event_to_state(event: dict) -> Optional[str]:
-    """Map the authoritative charlie_state event to one of the pet's 4 rendered visual states.
-
-    The pet only renders idle/listening/thinking/speaking today; charlie/state.py's other
-    5 CoreState values collapse onto the closest of those until Phase 11's companion upgrade.
-    """
+    """Map the authoritative charlie_state event straight through -- all 9 CoreState values render."""
     if event.get("type") != "charlie_state":
         return None
     core_state = (event.get("payload") or {}).get("state")
-    return _CORE_STATE_TO_PET_STATE.get(core_state)
+    return core_state if core_state in _ALL_CORE_STATES else None
 
 
 def _map_event_to_caption(event: dict) -> tuple[Optional[str], Optional[str]]:
@@ -503,6 +556,15 @@ def _map_event_to_caption(event: dict) -> tuple[Optional[str], Optional[str]]:
     if etype in ("speaking_stop", "response_done"):
         return (None, None)
 
+    if etype in ("tool_approval_request", "extension_pending", "recovery_proposal"):
+        reason = (event.get("payload") or {}).get("reason", "").strip()
+        return ("Needs your approval", reason or "Waiting on a decision")
+
+    if etype == "alert":
+        payload = event.get("payload") or {}
+        if payload.get("severity") in ("warning", "error"):
+            return ("Attention", (payload.get("message") or "Something needs a look").strip())
+
     return (None, None)
 
 
@@ -513,6 +575,7 @@ def _sub_loop(window: PetWindow, stop_event: threading.Event):
     sock.connect(f"tcp://127.0.0.1:{DEFAULT_EVENT_PORT}")
     sock.setsockopt(zmq.SUBSCRIBE, b"")
     sock.setsockopt(zmq.RCVTIMEO, 500)
+    active_workspaces: set = set()
     try:
         while not stop_event.is_set():
             try:
@@ -534,6 +597,10 @@ def _sub_loop(window: PetWindow, stop_event: threading.Event):
             title, desc = _map_event_to_caption(event)
             if title is not None:
                 window.caption_changed.emit(title, desc)
+
+            workspace_active = _track_workspace_surface(active_workspaces, event)
+            if workspace_active is not None:
+                window.workspace_surface_changed.emit(workspace_active)
     finally:
         sock.close(linger=0)
         ctx.term()
