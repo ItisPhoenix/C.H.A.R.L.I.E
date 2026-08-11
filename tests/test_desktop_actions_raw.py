@@ -199,6 +199,25 @@ def test_type_text_uses_uia_set_value_when_supported(fake_pyautogui):
     assert "Typed" in result
 
 
+def test_type_text_reports_verified_when_readback_matches(fake_pyautogui):
+    value_pattern = MagicMock()
+    value_pattern.Value = "hello"
+    control = _FakeUiaControl(value_pattern=value_pattern)
+    _register_live_control(6, control)
+    result = actions.type_text(6, "hello")
+    assert "verified" in result
+    assert "did not match" not in result
+
+
+def test_type_text_reports_mismatch_when_readback_differs(fake_pyautogui):
+    value_pattern = MagicMock()
+    value_pattern.Value = "wrong"
+    control = _FakeUiaControl(value_pattern=value_pattern)
+    _register_live_control(7, control)
+    result = actions.type_text(7, "hello")
+    assert "did not match" in result
+
+
 def test_type_text_falls_back_to_pyautogui_when_set_value_unsupported(fake_pyautogui):
     control = _FakeUiaControl(value_pattern=None)
     _register_live_control(4, control)

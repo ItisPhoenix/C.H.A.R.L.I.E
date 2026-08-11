@@ -69,6 +69,9 @@ def classify_action(
         if gated:
             return RiskClass.DESTRUCTIVE, gated
 
+    if tool_name == "desktop_window" and arguments.get("action") == "close":
+        return RiskClass.REVERSIBLE, "closing a window can lose unsaved work"
+
     policy_result = security_policy.check_tool_call(tool_name, arguments, recent_external_texts)
     if policy_result.needs_approval:
         return RiskClass.SECURITY_SENSITIVE, policy_result.reason or ""

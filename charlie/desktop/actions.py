@@ -92,19 +92,22 @@ def _try_uia_invoke(control: Any) -> bool:
         return False
 
 
-def _try_uia_set_value(control: Any, text: str) -> bool:
-    """Best-effort UIA ValuePattern.SetValue() -- no physical input, no focus
-    required. Returns False (not raises) if unsupported, so the caller can
-    fall back to click + typewrite."""
+def _try_uia_set_value(control: Any, text: str) -> Optional[bool]:
+    """Best-effort UIA ValuePattern.SetValue() -- no physical input, no focus required.
+
+    Returns None (not raises) if unsupported, so the caller can fall back to click +
+    typewrite; otherwise returns whether a read-back of the pattern's own Value confirms
+    the text actually landed, instead of just trusting SetValue() didn't raise.
+    """
     try:
         pattern = control.GetValuePattern()
         if pattern is None:
-            return False
+            return None
         pattern.SetValue(text)
-        return True
+        return getattr(pattern, "Value", None) == text
     except Exception:
         logger.debug("UIA ValuePattern unavailable/failed", exc_info=True)
-        return False
+        return None
 
 
 def click_mark(mark_id: int) -> str:
@@ -116,14 +119,14 @@ def click_mark(mark_id: int) -> str:
         return f"Error: {e}"
 
     if not isinstance(control, Element) and _try_uia_invoke(control):
-        return f"Invoked mark [{mark_id}] via UIA. This succeeded -- no need to click it again."
+        return f"Invoked mark [{mark_id}] via UIA (no automatic postcondition check for a generic invoke)."
 
     if not _HAS_PYAUTOGUI:
         return "Error: pyautogui is not installed -- desktop control unavailable."
     try:
         x, y = _center(resolve_bounds(mark_id))
         pyautogui.click(x, y)
-        return f"Clicked mark [{mark_id}]. This succeeded -- no need to click it again."
+        return f"Clicked mark [{mark_id}] (no automatic postcondition check for a generic click)."
     except DesktopHalted:
         raise
     except Exception as e:
@@ -149,11 +152,11 @@ def type_text(mark_id: int, text: str) -> str:
         logger.info("secure field detected -- refusing to type")
         return _SECURE_REFUSAL
 
-    if not isinstance(control, Element) and _try_uia_set_value(control, text):
-        return (
-            f"Typed {text!r} into mark [{mark_id}] via UIA. This succeeded -- do not retype it via "
-            "shell_execute or any other tool."
-        )
+    if not isinstance(control, Element):
+        set_result = _try_uia_set_value(control, text)
+        if set_result is not None:
+            tag = "verified" if set_result else "SetValue did not raise, but read-back did not match"
+            return f"Typed {text!r} into mark [{mark_id}] via UIA ({tag})."
 
     if not _HAS_PYAUTOGUI:
         return "Error: pyautogui is not installed -- desktop control unavailable."
@@ -162,8 +165,8 @@ def type_text(mark_id: int, text: str) -> str:
         pyautogui.click(x, y)
         pyautogui.typewrite(text, interval=0.02)
         return (
-            f"Typed {text!r} into mark [{mark_id}]. This succeeded -- do not retype it via "
-            "shell_execute or any other tool."
+            f"Typed {text!r} into mark [{mark_id}] via physical keystrokes "
+            "(no automatic postcondition check for this path)."
         )
     except DesktopHalted:
         raise

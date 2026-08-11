@@ -52,6 +52,21 @@ class TestClassifyActionInjection:
         assert risk == RiskClass.SAFE
 
 
+class TestClassifyActionDesktop:
+    def test_desktop_window_close_is_reversible(self):
+        risk, reason = classify_action("desktop_window", {"window": "notepad", "action": "close"})
+        assert risk == RiskClass.REVERSIBLE
+        assert reason
+
+    def test_desktop_window_minimize_is_safe(self):
+        risk, reason = classify_action("desktop_window", {"window": "notepad", "action": "minimize"})
+        assert risk == RiskClass.SAFE
+
+    def test_desktop_click_is_safe(self):
+        risk, reason = classify_action("desktop_click", {"mark_id": 1})
+        assert risk == RiskClass.SAFE
+
+
 class TestEvaluate:
     def test_irreversible_maps_to_block(self):
         req, reason = evaluate("shell_execute", {"command": "diskpart"})

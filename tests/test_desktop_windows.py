@@ -19,11 +19,23 @@ def test_find_window_matches_substring_case_insensitive(monkeypatch):
 def test_manage_window_minimize_calls_showwindow(monkeypatch):
     monkeypatch.setattr(windows, "find_window", lambda _: {"hwnd": 5, "title": "Test"})
     mock_user32 = MagicMock()
+    mock_user32.IsIconic.return_value = True
     monkeypatch.setattr(windows, "_user32", mock_user32)
     result = windows.manage_window("test", "minimize")
     mock_user32.ShowWindow.assert_called_once_with(5, windows._SW_MINIMIZE)
+    mock_user32.IsIconic.assert_called_once_with(5)
     assert "Minimized" in result
     assert "Test" in result
+    assert "(verified)" in result
+
+
+def test_manage_window_minimize_reports_unconfirmed_when_state_check_fails(monkeypatch):
+    monkeypatch.setattr(windows, "find_window", lambda _: {"hwnd": 5, "title": "Test"})
+    mock_user32 = MagicMock()
+    mock_user32.IsIconic.return_value = False
+    monkeypatch.setattr(windows, "_user32", mock_user32)
+    result = windows.manage_window("test", "minimize")
+    assert "state unconfirmed" in result
 
 
 def test_manage_window_close_posts_wm_close(monkeypatch):
@@ -34,6 +46,7 @@ def test_manage_window_close_posts_wm_close(monkeypatch):
     mock_user32.PostMessageW.assert_called_once_with(5, windows._WM_CLOSE, 0, 0)
     assert "close" in result.lower()
     assert "Test" in result
+    assert "asynchronous" in result
 
 
 def test_manage_window_unknown_action_errors(monkeypatch):
@@ -68,9 +81,22 @@ def test_focus_window_no_match_errors(monkeypatch):
     assert "nonexistent" in result
 
 
+def test_focus_window_verified_when_foreground_hwnd_matches(monkeypatch):
+    monkeypatch.setattr(windows, "find_window", lambda _: {"hwnd": 5, "title": "Test"})
+    mock_user32 = MagicMock()
+    mock_user32.SetForegroundWindow.return_value = 1
+    mock_user32.GetForegroundWindow.return_value = 5
+    monkeypatch.setattr(windows, "_user32", mock_user32)
+    mock_pyautogui = MagicMock()
+    monkeypatch.setattr(windows, "pyautogui", mock_pyautogui, raising=False)
+    result = windows.focus_window("test")
+    mock_user32.ShowWindow.assert_called_once_with(5, windows._SW_RESTORE)
+    mock_pyautogui.press.assert_not_called()
+    assert "(verified)" in result
+
+
 def test_focus_window_success_does_not_use_alt_fallback(monkeypatch):
-    # No real pyautogui import needed -- this path succeeds on the first
-    # SetForegroundWindow call and never touches the alt-fallback at all.
+    # Succeeds on the first SetForegroundWindow call, never touches the alt-fallback.
     monkeypatch.setattr(windows, "find_window", lambda _: {"hwnd": 5, "title": "Test"})
     mock_user32 = MagicMock()
     mock_user32.SetForegroundWindow.return_value = 1
@@ -81,6 +107,7 @@ def test_focus_window_success_does_not_use_alt_fallback(monkeypatch):
     mock_user32.ShowWindow.assert_called_once_with(5, windows._SW_RESTORE)
     mock_pyautogui.press.assert_not_called()
     assert "Test" in result
+    assert "requested; foreground not confirmed" in result
 
 
 def test_focus_window_fallback_fires_when_setforeground_fails(monkeypatch):

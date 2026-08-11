@@ -66,27 +66,36 @@ def focus_window(title_substr: str) -> str:
         return f"Error: no window matching '{title_substr}'."
     hwnd = w["hwnd"]
     _user32.ShowWindow(hwnd, _SW_RESTORE)
-    if _user32.SetForegroundWindow(hwnd):
-        return f"Focused window: {w['title']}"
-    # Windows blocks cross-process focus steals unless the caller shares the
-    # foreground thread's input state -- AttachThreadInput grants that.
-    fg_thread = _user32.GetWindowThreadProcessId(_user32.GetForegroundWindow(), None)
-    current_thread = _kernel32.GetCurrentThreadId()
-    can_attach = bool(fg_thread) and fg_thread != current_thread
-    attached = can_attach and _user32.AttachThreadInput(current_thread, fg_thread, True)
-    try:
-        _user32.BringWindowToTop(hwnd)
-        ok = _user32.SetForegroundWindow(hwnd)
-    finally:
-        if attached:
-            _user32.AttachThreadInput(current_thread, fg_thread, False)
-    if not ok and _HAS_PYAUTOGUI:
-        pyautogui.press("alt")
-        ok = _user32.SetForegroundWindow(hwnd)
+    ok = bool(_user32.SetForegroundWindow(hwnd))
+    if not ok:
+        # AttachThreadInput shares foreground input state -- Windows otherwise blocks cross-process focus steals.
+        fg_thread = _user32.GetWindowThreadProcessId(_user32.GetForegroundWindow(), None)
+        current_thread = _kernel32.GetCurrentThreadId()
+        can_attach = bool(fg_thread) and fg_thread != current_thread
+        attached = can_attach and _user32.AttachThreadInput(current_thread, fg_thread, True)
+        try:
+            _user32.BringWindowToTop(hwnd)
+            ok = bool(_user32.SetForegroundWindow(hwnd))
+        finally:
+            if attached:
+                _user32.AttachThreadInput(current_thread, fg_thread, False)
+        if not ok and _HAS_PYAUTOGUI:
+            pyautogui.press("alt")
+            ok = bool(_user32.SetForegroundWindow(hwnd))
+    verified = _user32.GetForegroundWindow() == hwnd
+    if verified:
+        return f"Focused window: {w['title']} (verified)."
     if ok:
-        return f"Focused window: {w['title']}"
+        return f"Focused window: {w['title']} (requested; foreground not confirmed)."
     logger.warning("Could not bring '%s' to foreground.", w["title"])
     return f"Warning: could not bring '{w['title']}' to foreground."
+
+
+_VERIFY_STATE = {
+    "minimize": lambda user32, hwnd: bool(user32.IsIconic(hwnd)),
+    "maximize": lambda user32, hwnd: bool(user32.IsZoomed(hwnd)),
+    "restore": lambda user32, hwnd: not user32.IsIconic(hwnd) and not user32.IsZoomed(hwnd),
+}
 
 
 def manage_window(title_substr: str, action: str) -> str:
@@ -96,10 +105,15 @@ def manage_window(title_substr: str, action: str) -> str:
     ops = {"minimize": _SW_MINIMIZE, "maximize": _SW_MAXIMIZE, "restore": _SW_RESTORE}
     if action in ops:
         _user32.ShowWindow(w["hwnd"], ops[action])
-        return f"{action.capitalize()}d: {w['title']}"
+        verified = _VERIFY_STATE[action](_user32, w["hwnd"])
+        tag = " (verified)" if verified else " (state unconfirmed)"
+        return f"{action.capitalize()}d: {w['title']}{tag}."
     if action == "close":
         _user32.PostMessageW(w["hwnd"], _WM_CLOSE, 0, 0)
-        return f"Sent close to: {w['title']}"
+        return (
+            f"Sent close to: {w['title']}. WM_CLOSE is asynchronous (a save-changes dialog "
+            "may block it) -- call desktop_windows again to confirm it actually closed."
+        )
     return f"Error: unknown action '{action}'. Valid: minimize, maximize, restore, close."
 
 
