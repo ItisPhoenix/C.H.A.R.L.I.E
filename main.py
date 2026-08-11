@@ -92,6 +92,7 @@ root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
 
 # 3. NOW IMPORT CHARLIE MODULES
+from charlie import background_task, telemetry
 from charlie.config import Config, config
 from charlie.core import Brain
 from charlie.events import EventMeta, EventSource, EventType
@@ -102,7 +103,16 @@ from charlie.session_store import SessionStore
 from charlie.state import StateMachine
 from charlie.surfaces import SurfaceEngine
 from charlie.voice import VoiceEngine
-from charlie.monitors import start_monitor_thread
+from charlie.attention import AttentionLevel
+from charlie.watchers import (
+    WatcherRegistry,
+    cpu_ram_watcher,
+    mcp_health_watcher,
+    path_change_watcher,
+    repeated_tool_failure_watcher,
+    stalled_task_watcher,
+    start_watcher_thread,
+)
 
 logger = logging.getLogger("charlie.main")
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
@@ -1317,37 +1327,46 @@ async def main():
                 import psutil
                 return psutil.cpu_percent(), psutil.virtual_memory().percent
 
-            _monitor_loop = asyncio.get_running_loop()
+            def _get_mcp_status() -> Dict[str, bool]:
+                return mcp_client.health_check() if mcp_client is not None else {}
 
-            def _on_resource_alert(message: str) -> None:
-                logger.warning(f"Resource alert: {message}")
+            _watcher_loop = asyncio.get_running_loop()
+
+            def _on_watcher_signal(event: dict, level: AttentionLevel, reason: str) -> None:
+                # Re-emit through the normal alert path -- state.py/pet_window.py already react to it.
+                payload = event.get("payload") or {}
+                message = payload.get("message", reason)
+                logger.warning(f"Watcher signal: {message}")
                 try:
                     asyncio.run_coroutine_threadsafe(
                         bus.emit(
-                            "alert", {"severity": "warning", "message": message},
-                            meta=EventMeta(
-                                source=EventSource.WATCHER,
-                                rationale="CPU/RAM usage exceeded the configured threshold for 3 consecutive samples",
-                            ),
+                            event.get("type", "alert"), payload,
+                            meta=EventMeta(source=EventSource.WATCHER, rationale=reason),
                         ),
-                        _monitor_loop,
+                        _watcher_loop,
                     )
                 except Exception:
-                    logger.warning("Failed to emit resource alert event", exc_info=True)
-                try:
-                    voice.speak(message, "neutral")
-                except Exception:
-                    logger.warning("Failed to speak resource alert", exc_info=True)
+                    logger.warning("Failed to emit watcher alert event", exc_info=True)
+                if level >= AttentionLevel.ATTENTION:
+                    try:
+                        voice.speak(message, "neutral")
+                    except Exception:
+                        logger.warning("Failed to speak watcher alert", exc_info=True)
+
+            _watcher_registry = WatcherRegistry()
+            _watcher_registry.register(
+                cpu_ram_watcher(_read_cpu_ram_percent, config.alert_cpu_pct, config.alert_ram_pct)
+            )
+            _watcher_registry.register(mcp_health_watcher(_get_mcp_status))
+            _watcher_registry.register(stalled_task_watcher(background_task.list_tasks))
+            _watcher_registry.register(repeated_tool_failure_watcher(telemetry.unreliable_tools))
+            if config.watch_paths:
+                _watcher_registry.register(path_change_watcher(config.watch_paths))
 
             try:
-                start_monitor_thread(
-                    get_cpu_ram=_read_cpu_ram_percent,
-                    on_alert=_on_resource_alert,
-                    cpu_threshold_pct=config.alert_cpu_pct,
-                    ram_threshold_pct=config.alert_ram_pct,
-                )
+                start_watcher_thread(_watcher_registry, _on_watcher_signal)
             except Exception:
-                logger.error("Failed to start resource monitor thread", exc_info=True)
+                logger.error("Failed to start watcher thread", exc_info=True)
 
             class ZmqLogHandler(logging.Handler):
                 def emit(self, record):

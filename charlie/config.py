@@ -421,6 +421,11 @@ class Config:
         default=float(os.getenv("ALERT_RAM_PCT", "92")),
         metadata=_meta("ALERT_RAM_PCT", "Monitoring"),
     )
+    # Comma-separated file/dir paths for the proactive file-change watcher; empty disables it.
+    watch_paths: List[str] = field(
+        default_factory=lambda: [p.strip() for p in os.getenv("WATCH_PATHS", "").split(",") if p.strip()],
+        metadata=_meta("WATCH_PATHS", "Monitoring"),
+    )
 
     # --- Desktop companion (pet_window.py) ---
     pet_enabled: bool = field(

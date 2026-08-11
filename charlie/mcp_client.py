@@ -193,6 +193,10 @@ class MCPClient:
                 logger.debug("Error stopping server '%s'", name, exc_info=True)
         self._tools.clear()
 
+    def health_check(self) -> Dict[str, bool]:
+        """Server name -> is_running, for charlie.watchers.mcp_health_watcher."""
+        return {name: server.is_running() for name, server in self._servers.items()}
+
     def list_tools(self) -> List[MCPTool]:
         """Return all discovered tools across all servers."""
         return list(self._tools.values())
