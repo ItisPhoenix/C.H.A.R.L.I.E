@@ -337,6 +337,21 @@ async def main():
             spawn_event["type"], spawn_event["payload"], meta=EventMeta(source=EventSource.SURFACE)
         )
 
+    def _resolve_tool_approval_and_notify(request_id: str, approved: bool) -> None:
+        """Resolve the pending future, then tell web_server.py's replay cache the
+        request is gone -- otherwise a webview that connects after resolution
+        still finds the (now-stale) tool_approval_request via replay."""
+        from charlie.core import resolve_tool_approval
+        resolve_tool_approval(request_id, approved)
+        if event_bus is not None:
+            asyncio.run_coroutine_threadsafe(
+                event_bus.emit(
+                    "tool_approval_resolved", {"request_id": request_id},
+                    meta=EventMeta(source=EventSource.BRAIN),
+                ),
+                loop,
+            )
+
     def on_tool_approval_request(request_id, tool_name, reason):
         # telegram_bot is None until its startup block below runs -- read at call time, not def time.
         if telegram_bot and config.telegram_user_id:
@@ -530,8 +545,7 @@ async def main():
             if answer is None:
                 voice.speak("Sorry, I didn't catch that. Say yes to continue or no to cancel.", last_emotion)
                 return
-            from charlie.core import resolve_tool_approval
-            resolve_tool_approval(pending_approval_id, answer)
+            _resolve_tool_approval_and_notify(pending_approval_id, answer)
             voice.speak("Okay, running it." if answer else "Cancelled.", last_emotion)
             return
 
@@ -975,14 +989,12 @@ async def main():
                     payload = cmd.get("payload", {})
                     request_id = payload.get("request_id")
                     if request_id:
-                        from charlie.core import resolve_tool_approval
-                        resolve_tool_approval(request_id, True)
+                        _resolve_tool_approval_and_notify(request_id, True)
                 elif cmd_type == "tool_reject":
                     payload = cmd.get("payload", {})
                     request_id = payload.get("request_id")
                     if request_id:
-                        from charlie.core import resolve_tool_approval
-                        resolve_tool_approval(request_id, False)
+                        _resolve_tool_approval_and_notify(request_id, False)
                 elif cmd_type == "stop":
                     voice.stop_tts()
                     brain.cancel_chat()
@@ -1181,8 +1193,7 @@ async def main():
                 await _dispatch_or_queue(text, current_web_session_id, platform="telegram")
 
             def on_telegram_approval(request_id, approved):
-                from charlie.core import resolve_tool_approval
-                resolve_tool_approval(request_id, approved)
+                _resolve_tool_approval_and_notify(request_id, approved)
 
             telegram_bot = TelegramBot(
                 config.telegram_bot_token, config.telegram_user_id, on_telegram_message, on_telegram_approval

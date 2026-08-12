@@ -328,6 +328,8 @@ async def _event_bridge():
                 ttl = event.get("payload", {}).get("ttl_seconds")
                 if sid and ttl:
                     asyncio.create_task(_expire_surface(sid, event, ttl))
+        elif etype in ("tool_approval_request", "tool_approval_resolved"):
+            _apply_approval_event(_pending_approvals, event)
 
         await broadcast(event)
 
@@ -369,6 +371,8 @@ async def websocket_endpoint(ws: WebSocket):
         await ws.send_text(json.dumps({"type": "mic_state", "payload": _mic_state}))
         for surface_event in _active_surfaces.values():
             await ws.send_text(json.dumps(surface_event))
+        for approval_event in _pending_approvals.values():
+            await ws.send_text(json.dumps(approval_event))
     except Exception as e:
         logger.warning("Failed to send initial cached state to WebSocket: %s", e)
 
@@ -583,12 +587,26 @@ _mic_state: dict = {
 }
 # surface_id -> latest spawn/update payload, replayed to webviews that connect after their spawn event fired
 _active_surfaces: dict = {}
+# request_id -> tool_approval_request event, replayed like _active_surfaces so a late-connecting window's store gets it
+_pending_approvals: dict = {}
 
 
 async def _expire_surface(surface_id: str, spawned_as: dict, ttl_seconds: float) -> None:
     await asyncio.sleep(ttl_seconds)
     if _active_surfaces.get(surface_id) is spawned_as:
         _active_surfaces.pop(surface_id, None)
+
+
+def _apply_approval_event(cache: dict, event: dict) -> None:
+    """Mutate `cache` (request_id -> tool_approval_request event) so a late-connecting window still finds it."""
+    payload = event.get("payload", {})
+    rid = payload.get("request_id")
+    if not rid:
+        return
+    if event.get("type") == "tool_approval_request":
+        cache[rid] = event
+    else:
+        cache.pop(rid, None)
 
 
 def _apply_surface_event(cache: dict, event: dict) -> None:

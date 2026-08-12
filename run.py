@@ -50,7 +50,7 @@ def check_and_build_frontend():
     """Ensure the frontend is built, compiling it if the build is missing or stale."""
     root = Path(__file__).parent
     frontend_dir = root / "frontend"
-    dist_dir = frontend_dir / "out"
+    dist_dir = frontend_dir / "dist"
 
     if not frontend_dir.exists():
         print("Warning: frontend directory not found. Web UI cannot be built.")

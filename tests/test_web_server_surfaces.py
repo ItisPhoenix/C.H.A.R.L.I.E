@@ -23,3 +23,14 @@ def test_unrelated_event_type_ignored():
     cache: dict = {}
     web_server._apply_surface_event(cache, {"type": "system_status", "payload": {}})
     assert cache == {}
+
+
+def test_approval_request_then_resolved():
+    cache: dict = {}
+    request = {"type": "tool_approval_request", "payload": {"request_id": "r1", "tool_name": "shell_execute"}}
+    web_server._apply_approval_event(cache, request)
+    assert cache["r1"] is request
+
+    resolved = {"type": "tool_approval_resolved", "payload": {"request_id": "r1"}}
+    web_server._apply_approval_event(cache, resolved)
+    assert "r1" not in cache
