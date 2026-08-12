@@ -6,6 +6,7 @@ the thread-affine Playwright objects and no lock is needed around them.
 """
 
 import logging
+import sys
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, TypeVar
@@ -53,13 +54,16 @@ def _launch() -> None:
     import asyncio
 
     from playwright.sync_api import sync_playwright
-    with _POLICY_SWAP_LOCK:
-        prior_policy = asyncio.get_event_loop_policy()
-        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-        try:
-            _playwright = sync_playwright().start()
-        finally:
-            asyncio.set_event_loop_policy(prior_policy)
+    if sys.platform == "win32":
+        with _POLICY_SWAP_LOCK:
+            prior_policy = asyncio.get_event_loop_policy()
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            try:
+                _playwright = sync_playwright().start()
+            finally:
+                asyncio.set_event_loop_policy(prior_policy)
+    else:
+        _playwright = sync_playwright().start()
     launch_kwargs = dict(
         user_data_dir=config.browser_profile_path,
         headless=config.browser_headless,

@@ -110,6 +110,31 @@ def test_desktop_read_screen_disabled_by_default():
         _tools_config.desktop_control_enabled = original
 
 
+def test_walk_captures_named_document_control():
+    """Regression: modern Notepad's text area is a DocumentControl (RichEdit), not EditControl --
+    _walk must include it in the set-of-marks output, not silently skip it."""
+    from charlie.desktop import uia as uia_mod
+
+    class FakeRect:
+        left, top, right, bottom = 0, 0, 100, 100
+
+    class FakeDocumentControl:
+        ControlTypeName = "DocumentControl"
+        Name = "Text editor"
+        IsOffscreen = False
+        BoundingRectangle = FakeRect()
+
+        def GetChildren(self):
+            return []
+
+    marks: list = []
+    controls: dict = {}
+    uia_mod._walk(FakeDocumentControl(), marks, controls, depth=0, max_depth=8)
+    assert len(marks) == 1
+    assert marks[0].control_type == "Document"
+    assert marks[0].name == "Text editor"
+
+
 def test_merge_ocr_elements_continues_mark_id_sequence():
     uia = [Element(mark_id=1, name="Save", control_type="Button", bounds=(0, 0, 10, 10),
                     is_password=False, is_offscreen=False)]
@@ -279,6 +304,7 @@ if __name__ == "__main__":
     test_click_mark_unknown_id_returns_error_not_raise()
     test_type_text_unknown_id_returns_error_not_raise()
     test_desktop_read_screen_disabled_by_default()
+    test_walk_captures_named_document_control()
     test_merge_ocr_elements_continues_mark_id_sequence()
     test_desktop_screenshot_disabled_by_default()
     test_pending_vision_image_pops_once()

@@ -147,6 +147,7 @@ _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
 _CLAUSE_BOUNDARY = re.compile(r"(?<=[,;])\s+")
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _MAX_FLUSH_CHARS = 200  # Force-flush at word boundary if no sentence boundary seen
+_IDLE_RETURN_THRESHOLD_S = 60.0  # idle_seconds below this after being above it counts as "user returned"
 
 
 def _flush_complete_sentences(
@@ -342,6 +343,19 @@ async def main():
             asyncio.run_coroutine_threadsafe(
                 telegram_bot.send_approval_request(config.telegram_user_id, request_id, tool_name, reason), loop
             )
+        if event_bus is None:
+            return
+        from charlie.utils import make_id
+        surface_id = make_id()
+        spec = _hud_surface_engine.decide({"type": "tool_approval_request"})
+        if spec is None:
+            return
+        _hud_surface_engine.spawn(surface_id, spec)
+        spawn_event = _hud_surface_engine.spawn_event(surface_id, spec)
+        asyncio.run_coroutine_threadsafe(
+            event_bus.emit(spawn_event["type"], spawn_event["payload"], meta=EventMeta(source=EventSource.SURFACE)),
+            loop,
+        )
 
     try:
         brain = Brain(
@@ -1278,6 +1292,9 @@ async def main():
 
         async def _emit_system_status(bus):
             import psutil
+            from charlie.results import ResultsStore
+            results_store = ResultsStore(db_path=config.session_db_path)
+            was_idle = False
             try:
                 while True:
                     cpu_percent = psutil.cpu_percent()
@@ -1295,6 +1312,19 @@ async def main():
                         await bus.emit(
                             envelope["type"], envelope["payload"], meta=EventMeta(source=EventSource.VOICE)
                         )
+                    if sys.platform == "win32":
+                        from charlie.desktop.session import user_idle_seconds
+                        idle_s = await asyncio.to_thread(user_idle_seconds)
+                        is_idle = idle_s >= _IDLE_RETURN_THRESHOLD_S
+                        if was_idle and not is_idle:
+                            catchup_msg = await asyncio.to_thread(results_store.consume_catchup)
+                            if catchup_msg:
+                                await bus.emit(
+                                    "alert", {"severity": "info", "message": catchup_msg},
+                                    meta=EventMeta(source=EventSource.TASK, rationale="idle-return catch-up"),
+                                )
+                                voice.speak(catchup_msg, "neutral")
+                        was_idle = is_idle
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 pass

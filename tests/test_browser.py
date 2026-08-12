@@ -591,3 +591,41 @@ def test_retry_blocked_restores_event_loop_policy(monkeypatch):
     result = stealth.retry_blocked("https://example.com")
     assert asyncio.get_event_loop_policy() is prior_policy
     assert result is not None and result.answer == "some page text"
+
+
+def test_launch_skips_windows_policy_swap_off_windows(monkeypatch):
+    from charlie.browser import controller
+
+    monkeypatch.setattr(controller.sys, "platform", "linux")
+    monkeypatch.setattr(controller, "_context", None)
+    monkeypatch.setattr(controller, "_page", None)
+
+    class FakeContext:
+        def add_init_script(self, script):
+            pass
+
+        def new_page(self):
+            class FakePage:
+                def route(self, pattern, handler):
+                    pass
+            return FakePage()
+
+    class FakeChromium:
+        def launch_persistent_context(self, **kwargs):
+            return FakeContext()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+    class FakeSyncPlaywright:
+        def start(self):
+            return FakePlaywright()
+
+    fake_module = type("mod", (), {"sync_playwright": lambda: FakeSyncPlaywright()})
+    monkeypatch.setitem(__import__("sys").modules, "playwright.sync_api", fake_module)
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("WindowsProactorEventLoopPolicy must not be touched off-Windows")
+
+    monkeypatch.setattr(asyncio, "set_event_loop_policy", fail_if_called)
+    controller._launch()

@@ -1081,6 +1081,35 @@ class Brain:
         )
         return f"Background task started (id={task.id}, status={task.status}): {text}"
 
+    async def _describe_image(self, data_url: str) -> str:
+        """One-shot vision-LLM call for charlie.browser's DescribeImage fallback -- separate from
+        the pending-image/_build_payload mechanism since agent.py needs a direct describe-and-return-text call."""
+        if self._vision_client is None:
+            return ""
+        payload = {
+            "model": self._vision_model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Describe what's visible in this browser screenshot, "
+                        "focusing on clickable elements and their labels.",
+                    },
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }],
+            "temperature": 0.0,
+            "max_tokens": 300,
+        }
+        try:
+            resp = await self._vision_client.post("chat/completions", json=payload)
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception as exc:
+            logger.warning("browser_task vision fallback failed: %s", exc, exc_info=True)
+            return ""
+
     async def _browser_task_bounded(self, task: str, platform: str) -> str:
         """Fast-path callers' safety net -- same timeout bound _exec_one already gives the LLM-dispatched path."""
         try:
@@ -1095,8 +1124,8 @@ class Brain:
         Tiers 0-2 need no LLM; tier 3 uses this Brain's own client/model via
         _stream_completion; tier 4 is a last-resort stealth retry after a
         detected block. Opens the user's real browser only when the task
-        carries open-intent. No vision fallback yet -- this branch's Brain
-        has no _describe_image equivalent (see docstring note in module docs).
+        carries open-intent. Vision fallback (_describe_image) only fires when
+        a vision LLM is configured -- None otherwise, same as no fallback.
         """
         if not self.config.browser_enabled or not _BROWSER_AVAILABLE:
             return "Browser control is disabled (set BROWSER_ENABLED=true and install the browser extra)."
@@ -1140,8 +1169,9 @@ class Brain:
                 "browser_task_started", {"task": task}, meta=EventMeta(source=EventSource.TASK)
             )
 
+        describe_image = self._describe_image if self._vision_client is not None else None
         result = await resolve_browser_task(
-            task, _complete, None, _approve_click, max_steps, deadline_s, _on_progress,
+            task, _complete, describe_image, _approve_click, max_steps, deadline_s, _on_progress,
         )
 
         if recovery._event_bus:

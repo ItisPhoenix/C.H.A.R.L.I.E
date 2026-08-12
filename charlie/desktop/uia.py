@@ -28,7 +28,7 @@ _MAX_DEPTH_DEFAULT = 8
 _INTERESTING_CONTROL_TYPES = {
     "ButtonControl", "EditControl", "CheckBoxControl", "RadioButtonControl",
     "ComboBoxControl", "ListItemControl", "MenuItemControl", "TabItemControl",
-    "HyperlinkControl", "TreeItemControl", "TextControl",
+    "HyperlinkControl", "TreeItemControl", "TextControl", "DocumentControl",
 }
 
 
@@ -77,7 +77,7 @@ def _walk(control: Any, marks: List[Element], controls: Dict[int, Any], depth: i
         offscreen = bool(control.IsOffscreen)
         if not offscreen and control_type in _INTERESTING_CONTROL_TYPES:
             name = (control.Name or "").strip()
-            if name or control_type == "EditControl":
+            if name or control_type in ("EditControl", "DocumentControl"):
                 rect = control.BoundingRectangle
                 mark_id = len(marks) + 1
                 marks.append(Element(

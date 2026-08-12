@@ -321,6 +321,13 @@ async def _event_bridge():
         elif etype == "extension_proposed":
             await _stage_proposed_extension(event.get("payload", {}))
             return
+        elif etype in ("surface_spawn", "surface_update", "surface_dismiss"):
+            _apply_surface_event(_active_surfaces, event)
+            if etype in ("surface_spawn", "surface_update"):
+                sid = event.get("payload", {}).get("surface_id")
+                ttl = event.get("payload", {}).get("ttl_seconds")
+                if sid and ttl:
+                    asyncio.create_task(_expire_surface(sid, event, ttl))
 
         await broadcast(event)
 
@@ -360,6 +367,8 @@ async def websocket_endpoint(ws: WebSocket):
         await ws.send_text(json.dumps({"type": "system_status", "payload": _system_status}))
         await ws.send_text(json.dumps({"type": "audio_state", "payload": _audio_state}))
         await ws.send_text(json.dumps({"type": "mic_state", "payload": _mic_state}))
+        for surface_event in _active_surfaces.values():
+            await ws.send_text(json.dumps(surface_event))
     except Exception as e:
         logger.warning("Failed to send initial cached state to WebSocket: %s", e)
 
@@ -572,6 +581,25 @@ _audio_state: dict = {
 _mic_state: dict = {
     "mic_muted": False,
 }
+# surface_id -> latest spawn/update payload, replayed to webviews that connect after their spawn event fired
+_active_surfaces: dict = {}
+
+
+async def _expire_surface(surface_id: str, spawned_as: dict, ttl_seconds: float) -> None:
+    await asyncio.sleep(ttl_seconds)
+    if _active_surfaces.get(surface_id) is spawned_as:
+        _active_surfaces.pop(surface_id, None)
+
+
+def _apply_surface_event(cache: dict, event: dict) -> None:
+    """Mutate `cache` (surface_id -> spawn/update event) so it always reflects the currently-live surfaces."""
+    etype = event.get("type", "")
+    payload = event.get("payload", {})
+    sid = payload.get("surface_id")
+    if etype in ("surface_spawn", "surface_update") and sid:
+        cache[sid] = event
+    elif etype == "surface_dismiss":
+        cache.pop(sid, None)
 
 
 @app.get("/api/audio")

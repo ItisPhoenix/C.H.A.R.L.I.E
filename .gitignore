@@ -30,6 +30,7 @@ blackboard.json
 .charlie_recovery_cache.json
 browser_profile/
 .charlie_background_task_state.json
+pet_position.json
 
 # === ML Models (large files) ===
 models/
