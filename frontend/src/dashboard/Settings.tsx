@@ -87,6 +87,7 @@ export function Settings(): ReactElement {
     (result[field.group] ??= []).push(field);
     return result;
   }, {}), [fields]);
+  const availableModels = useMemo(() => Array.from(new Set([String(fields.find((field) => field.key === "LLM_MODEL")?.value ?? ""), ...(modelSnapshot.models ?? [])])).filter(Boolean), [fields, modelSnapshot.models]);
 
   async function save(): Promise<void> {
     if (Object.keys(drafts).length === 0) return;
@@ -144,9 +145,12 @@ export function Settings(): ReactElement {
                 ) : field.type === "bool" ? (
                   <input aria-label={field.label} type="checkbox" checked={Boolean(fieldValue(field, drafts))} onChange={(event) => setDrafts((current) => ({ ...current, [field.key]: event.target.checked }))} />
                 ) : field.key === "LLM_MODEL" && (modelSnapshot.models?.length ?? 0) > 0 ? (
-                  <select aria-label={field.label} value={String(fieldValue(field, drafts) ?? "")} onChange={(event) => setDrafts((current) => ({ ...current, [field.key]: event.target.value }))}>
-                    {Array.from(new Set([String(fieldValue(field, drafts) ?? ""), ...(modelSnapshot.models ?? [])])).filter(Boolean).map((model) => <option key={model} value={model}>{model}</option>)}
-                  </select>
+                  <>
+                    <input aria-label={field.label} list="charlie-model-options" value={String(fieldValue(field, drafts) ?? "")} onChange={(event) => setDrafts((current) => ({ ...current, [field.key]: event.target.value }))} />
+                    <datalist id="charlie-model-options">
+                      {availableModels.map((model) => <option key={model} value={model} />)}
+                    </datalist>
+                  </>
                 ) : (
                   <input aria-label={field.label} type={field.type === "int" || field.type === "float" ? "number" : "text"} value={String(fieldValue(field, drafts) ?? "")} onChange={(event) => setDrafts((current) => ({ ...current, [field.key]: event.target.value }))} />
                 )}

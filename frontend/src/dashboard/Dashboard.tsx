@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactElement } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import { Background } from "./Background";
 import { Chat } from "./Chat";
 import { McpConnections } from "./McpConnections";
@@ -31,7 +31,6 @@ function useLayoutProfile(): LayoutProfile {
 
 export function Dashboard(): ReactElement {
   const profile = useLayoutProfile();
-  const stageRef = useRef<HTMLDivElement>(null);
   const panelIntent = useCharlieStore((state) => state.dashboardPanelIntent);
   const dashboardVisible = useCharlieStore((state) => state.dashboardVisible);
   const open = useLayoutStore((state) => state.open);
@@ -43,18 +42,6 @@ export function Dashboard(): ReactElement {
   }, [profile, setProfile]);
 
   useEffect(() => {
-    const stage = stageRef.current;
-    if (!stage) return;
-    const updateScale = () => {
-      const scale = Math.min(window.innerWidth / 1536, window.innerHeight / 1024);
-      stage.style.setProperty("--hud-scale", String(Math.min(2.5, Math.max(0.55, scale))));
-    };
-    updateScale();
-    window.addEventListener("resize", updateScale);
-    return () => window.removeEventListener("resize", updateScale);
-  }, []);
-
-  useEffect(() => {
     if (!panelIntent) return;
     if (panelIntent.action === "show") open(panelIntent.panelId);
     else close(panelIntent.panelId);
@@ -62,7 +49,7 @@ export function Dashboard(): ReactElement {
 
   return (
     <main className={dashboardVisible ? "hud-viewport" : "hud-viewport is-dashboard-hidden"}>
-      <div ref={stageRef} className="hud-stage" data-layout-profile={profile}>
+      <div className="hud-stage" data-layout-profile={profile}>
         <Background />
         <Topbar />
         <div className="hud-ring-wrap" aria-hidden="true"><Ring /></div>

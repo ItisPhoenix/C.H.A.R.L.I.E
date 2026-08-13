@@ -1,4 +1,4 @@
-import { useRef, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode } from "react";
+import { useRef, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode } from "react";
 import { ArrowClockwiseIcon, MinusIcon, XIcon } from "@phosphor-icons/react";
 import { useLayoutStore } from "./layoutStore";
 
@@ -59,7 +59,13 @@ export function Panel({ id, title, children }: { id: string; title: string; chil
   return (
     <section
       className={`hud-panel hud-panel-${id}${layout.minimized ? " is-minimized" : ""}`}
-      style={{ left: layout.x, top: layout.y, width: layout.w, height: layout.minimized ? 42 : layout.h, zIndex: layout.z }}
+      style={{
+        "--panel-x": `${layout.x}px`,
+        "--panel-y": `${layout.y}px`,
+        "--panel-width": `${layout.w}px`,
+        "--panel-height": `${layout.minimized ? 42 : layout.h}px`,
+        zIndex: layout.z,
+      } as CSSProperties}
       onPointerDown={() => focus(id)}
     >
       <header className="hud-panel-header" tabIndex={0} aria-label="Panel header" onKeyDown={handleHeaderKeyDown} onDoubleClick={() => resetPosition(id)} onPointerDown={startDrag} onPointerMove={drag} onPointerUp={() => { dragRef.current = null; }}>

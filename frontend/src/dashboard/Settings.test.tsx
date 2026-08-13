@@ -30,6 +30,6 @@ describe("Settings", () => {
     render(<Settings />);
 
     await waitFor(() => expect(screen.getByRole("combobox", { name: "LLM model" })).toBeInTheDocument());
-    expect(screen.getByRole("option", { name: "model-b" })).toBeInTheDocument();
+    expect(document.querySelector('datalist option[value="model-b"]')).toBeInTheDocument();
   });
 });
