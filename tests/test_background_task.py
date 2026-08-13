@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import Mock
 
 import pytest
 
@@ -118,6 +119,45 @@ async def test_lifecycle_alerts_speak_and_emit_start_and_complete(monkeypatch, b
 
 
 @pytest.mark.asyncio
+async def test_failed_task_alert_omits_raw_exception_text(monkeypatch, bg_config):
+    async def failing_chat_stream(self, user_input, **kwargs):
+        if "Break the following task" in user_input:
+            yield "1. Inspect deployment\n"
+            return
+        raise RuntimeError("ConnectionError: api-key=secret")
+        yield ""
+
+    monkeypatch.setattr(Brain, "chat_stream", failing_chat_stream)
+    monkeypatch.setattr(background_task, "_DESKTOP_AVAILABLE", False)
+    bus = FakeEventBus()
+    task = await background_task.start(bg_config, bus, "Check deployment")
+    await asyncio.sleep(0.05)
+
+    assert task.status == "failed"
+    alerts = [payload["message"] for event_type, payload in bus.events if event_type == "alert"]
+    assert all("api-key=secret" not in message for message in alerts)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_running_task_cancels_its_active_brain_generation():
+    release = asyncio.Event()
+    task = background_task.BackgroundTask(id="running-task", text="do the thing")
+    task.brain = Mock()
+
+    async def run():
+        await release.wait()
+
+    background_task._manager.submit(task, run)
+    await asyncio.sleep(0.01)
+
+    assert background_task.cancel(task.id) is True
+    task.brain.cancel_chat.assert_called_once_with()
+
+    release.set()
+    await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
 async def test_completed_task_persists_a_result(monkeypatch, bg_config):
     from charlie.results import ResultsStore
 
@@ -139,6 +179,25 @@ async def test_completed_task_persists_a_result(monkeypatch, bg_config):
     result_stored_events = [payload for etype, payload in bus.events if etype == "result_stored"]
     assert len(result_stored_events) == 1
     assert result_stored_events[0]["task_id"] == task.id
+
+
+@pytest.mark.asyncio
+async def test_completed_task_fires_on_result_stored_callback(monkeypatch, bg_config):
+    monkeypatch.setattr(Brain, "chat_stream", _fake_plan_chat_stream)
+    monkeypatch.setattr(background_task, "_DESKTOP_AVAILABLE", False)
+    bus = FakeEventBus()
+    captured = {}
+
+    def on_result_stored(task_id, summary, attention_level):
+        captured["task_id"] = task_id
+        captured["summary"] = summary
+        captured["attention_level"] = attention_level
+
+    task = await background_task.start(bg_config, bus, "do the thing", on_result_stored=on_result_stored)
+    await asyncio.sleep(0.05)  # let _run_loop finish both fake steps
+
+    assert captured["task_id"] == task.id
+    assert isinstance(captured["attention_level"], int)
 
 
 @pytest.mark.asyncio

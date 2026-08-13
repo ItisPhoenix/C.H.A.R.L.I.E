@@ -1,5 +1,8 @@
 """Region -> screen-rect placement math for HUD surfaces. Pure, no Qt import, unit-testable."""
-from typing import List, Tuple
+import logging
+from typing import Tuple
+
+logger = logging.getLogger("charlie.hud.placement")
 
 Rect = Tuple[int, int, int, int]  # x, y, width, height
 
@@ -40,6 +43,23 @@ def region_to_rect(
     return (sx + sw - w - margin, sy + margin + stack_offset, w, h)
 
 
-def primary_screen_rect(screens: List[Rect]) -> Rect:
-    """Pick which monitor hosts surfaces. ponytail: primary only, add real picking when multi-monitor is tested."""
-    return screens[0]
+def get_primary_screen_rect() -> Rect:
+    """Primary monitor's work area (taskbar excluded) -- must match Qt's
+    QScreen.availableGeometry(), which is what every SurfaceWindow is positioned relative to.
+    GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN) would return the full screen including the
+    taskbar strip, silently clipping bottom-anchored widgets against the smaller real window."""
+    try:
+        import ctypes
+
+        class _RECT(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                        ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+        SPI_GETWORKAREA = 0x0030
+        rect = _RECT()
+        if not ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+            raise OSError("SystemParametersInfoW(SPI_GETWORKAREA) failed")
+        return (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+    except Exception as e:
+        logger.warning("SPI_GETWORKAREA failed, falling back to 1920x1080: %s", e)
+        return (0, 0, 1920, 1080)

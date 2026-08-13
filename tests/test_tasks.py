@@ -60,6 +60,19 @@ async def test_run_fn_sets_terminal_status_on_completion():
 
 
 @pytest.mark.asyncio
+async def test_run_fn_exception_marks_task_failed():
+    mgr = TaskManager(max_parallel=1)
+
+    async def run():
+        raise RuntimeError("planned failure")
+
+    mgr.submit(_entry("a"), run)
+    await asyncio.sleep(0.01)
+
+    assert mgr.get("a").status == "failed"
+
+
+@pytest.mark.asyncio
 async def test_higher_priority_runs_before_lower_when_both_queued():
     mgr = TaskManager(max_parallel=1)
     release = asyncio.Event()

@@ -18,6 +18,7 @@ from charlie import prompt_builder, router, telemetry
 from charlie.autonomy import Requirement
 from charlie.autonomy import evaluate as autonomy_evaluate
 from charlie.budget import IterationBudget
+from charlie.capabilities import build_capability_roster
 from charlie.events import EventMeta, EventSource
 from charlie.security.provenance import trust_level_for_tool
 from charlie.streaming import (
@@ -116,6 +117,7 @@ _TOOL_TIMEOUTS = {
     "browser_read": 20.0,
 }
 _BROWSER_TASK_TIMEOUT_SEC = 100.0  # headroom above browser_task's own internal deadline (up to 90s)
+_NON_VOICE_BROWSER_DEADLINE_MULTIPLIER = 3.6  # preserves the old hardcoded 90s at the 25s config default
 _TOOL_RESULT_MAX_CHARS = 2000
 # Router classifier fallback (0.1): must fit well inside the ~1s time-to-first-audio budget.
 _ROUTER_CLASSIFIER_TIMEOUT_S = 0.6
@@ -742,26 +744,34 @@ def _should_queue_visual_screenshot(user_input: str, config: "Config") -> bool:
 
 
 
+_VISION_SYSTEM_PROMPT = (
+    "You are a vision assistant. Describe exactly what is visible in the image, "
+    "answering the user's question. Be concise and factual -- report only what you can see."
+)
+
+
 def _with_vision_image(messages: List[Dict[str, Any]], image_url: str) -> List[Dict[str, Any]]:
-    """Return a copy of `messages` with the last user message's content turned
-    multimodal, for this one outgoing payload only. Never mutates `messages`
-    or its dicts in place -- history persistence (string-only) stays untouched."""
+    """Build the vision follow-up payload: a minimal purpose-built system message + the last
+    user message with the image attached. Vision only needs to answer the current question from
+    the screenshot -- it doesn't need Charlie's full persona/tool-rules/capability-roster system
+    prompt or the turn's prior tool-call history, and both can be large enough to overflow a
+    small local vision model's context. Never mutates `messages` or its dicts -- history
+    persistence stays untouched."""
     last_user_idx = next(
         (i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"),
         None,
     )
     if last_user_idx is None:
         return messages
-    out = list(messages)
-    original = out[last_user_idx]
-    out[last_user_idx] = {
+    original = messages[last_user_idx]
+    multimodal_user = {
         **original,
         "content": [
             {"type": "text", "text": original.get("content", "")},
             {"type": "image_url", "image_url": {"url": image_url}},
         ],
     }
-    return out
+    return [{"role": "system", "content": _VISION_SYSTEM_PROMPT}, multimodal_user]
 
 
 def _payload_is_vision(payload: Dict[str, Any]) -> bool:
@@ -787,6 +797,7 @@ class Brain:
         on_tool_result: Optional[callable] = None,
         on_thinking_update: Optional[callable] = None,
         on_tool_approval_request: Optional[callable] = None,
+        on_result_stored: Optional[callable] = None,
         register_panic_hotkey: bool = True,
         approval_timeout: Optional[float] = _TOOL_APPROVAL_TIMEOUT_SEC,
         is_background: bool = False,
@@ -800,6 +811,7 @@ class Brain:
         self.on_tool_result = on_tool_result
         self.on_thinking_update = on_thinking_update
         self.on_tool_approval_request = on_tool_approval_request
+        self.on_result_stored = on_result_stored
         self._approval_timeout = approval_timeout
         llm_headers: Dict[str, str] = build_auth_headers(config.llm_key)
         self.client = httpx.AsyncClient(
@@ -850,7 +862,7 @@ class Brain:
         # --- Frozen tiers (cached once at init for prompt cache stability) ---
         soul_text = config.soul or "You are Charlie. Be concise and warm."
         self._stable_tier: str = prompt_builder.build_stable_tier(
-            soul_text, prompt_builder.build_capabilities_block(config), self._use_native_tools
+            soul_text, build_capability_roster(tool_registry, config), self._use_native_tools
         )
 
         # --- Frozen context tier (read once, reloaded only on explicit request) ---
@@ -921,7 +933,7 @@ class Brain:
         the new config instead of what was true at process start."""
         soul_text = self.config.soul or "You are Charlie. Be concise and warm."
         self._stable_tier = prompt_builder.build_stable_tier(
-            soul_text, prompt_builder.build_capabilities_block(self.config), self._use_native_tools
+            soul_text, build_capability_roster(tool_registry, self.config), self._use_native_tools
         )
 
     def add_installed_skill_block(self, name: str, block: str) -> None:
@@ -1078,6 +1090,7 @@ class Brain:
             self.config, recovery._event_bus, text,
             session_store=self.session_store, memory_store=self.memory_store,
             priority=arguments.get("priority", 0), depends_on=arguments.get("depends_on") or [],
+            on_result_stored=self.on_result_stored,
         )
         return f"Background task started (id={task.id}, status={task.status}): {text}"
 
@@ -1145,8 +1158,10 @@ class Brain:
             opened = await loop.run_in_executor(None, open_in_real_browser, last_url)
             return f"Opened {last_url}." if opened else f"Found {last_url} but couldn't open your browser."
 
-        max_steps = self.config.browser_max_steps if platform == "voice" else 8
-        deadline_s = float(self.config.browser_deadline_s if platform == "voice" else 90)
+        max_steps = self.config.browser_max_steps
+        # Non-voice callers have no live listener waiting on the reply, so they get more wall-clock headroom.
+        non_voice_deadline = self.config.browser_deadline_s * _NON_VOICE_BROWSER_DEADLINE_MULTIPLIER
+        deadline_s = float(self.config.browser_deadline_s if platform == "voice" else non_voice_deadline)
         generation = self._chat_generation
 
         async def _complete(prompt: str) -> str:
@@ -1157,6 +1172,7 @@ class Brain:
         async def _approve_click(name: str, url: str) -> bool:
             return await self.request_tool_approval(
                 "browser_task", {"action": f'click "{name}"', "url": url}, f'click "{name}" on {url}',
+                platform=platform,
             )
 
         def _on_progress() -> None:
@@ -1226,7 +1242,14 @@ class Brain:
             logger.warning("Failed to broadcast extension_proposed event", exc_info=True)
         return f"Drafted a new tool called '{name}' and sent it for your review on the dashboard."
 
-    async def request_tool_approval(self, tool_name: str, arguments: Dict[str, Any], reason: str) -> bool:
+    async def request_tool_approval(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        reason: str,
+        platform: str = "voice",
+        risk_class: Optional[str] = None
+    ) -> bool:
         """Ask the user to approve/decline a gated tool call and wait for the
         answer. Web dashboard is primary: broadcasts a "tool_approval_request"
         event and waits for a "tool_approve"/"tool_reject" WS command. If no
@@ -1251,9 +1274,9 @@ class Brain:
         fut: "asyncio.Future[bool]" = loop.create_future()
         pending_tool_approvals[request_id] = fut
 
-        # Telegram is additional, not a replacement -- fires alongside whichever of web/voice below is primary.
+        # Fires for every platform -- also drives the HUD modal, not just Telegram; callback checks `platform` itself.
         if self.on_tool_approval_request:
-            self.on_tool_approval_request(request_id, tool_name, reason)
+            self.on_tool_approval_request(request_id, tool_name, reason, platform, risk_class)
 
         try:
             if recovery.get_active_ws_count() > 0 and recovery._event_bus:
@@ -1264,6 +1287,7 @@ class Brain:
                         "tool_name": tool_name,
                         "arguments": arguments,
                         "reason": reason,
+                        "risk_class": risk_class,
                         "session_id": None if self._is_background else recovery.get_active_session_id(),
                     },
                     meta=EventMeta(source=EventSource.BRAIN, rationale=reason),
@@ -1338,6 +1362,9 @@ class Brain:
             image_url, self._pending_vision_image_url = self._pending_vision_image_url, None
             if image_url:
                 payload["messages"] = _with_vision_image(messages, image_url)
+                # Vision is a one-shot describer -- strip tools so it can't emit a broken tool call.
+                payload.pop("tools", None)
+                payload.pop("tool_choice", None)
         return payload
 
     def _select_followup_route(
@@ -1837,7 +1864,7 @@ class Brain:
 
             # Approve/decline gate only -- BLOCK-tier stays enforced inside shell_execute() itself.
             gate_reason: Optional[str] = None
-            requirement, requirement_reason = autonomy_evaluate(
+            requirement, risk_class, requirement_reason = autonomy_evaluate(
                 tool_name, call["arguments"], recent_external_texts=_turn_external_texts
             )
             if requirement == Requirement.APPROVE:
@@ -1845,7 +1872,9 @@ class Brain:
 
             approved = True
             if gate_reason:
-                approved = await self.request_tool_approval(tool_name, call["arguments"], gate_reason)
+                approved = await self.request_tool_approval(
+                    tool_name, call["arguments"], gate_reason, platform=platform, risk_class=risk_class
+                )
 
             if gate_reason and not approved:
                 r = f"Error: Command declined by user (required approval: {gate_reason})."
@@ -1970,20 +1999,19 @@ class Brain:
             if not tool_calls:
                 break
 
-            # Enforce iteration budget
-            allowed_calls = []
-            for call in tool_calls:
-                if budget.try_spend(call["name"]):
-                    allowed_calls.append(call)
-                else:
-                    yield "I've reached my tool limit for this turn. Let me know if you want me to continue."
-                    return
+            # Enforce iteration budget -- spend what fits, drop only the calls that don't, never abort the whole batch.
+            allowed_calls = [call for call in tool_calls if budget.try_spend(call["name"])]
+            if not allowed_calls:
+                yield "I've reached my tool limit for this turn. Let me know if you want me to continue."
+                return
 
             tool_calls = allowed_calls
             results_map: Dict[int, str] = {}
-            for idx, call in enumerate(tool_calls):
-                if not tool_registry.is_interactive(call["name"]):
-                    results_map[idx] = await _exec_one(call)
+            read_only_idxs = [i for i, call in enumerate(tool_calls) if not tool_registry.is_interactive(call["name"])]
+            if read_only_idxs:
+                gathered = await asyncio.gather(*(_exec_one(tool_calls[i]) for i in read_only_idxs))
+                for i, r in zip(read_only_idxs, gathered):
+                    results_map[i] = r
 
             # Interactive tools run sequentially after read-only tools complete.
             for idx, call in enumerate(tool_calls):
@@ -2044,9 +2072,15 @@ class Brain:
                 ):
                     yield filtered
             except Exception as tool_exc:
+                error_text = str(tool_exc) or repr(tool_exc)
                 logger.warning(
-                    "%s follow-up LLM error: %s", "Vision" if is_vision else "Tool", tool_exc
+                    "%s follow-up LLM error: %s", "Vision" if is_vision else "Tool", error_text
                 )
+                if not state.accumulated:
+                    yield (
+                        "I ran into a problem getting a response back just now "
+                        "(the follow-up model call failed) -- try asking again."
+                    )
                 break
 
             if state.cancelled:
@@ -2385,7 +2419,7 @@ def _format_text_tool_summary(
     lines.append(
         "\nIMPORTANT: The tools above have been executed. "
         "Do NOT mention to the user that you ran tools or what tools were executed. "
-        "Directly provide the final answer and results based on the tool return values. "
-        "Do NOT call any more tools."
+        "If these results are enough, give the final answer now. "
+        "If the task genuinely needs another tool call to make real progress, make it."
     )
     return "\n".join(lines)

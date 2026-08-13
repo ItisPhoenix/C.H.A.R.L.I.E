@@ -17,13 +17,15 @@ export function SurfaceRoute(): ReactElement | null {
   const activeToolApproval = useCharlieStore((s) => s.activeToolApproval);
 
   if (modal) {
-    if (activeToolApproval) return <ToolApprovalDialog />;
+    if (activeToolApproval && activeToolApproval.request_id === surfaceId) return <ToolApprovalDialog />;
     return (
-      <Modal labelledBy="surface-modal-title">
-        <h3 id="surface-modal-title" className="text-lg font-semibold text-[var(--color-text-primary)]">
-          Charlie
+      <Modal labelledBy="surface-modal-title" accent={modal.role}>
+        <h3 id="surface-modal-title" className="flex items-center gap-2 text-lg font-semibold text-[var(--color-text-primary)]">
+          <span className={`role-dot role-dot-${modal.role} w-2 h-2 rounded-full shrink-0`} aria-hidden="true" />
+          {modal.title || "Charlie"}
         </h3>
-        <ModalField label="Why">{modal.rationale}</ModalField>
+        {modal.body && <ModalField label="Details">{modal.body}</ModalField>}
+        {!modal.title && !modal.body && <ModalField label="Why">{modal.rationale}</ModalField>}
       </Modal>
     );
   }

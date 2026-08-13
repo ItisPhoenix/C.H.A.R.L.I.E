@@ -82,10 +82,11 @@ def _parse_action(raw: str) -> Optional[_Action]:
     return None
 
 
-def _build_prompt(task: str, observation: str, step: int, max_steps: int) -> str:
+def _build_prompt(task: str, observation: str) -> str:
+    # No step-count framing -- telling the model its budget is running low tends to make it quit the task early.
     return (
         f"You are controlling a headless browser to complete this task: {task}\n\n"
-        f"Step {step + 1} of {max_steps}. Current page:\n{observation}\n\n"
+        f"Current page:\n{observation}\n\n"
         f"{_ACTION_GRAMMAR}\n"
         "Pick DONE as soon as the task is satisfied or the answer is visible in TEXT."
     )
@@ -185,7 +186,7 @@ async def run_task(
             observation = await _augment_with_vision(loop, observation, marks, describe_image)
 
         try:
-            raw = await complete(_build_prompt(task, observation, step, max_steps))
+            raw = await complete(_build_prompt(task, observation))
         except Exception:
             logger.warning("Tier 3 LLM step failed on step %d", step, exc_info=True)
             break

@@ -46,6 +46,7 @@ def test_registry_registration_and_schema():
         "vector_memory",
         "session_search",
         "recall_results",
+        "capabilities",
         "graph_add_fact",
         "graph_query",
         "graph_consolidate",
@@ -69,6 +70,14 @@ def test_registry_registration_and_schema():
     assert any(
         d["function"]["parameters"]["required"] == ["query"] for d in definitions
     )
+
+
+def test_list_metadata_covers_every_registered_tool():
+    metadata = registry.list_metadata()
+    assert {m["name"] for m in metadata} == set(registry.get_tool_names())
+    web_search_meta = next(m for m in metadata if m["name"] == "web_search")
+    assert web_search_meta["description"]
+    assert "owner" in web_search_meta and "risk_class" in web_search_meta
 
 
 def test_get_tool_param_names_covers_every_registered_tool():
@@ -197,6 +206,7 @@ def test_shell_execute_timeout_does_not_report_error(monkeypatch):
         def kill(self):
             pass
 
+    monkeypatch.setattr(tools_module, "is_process_running", lambda name: False)
     monkeypatch.setattr(
         tools_module.subprocess, "Popen", lambda *a, **k: FakeProcess()
     )
@@ -232,6 +242,7 @@ def test_shell_execute_recovery_communicate_is_bounded(monkeypatch):
         def kill(self):
             pass
 
+    monkeypatch.setattr(tools_module, "is_process_running", lambda name: False)
     monkeypatch.setattr(
         tools_module.subprocess, "Popen", lambda *a, **k: FakeProcess()
     )
@@ -639,6 +650,23 @@ def test_unregister_tool_removes_it():
 def test_unregister_tool_missing_returns_false():
     local_registry = ToolRegistry()
     assert local_registry.unregister_tool("never-existed") is False
+
+
+def test_execute_tool_drops_hallucinated_kwargs_not_in_signature():
+    # A model-supplied argument outside the schema must be dropped, not crash -- real live bug on web_search.
+    local_registry = ToolRegistry()
+    local_registry.register_tool(name="temp", description="d", schema={"type": "object", "properties": {}})(
+        lambda query: f"got: {query}"
+    )
+    assert local_registry.execute_tool("temp", {"query": "hi", "voice_mode": True}) == "got: hi"
+
+
+def test_execute_tool_keeps_kwargs_for_var_keyword_functions():
+    local_registry = ToolRegistry()
+    local_registry.register_tool(name="temp", description="d", schema={"type": "object", "properties": {}})(
+        lambda **kwargs: str(sorted(kwargs.items()))
+    )
+    assert local_registry.execute_tool("temp", {"a": 1, "b": 2}) == "[('a', 1), ('b', 2)]"
 
 
 def test_register_tool_owner_and_risk_class_are_queryable():

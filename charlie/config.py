@@ -151,7 +151,7 @@ class Config:
 
     # Iteration Budget & Context Compression
     iteration_budget_max: int = field(
-        default=int(os.getenv("ITERATION_BUDGET_MAX", "12")),
+        default=int(os.getenv("ITERATION_BUDGET_MAX", "20")),
         metadata=_meta("ITERATION_BUDGET_MAX", "Chat Behavior"),
     )
     context_window: int = field(
@@ -319,7 +319,7 @@ class Config:
     )
     # Surface Engine cap: a surface beyond this evicts the lowest-priority-oldest of its class.
     surface_widget_cap: int = field(
-        default=int(os.getenv("SURFACE_WIDGET_CAP", "3")),
+        default=int(os.getenv("SURFACE_WIDGET_CAP", "5")),
         metadata=_meta("SURFACE_WIDGET_CAP", "Surfaces"),
     )
     surface_workspace_cap: int = field(
@@ -350,7 +350,7 @@ class Config:
     )
     # Step cap and wall-clock deadline both apply; whichever trips first ends the task.
     browser_max_steps: int = field(
-        default=int(os.getenv("BROWSER_MAX_STEPS", "3")),
+        default=int(os.getenv("BROWSER_MAX_STEPS", "12")),
         metadata=_meta("BROWSER_MAX_STEPS", "Browser", restart="reload"),
     )
     browser_deadline_s: int = field(
@@ -435,6 +435,11 @@ class Config:
     pet_position_path: str = field(
         default=os.getenv("PET_POSITION_PATH", "pet_position.json"),
         metadata=_meta("PET_POSITION_PATH", "Companion", restart="process"),
+    )
+    # Startup default only -- the live value is set via the pet's right-click Resize mode and persisted per-session.
+    pet_scale: float = field(
+        default=float(os.getenv("PET_SCALE", "1.0")),
+        metadata=_meta("PET_SCALE", "Companion", restart="process"),
     )
 
     charlie_host: str = field(

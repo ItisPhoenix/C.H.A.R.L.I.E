@@ -47,6 +47,19 @@ _RISK_TO_REQUIREMENT: Dict[RiskClass, Requirement] = {
     RiskClass.SECURITY_SENSITIVE: Requirement.APPROVE,
 }
 
+_DESKTOP_EFFECTOR_TOOLS = frozenset({
+    "desktop_click",
+    "desktop_type",
+    "desktop_invoke",
+    "desktop_key",
+    "desktop_click_at",
+    "desktop_drag",
+    "desktop_scroll",
+    "desktop_window",
+    "desktop_move_window",
+    "system_control",
+})
+
 
 def classify_action(
     tool_name: str,
@@ -68,9 +81,10 @@ def classify_action(
         gated = is_shell_command_gated(command)
         if gated:
             return RiskClass.DESTRUCTIVE, gated
+        return RiskClass.SECURITY_SENSITIVE, "arbitrary shell commands require explicit approval"
 
-    if tool_name == "desktop_window" and arguments.get("action") == "close":
-        return RiskClass.REVERSIBLE, "closing a window can lose unsaved work"
+    if tool_name in _DESKTOP_EFFECTOR_TOOLS:
+        return RiskClass.SECURITY_SENSITIVE, "desktop control actions require explicit approval"
 
     policy_result = security_policy.check_tool_call(tool_name, arguments, recent_external_texts)
     if policy_result.needs_approval:
@@ -79,7 +93,7 @@ def classify_action(
     default_risk = _tool_registry.get_risk_class(tool_name)
     if default_risk is not None:
         return RiskClass(default_risk), ""
-    return RiskClass.SAFE, ""
+    return RiskClass.SECURITY_SENSITIVE, "tool has no registered risk metadata"
 
 
 def evaluate(
@@ -88,12 +102,12 @@ def evaluate(
     ctx: Optional[Any] = None,
     prefs: Optional[Dict[str, Any]] = None,
     recent_external_texts: Optional[List[str]] = None,
-) -> Tuple[Requirement, str]:
-    """Risk x action x preferences x context -> (Requirement, reason).
+) -> Tuple[Requirement, RiskClass, str]:
+    """Risk x action x preferences x context -> (Requirement, RiskClass, reason).
 
     ctx/prefs are accepted for interface compatibility with the plan's
     signature but unused so far -- no existing rule branches on either.
     Wire in real context/preference logic only once a rule needs it.
     """
     risk, reason = classify_action(tool_name, arguments, recent_external_texts)
-    return _RISK_TO_REQUIREMENT[risk], reason
+    return _RISK_TO_REQUIREMENT[risk], risk, reason

@@ -5,7 +5,7 @@ import { Frame } from "./Frame";
 export function Notification({ spec }: { spec: SurfaceSpec }): ReactElement {
   return (
     <Frame spec={spec}>
-      <span className="text-sm font-medium text-[var(--color-accent)]">Notification</span>
+      {spec.body && <div className="text-xs text-[var(--color-text-secondary)] whitespace-pre-wrap flex-1 overflow-y-auto">{spec.body}</div>}
     </Frame>
   );
 }

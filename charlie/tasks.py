@@ -9,10 +9,13 @@ manager defaults it to "done" on a clean return.
 """
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Set
 
 ManagedTaskStatus = Literal["queued", "running", "done", "failed", "cancelled"]
+
+logger = logging.getLogger("charlie.tasks")
 
 
 @dataclass
@@ -97,6 +100,14 @@ class TaskManager:
     async def _run(self, task: ManagedTask) -> None:
         try:
             await self._run_fns[task.id]()
+        except asyncio.CancelledError:
+            if task.status == "running":
+                self._set_status(task, "cancelled")
+            raise
+        except Exception:
+            logger.error("Task %s failed", task.id, exc_info=True)
+            if task.status == "running":
+                self._set_status(task, "failed")
         finally:
             self._running_ids.discard(task.id)
             if task.status == "running":

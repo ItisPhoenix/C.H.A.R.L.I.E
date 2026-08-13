@@ -20,6 +20,11 @@ def is_authorized(user_id: Optional[int], allowed_user_id: int) -> bool:
     return user_id is not None and user_id == allowed_user_id
 
 
+def should_relay_approval(bot_available: bool, allowed_user_id: int) -> bool:
+    """Telegram approval is additive for every action origin when the owner channel is live."""
+    return bot_available and allowed_user_id > 0
+
+
 def parse_callback_data(data: str) -> Optional[Tuple[str, bool]]:
     action, _, request_id = data.partition(":")
     if not request_id or action not in ("approve", "decline"):

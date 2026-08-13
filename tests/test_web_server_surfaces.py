@@ -4,6 +4,12 @@ already fired must still find its spec -- see charlie.web_server._apply_surface_
 import charlie.web_server as web_server
 
 
+def test_non_loopback_host_is_rejected_without_authentication():
+    assert web_server.validate_bind_host("127.0.0.1") is None
+    assert web_server.validate_bind_host("::1") is None
+    assert "loopback" in web_server.validate_bind_host("192.168.1.10").lower()
+
+
 def test_spawn_then_replay_then_dismiss():
     cache: dict = {}
     spawn = {"type": "surface_spawn", "payload": {"surface_id": "s1", "presentation": "widget"}}

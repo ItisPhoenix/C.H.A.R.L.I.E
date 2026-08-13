@@ -127,3 +127,26 @@ async def test_non_session_event_is_broadcast_to_all():
         web_server.active_connections.discard(client_b)
         web_server.ws_sessions.pop(client_a, None)
         web_server.ws_sessions.pop(client_b, None)
+
+
+@pytest.mark.asyncio
+async def test_broadcast_survives_connection_set_mutated_mid_iteration():
+    """Regression: a real connect/disconnect racing broadcast() while it iterated the live
+    active_connections set directly raised 'Set changed size during iteration' in production."""
+    from charlie import web_server
+
+    class _MutatingWebSocket(_FakeWebSocket):
+        async def send_text(self, message: str) -> None:
+            web_server.active_connections.add(_FakeWebSocket(None))
+            await super().send_text(message)
+
+    client = _MutatingWebSocket(None)
+    web_server.active_connections.add(client)
+    web_server.ws_sessions[client] = None
+
+    try:
+        await web_server.broadcast({"type": "thinking", "payload": {}})
+        assert any(m["type"] == "thinking" for m in client.sent)
+    finally:
+        web_server.active_connections.clear()
+        web_server.ws_sessions.clear()

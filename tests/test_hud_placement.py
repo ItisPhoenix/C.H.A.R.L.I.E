@@ -48,8 +48,3 @@ def test_scale_grows_surface_size():
 
 def test_unknown_mode_falls_back_to_widget_size():
     assert placement.surface_size("mystery") == placement.surface_size("widget")
-
-
-def test_primary_screen_rect_picks_first_screen():
-    screens = [(0, 0, 1920, 1080), (1920, 0, 1920, 1080)]
-    assert placement.primary_screen_rect(screens) == (0, 0, 1920, 1080)

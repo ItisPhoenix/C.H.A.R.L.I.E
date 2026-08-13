@@ -37,6 +37,7 @@ class EventType(StrEnum):
     # Session / system
     SESSION_UPDATED = "session_updated"
     SYSTEM_STATUS = "system_status"
+    SUBSYSTEM_HEALTH = "subsystem_health"
     ALERT = "alert"
     LOG = "log"
 
@@ -46,6 +47,7 @@ class EventType(StrEnum):
     EXTENSION_PROPOSED = "extension_proposed"
     EXTENSION_PENDING = "extension_pending"
     BACKGROUND_TASK = "background_task"
+    TASK_SNAPSHOT = "task_snapshot"
 
     # Adaptive Agentic OS additions
     CHARLIE_STATE = "charlie_state"
@@ -58,7 +60,6 @@ class EventType(StrEnum):
     MCP_STATUS_CHANGED = "mcp_status_changed"
     MEMORY_UPDATED = "memory_updated"
     VISION_OBSERVED = "vision_observed"
-    CONVERSATION_SUMMON = "conversation_summon"
 
 
 class EventSource(StrEnum):

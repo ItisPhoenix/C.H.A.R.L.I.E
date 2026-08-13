@@ -12,13 +12,14 @@ _configure_platform()  # noqa: E402
 import asyncio  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
 
+import ipaddress
 import json
 import logging
 import os
 import time
 import uuid
 from pathlib import Path
-from typing import List, Set
+from typing import List, Optional, Set
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,6 +48,19 @@ from charlie.plugins import PluginManager
 
 mcp_client = None
 plugin_manager = PluginManager()
+
+
+def validate_bind_host(host: str) -> Optional[str]:
+    """Return an error when the unauthenticated server would leave loopback."""
+    normalized = host.strip().lower()
+    if normalized == "localhost":
+        return None
+    try:
+        if ipaddress.ip_address(normalized).is_loopback:
+            return None
+    except ValueError:
+        pass
+    return "Charlie has no remote authentication; CHARLIE_HOST must be a loopback address"
 
 
 def _ensure_mcp_client():
@@ -262,9 +276,11 @@ if _FRONTEND_DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="surface-assets")
 
 
+@app.get("/")
+@app.get("/dashboard")
 @app.get("/surface/{surface_id}")
-async def serve_surface(surface_id: str) -> FileResponse:
-    """Single-page app entry for a QWebEngineView surface window; surface_id is read client-side via the router."""
+async def serve_surface(surface_id: Optional[str] = None) -> FileResponse:
+    """Single-page app entry -- the Dashboard is a plain web page, no Qt window involved."""
     index_path = _FRONTEND_DIST / "index.html"
     if not index_path.is_file():
         raise HTTPException(status_code=404, detail="frontend not built -- run `npm run build` in frontend/")
@@ -283,7 +299,7 @@ async def broadcast(data: dict):
     event_session = data.get("session_id") or (data.get("payload") or {}).get("session_id")
     scoped = etype in _SESSION_SCOPED_EVENTS and event_session is not None
     disconnected: list[WebSocket] = []
-    for ws in active_connections:
+    for ws in list(active_connections):
         if scoped and ws_sessions.get(ws) != event_session:
             continue
         try:
@@ -309,9 +325,17 @@ async def _event_bridge():
             pipeline_state = event.get("payload", {}).get("state", pipeline_state)
 
         # Keep web server cached state in sync
-        if etype == "system_status":
+        if etype == "charlie_state":
+            global _charlie_state
+            _charlie_state = event.get("payload", {})
+        elif etype == "background_task":
+            _apply_background_task_event(_background_tasks, event)
+        elif etype == "system_status":
             global _system_status
             _system_status = event.get("payload", {})
+        elif etype == "subsystem_health":
+            global _subsystem_health
+            _subsystem_health = event.get("payload", {})
         elif etype == "audio_state":
             global _audio_state
             _audio_state = event.get("payload", {})
@@ -366,13 +390,8 @@ async def websocket_endpoint(ws: WebSocket):
 
     # Send initial cached state immediately to prevent empty UI states on connection
     try:
-        await ws.send_text(json.dumps({"type": "system_status", "payload": _system_status}))
-        await ws.send_text(json.dumps({"type": "audio_state", "payload": _audio_state}))
-        await ws.send_text(json.dumps({"type": "mic_state", "payload": _mic_state}))
-        for surface_event in _active_surfaces.values():
-            await ws.send_text(json.dumps(surface_event))
-        for approval_event in _pending_approvals.values():
-            await ws.send_text(json.dumps(approval_event))
+        for event in _initial_state_events():
+            await ws.send_text(json.dumps(event))
     except Exception as e:
         logger.warning("Failed to send initial cached state to WebSocket: %s", e)
 
@@ -444,6 +463,7 @@ async def health():
         "log_file_size_bytes": log_stat.st_size if log_stat else 0,
         "log_file_age_seconds": (time.time() - log_stat.st_mtime) if log_stat else None,
         "uptime_seconds": int(time.time() - _START_TIME),
+        "subsystems": _subsystem_health,
     }
 
 
@@ -463,7 +483,13 @@ async def background_task_status():
     from charlie import background_task
 
     task = background_task.get_current_task()
-    return {"task": task.to_event() if task is not None else None}
+    return {"task": task.to_public_event() if task is not None else None}
+
+
+@app.get("/api/tasks")
+async def list_tasks():
+    """Replayable public task snapshot from the runtime event bridge."""
+    return {"tasks": list(_background_tasks.values())}
 
 
 @app.get("/api/sessions")
@@ -572,11 +598,10 @@ async def session_chat(session_id: str, data: dict):
         )
     return {"status": "ok"}
 # ---------------------------------------------------------------------------
-_system_status: dict = {
-    "cpu": 0.0,
-    "ram": 0.0,
-    "gpu": 0.0,
-}
+_system_status: dict = {}
+_subsystem_health: dict = {}
+_charlie_state: dict = {"state": "idle", "activities": []}
+_background_tasks: dict = {}
 _active_frontend_session: str | None = None
 _audio_state: dict = {
     "muted": False,
@@ -589,6 +614,21 @@ _mic_state: dict = {
 _active_surfaces: dict = {}
 # request_id -> tool_approval_request event, replayed like _active_surfaces so a late-connecting window's store gets it
 _pending_approvals: dict = {}
+
+
+def _initial_state_events() -> List[dict]:
+    """Return cached events needed by a newly connected client."""
+    events = [
+        {"type": "charlie_state", "payload": _charlie_state},
+        {"type": "system_status", "payload": _system_status},
+        {"type": "subsystem_health", "payload": _subsystem_health},
+        {"type": "task_snapshot", "payload": {"tasks": list(_background_tasks.values())}},
+        {"type": "audio_state", "payload": _audio_state},
+        {"type": "mic_state", "payload": _mic_state},
+    ]
+    events.extend(_active_surfaces.values())
+    events.extend(_pending_approvals.values())
+    return events
 
 
 async def _expire_surface(surface_id: str, spawned_as: dict, ttl_seconds: float) -> None:
@@ -607,6 +647,20 @@ def _apply_approval_event(cache: dict, event: dict) -> None:
         cache[rid] = event
     else:
         cache.pop(rid, None)
+
+
+def _apply_background_task_event(cache: dict, event: dict) -> None:
+    """Cache the latest safe event for each background task."""
+    payload = event.get("payload", {})
+    task_id = payload.get("id")
+    if task_id:
+        cache[task_id] = {
+            "id": str(task_id),
+            "title": str(payload.get("title", "")),
+            "status": str(payload.get("status", "")),
+            "current_step": int(payload.get("current_step", 0)),
+            "total_steps": int(payload.get("total_steps", 0)),
+        }
 
 
 def _apply_surface_event(cache: dict, event: dict) -> None:
@@ -665,12 +719,35 @@ async def get_mcp_tools():
         await _ensure_mcp_client_async()
         defs = [
             d for d in registry.get_tool_definitions()
-            if d.get("name", "").startswith("mcp_")
+            if d.get("function", {}).get("name", "").startswith("mcp_")
         ]
         return {"tools": defs}
     except Exception as e:
         logger.error(f"Error fetching tools: {e}")
     return {"tools": []}
+
+
+@app.get("/api/tools")
+async def get_tools():
+    """Full tool roster (built-in + MCP + plugin + extension) for the Tools-grid HUD widget."""
+    try:
+        from charlie.tools import registry
+        return {"tools": registry.list_metadata()}
+    except Exception as e:
+        logger.error(f"Error fetching tool roster: {e}", exc_info=True)
+        return {"tools": []}
+
+
+@app.get("/api/mcp/status")
+async def get_mcp_status():
+    """Per-server MCP connection status for the Connections HUD widget."""
+    if not config.mcp_enabled or mcp_client is None:
+        return {"servers": {}}
+    try:
+        return {"servers": mcp_client.health_check()}
+    except Exception as e:
+        logger.error(f"Error fetching MCP status: {e}", exc_info=True)
+        return {"servers": {}}
 
 
 @app.get("/api/extensions")
@@ -1100,47 +1177,20 @@ async def get_local_models():
 
 @app.get("/api/services/status")
 async def get_services_status():
-    """Return status of real Charlie system processes and services."""
-    return {
-        "services": [
+    """Return the current runtime health snapshot without inventing services."""
+    services = []
+    for name, raw in sorted(_subsystem_health.items()):
+        if not isinstance(raw, dict):
+            continue
+        services.append(
             {
-                "name": "Voice Pipeline Engine",
-                "status": "online",
-                "details": "sounddevice mic capture + Kokoro TTS synthesis",
-                "type": "audio",
-            },
-            {
-                "name": "Whisper ASR Worker",
-                "status": "online",
-                "details": "distil-large-v3 CUDA subprocess",
-                "type": "speech_to_text",
-            },
-            {
-                "name": "FastAPI Web Server",
-                "status": "online",
-                "details": f"Uvicorn PID {os.getpid()} on port {config.charlie_port}",
-                "type": "http_api",
-            },
-            {
-                "name": "ZeroMQ EventBus Bridge",
-                "status": "online",
-                "details": f"PUB/SUB IPC ports {DEFAULT_EVENT_PORT}/{DEFAULT_COMMAND_PORT}",
-                "type": "ipc",
-            },
-            {
-                "name": "SQLite SessionStore",
-                "status": "online",
-                "details": "FTS5 isolated session history database",
-                "type": "database",
-            },
-            {
-                "name": "ChromaDB MemoryStore",
-                "status": "online",
-                "details": "Vector memory embedding store",
-                "type": "vector_db",
-            },
-        ]
-    }
+                "name": name,
+                "status": str(raw.get("status", "unknown")),
+                "details": str(raw.get("detail", "Unknown")),
+                "type": "subsystem",
+            }
+        )
+    return {"services": services}
 
 
 def start_server(
@@ -1151,11 +1201,9 @@ def start_server(
     import uvicorn
 
     host = config.charlie_host
-    if host == "0.0.0.0":
-        logger.warning(
-            "Binding to 0.0.0.0 exposes Charlie to the local network. "
-            "Use a reverse proxy with TLS for remote access."
-        )
+    bind_error = validate_bind_host(host)
+    if bind_error:
+        raise RuntimeError(bind_error)
     logger.info("Starting web server on %s:%s", host, config.charlie_port)
     server_config = uvicorn.Config(
         app,

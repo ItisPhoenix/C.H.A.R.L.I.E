@@ -6,6 +6,7 @@ No business logic -- just tool I/O.
 
 import asyncio
 import base64
+import inspect
 import logging
 import os
 import re
@@ -180,6 +181,18 @@ class ToolRegistry:
     def get_owner(self, name: str) -> str:
         return self._tools.get(name, {}).get("owner", "")
 
+    def list_metadata(self) -> List[Dict[str, Any]]:
+        """name/description/owner/risk_class for every registered tool -- what a Tools-grid UI needs."""
+        return [
+            {
+                "name": name,
+                "description": info["description"],
+                "owner": info["owner"],
+                "risk_class": info["risk_class"],
+            }
+            for name, info in self._tools.items()
+        ]
+
     def get_risk_class(self, name: str) -> Optional[str]:
         return self._tools.get(name, {}).get("risk_class")
 
@@ -242,6 +255,9 @@ class ToolRegistry:
 
         func = self._tools[name]["func"]
         try:
+            params = inspect.signature(func).parameters
+            if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                arguments = {k: v for k, v in arguments.items() if k in params}
             logger.info("Executing tool '%s' with arguments: %s", name, arguments)
             result = func(**arguments)
             return str(result)
@@ -1356,6 +1372,18 @@ def recall_results(limit: int = 5) -> str:
     return "\n".join(lines)
 
 
+@registry.register_tool(
+    name="capabilities",
+    description=(
+        "List what you can actually do right now, derived live from your registered tools. "
+        "Use this when asked 'what can you do' instead of guessing from memory of your prompt."
+    ),
+    schema={"type": "object", "properties": {}, "required": []},
+)
+def capabilities() -> str:
+    from charlie.capabilities import build_capability_roster
+    return build_capability_roster(registry, config)
+
 
 # ---------------------------------------------------------------------------
 # Knowledge graph tools
@@ -1512,6 +1540,8 @@ def enable_plugin(reg: "ToolRegistry", manager: Any, plugin: Any) -> List[str]:
             name=f"plugin_{action}",
             description=description,
             schema=tool_def["parameters"],
+            owner="plugins",
+            risk_class="security_sensitive",
         )(_make_plugin_runner(manager, action))
         registered.append(f"plugin_{action}")
     return registered
@@ -1768,7 +1798,7 @@ def desktop_observe() -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
     from charlie.desktop.uia import serialize_marks, snapshot_tree
-    elements = _grounding_marks(_ocr_fallback_marks(snapshot_tree(max_depth=8)))
+    elements = _grounding_marks(_ocr_fallback_marks(snapshot_tree()))
     _capture_and_emit_frame(elements)
     if not elements:
         return "No UI elements found in the foreground window."
@@ -2001,7 +2031,7 @@ def desktop_screenshot() -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
     from charlie.desktop.uia import serialize_marks, snapshot_tree
-    elements = _grounding_marks(_ocr_fallback_marks(snapshot_tree(max_depth=8)))
+    elements = _grounding_marks(_ocr_fallback_marks(snapshot_tree()))
     text_result = serialize_marks(elements) if elements else "No UI elements found in the foreground window."
     if not config.vision_enabled:
         _capture_and_emit_frame(elements)

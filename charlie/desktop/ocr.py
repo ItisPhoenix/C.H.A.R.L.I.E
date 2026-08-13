@@ -59,8 +59,31 @@ def capture(
             bottom = grab_target["top"] + grab_target["height"]
             bounds = (grab_target["left"], grab_target["top"], right, bottom)
         set_last_capture_bounds(bounds)
-        shot = sct.grab(grab_target)
-        img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        try:
+            shot = sct.grab(grab_target)
+            img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        except (mss.exception.ScreenShotError, PermissionError) as e:
+            logger.warning("mss capture failed, attempting dxcam fallback: %s", e)
+            img = None
+            try:
+                import dxcam
+                # Use primary monitor for fallback
+                camera = dxcam.create(output_color="RGB")
+                frame = camera.grab()
+                if frame is not None:
+                    img = Image.fromarray(frame)
+                    if region is not None:
+                        img = img.crop((region[0], region[1], region[2], region[3]))
+                del camera
+            except Exception as fallback_e:
+                logger.warning("dxcam fallback also failed: %s", fallback_e, exc_info=True)
+
+            if img is None:
+                raise RuntimeError(
+                    "Screen capture failed: both mss and the dxcam fallback were unable to grab a frame "
+                    "(likely an exclusive-fullscreen app or a capture permission issue)."
+                ) from e
+
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()

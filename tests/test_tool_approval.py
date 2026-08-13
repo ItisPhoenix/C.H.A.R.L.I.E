@@ -44,6 +44,35 @@ def test_resolve_tool_approval_unknown_id_returns_false():
 
 
 @pytest.mark.asyncio
+async def test_on_tool_approval_request_fires_for_every_platform_not_just_telegram(brain_config):
+    """Regression: on_tool_approval_request also drives the HUD approval modal (main.py), not just the
+    Telegram relay -- it must fire for voice/web turns too, not be gated to platform == "telegram"."""
+    calls = []
+    brain = Brain(
+        brain_config,
+        on_thought_callback=lambda text: None,
+        on_tool_approval_request=lambda *args: calls.append(args),
+    )
+
+    async def decline_shortly():
+        await asyncio.sleep(0.05)
+        request_id = get_active_voice_approval()
+        resolve_tool_approval(request_id, False)
+
+    decline_task = asyncio.create_task(decline_shortly())
+    await brain.request_tool_approval(
+        "shell_execute", {"command": "x"}, "reason", platform="voice", risk_class="destructive"
+    )
+    await decline_task
+
+    assert len(calls) == 1
+    request_id, tool_name, reason, platform, risk_class = calls[0]
+    assert platform == "voice"
+    assert risk_class == "destructive"
+    assert tool_name == "shell_execute"
+
+
+@pytest.mark.asyncio
 async def test_request_tool_approval_declines_safely_with_no_channel(brain_config):
     """No web dashboard and no on_thought_callback (voice) wired -- there's
     no way to ask, so the gated call must fail safe (declined), not hang or

@@ -3,7 +3,7 @@ from typing import Optional, Tuple
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from charlie.hud.webview import build_webview
 
@@ -22,7 +22,9 @@ class SurfaceWindow(QWidget):
     the corners is future work if it's ever needed.
     """
 
-    def __init__(self, url: str, rect: Tuple[int, int, int, int], draggable: bool = True) -> None:
+    def __init__(
+        self, url: str, rect: Tuple[int, int, int, int], draggable: bool = True, click_through: bool = False
+    ) -> None:
         super().__init__()
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -30,6 +32,8 @@ class SurfaceWindow(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        if click_through:
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._draggable = draggable
         self._drag_origin: Optional[QPoint] = None
 
@@ -37,7 +41,7 @@ class SurfaceWindow(QWidget):
         self.setGeometry(x, y, w, h)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, _DRAG_STRIP_HEIGHT, 0, 0)
+        layout.setContentsMargins(0, _DRAG_STRIP_HEIGHT if draggable else 0, 0, 0)
         layout.addWidget(build_webview(url))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -50,18 +54,3 @@ class SurfaceWindow(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         self._drag_origin = None
-
-
-def main() -> None:
-    """Live spike: show one floating translucent web surface for manual verification, no backend needed."""
-    from pathlib import Path
-
-    app = QApplication([])
-    html_path = Path(__file__).parent / "_spike.html"
-    window = SurfaceWindow(html_path.as_uri(), rect=(100, 100, 360, 200))
-    window.show()
-    app.exec()
-
-
-if __name__ == "__main__":
-    main()

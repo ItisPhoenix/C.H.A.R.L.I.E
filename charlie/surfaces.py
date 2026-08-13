@@ -9,12 +9,13 @@ charlie.attention's own INTERRUPT-always design) -> event/task category.
 Explicit intent short-circuits everything below it.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from charlie.attention import AttentionLevel
 from charlie.events import EventType
+from charlie.hud import placement
 
 _MIN_ATTENTION_FOR_SURFACE = AttentionLevel.INFORM
 
@@ -31,6 +32,7 @@ _WORKSPACE_MODES = frozenset({"workspace"})
 # Priority-ordered abstract regions (charlie/hud/placement.py maps these to real screen rects); overflow wraps.
 _REGION_ORDER = ("top_right", "bottom_right", "top_left", "bottom_left")
 _EPHEMERAL_SPAWN_TTL_SECONDS = 30.0
+_RESULT_INTERACTION_TTL_SECONDS = 60.0  # longer than the default so there's time to actually read a result
 
 
 class PresentationMode(StrEnum):
@@ -58,16 +60,14 @@ _CATEGORY_TO_MODE: Dict[str, PresentationMode] = {
     "approval": PresentationMode.MODAL,
     "result_interaction": PresentationMode.MODAL,
     "sustained_interaction": PresentationMode.WORKSPACE,
-    "conversation": PresentationMode.WORKSPACE,
-    "information_only": PresentationMode.BACKGROUND,
+    "information_only": PresentationMode.NOTIFICATION,
     "no_involvement": PresentationMode.BACKGROUND,
 }
 
 _CATEGORY_TO_PERSISTENCE: Dict[str, Persistence] = {
     "approval": Persistence.PERSISTENT,
     "sustained_interaction": Persistence.PERSISTENT,
-    "conversation": Persistence.PERSISTENT,
-    "result_interaction": Persistence.ARCHIVED,
+    "result_interaction": Persistence.EPHEMERAL,
     "information_only": Persistence.EPHEMERAL,
     "no_involvement": Persistence.EPHEMERAL,
 }
@@ -81,6 +81,13 @@ class SurfaceSpec:
     rationale: str
     task_id: Optional[str] = None
     region: str = ""
+    title: str = ""
+    body: str = ""
+    role: str = "info"
+    rect: Optional[Tuple[int, int, int, int]] = None
+    actions: List[Dict[str, str]] = field(default_factory=list)
+    ttl_seconds: Optional[float] = None
+    kind: str = "generic"
 
 
 def _categorize(event: Dict[str, Any], task: Optional[Any]) -> str:
@@ -93,8 +100,6 @@ def _categorize(event: Dict[str, Any], task: Optional[Any]) -> str:
         return "approval"
     if etype in _RESULT_EVENT_TYPES:
         return "result_interaction"
-    if etype == EventType.CONVERSATION_SUMMON:
-        return "conversation"
     if task is not None and getattr(task, "visibility_hint", None) == "workspace":
         return "sustained_interaction"
     if etype in _INFO_EVENT_TYPES:
@@ -105,7 +110,7 @@ def _categorize(event: Dict[str, Any], task: Optional[Any]) -> str:
 class SurfaceEngine:
     """decide() is stateless; spawn()/dismiss() track ACTIVE surfaces only to enforce the cap."""
 
-    def __init__(self, widget_cap: int = 3, workspace_cap: int = 1):
+    def __init__(self, widget_cap: int = 5, workspace_cap: int = 1):
         self.widget_cap = widget_cap
         self.workspace_cap = workspace_cap
         self._active: Dict[str, SurfaceSpec] = {}
@@ -118,6 +123,10 @@ class SurfaceEngine:
         attention: AttentionLevel = AttentionLevel.SILENT,
         ctx: Optional[Any] = None,
         user_intent: Optional[UserIntent] = None,
+        title: str = "",
+        body: str = "",
+        actions: Optional[List[Dict[str, str]]] = None,
+        kind: str = "generic",
     ) -> Optional[SurfaceSpec]:
         category = _categorize(event, task)
 
@@ -134,12 +143,27 @@ class SurfaceEngine:
         if user_intent == UserIntent.SHOW and mode == PresentationMode.BACKGROUND:
             mode = PresentationMode.WIDGET
 
+        role = "info"
+        if category == "approval":
+            risk = event.get("payload", {}).get("risk_class")
+            role = "danger" if risk == "destructive" else "warning"
+        elif category == "result_interaction":
+            role = "success"
+
+        ttl = _RESULT_INTERACTION_TTL_SECONDS if category == "result_interaction" else None
+
         return SurfaceSpec(
             presentation=mode,
             persistence=persistence,
             density=density,
             rationale=f"{category} at attention {attention.name}",
             task_id=getattr(task, "id", None),
+            title=title,
+            body=body,
+            role=role,
+            actions=actions or [],
+            ttl_seconds=ttl,
+            kind=kind,
         )
 
     def spawn(self, surface_id: str, spec: SurfaceSpec) -> List[str]:
@@ -151,6 +175,20 @@ class SurfaceEngine:
         self._active[surface_id] = spec
         self._order.append(surface_id)
         spec.region = self._assign_region(spec.presentation)
+
+        stack_idx = len([
+            sid for sid in self._order
+            if self._active[sid].presentation == spec.presentation and self._active[sid].region == spec.region
+        ]) - 1
+
+        screen = placement.get_primary_screen_rect()
+        spec.rect = placement.region_to_rect(
+            spec.region,
+            screen,
+            spec.presentation.value,
+            stack_index=max(0, stack_idx)
+        )
+
         return self._evict_over_cap(spec.presentation, protect=surface_id)
 
     def dismiss(self, surface_id: str) -> None:
@@ -158,8 +196,15 @@ class SurfaceEngine:
         if surface_id in self._order:
             self._order.remove(surface_id)
 
+    def dismiss_if_active(self, surface_id: str) -> bool:
+        """Dismiss a live surface and report whether this call changed engine state."""
+        if surface_id not in self._active:
+            return False
+        self.dismiss(surface_id)
+        return True
+
     def _assign_region(self, mode: PresentationMode) -> str:
-        if mode in _WORKSPACE_MODES:
+        if mode in _WORKSPACE_MODES or mode == PresentationMode.MODAL:
             return "center"
         if mode not in _WIDGET_MODES:
             return ""
@@ -167,13 +212,19 @@ class SurfaceEngine:
         return _REGION_ORDER[(len(class_ids) - 1) % len(_REGION_ORDER)]
 
     def spawn_event(self, surface_id: str, spec: SurfaceSpec) -> Dict[str, Any]:
-        ttl = _EPHEMERAL_SPAWN_TTL_SECONDS if spec.persistence == Persistence.EPHEMERAL else None
+        if spec.persistence != Persistence.EPHEMERAL:
+            ttl = None
+        else:
+            ttl = spec.ttl_seconds if spec.ttl_seconds is not None else _EPHEMERAL_SPAWN_TTL_SECONDS
         return self._build_event(EventType.SURFACE_SPAWN, surface_id, spec, ttl=ttl)
 
     def update_event(self, surface_id: str, spec: SurfaceSpec) -> Dict[str, Any]:
         return self._build_event(EventType.SURFACE_UPDATE, surface_id, spec)
 
-    def dismiss_event(self, surface_id: str, spec: SurfaceSpec) -> Dict[str, Any]:
+    def dismiss_event(self, surface_id: str, spec: Optional[SurfaceSpec] = None) -> Dict[str, Any]:
+        """spec is optional -- dismiss consumers (store/web_server) only ever read surface_id."""
+        if spec is None:
+            return {"type": EventType.SURFACE_DISMISS, "payload": {"surface_id": surface_id}}
         return self._build_event(EventType.SURFACE_DISMISS, surface_id, spec)
 
     @staticmethod
@@ -188,6 +239,12 @@ class SurfaceEngine:
             "region": spec.region,
             "task_id": spec.task_id,
             "rationale": spec.rationale,
+            "title": spec.title,
+            "body": spec.body,
+            "role": spec.role,
+            "rect": spec.rect,
+            "actions": spec.actions,
+            "kind": spec.kind,
         }
         if ttl is not None:
             payload["ttl_seconds"] = ttl

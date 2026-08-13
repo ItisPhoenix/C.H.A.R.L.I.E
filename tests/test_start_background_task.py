@@ -39,7 +39,7 @@ class TestHandleStartBackgroundTask:
         captured = {}
 
         async def fake_start(config, event_bus, text, session_store=None, memory_store=None,
-                              voice=None, priority=0, depends_on=None):
+                              voice=None, priority=0, depends_on=None, on_result_stored=None):
             captured["text"] = text
             captured["priority"] = priority
             captured["depends_on"] = depends_on
@@ -95,7 +95,7 @@ class TestHandleStartBackgroundTask:
         captured = {}
 
         async def fake_start(config, event_bus, text, session_store=None, memory_store=None,
-                              voice=None, priority=0, depends_on=None):
+                              voice=None, priority=0, depends_on=None, on_result_stored=None):
             captured["priority"] = priority
             captured["depends_on"] = depends_on
             return _FakeTask()

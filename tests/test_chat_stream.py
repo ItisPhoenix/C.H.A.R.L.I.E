@@ -76,6 +76,57 @@ async def test_budget_exhaustion(monkeypatch, brain_config):
     assert any("tool limit" in str(r) for r in results)
 
 
+@pytest.mark.asyncio
+async def test_partial_budget_spend_runs_affordable_calls_not_whole_batch_abort(monkeypatch):
+    # Budget for 1 call, model requests 2 in one round -- the affordable one must still execute.
+    config = Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy", iteration_budget_max=1)
+    brain = Brain(config)
+
+    call_count = 0
+
+    def mock_stream(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+
+        class MockResponse:
+            def raise_for_status(self):
+                pass
+
+            async def aiter_lines(self):
+                if call_count == 1:
+                    yield (
+                        'data: {"choices":[{"delta":{"tool_calls":['
+                        '{"index":0,"id":"a","function":{"name":"web_search","arguments":"{\\"query\\":\\"x\\"}"}},'
+                        '{"index":1,"id":"b","function":{"name":"web_search","arguments":"{\\"query\\":\\"y\\"}"}}'
+                        "]}}]}"
+                    )
+                else:
+                    yield 'data: {"choices":[{"delta":{"content":"done"}}]}'
+                yield "data: [DONE]"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        return MockResponse()
+
+    monkeypatch.setattr(brain.client, "stream", mock_stream)
+
+    executed_args = []
+    monkeypatch.setattr(
+        "charlie.tools.registry.execute_tool",
+        lambda name, args: executed_args.append(args) or "mock result",
+    )
+
+    results = []
+    async for chunk in brain.chat_stream("test"):
+        results.append(chunk)
+
+    assert len(executed_args) == 1
+
+
 def test_extract_bare_tool_calls():
     """Local LLMs output bare tool_name(args) without TOOL: prefix."""
     from charlie.config import Config
@@ -260,6 +311,9 @@ async def test_auto_halt_threshold_is_one_for_low_confidence_call(monkeypatch, b
 
     brain = Brain(brain_config)
     monkeypatch.setattr(brain.client, "stream", mock_stream)
+    async def approve_desktop_action(*args, **kwargs):
+        return True
+    monkeypatch.setattr(brain, "request_tool_approval", approve_desktop_action)
     monkeypatch.setattr("charlie.tools.registry.execute_tool", mock_execute_tool)
 
     results = []
@@ -305,6 +359,9 @@ async def test_auto_halt_threshold_is_two_for_regular_desktop_call(monkeypatch, 
 
     brain = Brain(brain_config)
     monkeypatch.setattr(brain.client, "stream", mock_stream)
+    async def approve_desktop_action(*args, **kwargs):
+        return True
+    monkeypatch.setattr(brain, "request_tool_approval", approve_desktop_action)
     monkeypatch.setattr("charlie.tools.registry.execute_tool", mock_execute_tool)
 
     results = []

@@ -16,13 +16,15 @@ export function ToolApprovalDialog(): ReactElement | null {
   };
 
   const argsSummary = Object.entries(activeToolApproval.arguments || {})
-    .map(([key, value]) => `${key}: ${String(value)}`)
+    .map(([key, value]) => `${key}: ${typeof value === "object" && value !== null ? JSON.stringify(value) : String(value)}`)
     .join("\n");
+  const accent = activeToolApproval.risk_class === "destructive" ? "danger" : "warning";
 
   return (
-    <Modal labelledBy="tool-approval-title">
+    <Modal labelledBy="tool-approval-title" accent={accent}>
       <div>
-        <h3 id="tool-approval-title" className="text-lg font-semibold text-[var(--color-text-primary)]">
+        <h3 id="tool-approval-title" className="flex items-center gap-2 text-lg font-semibold text-[var(--color-text-primary)]">
+          <span className={`role-dot role-dot-${accent} w-2 h-2 rounded-full shrink-0`} aria-hidden="true" />
           Approval Required
         </h3>
         <p className="text-sm text-[var(--color-text-muted)] mt-1">Charlie wants to run something that needs your confirmation.</p>

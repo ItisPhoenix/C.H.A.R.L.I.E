@@ -50,14 +50,15 @@ def test_decide_approval_bypasses_attention_gate():
     assert result.density == int(AttentionLevel.INTERRUPT)
 
 
-def test_decide_result_stored_is_modal_and_archived():
+def test_decide_result_stored_is_modal_and_ephemeral_with_60s_ttl():
     engine = SurfaceEngine()
     event = {"type": EventType.RESULT_STORED, "payload": {"task_id": "t1"}}
 
     result = engine.decide(event, attention=AttentionLevel.INFORM)
 
     assert result.presentation == PresentationMode.MODAL
-    assert result.persistence == Persistence.ARCHIVED
+    assert result.persistence == Persistence.EPHEMERAL
+    assert result.ttl_seconds == 60.0
 
 
 def test_decide_sustained_interaction_task_is_workspace_and_persistent():
@@ -72,23 +73,31 @@ def test_decide_sustained_interaction_task_is_workspace_and_persistent():
     assert result.task_id == "t1"
 
 
-def test_decide_conversation_summon_is_workspace_and_persistent():
+def test_decide_passes_through_kind():
     engine = SurfaceEngine()
-    event = {"type": EventType.CONVERSATION_SUMMON, "payload": {}}
+    event = {"type": EventType.RESULT_STORED, "payload": {}}
 
-    result = engine.decide(event, attention=AttentionLevel.INTERRUPT)
+    result = engine.decide(event, attention=AttentionLevel.INFORM, kind="system_monitor")
 
-    assert result.presentation == PresentationMode.WORKSPACE
-    assert result.persistence == Persistence.PERSISTENT
+    assert result.kind == "system_monitor"
 
 
-def test_decide_information_only_is_background_and_ephemeral():
+def test_decide_default_kind_is_generic():
+    engine = SurfaceEngine()
+    event = {"type": EventType.RESULT_STORED, "payload": {}}
+
+    result = engine.decide(event, attention=AttentionLevel.INFORM)
+
+    assert result.kind == "generic"
+
+
+def test_decide_information_only_is_notification_and_ephemeral():
     engine = SurfaceEngine()
     event = {"type": EventType.ALERT, "payload": {"severity": "warning"}}
 
     result = engine.decide(event, attention=AttentionLevel.INFORM)
 
-    assert result.presentation == PresentationMode.BACKGROUND
+    assert result.presentation == PresentationMode.NOTIFICATION
     assert result.persistence == Persistence.EPHEMERAL
 
 
@@ -227,6 +236,31 @@ def test_spawn_event_shape():
     assert event["payload"]["density"] == 3
 
 
+def test_decide_passes_through_title_body_actions():
+    engine = SurfaceEngine()
+    event = {"type": EventType.TOOL_APPROVAL_REQUEST, "payload": {}}
+    actions = [{"id": "approve", "label": "Approve", "style": "primary"}]
+
+    result = engine.decide(event, title="Approval needed", body="run rm -rf", actions=actions)
+
+    assert result.title == "Approval needed"
+    assert result.body == "run rm -rf"
+    assert result.actions == actions
+
+
+def test_spawn_event_carries_title_body_actions():
+    engine = SurfaceEngine()
+    spec = _widget_spec()
+    spec.title, spec.body, spec.actions = "Result ready", "Found 3 matches.", []
+    engine.spawn("w1", spec)
+
+    payload = engine.spawn_event("w1", spec)["payload"]
+
+    assert payload["title"] == "Result ready"
+    assert payload["body"] == "Found 3 matches."
+    assert payload["actions"] == []
+
+
 def test_spawn_event_carries_ttl_for_ephemeral_only():
     engine = SurfaceEngine()
     ephemeral = _widget_spec(persistence=Persistence.EPHEMERAL)
@@ -234,6 +268,14 @@ def test_spawn_event_carries_ttl_for_ephemeral_only():
 
     assert "ttl_seconds" in engine.spawn_event("w1", ephemeral)["payload"]
     assert "ttl_seconds" not in engine.spawn_event("w2", persistent)["payload"]
+
+
+def test_dismiss_if_active_removes_only_a_live_surface():
+    engine = SurfaceEngine()
+    engine.spawn("w1", _widget_spec())
+
+    assert engine.dismiss_if_active("w1") is True
+    assert engine.dismiss_if_active("w1") is False
 
 
 def test_update_event_shape():
@@ -254,3 +296,14 @@ def test_dismiss_event_shape():
 
     assert event["type"] == EventType.SURFACE_DISMISS
     assert event["payload"]["surface_id"] == "w1"
+
+
+def test_dismiss_event_works_without_a_spec():
+    """Callers dismissing after an eviction (spec already popped from _active) or a resolved
+    approval (no spec ever tracked) still get a minimal, valid dismiss event."""
+    engine = SurfaceEngine()
+
+    event = engine.dismiss_event("w1")
+
+    assert event["type"] == EventType.SURFACE_DISMISS
+    assert event["payload"] == {"surface_id": "w1"}

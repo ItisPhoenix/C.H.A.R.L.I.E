@@ -3,15 +3,18 @@
 import json
 import logging
 import math
+import re
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Callable, List, Optional
 
 import zmq
 from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QFont,
+    QFontMetrics,
     QLinearGradient,
     QMouseEvent,
     QPainter,
@@ -20,7 +23,7 @@ from PySide6.QtGui import (
     QRadialGradient,
     QRegion,
 )
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
 from charlie.config import config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT
@@ -33,7 +36,26 @@ _HEIGHT = 240
 _DRAG_THRESHOLD = 6
 _POSITION_PATH = Path(getattr(config, "pet_position_path", "pet_position.json"))
 _PULSE_INTERVAL_MS = 30
-_CAPTION_MAX_CHARS = 100
+_MIN_SCALE = 0.5
+_MAX_SCALE = 2.0
+_WHEEL_SCALE_STEP = 1200.0
+_CAPTION_PILL_HEIGHT = 46
+_CAPTION_MAX_WIDTH = 320
+_CAPTION_MIN_WIDTH = 90
+_CAPTION_PADDING_X = 14
+_CAPTION_MARGIN = 10
+
+_STATE_TITLES = {
+    "idle": "Idle",
+    "listening": "Listening",
+    "thinking": "Thinking",
+    "speaking": "Speaking",
+    "working": "Working",
+    "waiting": "Waiting",
+    "attention": "Needs attention",
+    "completed": "Done",
+    "error": "Error",
+}
 
 _STATE_COLORS = {
     "idle": "#4b5563",
@@ -129,7 +151,7 @@ def _track_workspace_surface(active_ids: set, event: dict) -> Optional[bool]:
 
 class PetWindow(QWidget):
     state_changed = Signal(str)
-    caption_changed = Signal(str, str) # title, desc
+    caption_changed = Signal(str) # content line only -- title is derived from state
     workspace_surface_changed = Signal(bool)
 
     def __init__(self):
@@ -141,7 +163,9 @@ class PetWindow(QWidget):
 
         self._pet_scale = getattr(config, "pet_scale", 1.0)
         self.resize(int(_WIDTH * self._pet_scale), int(_HEIGHT * self._pet_scale))
+        self.setFocusPolicy(Qt.StrongFocus)
         self._state = "idle"
+        self._resizing = False
 
         self._captions_enabled = True
         self._caption_title = ""
@@ -176,38 +200,74 @@ class PetWindow(QWidget):
         self._pulse_timer.timeout.connect(self._tick)
         self._pulse_timer.start(_PULSE_INTERVAL_MS)
 
-        self._color_poll_timer = QTimer(self)
-        self._color_poll_timer.timeout.connect(self._poll_config)
-        self._color_poll_timer.start(250)
+    def _set_resizing(self, value: bool) -> None:
+        """Enter/exit wheel-resize mode; persist the final scale on exit."""
+        self._resizing = value
+        if value:
+            self.setFocus()
+        else:
+            self._save_position()
+        self.update()
 
-    def _poll_config(self):
-        try:
-            env_path = Path(".env")
-            if env_path.exists():
-                for line in env_path.read_text().splitlines():
-                    if line.startswith("PET_SCALE="):
-                        val = line.split("=", 1)[1].strip(' "\'')
-                        if val:
-                            try:
-                                scale = float(val)
-                                if scale != self._pet_scale:
-                                    self._pet_scale = scale
-                                    self.resize(int(_WIDTH * scale), int(_HEIGHT * scale))
-                            except ValueError:
-                                pass
-        except Exception:
-            pass
+    def _reset_position(self) -> None:
+        screen = QApplication.primaryScreen().availableGeometry()
+        default_x = screen.right() - int(_WIDTH * self._pet_scale) - 24
+        default_y = screen.bottom() - int(_HEIGHT * self._pet_scale) - 24
+        self.move(default_x, default_y)
+        self._save_position()
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        resize_action = QAction("Stop Resizing" if self._resizing else "Resize", self)
+        captions_action = QAction("Captions: On" if self._captions_enabled else "Captions: Off", self)
+        reset_action = QAction("Reset Position", self)
+        quit_action = QAction("Quit", self)
+        for action in (resize_action, captions_action, reset_action):
+            menu.addAction(action)
+        menu.addSeparator()
+        menu.addAction(quit_action)
+
+        chosen = menu.exec(event.globalPos())
+        if chosen is resize_action:
+            self._set_resizing(not self._resizing)
+        elif chosen is captions_action:
+            self._captions_enabled = not self._captions_enabled
+            self.update()
+        elif chosen is reset_action:
+            self._reset_position()
+        elif chosen is quit_action:
+            QApplication.quit()
+
+    def wheelEvent(self, event):
+        if not self._resizing:
+            event.ignore()
+            return
+        delta = event.angleDelta().y() / _WHEEL_SCALE_STEP
+        self._pet_scale = min(_MAX_SCALE, max(_MIN_SCALE, self._pet_scale + delta))
+        self.resize(int(_WIDTH * self._pet_scale), int(_HEIGHT * self._pet_scale))
+        self._save_position() # persist every tick so whatever size the wheel lands on is the new default
+        self.update()
+        event.accept()
+
+    def keyPressEvent(self, event):
+        if self._resizing and event.key() == Qt.Key_Escape:
+            self._set_resizing(False)
+            return
+        super().keyPressEvent(event)
 
     def _on_state_changed(self, state: str):
         self._state = state
+        self._caption_title = _STATE_TITLES.get(state, state.capitalize() if state else "")
+        self._caption_visible = True
+        self._caption_fade_dir = 1
+        self._caption_time_left = 5000 // _PULSE_INTERVAL_MS # 5 seconds
         self.update()
 
-    def _on_caption_changed(self, title: str, desc: str):
-        if not title and not desc:
+    def _on_caption_changed(self, desc: str):
+        if not desc:
             # Clear / fade out
             self._caption_time_left = 0
         else:
-            self._caption_title = title
             self._caption_desc = desc
             self._caption_visible = True
             self._caption_fade_dir = 1
@@ -260,30 +320,51 @@ class PetWindow(QWidget):
         cy = 120 + bounce
 
         self._draw_pet(painter, cx, cy, pet_w, pet_h)
-        self._draw_chevron(painter, cx, cy)
+        self._draw_chevron(painter, cx, cy, pet_w, pet_h)
+
+        if self._resizing:
+            self._draw_resize_ring(painter, cx, cy, pet_w, pet_h)
 
         if self._captions_enabled and self._caption_alpha > 0:
-            self._draw_caption_bubble(painter, cx, cy)
+            self._draw_caption_bubble(painter, cx, cy, pet_w)
 
-        # Update click-through mask
-        s = self._pet_scale
-        mask = QRegion(int((cx - 30)*s), int((cy - 30)*s), int((pet_w + 60)*s), int((pet_h + 60)*s))
-        if self._captions_enabled and self._caption_alpha > 0:
-            mask = mask | QRegion(
-                int((self._card_x - 10) * s), int((self._card_y - 10) * s),
-                int((self._card_w + 20) * s), int((self._card_h + 20) * s),
-            )
+        self._apply_click_mask()
+
+    def _draw_resize_ring(self, painter: QPainter, cx: float, cy: float, w: float, h: float):
+        ring = QRectF(cx - 34, cy - 34, w + 68, h + 68)
+        painter.setPen(QPen(QColor("#38bdf8"), 3, Qt.DashLine))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(ring, 20, 20)
+
+    def _mask_regions(self) -> List[QRectF]:
+        """Un-scaled click-through rects (pet body, caption pill, chevron); scaled once by the caller."""
+        pet_w, pet_h = 120, 100
+        cx = _WIDTH - pet_w - 20
+        bounce = int(_BOUNCE_AMPLITUDE_PX.get(self._state, 2.0) * math.sin(self._phase))
+        cy = 120 + bounce
+        pad = 34 if self._resizing else 30
+        regions = [QRectF(cx - pad, cy - pad, pet_w + 2 * pad, pet_h + 2 * pad)]
+        if self._captions_enabled and self._caption_alpha > 0 and self._card_w > 0:
+            regions.append(QRectF(
+                self._card_x - 10, self._card_y - 10, self._card_w + 20, self._card_h + 20,
+            ))
         chevron = self._chevron_rect
-        mask = mask | QRegion(
-            int((chevron.x() - 5) * s), int((chevron.y() - 5) * s),
-            int((chevron.width() + 10) * s), int((chevron.height() + 10) * s),
-        )
+        regions.append(QRectF(
+            chevron.x() - 5, chevron.y() - 5, chevron.width() + 10, chevron.height() + 10,
+        ))
+        return regions
+
+    def _apply_click_mask(self) -> None:
+        s = self._pet_scale
+        mask = QRegion()
+        for r in self._mask_regions():
+            mask = mask | QRegion(int(r.x() * s), int(r.y() * s), int(r.width() * s), int(r.height() * s))
         self.setMask(mask)
 
-    def _draw_chevron(self, painter: QPainter, pet_cx: float, pet_cy: float):
-        # Chevron to the left of the pet
-        ch_x = pet_cx - 20
-        ch_y = pet_cy + 50
+    def _draw_chevron(self, painter: QPainter, pet_cx: float, pet_cy: float, pet_w: float, pet_h: float):
+        # Right of the pet, below the headphone -- clear of the caption band above and within canvas bounds
+        ch_x = pet_cx + pet_w + 5
+        ch_y = pet_cy + pet_h - 5
         self._chevron_rect = QRectF(ch_x - 12, ch_y - 12, 24, 24)
 
         # Background circle
@@ -433,44 +514,63 @@ class PetWindow(QWidget):
 
         painter.restore()
 
-    def _draw_caption_bubble(self, painter: QPainter, pet_cx: float, pet_cy: float):
-        alpha = int(self._caption_alpha)
+    def _draw_caption_bubble(self, painter: QPainter, pet_cx: float, pet_cy: float, pet_w: float):
+        title = self._caption_title
+        desc = self._caption_desc
+        if not title and not desc:
+            self._card_w = 0
+            self._card_h = 0
+            return
 
-        card_w = 260
-        card_h = 70
-        # Position above the pet's head, extending left
-        card_x = pet_cx - 140
-        card_y = pet_cy - card_h - 10
+        alpha = int(self._caption_alpha)
+        title_font = QFont("Segoe UI", 9, QFont.Bold)
+        desc_font = QFont("Segoe UI", 9)
+        title_metrics = QFontMetrics(title_font)
+        desc_metrics = QFontMetrics(desc_font)
+        elided_title = _elide_text(title, title_metrics.horizontalAdvance, _CAPTION_MAX_WIDTH)
+        elided_desc = _elide_text(desc, desc_metrics.horizontalAdvance, _CAPTION_MAX_WIDTH) if desc else ""
+        text_w = max(
+            title_metrics.horizontalAdvance(elided_title),
+            desc_metrics.horizontalAdvance(elided_desc) if elided_desc else 0,
+        )
+
+        card_h = _CAPTION_PILL_HEIGHT
+        card_w = max(text_w + 2 * _CAPTION_PADDING_X, _CAPTION_MIN_WIDTH)
+        # Right edge anchored near the pet, extends left -- centering on the pet overflowed past _WIDTH.
+        right_edge = min(pet_cx + pet_w, _WIDTH - _CAPTION_MARGIN)
+        card_x = max(right_edge - card_w, _CAPTION_MARGIN)
+        card_y = pet_cy - card_h - 14
 
         self._card_x = card_x
         self._card_y = card_y
         self._card_w = card_w
         self._card_h = card_h
 
-        # Dark rounded rect with dynamic state border
         state_hex = _STATE_COLORS.get(self._state, _STATE_COLORS["idle"])
         base_c = QColor(state_hex)
         painter.setBrush(QColor(30, 30, 30, int(alpha * 0.9)))
         painter.setPen(QPen(QColor(base_c.red(), base_c.green(), base_c.blue(), int(alpha * 0.6)), 1.5))
-        painter.drawRoundedRect(card_x, card_y, card_w, card_h, 16, 16)
+        painter.drawRoundedRect(card_x, card_y, card_w, card_h, 14, 14)
 
-        # Text Metrics
-        painter.setPen(QColor(255, 255, 255, alpha))
-
-        # Title (Bold)
-        title_font = QFont("Segoe UI", 10, QFont.Bold)
         painter.setFont(title_font)
-        painter.drawText(card_x + 16, card_y + 12, card_w - 32, 24, Qt.AlignLeft | Qt.AlignVCenter, self._caption_title)
-
-        # Description (Regular)
-        desc_font = QFont("Segoe UI", 9)
-        painter.setFont(desc_font)
-        painter.setPen(QColor(180, 180, 180, alpha))
-        painter.drawText(card_x + 16, card_y + 36, card_w - 32, 24, Qt.AlignLeft | Qt.AlignVCenter, self._caption_desc)
-
+        painter.setPen(QColor(255, 255, 255, alpha))
+        painter.drawText(
+            card_x + _CAPTION_PADDING_X, card_y + 4, card_w - 2 * _CAPTION_PADDING_X, card_h / 2,
+            Qt.AlignLeft | Qt.AlignVCenter, elided_title,
+        )
+        if elided_desc:
+            painter.setFont(desc_font)
+            painter.setPen(QColor(200, 200, 200, alpha))
+            painter.drawText(
+                card_x + _CAPTION_PADDING_X, card_y + card_h / 2, card_w - 2 * _CAPTION_PADDING_X, card_h / 2,
+                Qt.AlignLeft | Qt.AlignVCenter, elided_desc,
+            )
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
+            if self._resizing:
+                self._set_resizing(False)
+                return
             self._drag_origin = event.globalPosition().toPoint() - self.pos()
             self._press_pos = event.globalPosition().toPoint()
             self._dragged = False
@@ -507,6 +607,10 @@ class PetWindow(QWidget):
         try:
             if _POSITION_PATH.exists():
                 data = json_loads(_POSITION_PATH.read_text(encoding="utf-8"))
+                scale = data.get("scale")
+                if isinstance(scale, (int, float)) and _MIN_SCALE <= scale <= _MAX_SCALE:
+                    self._pet_scale = float(scale)
+                    self.resize(int(_WIDTH * self._pet_scale), int(_HEIGHT * self._pet_scale))
                 x = min(max(int(data["x"]), screen.left()), screen.right() - int(_WIDTH * self._pet_scale))
                 y = min(max(int(data["y"]), screen.top()), screen.bottom() - int(_HEIGHT * self._pet_scale))
                 self.move(x, y)
@@ -520,7 +624,7 @@ class PetWindow(QWidget):
     def _save_position(self):
         try:
             _POSITION_PATH.write_text(
-                json.dumps({"x": self.x(), "y": self.y()}), encoding="utf-8"
+                json.dumps({"x": self.x(), "y": self.y(), "scale": self._pet_scale}), encoding="utf-8"
             )
         except Exception as e:
             logger.warning("Failed to save pet position: %s", e, exc_info=True)
@@ -537,35 +641,63 @@ def _map_event_to_state(event: dict) -> Optional[str]:
     return core_state if core_state in _ALL_CORE_STATES else None
 
 
-def _map_event_to_caption(event: dict) -> tuple[Optional[str], Optional[str]]:
-    """Map an EventBus event to caption bubble (title, desc), or (None, None) if irrelevant."""
+def _state_caption_title(state: str) -> str:
+    """Human-readable title line for the caption pill -- the pet's current charlie_state, verbatim."""
+    return _STATE_TITLES.get(state, state.capitalize() if state else "")
+
+
+def _map_event_to_caption_desc(event: dict) -> Optional[str]:
+    """Content line (line 2) for the caption pill. None means no mapping -- _sub_loop leaves desc untouched.
+    speaking_start deliberately has no branch here: it fires once per TTS-flushed sentence chunk
+    (many times per reply), and a generic placeholder here would stomp the live token-driven text."""
     etype = event.get("type", "")
 
     if etype in ("vad_start", "wake_word"):
-        return ("Listening...", "I'm paying attention")
+        return "I'm paying attention"
 
     if etype == "thinking":
-        return ("Thinking...", "Processing request...")
-
-    if etype == "speaking_start":
-        text = (event.get("payload") or {}).get("text", "").strip()
-        if len(text) > _CAPTION_MAX_CHARS:
-            text = text[:_CAPTION_MAX_CHARS].rstrip() + "..."
-        return ("Speaking", text or "Responding...")
+        return "Processing request..."
 
     if etype in ("speaking_stop", "response_done"):
-        return (None, None)
+        return ""
 
     if etype in ("tool_approval_request", "extension_pending", "recovery_proposal"):
         reason = (event.get("payload") or {}).get("reason", "").strip()
-        return ("Needs your approval", reason or "Waiting on a decision")
+        return reason or "Waiting on a decision"
 
     if etype == "alert":
         payload = event.get("payload") or {}
         if payload.get("severity") in ("warning", "error"):
-            return ("Attention", (payload.get("message") or "Something needs a look").strip())
+            return (payload.get("message") or "Something needs a look").strip()
 
-    return (None, None)
+    return None
+
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _extract_last_sentence(buffer: str) -> str:
+    """Return the last (possibly still-incomplete) sentence of a streamed token buffer."""
+    buffer = buffer.strip()
+    if not buffer:
+        return ""
+    return _SENTENCE_SPLIT_RE.split(buffer)[-1].strip()
+
+
+def _elide_text(text: str, width_fn: Callable[[str], int], max_width: int) -> str:
+    """Shrink text with a trailing ellipsis until width_fn(text) <= max_width. Pure, Qt-free."""
+    if not text or width_fn(text) <= max_width:
+        return text
+    ellipsis = "..."
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        candidate = text[:mid].rstrip() + ellipsis
+        if width_fn(candidate) <= max_width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return (text[:lo].rstrip() + ellipsis) if lo > 0 else ellipsis
 
 
 def _sub_loop(window: PetWindow, stop_event: threading.Event):
@@ -576,6 +708,7 @@ def _sub_loop(window: PetWindow, stop_event: threading.Event):
     sock.setsockopt(zmq.SUBSCRIBE, b"")
     sock.setsockopt(zmq.RCVTIMEO, 500)
     active_workspaces: set = set()
+    speech_buffer = ""
     try:
         while not stop_event.is_set():
             try:
@@ -590,13 +723,24 @@ def _sub_loop(window: PetWindow, stop_event: threading.Event):
             except Exception:
                 continue
 
+            etype = event.get("type", "")
+            if etype == "speaking_start":
+                speech_buffer = ""
+            elif etype == "token":
+                speech_buffer += (event.get("payload") or {}).get("text", "")
+                sentence = _extract_last_sentence(speech_buffer)
+                if sentence:
+                    window.caption_changed.emit(sentence)
+            elif etype in ("speaking_stop", "response_done"):
+                speech_buffer = ""
+
             state = _map_event_to_state(event)
             if state is not None:
                 window.state_changed.emit(state)
 
-            title, desc = _map_event_to_caption(event)
-            if title is not None:
-                window.caption_changed.emit(title, desc)
+            desc = _map_event_to_caption_desc(event)
+            if desc is not None:
+                window.caption_changed.emit(desc)
 
             workspace_active = _track_workspace_surface(active_workspaces, event)
             if workspace_active is not None:

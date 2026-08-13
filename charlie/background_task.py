@@ -22,7 +22,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from charlie.attention import decide as _attention_decide
 from charlie.config import Config
@@ -89,6 +89,16 @@ class BackgroundTask:
             "error": self.error,
         }
 
+    def to_public_event(self) -> Dict[str, Any]:
+        """Return the client-safe task state without local exception detail."""
+        return {
+            "id": self.id,
+            "title": self.text,
+            "status": self.status,
+            "current_step": self.current_step,
+            "total_steps": len(self.steps),
+        }
+
     def to_state_dict(self) -> Dict[str, Any]:
         """to_event() plus session_id, for on-disk persistence."""
         return {**self.to_event(), "session_id": self.session_id}
@@ -131,7 +141,7 @@ def _save_state(task: BackgroundTask) -> None:
 async def _emit_task_event(event_bus, task: BackgroundTask) -> None:
     """WS event plus on-disk persist -- single choke point, see check_interrupted_task()."""
     await event_bus.emit(
-        "background_task", task.to_event(),
+        "background_task", task.to_public_event(),
         meta=EventMeta(source=EventSource.TASK, task_id=task.id),
     )
     _save_state(task)
@@ -198,6 +208,11 @@ async def _store_result(task: BackgroundTask, event_bus, full_result: str) -> No
         )
     except Exception:
         logger.warning("Failed to emit result_stored event", exc_info=True)
+    if task.brain.on_result_stored:
+        try:
+            task.brain.on_result_stored(task.id, summary, int(level))
+        except Exception:
+            logger.warning("on_result_stored callback failed", exc_info=True)
 
 
 async def _announce(event_bus, voice, severity: str, message: str) -> None:
@@ -219,6 +234,7 @@ async def _announce(event_bus, voice, severity: str, message: str) -> None:
 async def start(
     config: Config, event_bus, text: str, session_store=None, memory_store=None, voice=None,
     priority: int = 0, depends_on: Optional[List[str]] = None, visibility_hint: str = "",
+    on_result_stored: Optional[Callable] = None,
 ) -> BackgroundTask:
     """Plan a background task and hand it to the TaskManager queue -- no
     upfront approval gate. Runs immediately if a slot is free (the common
@@ -249,6 +265,7 @@ async def start(
         register_panic_hotkey=False,
         approval_timeout=None,
         is_background=True,
+        on_result_stored=on_result_stored,
     )
 
     await _emit_task_event(event_bus, task)
@@ -270,7 +287,11 @@ async def start(
 
 
 def cancel(task_id: str) -> bool:
-    return _manager.cancel(task_id)
+    cancelled = _manager.cancel(task_id)
+    task = _manager.get(task_id)
+    if cancelled and task is not None and task.status == "running" and task.brain is not None:
+        task.brain.cancel_chat()
+    return cancelled
 
 
 async def _wait_until_clear(task: BackgroundTask, config: Config, event_bus) -> bool:
@@ -363,7 +384,7 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
         task.status = "failed"
         task.error = str(e)
         await _emit_task_event(event_bus, task)
-        await _announce(event_bus, voice, "error", f"Background task failed: {e}")
+        await _announce(event_bus, voice, "error", "Background task failed. Check task details.")
         await _store_result(task, event_bus, "\n".join(step_outputs) or task.error or "")
     finally:
         await task.brain.close()

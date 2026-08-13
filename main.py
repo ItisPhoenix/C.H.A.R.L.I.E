@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import time
+import threading
 from typing import Callable, Dict, Optional, Tuple
 
 # Windows event-loop policy (must precede zmq/asyncio imports)
@@ -102,6 +103,7 @@ from charlie.memory_store import MemoryStore
 from charlie.personality import get_emotion_for_context, parse_voice_command, parse_yes_no
 from charlie.session_store import SessionStore
 from charlie.state import StateMachine
+from charlie.subsystem_health import HealthRegistry, HealthStatus
 from charlie.surfaces import SurfaceEngine
 from charlie.voice import VoiceEngine
 from charlie.attention import AttentionLevel
@@ -121,6 +123,108 @@ _hud_surface_engine = SurfaceEngine(
     widget_cap=config.surface_widget_cap, workspace_cap=config.surface_workspace_cap
 )
 _state_machine = StateMachine()  # single authoritative CoreState instance for this process
+_runtime_health = HealthRegistry((
+    "brain", "memory", "plugins", "mcp", "web", "companion", "hud", "telegram", "voice", "watchers",
+))
+
+
+async def _publish_subsystem_health(bus: Optional[EventBus] = None) -> None:
+    """Publish current public health snapshot when the IPC producer exists."""
+    if bus is None:
+        return
+    event = _runtime_health.event()
+    await bus.emit(event["type"], event["payload"], meta=EventMeta(source=EventSource.VOICE))
+
+
+def _set_subsystem_health(name: str, status: HealthStatus) -> None:
+    """Record one safe public subsystem transition."""
+    _runtime_health.set(name, status)
+
+
+def _start_subsystem_process(
+    name: str,
+    command: Tuple[str, ...],
+    env: Optional[Dict[str, str]] = None,
+) -> Optional[subprocess.Popen]:
+    """Start one optional child process without taking down the core."""
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=os.path.dirname(__file__),
+            env=env,
+        )
+    except Exception:
+        logger.warning("Failed to start %s", name, exc_info=True)
+        _set_subsystem_health(name, HealthStatus.DEGRADED)
+        return None
+    logger.info("%s subprocess started (PID: %s)", name.capitalize(), process.pid)
+    _set_subsystem_health(name, HealthStatus.RUNNING)
+    return process
+
+
+class _UnavailableVoiceEngine:
+    """No-op voice replacement that keeps non-voice Charlie features available."""
+
+    is_available = False
+
+    def __init__(self) -> None:
+        self.is_speaking = threading.Event()
+        self._muted = True
+        self._volume = 0.0
+
+    def speak(self, text: str, emotion: str) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+    def stop_tts(self) -> None:
+        return None
+
+    def is_echo(self, text: str) -> bool:
+        return False
+
+    def set_event_bus(self, bus: EventBus) -> None:
+        return None
+
+    def set_wake_word_callback(self, callback: Callable[[], None]) -> None:
+        return None
+
+    def set_audio_state(
+        self, muted: Optional[bool] = None, volume: Optional[float] = None
+    ) -> Dict[str, object]:
+        if muted is not None:
+            self._muted = muted
+        if volume is not None:
+            self._volume = volume
+        return {"muted": self._muted, "volume": self._volume, "available": False}
+
+    def set_mic_state(self, mic_muted: bool) -> Dict[str, object]:
+        self._muted = mic_muted
+        return {"mic_muted": self._muted, "available": False}
+
+
+def _start_voice_or_degrade(
+    voice_config: Config,
+    on_speech: Callable[[str], None],
+    on_tts_start: Callable[[], None],
+    on_tts_stop: Callable[[], None],
+) -> VoiceEngine | _UnavailableVoiceEngine:
+    """Start voice or retain text and web operation after a voice failure."""
+    try:
+        voice = VoiceEngine(
+            voice_config,
+            on_speech=on_speech,
+            on_tts_start=on_tts_start,
+            on_tts_stop=on_tts_stop,
+        )
+        voice.start()
+    except Exception:
+        logger.warning("Failed to start voice", exc_info=True)
+        _set_subsystem_health("voice", HealthStatus.DEGRADED)
+        return _UnavailableVoiceEngine()
+    _set_subsystem_health("voice", HealthStatus.RUNNING)
+    return voice
 
 
 def _charlie_state_envelope() -> dict:
@@ -277,8 +381,10 @@ async def main():
     memory_store = None
     try:
         memory_store = MemoryStore(config)
+        _set_subsystem_health("memory", HealthStatus.RUNNING)
     except Exception as e:
         logger.warning(f"Vector memory disabled: {e}")
+        _set_subsystem_health("memory", HealthStatus.DEGRADED)
 
     def speaking_callback(text):
         if voice:
@@ -321,26 +427,40 @@ async def main():
 
     _CONVERSATION_SUMMON_RE = re.compile(r"\b(?:show|open) (?:me )?(?:the )?(?:chat|conversation)\b", re.IGNORECASE)
 
-    async def _summon_conversation_workspace():
-        """Real conversation workspace via decide(), shared by the hud_invoke hotkey and this voice phrase."""
-        from charlie.surfaces import UserIntent
-        from charlie.utils import make_id
+    async def _emit_surface_dismiss(surface_id: str) -> None:
+        """Shared by every spawn call site so an evicted surface's window actually closes."""
         if event_bus is None:
             return
-        surface_id = make_id()
-        spec = _hud_surface_engine.decide({"type": "conversation_summon", "payload": {}}, user_intent=UserIntent.SHOW)
-        if spec is None:
-            return
-        _hud_surface_engine.spawn(surface_id, spec)
-        spawn_event = _hud_surface_engine.spawn_event(surface_id, spec)
+        dismiss_event = _hud_surface_engine.dismiss_event(surface_id)
         await event_bus.emit(
-            spawn_event["type"], spawn_event["payload"], meta=EventMeta(source=EventSource.SURFACE)
+            dismiss_event["type"], dismiss_event["payload"], meta=EventMeta(source=EventSource.SURFACE)
         )
+
+    def _schedule_surface_expiry(surface_id, spec) -> None:
+        if spec.persistence.value != "ephemeral":
+            return
+        ttl_seconds = spec.ttl_seconds if spec.ttl_seconds is not None else 30.0
+
+        async def _expire() -> None:
+            await asyncio.sleep(ttl_seconds)
+            if _hud_surface_engine.dismiss_if_active(surface_id):
+                await _emit_surface_dismiss(surface_id)
+
+        asyncio.run_coroutine_threadsafe(_expire(), loop)
+
+    async def _summon_conversation_workspace():
+        """The Dashboard is a plain web page (chat + tools + system monitor + connections +
+        tasks), not a Qt window -- this just opens it in the user's real browser. Shared by the
+        hud_invoke hotkey and this voice phrase."""
+        from charlie.utils import open_url_in_browser
+        host = "127.0.0.1" if config.charlie_host == "0.0.0.0" else config.charlie_host
+        open_url_in_browser(f"http://{host}:{config.charlie_port}/dashboard")
 
     def _resolve_tool_approval_and_notify(request_id: str, approved: bool) -> None:
         """Resolve the pending future, then tell web_server.py's replay cache the
         request is gone -- otherwise a webview that connects after resolution
-        still finds the (now-stale) tool_approval_request via replay."""
+        still finds the (now-stale) tool_approval_request via replay. Also closes
+        the HUD approval modal, which is spawned with surface_id == request_id."""
         from charlie.core import resolve_tool_approval
         resolve_tool_approval(request_id, approved)
         if event_bus is not None:
@@ -351,26 +471,63 @@ async def main():
                 ),
                 loop,
             )
+            _hud_surface_engine.dismiss(request_id)
+            asyncio.run_coroutine_threadsafe(_emit_surface_dismiss(request_id), loop)
 
-    def on_tool_approval_request(request_id, tool_name, reason):
+    def on_tool_approval_request(request_id, tool_name, reason, platform, risk_class):
         # telegram_bot is None until its startup block below runs -- read at call time, not def time.
-        if telegram_bot and config.telegram_user_id:
+        if telegram_bot and should_relay_approval(True, config.telegram_user_id):
             asyncio.run_coroutine_threadsafe(
                 telegram_bot.send_approval_request(config.telegram_user_id, request_id, tool_name, reason), loop
             )
         if event_bus is None:
             return
-        from charlie.utils import make_id
-        surface_id = make_id()
-        spec = _hud_surface_engine.decide({"type": "tool_approval_request"})
+        # surface_id == request_id: lets the resolve handler dismiss this exact modal with no extra bookkeeping.
+        surface_id = request_id
+        spec = _hud_surface_engine.decide(
+            {"type": "tool_approval_request", "payload": {"risk_class": risk_class}},
+            title=f"Approval needed: {tool_name}",
+            body=reason,
+            actions=[
+                {"id": "approve", "label": "Approve", "style": "primary"},
+                {"id": "decline", "label": "Decline", "style": "danger"},
+            ],
+        )
         if spec is None:
             return
-        _hud_surface_engine.spawn(surface_id, spec)
+        evicted = _hud_surface_engine.spawn(surface_id, spec)
+        _schedule_surface_expiry(surface_id, spec)
         spawn_event = _hud_surface_engine.spawn_event(surface_id, spec)
         asyncio.run_coroutine_threadsafe(
             event_bus.emit(spawn_event["type"], spawn_event["payload"], meta=EventMeta(source=EventSource.SURFACE)),
             loop,
         )
+        for evicted_id in evicted:
+            asyncio.run_coroutine_threadsafe(_emit_surface_dismiss(evicted_id), loop)
+
+    def on_result_stored(task_id, summary, attention_level):
+        if event_bus is None:
+            return
+        from charlie.utils import make_id
+        surface_id = make_id()
+        spec = _hud_surface_engine.decide(
+            {"type": "result_stored"}, attention=AttentionLevel(attention_level),
+            title="Task finished", body=summary,
+        )
+        if spec is None:
+            return
+        evicted = _hud_surface_engine.spawn(surface_id, spec)
+        _schedule_surface_expiry(surface_id, spec)
+        spawn_event = _hud_surface_engine.spawn_event(surface_id, spec)
+        asyncio.run_coroutine_threadsafe(
+            event_bus.emit(
+                spawn_event["type"], spawn_event["payload"],
+                meta=EventMeta(source=EventSource.SURFACE, task_id=task_id),
+            ),
+            loop,
+        )
+        for evicted_id in evicted:
+            asyncio.run_coroutine_threadsafe(_emit_surface_dismiss(evicted_id), loop)
 
     try:
         brain = Brain(
@@ -382,9 +539,12 @@ async def main():
             on_tool_result=on_tool_result,
             on_thinking_update=on_thinking_update,
             on_tool_approval_request=on_tool_approval_request,
+            on_result_stored=on_result_stored,
         )
+        _set_subsystem_health("brain", HealthStatus.RUNNING)
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")
+        _set_subsystem_health("brain", HealthStatus.DEGRADED)
         if store:
             store.close()
         return
@@ -407,11 +567,14 @@ async def main():
         plugin_manager = register_plugin_tools(config)
         if plugin_manager is None:
             logger.info("Plugin system disabled (PLUGINS_ENABLED=false).")
+            _set_subsystem_health("plugins", HealthStatus.DISABLED)
         else:
             logger.info("Plugin system ACTIVE: plugin_* tools registered.")
+            _set_subsystem_health("plugins", HealthStatus.RUNNING)
     except Exception as e:
         logger.warning(f"Plugin system failed to initialize: {e}")
         plugin_manager = None
+        _set_subsystem_health("plugins", HealthStatus.DEGRADED)
     if plugin_manager is None:
         # Always keep a manager available so a mirrored "extension_enabled"/
         # "extension_disabled" command (see consume_web_commands below) can
@@ -425,6 +588,8 @@ async def main():
     # Wire the MCP subsystem into the SAME shared tool registry (no-op unless enabled).
     # Runs on a thread, awaited later, so it overlaps with VoiceEngine/STT startup instead of blocking it.
     mcp_client = None
+    if config.mcp_enabled:
+        _set_subsystem_health("mcp", HealthStatus.STARTING)
 
     async def _start_mcp_task():
         nonlocal mcp_client
@@ -435,11 +600,18 @@ async def main():
                 mcp_client = await asyncio.to_thread(start_mcp, config)
                 if mcp_client is None:
                     logger.info("MCP subsystem not started (no servers configured)")
+                    _set_subsystem_health("mcp", HealthStatus.DEGRADED)
+                else:
+                    _set_subsystem_health("mcp", HealthStatus.RUNNING)
             else:
                 logger.info("MCP subsystem not enabled (MCP_ENABLED=false)")
+                _set_subsystem_health("mcp", HealthStatus.DISABLED)
         except Exception as e:
             logger.warning(f"MCP subsystem failed to initialize: {e}")
             mcp_client = None
+            _set_subsystem_health("mcp", HealthStatus.DEGRADED)
+        finally:
+            await _publish_subsystem_health(event_bus)
 
     mcp_start_task = asyncio.create_task(_start_mcp_task())
 
@@ -1140,54 +1312,26 @@ async def main():
             except Exception as e:
                 logger.error(f"Error handling web command: {e}", exc_info=True)
 
-    # Start web server subprocess
-    try:
-        web_entry = os.path.join(
-            os.path.dirname(__file__), "charlie", "web_server_entry.py"
-        )
-        _web_env = os.environ.copy()
-        _web_env["CHARLIE_LAUNCH_ID"] = _LAUNCH_ID
-        web_proc = subprocess.Popen(
-            [sys.executable, web_entry],
-            cwd=os.path.dirname(__file__),
-            env=_web_env,
-        )
-        logger.info(f"Web server subprocess started (PID: {web_proc.pid})")
-    except Exception as e:
-        logger.warning(f"Failed to start web server: {e}")
+    # Start web server subprocess.
+    web_entry = os.path.join(os.path.dirname(__file__), "charlie", "web_server_entry.py")
+    _web_env = os.environ.copy()
+    _web_env["CHARLIE_LAUNCH_ID"] = _LAUNCH_ID
+    web_proc = _start_subsystem_process("web", (sys.executable, web_entry), _web_env)
 
     # Start desktop companion subprocess (Windows-only, PySide6)
     if config.pet_enabled:
-        try:
-            pet_entry = os.path.join(
-                os.path.dirname(__file__), "charlie", "pet_entry.py"
-            )
-            pet_proc = subprocess.Popen(
-                [sys.executable, pet_entry],
-                cwd=os.path.dirname(__file__),
-            )
-            logger.info(f"Companion subprocess started (PID: {pet_proc.pid})")
-        except Exception as e:
-            logger.warning(f"Failed to start companion: {e}")
+        pet_entry = os.path.join(os.path.dirname(__file__), "charlie", "pet_entry.py")
+        pet_proc = _start_subsystem_process("companion", (sys.executable, pet_entry))
 
     # Start HUD surface shell subprocess (Windows-only, PySide6 + QtWebEngine)
     if config.hud_enabled:
-        try:
-            hud_entry = os.path.join(
-                os.path.dirname(__file__), "charlie", "hud_entry.py"
-            )
-            hud_proc = subprocess.Popen(
-                [sys.executable, hud_entry],
-                cwd=os.path.dirname(__file__),
-            )
-            logger.info(f"HUD subprocess started (PID: {hud_proc.pid})")
-        except Exception as e:
-            logger.warning(f"Failed to start HUD shell: {e}")
+        hud_entry = os.path.join(os.path.dirname(__file__), "charlie", "hud_entry.py")
+        hud_proc = _start_subsystem_process("hud", (sys.executable, hud_entry))
 
     # Telegram runs in-process (needs direct access to _dispatch_or_queue), not a subprocess like web/pet/hud.
     if config.telegram_enabled:
         try:
-            from charlie.telegram_bot import TelegramBot
+            from charlie.telegram_bot import TelegramBot, should_relay_approval
 
             async def on_telegram_message(text, chat_id):
                 await _dispatch_or_queue(text, current_web_session_id, platform="telegram")
@@ -1200,8 +1344,10 @@ async def main():
             )
             await telegram_bot.start()
             logger.info("Telegram bot started")
+            _set_subsystem_health("telegram", HealthStatus.RUNNING)
         except Exception as e:
             logger.warning(f"Failed to start Telegram bot: {e}")
+            _set_subsystem_health("telegram", HealthStatus.DEGRADED)
 
     logger.info("Loading AI models (Whisper, VAD, Kokoro)...")
     try:
@@ -1224,13 +1370,12 @@ async def main():
                     ), loop
                 )
 
-        voice = VoiceEngine(
+        voice = _start_voice_or_degrade(
             config,
-            on_speech=on_speech,
-            on_tts_start=on_tts_start,
-            on_tts_stop=on_tts_stop,
+            on_speech,
+            on_tts_start,
+            on_tts_stop,
         )
-        voice.start()
 
         def on_wake_word():
             if event_bus:
@@ -1306,15 +1451,41 @@ async def main():
             from charlie.results import ResultsStore
             results_store = ResultsStore(db_path=config.session_db_path)
             was_idle = False
+            boot_time = psutil.boot_time()
+            try:
+                last_net = psutil.net_io_counters()
+            except (OSError, psutil.Error) as e:
+                logger.debug(f"net_io_counters unavailable: {type(e).__name__}: {e}")
+                last_net = None
             try:
                 while True:
                     cpu_percent = psutil.cpu_percent()
                     ram_percent = psutil.virtual_memory().percent
+                    net_kbps = 0.0
+                    if last_net is not None:
+                        try:
+                            net_now = psutil.net_io_counters()
+                            net_kbps = (
+                                (net_now.bytes_sent + net_now.bytes_recv)
+                                - (last_net.bytes_sent + last_net.bytes_recv)
+                            ) / 1024.0
+                            last_net = net_now
+                        except (OSError, psutil.Error) as e:
+                            logger.debug(f"net_io_counters read failed: {type(e).__name__}: {e}")
+                    battery_percent = None
+                    try:
+                        battery = psutil.sensors_battery()
+                        battery_percent = battery.percent if battery else None
+                    except (OSError, psutil.Error, NotImplementedError) as e:
+                        logger.debug(f"sensors_battery unavailable: {type(e).__name__}: {e}")
                     await bus.emit(
                         "system_status", {
                             "cpu": cpu_percent,
                             "ram": ram_percent,
                             "gpu": await asyncio.to_thread(_read_gpu_percent),
+                            "net_kbps": max(0.0, net_kbps),
+                            "uptime_seconds": time.time() - boot_time,
+                            "battery_percent": battery_percent,
                         },
                         meta=EventMeta(source=EventSource.VOICE),
                     )
@@ -1335,6 +1506,27 @@ async def main():
                                     meta=EventMeta(source=EventSource.TASK, rationale="idle-return catch-up"),
                                 )
                                 voice.speak(catchup_msg, "neutral")
+                                from charlie.surfaces import UserIntent
+                                from charlie.utils import make_id
+                                catchup_spec = _hud_surface_engine.decide(
+                                    {"type": "alert"}, user_intent=UserIntent.SHOW,
+                                    title="While you were away", body=catchup_msg,
+                                )
+                                if catchup_spec is not None:
+                                    catchup_id = make_id()
+                                    catchup_evicted = _hud_surface_engine.spawn(catchup_id, catchup_spec)
+                                    _schedule_surface_expiry(catchup_id, catchup_spec)
+                                    catchup_event = _hud_surface_engine.spawn_event(catchup_id, catchup_spec)
+                                    await bus.emit(
+                                        catchup_event["type"], catchup_event["payload"],
+                                        meta=EventMeta(source=EventSource.SURFACE),
+                                    )
+                                    for evicted_id in catchup_evicted:
+                                        dismiss_event = _hud_surface_engine.dismiss_event(evicted_id)
+                                        await bus.emit(
+                                            dismiss_event["type"], dismiss_event["payload"],
+                                            meta=EventMeta(source=EventSource.SURFACE),
+                                        )
                         was_idle = is_idle
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:
@@ -1345,6 +1537,7 @@ async def main():
         # Run voice loop + web command consumer concurrently via ZeroMQ
         async with EventBus(pub_port=5555, pull_port=5556, is_producer=True) as bus:
             event_bus = bus
+            await _publish_subsystem_health(bus)
             bus.set_state_listener(_on_event_for_state)
             voice.set_event_bus(bus)
             import charlie.recovery
@@ -1382,6 +1575,31 @@ async def main():
 
             _watcher_loop = asyncio.get_running_loop()
 
+            async def _spawn_watcher_surface(event: dict, message: str, reason: str) -> None:
+                # Runs on the main loop -- _hud_surface_engine is only ever mutated here, never from the watcher thread.
+                from charlie.surfaces import UserIntent
+                from charlie.utils import make_id
+                watcher_spec = _hud_surface_engine.decide(
+                    {"type": event.get("type", "alert")}, user_intent=UserIntent.SHOW,
+                    title="Heads up", body=message,
+                )
+                if watcher_spec is None:
+                    return
+                watcher_id = make_id()
+                watcher_evicted = _hud_surface_engine.spawn(watcher_id, watcher_spec)
+                _schedule_surface_expiry(watcher_id, watcher_spec)
+                watcher_event = _hud_surface_engine.spawn_event(watcher_id, watcher_spec)
+                await bus.emit(
+                    watcher_event["type"], watcher_event["payload"],
+                    meta=EventMeta(source=EventSource.SURFACE, rationale=reason),
+                )
+                for evicted_id in watcher_evicted:
+                    dismiss_event = _hud_surface_engine.dismiss_event(evicted_id)
+                    await bus.emit(
+                        dismiss_event["type"], dismiss_event["payload"],
+                        meta=EventMeta(source=EventSource.SURFACE),
+                    )
+
             def _on_watcher_signal(event: dict, level: AttentionLevel, reason: str) -> None:
                 # Re-emit through the normal alert path -- state.py/pet_window.py already react to it.
                 payload = event.get("payload") or {}
@@ -1402,6 +1620,10 @@ async def main():
                         voice.speak(message, "neutral")
                     except Exception:
                         logger.warning("Failed to speak watcher alert", exc_info=True)
+                    try:
+                        asyncio.run_coroutine_threadsafe(_spawn_watcher_surface(event, message, reason), _watcher_loop)
+                    except Exception:
+                        logger.warning("Failed to spawn watcher alert surface", exc_info=True)
 
             _watcher_registry = WatcherRegistry()
             _watcher_registry.register(
@@ -1415,8 +1637,12 @@ async def main():
 
             try:
                 start_watcher_thread(_watcher_registry, _on_watcher_signal)
+                _set_subsystem_health("watchers", HealthStatus.RUNNING)
+                await _publish_subsystem_health(bus)
             except Exception:
                 logger.error("Failed to start watcher thread", exc_info=True)
+                _set_subsystem_health("watchers", HealthStatus.DEGRADED)
+                await _publish_subsystem_health(bus)
 
             class ZmqLogHandler(logging.Handler):
                 def emit(self, record):

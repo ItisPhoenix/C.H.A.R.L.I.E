@@ -149,6 +149,21 @@ def test_repeated_tool_failure_watcher_edge_triggers():
     assert watcher.check() is None
 
 
+def test_repeated_tool_failure_watcher_reports_each_newly_failed_tool():
+    calls = iter([
+        [("file_read", 0.8, 6), ("shell_execute", 0.8, 6)],
+        [("file_read", 0.8, 6), ("shell_execute", 0.8, 6)],
+        [("file_read", 0.8, 6), ("shell_execute", 0.8, 6)],
+    ])
+    watcher = repeated_tool_failure_watcher(lambda: next(calls))
+
+    first = watcher.check()
+    second = watcher.check()
+
+    assert "file_read" in first["payload"]["message"]
+    assert "shell_execute" in second["payload"]["message"]
+
+
 def test_path_change_watcher_detects_mtime_change(tmp_path):
     f = tmp_path / "watched.txt"
     f.write_text("a")

@@ -1,11 +1,22 @@
 """Entry point for Charlie HUD surface shell subprocess."""
 
+import logging
+import os
 import sys
 import threading
 from pathlib import Path
 
 # Ensure charlie package is importable (must precede charlie imports)
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# QtWebEngine's re-exec breaks stdout/stderr inheritance -- without this file, hud logs vanish.
+os.makedirs("logs", exist_ok=True)
+logging.basicConfig(
+    filename="logs/charlie_hud.log",
+    encoding="utf-8",
+    level=logging.DEBUG,
+    format="%(asctime)s [%(name)s] [%(levelname)s] %(funcName)s:%(lineno)d - %(message)s",
+)
 
 from PySide6.QtWidgets import QApplication
 

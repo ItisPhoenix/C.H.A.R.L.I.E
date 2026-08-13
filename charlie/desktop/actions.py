@@ -7,12 +7,19 @@ charlie.core) stops motion within one action, never mid-action.
 """
 
 import ctypes
+import functools
 import logging
 import re
 import threading
-from typing import Any, Optional, Tuple
+import time
+from typing import Any, Callable, Optional, Tuple, TypeVar, cast
 
 logger = logging.getLogger("charlie.desktop.actions")
+
+try:
+    ctypes.windll.user32.SetProcessDPIAware()
+except Exception as _dpi_exc:
+    logger.warning("SetProcessDPIAware failed -- screen coordinates may be misscaled: %s", _dpi_exc)
 
 try:
     import pyautogui
@@ -27,6 +34,24 @@ except Exception:  # pyautogui also raises on headless Linux (no X display), not
 _HALT = threading.Event()
 # Same clock as charlie.desktop.session's GetLastInputInfo reads, so external_input_since() can compare them.
 _last_action_tick_ms = 0
+
+T = TypeVar("T", bound=Callable[..., Any])
+
+def _instrument(func: T) -> T:
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
+        try:
+            result = func(*args, **kwargs)
+            outcome = "success"
+            return result
+        except Exception as e:
+            outcome = f"error: {type(e).__name__}"
+            raise
+        finally:
+            elapsed = (time.perf_counter() - start_time) * 1000
+            logger.info(f"[DIAGNOSTICS] {func.__name__} took {elapsed:.2f}ms, outcome: {outcome}")
+    return cast(T, wrapper)
 
 
 def _record_action_tick() -> None:
@@ -110,6 +135,7 @@ def _try_uia_set_value(control: Any, text: str) -> Optional[bool]:
         return None
 
 
+@_instrument
 def click_mark(mark_id: int) -> str:
     _check_halt()
     from charlie.desktop.uia import Element, resolve_bounds, resolve_mark
@@ -134,6 +160,7 @@ def click_mark(mark_id: int) -> str:
         return f"Error clicking mark [{mark_id}]: {e}"
 
 
+@_instrument
 def type_text(mark_id: int, text: str) -> str:
     _check_halt()
     from charlie.desktop.uia import Element, resolve_bounds, resolve_is_password, resolve_mark, resolve_name
@@ -175,6 +202,7 @@ def type_text(mark_id: int, text: str) -> str:
         return f"Error typing into mark [{mark_id}]: {e}"
 
 
+@_instrument
 def invoke_mark(mark_id: int) -> str:
     _check_halt()
     from charlie.desktop.uia import Element, resolve_mark
@@ -197,6 +225,7 @@ def invoke_mark(mark_id: int) -> str:
         return f"Error invoking mark [{mark_id}]: {e}"
 
 
+@_instrument
 def key_press(keys: str) -> str:
     _check_halt()
     if not _HAS_PYAUTOGUI:
@@ -223,6 +252,7 @@ def _to_screen(x: int, y: int) -> Optional[Tuple[int, int]]:
     return image_to_screen(x, y)
 
 
+@_instrument
 def click_at(x: int, y: int, button: str = "left", double: bool = False) -> str:
     _check_halt()
     if not _HAS_PYAUTOGUI:
@@ -240,6 +270,7 @@ def click_at(x: int, y: int, button: str = "left", double: bool = False) -> str:
         return f"Error clicking at ({x},{y}): {e}"
 
 
+@_instrument
 def move_to(x: int, y: int) -> str:
     _check_halt()
     if not _HAS_PYAUTOGUI:
@@ -257,6 +288,7 @@ def move_to(x: int, y: int) -> str:
         return f"Error moving to ({x},{y}): {e}"
 
 
+@_instrument
 def drag(x1: int, y1: int, x2: int, y2: int) -> str:
     _check_halt()
     if not _HAS_PYAUTOGUI:
@@ -276,6 +308,7 @@ def drag(x1: int, y1: int, x2: int, y2: int) -> str:
         return f"Error dragging ({x1},{y1}) -> ({x2},{y2}): {e}"
 
 
+@_instrument
 def scroll(notches: int) -> str:
     _check_halt()
     if not _HAS_PYAUTOGUI:
@@ -300,6 +333,7 @@ _SYSTEM_ACTIONS = {
 }
 
 
+@_instrument
 def system_control(action: str) -> str:
     _check_halt()
     if not _HAS_PYAUTOGUI:

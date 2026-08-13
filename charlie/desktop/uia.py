@@ -20,15 +20,16 @@ except ImportError:
     _uia = None
     _HAS_UIA = False
 
-_MAX_DEPTH_DEFAULT = 8
+_MAX_DEPTH_DEFAULT = 25
+_MAX_MARKS_DEFAULT = 120  # bounds prompt size/walk time -- depth alone doesn't (Chrome/Electron/WinUI nest past 8)
 
-# Control types worth exposing to the model. Generic containers (pane,
-# group, window, custom) are skipped -- they're not actionable and just add
-# noise to the set-of-marks text.
+# Control types worth exposing to the model -- generic containers (pane/group/window/custom) skipped as noise.
 _INTERESTING_CONTROL_TYPES = {
     "ButtonControl", "EditControl", "CheckBoxControl", "RadioButtonControl",
     "ComboBoxControl", "ListItemControl", "MenuItemControl", "TabItemControl",
     "HyperlinkControl", "TreeItemControl", "TextControl", "DocumentControl",
+    "SplitButtonControl", "MenuControl", "SliderControl", "DataItemControl",
+    "HeaderItemControl", "ImageControl",
 }
 
 
@@ -69,8 +70,11 @@ def image_to_screen(x: int, y: int) -> Optional[Tuple[int, int]]:
     return left + x, top + y
 
 
-def _walk(control: Any, marks: List[Element], controls: Dict[int, Any], depth: int, max_depth: int) -> None:
-    if control is None or depth > max_depth:
+def _walk(
+    control: Any, marks: List[Element], controls: Dict[int, Any], depth: int, max_depth: int,
+    max_marks: int = _MAX_MARKS_DEFAULT,
+) -> None:
+    if control is None or depth > max_depth or len(marks) >= max_marks:
         return
     try:
         control_type = control.ControlTypeName
@@ -98,7 +102,9 @@ def _walk(control: Any, marks: List[Element], controls: Dict[int, Any], depth: i
     except Exception:
         return
     for child in children:
-        _walk(child, marks, controls, depth + 1, max_depth)
+        if len(marks) >= max_marks:
+            return
+        _walk(child, marks, controls, depth + 1, max_depth, max_marks)
 
 
 def control_from_hwnd(hwnd: int) -> Optional[Any]:
@@ -112,8 +118,10 @@ def control_from_hwnd(hwnd: int) -> Optional[Any]:
         return None
 
 
-def snapshot_tree(max_depth: int = _MAX_DEPTH_DEFAULT, root: Optional[Any] = None) -> List[Element]:
-    """Walk the foreground window (never the whole desktop) and return marked elements."""
+def snapshot_tree(
+    max_depth: int = _MAX_DEPTH_DEFAULT, root: Optional[Any] = None, max_marks: int = _MAX_MARKS_DEFAULT
+) -> List[Element]:
+    """Walk the foreground window (never the whole desktop) and return marked elements, capped at max_marks."""
     if not _HAS_UIA:
         return []
     try:
@@ -122,7 +130,7 @@ def snapshot_tree(max_depth: int = _MAX_DEPTH_DEFAULT, root: Optional[Any] = Non
             return []
         marks: List[Element] = []
         controls: Dict[int, Any] = {}
-        _walk(window, marks, controls, depth=0, max_depth=max_depth)
+        _walk(window, marks, controls, depth=0, max_depth=max_depth, max_marks=max_marks)
         with _lock:
             _controls.clear()
             _controls.update(controls)

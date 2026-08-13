@@ -7,6 +7,7 @@ Brain/core.py -- same constraint as agent.py, core.py imports this lazily instea
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from charlie import resource_locks
@@ -51,6 +52,28 @@ async def resolve(
     deadline_s: float = 25.0,
     on_progress=None,
 ) -> BrowserResult:
+    start_time = time.perf_counter()
+    outcome = "success"
+    try:
+        return await _resolve_inner(
+            task, complete, describe_image, approve_click, max_steps, deadline_s, on_progress
+        )
+    except Exception as e:
+        outcome = f"error: {type(e).__name__}"
+        raise
+    finally:
+        elapsed = (time.perf_counter() - start_time) * 1000
+        logger.debug(f"browser.task.resolve took {elapsed:.2f}ms, outcome: {outcome}")
+
+async def _resolve_inner(
+    task: str,
+    complete: agent.Complete,
+    describe_image: Optional[agent.DescribeImage] = None,
+    approve_click: Optional[agent.ApproveClick] = None,
+    max_steps: int = 3,
+    deadline_s: float = 25.0,
+    on_progress=None,
+) -> BrowserResult:
     """Run the tier cascade for `task`, falling through tier by tier, and cache the result."""
     freshness_sensitive = intent.is_freshness_sensitive(task)
     if not freshness_sensitive:
@@ -58,9 +81,12 @@ async def resolve(
         if cached is not None:
             return cached
 
+    wait_start = time.monotonic()
     owner_id = make_id()
     acquired = await _acquire_browser(owner_id, max_wait_s=deadline_s)
     try:
+        # deadline_s is a total budget -- subtract lock-wait time already spent, or a slow lock can double it.
+        remaining_deadline_s = max(0.0, deadline_s - (time.monotonic() - wait_start))
         loop = asyncio.get_running_loop()
         result: Optional[BrowserResult] = None
         lowered = task.lower()
@@ -78,7 +104,7 @@ async def resolve(
 
         if result is None:
             result = await agent.run_task(
-                task, complete, describe_image, approve_click, max_steps, deadline_s, on_progress
+                task, complete, describe_image, approve_click, max_steps, remaining_deadline_s, on_progress
             )
             if result.answer == "blocked":
                 blocked_url = session.get_session().last_url

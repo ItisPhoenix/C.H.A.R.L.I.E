@@ -320,6 +320,16 @@ class TestPluginToolBridge:
         assert "plugin_cal_list_events" in names
         assert "plugin_code_exec_python" in names
 
+    def test_enabled_plugin_tools_have_conservative_metadata(self):
+        from charlie.tools import ToolRegistry, register_plugin_tools_into
+
+        reg = ToolRegistry()
+        register_plugin_tools_into(reg, _FakeConfig(enabled=True))
+
+        metadata = {item["name"]: item for item in reg.list_metadata()}
+        assert metadata["plugin_fs_write_file"]["owner"] == "plugins"
+        assert metadata["plugin_fs_write_file"]["risk_class"] == "security_sensitive"
+
     def test_disabled_then_enabled_is_isolated(self):
         from charlie.tools import ToolRegistry, register_plugin_tools_into
 

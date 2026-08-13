@@ -231,6 +231,55 @@ class TestMemoryStoreEdgeCases:
         store._collection.add.assert_not_called()
 
 
+class TestEmbeddingDimensionMismatch:
+    """A collection persisted with one embedding backend's dimension (e.g. a 768-dim remote
+    model) must not silently attach a different-dimension fallback (e.g. a 384-dim local model)
+    -- that crashes every future search() with chromadb's InvalidArgumentError. MemoryStore must
+    detect the mismatch at init and disable memory for the session instead."""
+
+    def _make_store_with_stored_dim(self, monkeypatch, stored_dim, ef_dim):
+        mock_ef = MagicMock()
+        mock_ef.embed_query = MagicMock(return_value=[[0.1] * ef_dim])
+        mock_ef.name = MagicMock(return_value="fake-ef")
+        monkeypatch.setattr(
+            "charlie.memory_store._build_embedding_function",
+            lambda _: mock_ef,
+        )
+
+        mock_collection = MagicMock()
+        mock_collection.count = MagicMock(return_value=1)
+        mock_collection.peek = MagicMock(return_value={"embeddings": [[0.0] * stored_dim]})
+        mock_client = MagicMock()
+        mock_client.get_or_create_collection = MagicMock(return_value=mock_collection)
+        monkeypatch.setattr("chromadb.PersistentClient", lambda path: mock_client)
+
+        from charlie.memory_store import MemoryStore
+        return MemoryStore(FakeConfig())
+
+    def test_mismatched_dimension_disables_memory(self, monkeypatch):
+        store = self._make_store_with_stored_dim(monkeypatch, stored_dim=768, ef_dim=384)
+        assert store.is_available is False
+
+    def test_matching_dimension_stays_available(self, monkeypatch):
+        store = self._make_store_with_stored_dim(monkeypatch, stored_dim=384, ef_dim=384)
+        assert store.is_available is True
+
+    def test_empty_collection_skips_the_check(self, monkeypatch):
+        mock_ef = MagicMock()
+        mock_ef.embed_query = MagicMock(return_value=[[0.1] * 384])
+        monkeypatch.setattr("charlie.memory_store._build_embedding_function", lambda _: mock_ef)
+
+        mock_collection = MagicMock()
+        mock_collection.count = MagicMock(return_value=0)
+        mock_client = MagicMock()
+        mock_client.get_or_create_collection = MagicMock(return_value=mock_collection)
+        monkeypatch.setattr("chromadb.PersistentClient", lambda path: mock_client)
+
+        from charlie.memory_store import MemoryStore
+        store = MemoryStore(FakeConfig())
+        assert store.is_available is True
+
+
 class TestBuildEmbeddingFunctionRetry:
     """A transient startup race (LM Studio still loading the embedding model
     when Charlie boots) must not immediately fall back to a different-

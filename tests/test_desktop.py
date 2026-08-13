@@ -12,6 +12,7 @@ from charlie.config import Config
 from charlie.core import (
     _DESKTOP_COM_TOOLS,
     _DESKTOP_CONTROL_TOOLS,
+    _VISION_SYSTEM_PROMPT,
     Brain,
     _payload_is_vision,
     _with_vision_image,
@@ -135,6 +136,29 @@ def test_walk_captures_named_document_control():
     assert marks[0].name == "Text editor"
 
 
+def test_walk_stops_at_mark_budget_not_depth():
+    """A deep, wide tree must stop once max_marks is hit -- max_depth alone was the old,
+    too-shallow limiter that returned near-nothing for Chrome/Electron/WinUI trees."""
+    from charlie.desktop import uia as uia_mod
+
+    class FakeRect:
+        left, top, right, bottom = 0, 0, 10, 10
+
+    class FakeButton:
+        ControlTypeName = "ButtonControl"
+        Name = "btn"
+        IsOffscreen = False
+        BoundingRectangle = FakeRect()
+
+        def GetChildren(self):
+            return [FakeButton() for _ in range(5)]
+
+    marks: list = []
+    controls: dict = {}
+    uia_mod._walk(FakeButton(), marks, controls, depth=0, max_depth=25, max_marks=10)
+    assert len(marks) == 10
+
+
 def test_merge_ocr_elements_continues_mark_id_sequence():
     uia = [Element(mark_id=1, name="Save", control_type="Button", bounds=(0, 0, 10, 10),
                     is_password=False, is_offscreen=False)]
@@ -215,13 +239,34 @@ def test_build_payload_uses_instance_pending_image_not_shared_global():
     assert pop_pending_vision_image() == "image-from-a-different-brain"
 
 
+def test_build_payload_strips_tools_when_vision_image_attached():
+    """A vision model handed the tool schema can emit a broken tool call instead of text."""
+    from charlie.config import Config
+    from charlie.core import Brain
+
+    cfg = Config(
+        llm_url="https://example.com/v1",
+        llm_key="test-key",
+        llm_model="dummy",
+        native_tool_calling=True,
+        vision_enabled=True,
+    )
+    brain = Brain(cfg)
+    brain._pending_vision_image_url = "data:image/png;base64,x"
+
+    payload = brain._build_payload([{"role": "user", "content": "what's on my screen?"}])
+
+    assert "tools" not in payload
+    assert "tool_choice" not in payload
+
+
 def test_with_vision_image_rewrites_last_user_message_only():
     messages = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "click OK"},
     ]
     out = _with_vision_image(messages, "data:image/png;base64,x")
-    assert out[0] == {"role": "system", "content": "sys"}
+    assert out[0] == {"role": "system", "content": _VISION_SYSTEM_PROMPT}
     assert out[1]["content"] == [
         {"type": "text", "text": "click OK"},
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
@@ -230,6 +275,30 @@ def test_with_vision_image_rewrites_last_user_message_only():
     assert messages[1]["content"] == "click OK"
     assert _payload_is_vision({"messages": out}) is True
     assert _payload_is_vision({"messages": messages}) is False
+
+
+def test_with_vision_image_drops_tool_call_history_and_full_system_prompt():
+    # Vision answers from image + question -- prior tool results and Charlie's full system prompt must not ride along.
+    messages = [
+        {"role": "system", "content": "sys" * 1000},
+        {"role": "user", "content": "earlier question"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "type": "function", "function": {}}]},
+        {"role": "tool", "content": "a huge OCR dump" * 1000},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "2", "type": "function", "function": {}}]},
+        {"role": "tool", "content": "another huge tool result" * 1000},
+        {"role": "user", "content": "what's on my screen?"},
+    ]
+    out = _with_vision_image(messages, "data:image/png;base64,x")
+    assert out == [
+        {"role": "system", "content": _VISION_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what's on my screen?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+            ],
+        },
+    ]
 
 
 def test_select_followup_route_prefers_vision_when_payload_carries_image(brain_config):
@@ -308,7 +377,9 @@ if __name__ == "__main__":
     test_merge_ocr_elements_continues_mark_id_sequence()
     test_desktop_screenshot_disabled_by_default()
     test_pending_vision_image_pops_once()
+    test_build_payload_strips_tools_when_vision_image_attached()
     test_with_vision_image_rewrites_last_user_message_only()
+    test_with_vision_image_drops_tool_call_history_and_full_system_prompt()
     test_select_followup_route_prefers_vision_when_payload_carries_image(brain_config())
     test_select_followup_route_uses_llm_without_image(brain_config())
     test_desktop_com_tools_covers_perception_and_effectors()

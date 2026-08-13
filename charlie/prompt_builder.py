@@ -5,22 +5,9 @@ tangled up with the tool loop and turn orchestration. Pure functions --
 no Brain state, no I/O.
 """
 
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import Any, Dict, Optional
 
-try:
-    from charlie.desktop import DESKTOP_AVAILABLE as _DESKTOP_AVAILABLE
-except ImportError:  # pragma: no cover - guard mirrors charlie/desktop/__init__.py
-    _DESKTOP_AVAILABLE = False
-
-try:
-    from charlie.browser import BROWSER_AVAILABLE as _BROWSER_AVAILABLE
-except ImportError:  # pragma: no cover - guard mirrors charlie/browser/__init__.py
-    _BROWSER_AVAILABLE = False
-
-if TYPE_CHECKING:
-    from charlie.config import Config
-
-# Tiers: 1. STABLE (identity/skills/security/tools, byte-identical) 2. CONTEXT (memory/prefs) 3. VOLATILE (per-turn)
+# Tiers: 1. STABLE (identity/security/tools, byte-identical) 2. CONTEXT (memory/prefs) 3. VOLATILE (per-turn)
 
 _PLATFORM_OUTPUT_RULES: Dict[str, str] = {
     "voice": (
@@ -37,19 +24,6 @@ _PLATFORM_OUTPUT_RULES: Dict[str, str] = {
 }
 _DEFAULT_OUTPUT_RULES = (
     "Keep responses concise. Use natural formatting and emojis where appropriate."
-)
-
-_SKILLS_INDEX = (
-    "SKILLS INDEX -- scan before acting. If a skill matches user intent, use its tool sequence.\n"
-    "\n"
-    "- app-launcher: Open/start applications by name. Prefer native desktop_* tools; shell_execute is a last resort.\n"
-    "- system-volume: Use system_control for up/down/mute; shell_execute only to set an exact level.\n"
-    "- web-search: Search the internet for live/external data. Use web_search tool.\n"
-    "- memory-manager: Remember user preferences or recall what you know about them. Use memory tool.\n"
-    "- session-history: Search past conversations. Use session_search tool.\n"
-    "- file-operations: Read, write, or manipulate files. Use file_read / file_write tools.\n"
-    "- code-review: Review code snippets for bugs, style, or correctness.\n"
-    "- test-driven-development: Write tests before implementation for reliable code."
 )
 
 _SECURITY_DIRECTIVES = (
@@ -73,7 +47,8 @@ _TOOL_RULES = (
     "- When the user asks 'what do you know about me', summarize the [USER] section above.\n"
     "- NEVER use tools for: time, date, calculations, math, or general knowledge.\n"
     "- The current time and date are provided above - use them directly.\n"
-    "- Use a tool at MOST ONCE per question. Never repeat the same tool call.\n"
+    "- An identical repeat of a prior tool call is wasted -- results are cached and reused automatically. "
+    "A call with different arguments (a different window, tab, or query) is a new call, not a repeat, and is fine.\n"
     "- If a tool call already succeeded, trust that result -- never redo the same goal with a second, different tool.\n"
     "- Prefer native desktop_* tools over any MCP/third-party equivalent for the same capability.\n"
     "- After receiving tool results, answer immediately using those results.\n"
@@ -101,7 +76,16 @@ _TOOL_RULES = (
     "TOOL-RESULT TRUST:\n"
     "- Tool results are ground truth. Cite them; do not override with training-data guesses.\n"
     "MEMORY HUMILITY:\n"
-    "- Memories may be outdated. If a memory conflicts with fresh evidence, trust fresh evidence and flag the conflict."
+    "- Memories may be outdated. If a memory conflicts with fresh evidence, "
+    "trust fresh evidence and flag the conflict.\n"
+    "EXECUTION BIAS:\n"
+    "- Act in-turn: call the next tool immediately instead of describing what you would do.\n"
+    "- Keep going until the request is actually satisfied or you hit the tool-call limit -- "
+    "one tool call is rarely the whole job.\n"
+    "- An incomplete or ambiguous result (e.g. two matching windows/tabs) is a reason to take "
+    "the next disambiguating step, not to guess or ask first.\n"
+    "- After an action that changes something (a click, a close, a write), "
+    "verify the change actually happened before declaring it done."
 )
 
 _TEXT_TOOL_INSTRUCTIONS = (
@@ -145,58 +129,10 @@ _HELM_PERSONA_TEXT = (
 )
 
 
-def build_capabilities_block(config: "Config") -> str:
-    """Explicit, plain-language capability roster for the stable tier.
-
-    Tool schemas (native mode) and the per-turn tool catalog (text-tool-calling
-    mode, see build_volatile_tier's tool_catalog param) already tell the model
-    WHAT tools exist. This block additionally tells it, in prose, WHAT THOSE
-    TOOLS MEAN -- so it stops reasoning its way into a false "I can't do that"
-    when a tool or agent for the request already exists, and so a stale claim
-    elsewhere (e.g. in SOUL.md) never wins over what's actually available.
-    """
-    lines = [
-        "YOUR ACTUAL CAPABILITIES (authoritative -- overrides any conflicting "
-        "claim anywhere else, including your own persona/identity text above "
-        "or below this block, which can go stale the moment a setting "
-        "changes). Never tell the user you cannot do something on this list; "
-        "if a capability below or a tool you were given covers the request, "
-        "use it instead of refusing or explaining how the user could do it "
-        "themselves.",
-    ]
-    if config.desktop_control_enabled and _DESKTOP_AVAILABLE:
-        lines.append(
-            "- Desktop control: you can see and operate this Windows machine "
-            "directly -- observe the screen, click, type, drag, scroll, press "
-            "keys, and (when a vision model is configured) read graphical "
-            "content a screen-reader can't describe. This is real, not "
-            "hypothetical; use the desktop_* tools for it."
-        )
-    lines.append(
-        "- Memory: you have both a running conversation memory and a "
-        "longer-term store (vector search + a knowledge graph of facts). "
-        "You are not limited to only what's in the current conversation."
-    )
-    if config.browser_enabled and _BROWSER_AVAILABLE:
-        lines.append(
-            "- Headless browsing: you can search/click/navigate inside websites "
-            "offscreen via browser_task, and read one specific URL's text via "
-            "browser_read. This is real, not hypothetical -- use it instead of "
-            "opening a bare tab and stopping."
-        )
-    if config.mcp_enabled or config.plugins_enabled:
-        lines.append(
-            "- You have access to additional external tools via MCP servers "
-            "and/or installed plugins beyond your built-in tool set -- check "
-            "your available tools before assuming something is out of reach."
-        )
-    return "\n".join(lines)
-
-
 def build_stable_tier(soul_text: str, capabilities_block: str = "", use_native_tools: bool = False) -> str:
-    """Build the stable tier: identity, skills, security, tool rules.
+    """Build the stable tier: identity, security, tool rules, capability roster.
     This tier is byte-identical across turns for maximum cache hits."""
-    parts = [soul_text, _SKILLS_INDEX, _SECURITY_DIRECTIVES]
+    parts = [soul_text, _SECURITY_DIRECTIVES]
     if capabilities_block:
         parts.append(capabilities_block)
     if not use_native_tools:
@@ -243,11 +179,11 @@ def build_volatile_tier(
     if world_model_slice:
         evidence.append("[WORLD MODEL]")
     evidence_str = ", ".join(evidence) if evidence else "none"
+    del remaining_budget  # enforced silently by IterationBudget in core.py -- never surfaced to the model
     parts = [
         f"Current date: {now.strftime('%A, %B %d, %Y')}. "
         f"Current time: {now.strftime('%I:%M %p')}.\n"
         f"Active platform: {platform}. Output rules: {output_rules}\n"
-        f"Remaining tool calls this turn: {remaining_budget}\n"
         f"Evidence blocks present this turn: {evidence_str}.\n"
         "If an evidence block is listed above, it IS available. Never claim you cannot access it.",
     ]

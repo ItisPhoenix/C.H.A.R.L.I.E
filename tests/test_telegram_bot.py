@@ -1,3 +1,4 @@
+import charlie.telegram_bot as telegram_bot
 from charlie.telegram_bot import is_authorized, parse_callback_data
 
 
@@ -24,3 +25,10 @@ class TestParseCallbackData:
 
     def test_unknown_action_returns_none(self):
         assert parse_callback_data("maybe:tool_abc123") is None
+
+
+def test_approval_relay_is_available_for_every_origin_channel():
+    relay = getattr(telegram_bot, "should_relay_approval", None)
+
+    assert relay is not None
+    assert relay(bot_available=True, allowed_user_id=694903315) is True

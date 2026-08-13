@@ -1,4 +1,14 @@
-"""Shell: consumes SURFACE_* events over the EventBus SUB channel, owns SurfaceWindow instances."""
+"""Shell: consumes SURFACE_* events over the EventBus SUB channel, owns SurfaceWindow instances.
+
+Every active surface gets its own small SurfaceWindow at its own absolute screen rect. There is
+no shared full-screen overlay: a masked, always-on-top, focus-less QWebEngineView window was
+isolated-tested standalone and never painted a single visible pixel on this Windows/Qt/WebEngine
+stack (show()+setMask() to a plain box, and even show() with no mask at all -- both blank).
+SurfaceWindow (no mask, per-surface, already used for workspace) was tested the same way and
+rendered correctly. Per-surface windows also make the desktop naturally click-through when idle
+for free -- there is simply no window covering it, so no masking/mouse-transparency logic is
+needed there either.
+"""
 import json
 import logging
 import threading
@@ -16,7 +26,7 @@ from charlie.ipc import DEFAULT_EVENT_PORT
 logger = logging.getLogger("charlie.hud.shell")
 
 _POLL_TIMEOUT_MS = 500
-_DRAGGABLE_MODES = frozenset({"widget", "notification", "floating"})
+_DRAGGABLE_MODES = frozenset({"widget", "notification", "floating", "workspace"})
 
 
 class Shell(QObject):
@@ -29,6 +39,7 @@ class Shell(QObject):
         super().__init__()
         self._base_url = base_url
         self._windows: Dict[str, SurfaceWindow] = {}
+
         self.spawn_requested.connect(self._on_spawn)
         self.dismiss_requested.connect(self._on_dismiss)
 
@@ -41,15 +52,25 @@ class Shell(QObject):
         if mode == "background":
             return
         self._on_dismiss(surface_id)
-        region = payload.get("region") or "top_right"
-        rect = placement.region_to_rect(region, self._screen_rect(), mode)
-        url = f"{self._base_url}/surface/{surface_id}"
-        window = SurfaceWindow(url, rect, draggable=mode in _DRAGGABLE_MODES)
-        window.show()
-        self._windows[surface_id] = window
-        ttl = payload.get("ttl_seconds")
-        if ttl:
-            QTimer.singleShot(int(ttl * 1000), lambda: self.dismiss_requested.emit(surface_id))
+
+        try:
+            rect = payload.get("rect")
+            if not rect:
+                # Fallback if rect wasn't in payload (should be added by surfaces.py)
+                region = payload.get("region") or "top_right"
+                rect = placement.region_to_rect(region, self._screen_rect(), mode)
+
+            url = f"{self._base_url}/surface/{surface_id}"
+            window = SurfaceWindow(url, rect, draggable=mode in _DRAGGABLE_MODES)
+            window.show()
+            self._windows[surface_id] = window
+            logger.info("Spawned surface %s (%s) at %s", surface_id, mode, rect)
+
+            ttl = payload.get("ttl_seconds")
+            if ttl:
+                QTimer.singleShot(int(ttl * 1000), lambda: self.dismiss_requested.emit(surface_id))
+        except Exception:
+            logger.error("Failed to spawn surface %s (%s)", surface_id, mode, exc_info=True)
 
     def _on_dismiss(self, surface_id: str) -> None:
         window = self._windows.pop(surface_id, None)

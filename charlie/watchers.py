@@ -172,10 +172,10 @@ def repeated_tool_failure_watcher(
         flagged = get_unreliable_tools()
         flagged_names = {name for name, _rate, _calls in flagged}
         newly_flagged = flagged_names - already_alerted
-        already_alerted.clear()
-        already_alerted.update(flagged_names)
+        already_alerted.intersection_update(flagged_names)
         if newly_flagged:
             name = sorted(newly_flagged)[0]
+            already_alerted.add(name)
             rate = next(r for n, r, _c in flagged if n == name)
             return _alert_event(f"Tool '{name}' is failing {rate:.0%} of calls")
         return None

@@ -18,7 +18,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from charlie.known_apps import APP_REGISTRY as _APP_REGISTRY
 from charlie.text_utils import format_app_list
@@ -31,22 +31,6 @@ logger = logging.getLogger("charlie.router")
 class RouteMatch:
     name: str
     args: Dict[str, Any]
-
-
-@dataclass
-class Route:
-    name: str
-    matcher: Callable[[str], Optional[RouteMatch]]
-    cost: str = "fast"
-
-
-def resolve(query: str) -> Optional[RouteMatch]:
-    """Try each route's matcher in order, return the first match, or None."""
-    for route in _ROUTES:
-        match = route.matcher(query)
-        if match is not None:
-            return match
-    return None
 
 
 _TIME_DATE_RE = re.compile(
@@ -447,11 +431,3 @@ def is_router_classifier_candidate(text: str) -> bool:
     if not stripped or stripped.endswith("?"):
         return False
     return len(stripped.split()) <= _ROUTER_CLASSIFIER_MAX_WORDS
-
-
-_ROUTES: List[Route] = [
-    Route("time_date", _match_time_date),
-    Route("close_app", _match_route_close_app),
-    Route("open_app", _match_route_open_app),
-    Route("background_task_status", _match_background_task_status),
-]

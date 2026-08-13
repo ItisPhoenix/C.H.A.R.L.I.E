@@ -1,13 +1,44 @@
 @theme {
-  --color-glass-bg: rgba(20, 20, 30, 0.72);
-  --color-glass-bg-2: rgba(255, 255, 255, 0.04);
-  --color-glass-border: rgba(255, 255, 255, 0.08);
-  --color-text-primary: #f4f6fa;
-  --color-text-secondary: #c7cbd6;
-  --color-text-muted: #8b8fa3;
+  /* Agentic OS identity: electric cyan glow on near-black blue, replacing the prior neutral-violet glass. */
+  --color-bg: #050a10;
+  --color-glass-bg: rgba(6, 16, 26, 0.78);
+  --color-glass-bg-2: rgba(34, 211, 238, 0.06);
+  --color-glass-border: rgba(34, 211, 238, 0.22);
+  --color-text-primary: #eaf6ff;
+  --color-text-secondary: #9fc4d6;
+  --color-text-muted: #5c7c8c;
   --color-status-success: #34d399;
   --color-status-error: #f87171;
   --color-status-error-dim: rgba(248, 113, 113, 0.12);
   --color-status-warning: #fbbf24;
-  --color-accent: #7c9eff;
+  --color-accent: #22d3ee;
+  --color-accent-dim: rgba(34, 211, 238, 0.14);
+  --glow-accent: 0 0 1px rgba(34, 211, 238, 0.8), 0 0 20px rgba(34, 211, 238, 0.25);
+  --glow-danger: 0 0 1px rgba(248, 113, 113, 0.8), 0 0 20px rgba(248, 113, 113, 0.25);
+  --glow-warning: 0 0 1px rgba(251, 191, 36, 0.8), 0 0 20px rgba(251, 191, 36, 0.25);
+  --glow-success: 0 0 1px rgba(52, 211, 153, 0.8), 0 0 20px rgba(52, 211, 153, 0.25);
+
+  /* Type ramp -- surfaces are read at a glance, not scanned like prose; kept tight and few-stepped. */
+  --font-size-caption: 0.6875rem;   /* 11px -- rationale line, code chrome labels */
+  --font-size-body: 0.8125rem;      /* 13px -- widget/notification body text */
+  --font-size-label: 0.875rem;      /* 14px -- widget/notification title */
+  --font-size-heading: 1.125rem;    /* 18px -- modal/workspace title */
+
+  /* Radii scale -- overrides Tailwind's own rounded-* defaults so every card/control
+     shares one deliberate scale instead of the previous unreviewed 16/12/8/4px mix. */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+
+  /* Elevation scale -- how far off the desktop a surface sits. */
+  --shadow-elevation-1: 0 2px 8px rgba(0, 0, 0, 0.25);
+  --shadow-elevation-2: 0 8px 32px rgba(0, 0, 0, 0.35);
+  --shadow-elevation-3: 0 16px 56px rgba(0, 0, 0, 0.5);
+
+  /* Motion -- one entrance curve, three durations. No bounce/elastic (impeccable: ease-out-expo only). */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 320ms;
 }

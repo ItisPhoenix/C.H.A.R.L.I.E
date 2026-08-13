@@ -305,34 +305,49 @@ class TestHelmPersona:
 
 
 class TestCapabilitiesBlock:
-    """Stable-tier capability roster (Task A4b): stop Charlie from falsely
-    refusing when a tool/agent for the request already exists, and make a
-    live capability roster override any stale claim (e.g. in SOUL.md)."""
+    """Stable-tier capability roster: stop Charlie from falsely refusing when a tool/agent
+    for the request already exists, and make a live, registry-derived roster override any
+    stale claim (e.g. in SOUL.md). Superseded build_capabilities_block with
+    charlie.capabilities.build_capability_roster, which reads real registered tools."""
 
-    def test_capabilities_block_overrides_stale_claims(self):
+    @staticmethod
+    def _registry_with(*, desktop=False, browser=False):
+        from charlie.tools import ToolRegistry
+        reg = ToolRegistry()
+        empty_schema = {"type": "object", "properties": {}}
+        reg.register_tool(name="memory", description="Manage memory.", schema=empty_schema, owner="memory")(lambda: "x")
+        if desktop:
+            reg.register_tool(
+                name="desktop_observe", description="See the screen.", schema=empty_schema, owner="desktop"
+            )(lambda: "x")
+        if browser:
+            reg.register_tool(
+                name="browser_task", description="Browse.", schema=empty_schema, owner="browser"
+            )(lambda: "x")
+        return reg
+
+    def test_roster_overrides_stale_claims(self):
+        from charlie.capabilities import build_capability_roster
         from charlie.config import Config
-        from charlie.prompt_builder import build_capabilities_block as _build_capabilities_block
-        cfg = Config()
-        block = _build_capabilities_block(cfg)
-        assert "conversation memory" in block
+        block = build_capability_roster(self._registry_with(), Config())
+        assert "Memory" in block
         assert "overrides any conflicting claim" in block
 
-    def test_stable_tier_includes_capabilities_block(self):
+    def test_stable_tier_includes_roster(self):
+        from charlie.capabilities import build_capability_roster
         from charlie.config import Config
-        from charlie.prompt_builder import build_capabilities_block as _build_capabilities_block
         from charlie.prompt_builder import build_stable_tier as _build_stable_tier
-        cfg = Config()
-        block = _build_capabilities_block(cfg)
+        block = build_capability_roster(self._registry_with(), Config())
         stable = _build_stable_tier("Test soul text.", block)
-        assert "conversation memory" in stable
+        assert "Memory" in stable
         assert "Test soul text." in stable
 
-    def test_capabilities_block_omits_desktop_control_when_disabled(self):
+    def test_roster_omits_desktop_control_when_disabled(self):
+        from charlie.capabilities import build_capability_roster
         from charlie.config import Config
-        from charlie.prompt_builder import build_capabilities_block as _build_capabilities_block
         cfg = Config()
         cfg.desktop_control_enabled = False
-        block = _build_capabilities_block(cfg)
+        block = build_capability_roster(self._registry_with(desktop=True), cfg)
         assert "Desktop control" not in block
 
     def test_stable_tier_default_second_arg_matches_old_single_arg_call(self):
@@ -341,17 +356,17 @@ class TestCapabilitiesBlock:
         stable = _build_stable_tier("Test soul text.")
         assert "Test soul text." in stable
 
-    def test_capabilities_block_omits_desktop_control_when_unavailable(self):
+    def test_roster_omits_desktop_control_when_unavailable(self):
         """desktop_control_enabled=True alone isn't enough -- must also check
         the real _DESKTOP_AVAILABLE import-success flag, mirroring tools.py's
         _desktop_ready() double-check, or the prompt claims a capability that
         actual tool execution will refuse."""
-        import charlie.prompt_builder as prompt_builder_module
+        import charlie.capabilities as capabilities_module
         from charlie.config import Config
         cfg = Config()
         cfg.desktop_control_enabled = True
-        with patch.object(prompt_builder_module, "_DESKTOP_AVAILABLE", False):
-            block = prompt_builder_module.build_capabilities_block(cfg)
+        with patch.object(capabilities_module, "_DESKTOP_AVAILABLE", False):
+            block = capabilities_module.build_capability_roster(self._registry_with(desktop=True), cfg)
         assert "Desktop control" not in block
 
 

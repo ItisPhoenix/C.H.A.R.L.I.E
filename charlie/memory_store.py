@@ -133,6 +133,17 @@ def _build_embedding_function(config: Any) -> Any:
         return None
 
 
+def _existing_embedding_dim(collection: Any) -> Optional[int]:
+    """Dimension of an already-stored vector, or None if empty. peek() reads raw vectors, no embedding call."""
+    if collection.count() == 0:
+        return None
+    peeked = collection.peek(limit=1)
+    embeddings = peeked.get("embeddings")
+    if embeddings is None or len(embeddings) == 0:
+        return None
+    return len(embeddings[0])
+
+
 class MemoryStore:
     """Persistent vector memory backed by ChromaDB with local embeddings.
 
@@ -158,11 +169,24 @@ class MemoryStore:
             import chromadb
 
             client = chromadb.PersistentClient(path=self.db_path)
-            self._collection = client.get_or_create_collection(
+            collection = client.get_or_create_collection(
                 name=_COLLECTION_NAME,
                 embedding_function=self._ef,
                 metadata={"hnsw:space": "cosine"},
             )
+            stored_dim = _existing_embedding_dim(collection)
+            current_dim = len(self._ef.embed_query(["dimension probe"])[0])
+            if stored_dim is not None and stored_dim != current_dim:
+                logger.error(
+                    "MemoryStore: embedding dimension mismatch (collection has %d-dim vectors "
+                    "from a previous embedding backend, current backend %s produces %d-dim). "
+                    "Disabling memory for this session rather than crashing every search -- "
+                    "restore the original embedding service or delete %s to rebuild.",
+                    stored_dim, self._ef.name(), current_dim, self.db_path,
+                )
+                self._collection = None
+                return
+            self._collection = collection
             logger.info(
                 "MemoryStore initialized: %s (%d documents)",
                 self.db_path,

@@ -15,7 +15,125 @@ body {
 .glass {
   background: var(--color-glass-bg);
   border: 1px solid var(--color-glass-border);
-  border-radius: 16px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-elevation-2), var(--glow-accent);
   backdrop-filter: blur(12px);
+  position: relative;
+  animation: surface-enter var(--duration-base) var(--ease-out-expo) both;
+}
+
+@keyframes surface-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glass {
+    animation: none;
+  }
+}
+
+.glass::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0) 40%);
+  pointer-events: none;
+}
+
+.role-danger {
+  border-top-color: var(--color-status-error);
+  box-shadow: var(--shadow-elevation-2), var(--glow-danger);
+}
+
+.role-warning {
+  border-top-color: var(--color-status-warning);
+  box-shadow: var(--shadow-elevation-2), var(--glow-warning);
+}
+
+.role-success {
+  border-top-color: var(--color-status-success);
+  box-shadow: var(--shadow-elevation-2), var(--glow-success);
+}
+
+.role-info {
+  border-top-color: var(--color-accent);
+}
+
+.role-dot-danger {
+  background: var(--color-status-error);
+}
+
+.role-dot-warning {
+  background: var(--color-status-warning);
+}
+
+.role-dot-success {
+  background: var(--color-status-success);
+}
+
+.role-dot-info {
+  background: var(--color-accent);
+}
+
+@keyframes ring-pulse {
+  0%, 100% { opacity: 0.7; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.04); }
+}
+
+.animate-ring-pulse {
+  animation: ring-pulse 3.5s ease-in-out infinite;
+}
+
+@keyframes spin-arc {
+  to { transform: rotate(360deg); }
+}
+
+.animate-spin-arc {
+  animation: spin-arc 0.9s linear infinite;
+}
+
+.voice-bar-wave {
+  animation: voice-bar 0.9s ease-in-out infinite;
+}
+
+@keyframes voice-bar {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+
+@keyframes ring-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-ring-spin {
+  animation: ring-spin 90s linear infinite;
+}
+
+@keyframes node-twinkle {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+.animate-node-twinkle {
+  animation: node-twinkle 2.4s ease-in-out infinite;
+  transform-origin: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-ring-pulse,
+  .animate-spin-arc,
+  .animate-ring-spin,
+  .animate-node-twinkle,
+  .voice-bar-wave {
+    animation: none !important;
+  }
 }

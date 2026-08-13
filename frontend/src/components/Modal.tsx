@@ -3,13 +3,14 @@ import type { ReactElement, ReactNode } from "react";
 interface ModalProps {
   children: ReactNode;
   labelledBy: string;
+  accent?: string;
 }
 
 // Shared shell for interruption dialogs (recovery proposals, tool approvals). Ported from frontend@c7aa7df~1.
-export function Modal({ children, labelledBy }: ModalProps): ReactElement {
+export function Modal({ children, labelledBy, accent = "info" }: ModalProps): ReactElement {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md">
-      <div role="dialog" aria-modal="true" aria-labelledby={labelledBy} className="w-full max-w-lg glass p-6 flex flex-col gap-5">
+    <div className="w-full h-full flex flex-col items-center justify-center">
+      <div role="dialog" aria-modal="true" aria-labelledby={labelledBy} className={`w-full max-w-lg glass p-6 flex flex-col gap-5 role-${accent}`}>
         {children}
       </div>
     </div>
