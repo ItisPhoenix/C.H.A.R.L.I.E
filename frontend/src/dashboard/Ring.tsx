@@ -21,6 +21,18 @@ const PLASMA_PARTICLES = Array.from({ length: 180 }, (_, index) => {
   };
 });
 
+const ORB_PARTICLES = Array.from({ length: 220 }, (_, index) => {
+  const angle = index * 137.508;
+  const radius = 106 + ((index * 29) % 86);
+  const radians = angle * Math.PI / 180;
+  return {
+    cx: 384 + Math.cos(radians) * radius,
+    cy: 384 + Math.sin(radians) * radius * 0.72,
+    r: 0.7 + (index % 5) * 0.35,
+    opacity: 0.25 + (index % 7) * 0.09,
+  };
+});
+
 export function Ring(): ReactElement {
   const coreState = useCharlieStore((state) => state.coreState);
   const connected = useCharlieStore((state) => state.connected);
@@ -95,7 +107,29 @@ export function Ring(): ReactElement {
         <path className="ring-hairline" d="M384 72v48M384 648v48M72 384h48M648 384h48" strokeWidth=".6" strokeDasharray="2 4" />
       </svg>
 
-      <img className="ring-orb-art" src="/charlie-orb.png" alt="" aria-hidden="true" />
+      <svg className="ring-orb-code" viewBox="0 0 768 768" aria-hidden="true">
+        <defs>
+          <radialGradient id="orbCodeGlow">
+            <stop offset="0" stopColor="var(--plasma-hot)" stopOpacity=".98" />
+            <stop offset=".22" stopColor="var(--plasma-mid)" stopOpacity=".82" />
+            <stop offset=".58" stopColor="var(--plasma-mid)" stopOpacity=".2" />
+            <stop offset="1" stopColor="var(--plasma-deep)" stopOpacity="0" />
+          </radialGradient>
+          <filter id="orbCodeGlowFilter" x="-100%" y="-100%" width="300%" height="300%">
+            <feGaussianBlur stdDeviation="3" result="blur" />
+            <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+          </filter>
+        </defs>
+        <circle cx="384" cy="384" r="218" fill="url(#orbCodeGlow)" opacity=".8" />
+        <g className="orb-code-particles" filter="url(#orbCodeGlowFilter)">
+          {ORB_PARTICLES.map((particle, index) => <circle key={index} {...particle} />)}
+        </g>
+        <g className="orb-code-arcs" fill="none" stroke="var(--plasma-mid)" strokeLinecap="round">
+          <ellipse cx="384" cy="384" rx="164" ry="92" strokeWidth="2" strokeDasharray="2 13 22 8" />
+          <ellipse cx="384" cy="384" rx="188" ry="108" strokeWidth="1.5" strokeDasharray="1 18 31 11" transform="rotate(58 384 384)" />
+          <ellipse cx="384" cy="384" rx="206" ry="118" strokeWidth="1.4" strokeDasharray="3 21 42 16" transform="rotate(-42 384 384)" />
+        </g>
+      </svg>
 
       <div className="ring-core">
         <div className="ring-core-copy">

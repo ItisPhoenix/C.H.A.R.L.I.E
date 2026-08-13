@@ -46,8 +46,8 @@ export function Dashboard(): ReactElement {
     const stage = stageRef.current;
     if (!stage) return;
     const updateScale = () => {
-      const scale = Math.min(1, window.innerWidth / 1536, window.innerHeight / 1024);
-      stage.style.setProperty("--hud-scale", String(Math.max(0.55, scale)));
+      const scale = Math.min(window.innerWidth / 1536, window.innerHeight / 1024);
+      stage.style.setProperty("--hud-scale", String(Math.min(2.5, Math.max(0.55, scale))));
     };
     updateScale();
     window.addEventListener("resize", updateScale);

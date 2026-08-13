@@ -36,6 +36,12 @@
   isolation: isolate;
 }
 
+/* The artwork uses a 1536x1024 design coordinate system; the runtime scale maps it to any viewport. */
+@media (min-width: 1440px) {
+  .hud-viewport { overflow: hidden; }
+  .hud-stage { will-change: transform; }
+}
+
 .hud-background,
 .hud-grid,
 .hud-vignette,
@@ -464,23 +470,20 @@
   place-items: center;
 }
 
-.ring-orb-art {
+.ring-orb-code {
   position: absolute;
   z-index: 2;
-  width: 92%;
-  height: 92%;
-  object-fit: contain;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
-  opacity: .9;
-  mix-blend-mode: screen;
   filter: drop-shadow(0 0 22px rgba(255, 126, 20, .62));
   animation: orb-breathe 3.8s ease-in-out infinite;
 }
-.hud-ring[data-state="listening"] .ring-orb-art { filter: hue-rotate(148deg) saturate(1.15) drop-shadow(0 0 22px rgba(69, 216, 255, .62)); }
-.hud-ring[data-state="thinking"] .ring-orb-art, .hud-ring[data-state="executing"] .ring-orb-art { filter: hue-rotate(245deg) saturate(1.1) drop-shadow(0 0 22px rgba(181, 140, 255, .62)); }
-.hud-ring[data-state="speaking"] .ring-orb-art { filter: hue-rotate(72deg) saturate(.9) drop-shadow(0 0 22px rgba(82, 226, 176, .62)); }
-.hud-ring[data-state="attention"] .ring-orb-art { filter: hue-rotate(18deg) saturate(1.1) drop-shadow(0 0 22px rgba(255, 209, 102, .62)); }
-.hud-ring[data-state="error"] .ring-orb-art, .hud-ring[data-state="offline"] .ring-orb-art { filter: hue-rotate(325deg) saturate(1.2) drop-shadow(0 0 22px rgba(255, 119, 125, .62)); }
+.hud-ring[data-state="listening"] .ring-orb-code { filter: hue-rotate(148deg) saturate(1.15) drop-shadow(0 0 22px rgba(69, 216, 255, .62)); }
+.hud-ring[data-state="thinking"] .ring-orb-code, .hud-ring[data-state="executing"] .ring-orb-code { filter: hue-rotate(245deg) saturate(1.1) drop-shadow(0 0 22px rgba(181, 140, 255, .62)); }
+.hud-ring[data-state="speaking"] .ring-orb-code { filter: hue-rotate(72deg) saturate(.9) drop-shadow(0 0 22px rgba(82, 226, 176, .62)); }
+.hud-ring[data-state="attention"] .ring-orb-code { filter: hue-rotate(18deg) saturate(1.1) drop-shadow(0 0 22px rgba(255, 209, 102, .62)); }
+.hud-ring[data-state="error"] .ring-orb-code, .hud-ring[data-state="offline"] .ring-orb-code { filter: hue-rotate(325deg) saturate(1.2) drop-shadow(0 0 22px rgba(255, 119, 125, .62)); }
 @keyframes orb-breathe { 0%, 100% { transform: scale(.975); opacity: .82; } 50% { transform: scale(1.02); opacity: 1; } }
 
 .hud-ring::before {
@@ -540,12 +543,15 @@
 .ring-plasma circle:first-child { opacity: .38; }
 .ring-plasma path { display: none; }
 .ring-plasma circle:not(:first-child) { fill: var(--plasma-hot); filter: url(#nodeGlow); }
-.hud-ring-svg { --plasma-hot: #fff4c2; --plasma-mid: #ff9b2e; --plasma-deep: #8e2d00; }
-.hud-ring-svg[data-state="listening"] { --plasma-hot: #e6fbff; --plasma-mid: #45d8ff; --plasma-deep: #087da8; }
-.hud-ring-svg[data-state="thinking"], .hud-ring-svg[data-state="executing"] { --plasma-hot: #f4edff; --plasma-mid: #b58cff; --plasma-deep: #5431a1; }
-.hud-ring-svg[data-state="speaking"] { --plasma-hot: #eafff7; --plasma-mid: #52e2b0; --plasma-deep: #16765e; }
-.hud-ring-svg[data-state="attention"] { --plasma-hot: #fff7d0; --plasma-mid: #ffd166; --plasma-deep: #9b6210; }
-.hud-ring-svg[data-state="error"], .hud-ring-svg[data-state="offline"] { --plasma-hot: #fff0f0; --plasma-mid: #ff777d; --plasma-deep: #921f35; }
+.orb-code-particles circle { fill: var(--plasma-hot); }
+.orb-code-arcs { opacity: .7; animation: orb-code-spin 32s linear infinite; transform-origin: 384px 384px; }
+@keyframes orb-code-spin { to { transform: rotate(360deg); } }
+.hud-ring, .hud-ring-svg { --plasma-hot: #fff4c2; --plasma-mid: #ff9b2e; --plasma-deep: #8e2d00; }
+.hud-ring[data-state="listening"], .hud-ring-svg[data-state="listening"] { --plasma-hot: #e6fbff; --plasma-mid: #45d8ff; --plasma-deep: #087da8; }
+.hud-ring[data-state="thinking"], .hud-ring[data-state="executing"], .hud-ring-svg[data-state="thinking"], .hud-ring-svg[data-state="executing"] { --plasma-hot: #f4edff; --plasma-mid: #b58cff; --plasma-deep: #5431a1; }
+.hud-ring[data-state="speaking"], .hud-ring-svg[data-state="speaking"] { --plasma-hot: #eafff7; --plasma-mid: #52e2b0; --plasma-deep: #16765e; }
+.hud-ring[data-state="attention"], .hud-ring-svg[data-state="attention"] { --plasma-hot: #fff7d0; --plasma-mid: #ffd166; --plasma-deep: #9b6210; }
+.hud-ring[data-state="error"], .hud-ring[data-state="offline"], .hud-ring-svg[data-state="error"], .hud-ring-svg[data-state="offline"] { --plasma-hot: #fff0f0; --plasma-mid: #ff777d; --plasma-deep: #921f35; }
 @keyframes plasma-breathe { 0%, 100% { transform: scale(.97); opacity: .72; } 50% { transform: scale(1.03); opacity: 1; } }
 .ring-rotate-slow { transform-origin: 384px 384px; animation: ring-clockwise 70s linear infinite; }
 .ring-rotate-reverse { transform-origin: 384px 384px; animation: ring-counter 46s linear infinite; }
@@ -968,15 +974,6 @@
 /* Responsive command-center layout. Floating pixel coordinates apply only on wide displays. */
 .hud-viewport { overflow: auto; }
 .hud-viewport.is-dashboard-hidden .hud-stage > * { visibility: hidden; }
-.hud-stage {
-  position: relative;
-  left: auto;
-  top: auto;
-  width: min(100%, 1536px);
-  min-height: 1024px;
-  margin: 0 auto;
-  transform: none;
-}
 
 .hud-panel-chat .hud-panel-body {
   display: flex;
