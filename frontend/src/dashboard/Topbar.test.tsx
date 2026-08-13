@@ -1,6 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, test } from "vitest";
 import { useCharlieStore } from "../store/charlie";
+import { useLayoutStore } from "./layoutStore";
 import { Topbar } from "./Topbar";
 
 beforeEach(() => {
@@ -22,5 +23,14 @@ describe("Topbar", () => {
     expect(screen.getByLabelText("System status")).toHaveTextContent("Voice: Unknown");
     expect(screen.queryByText("100%")).not.toBeInTheDocument();
     expect(screen.queryByText("Online")).not.toBeInTheDocument();
+  });
+
+  test("opens real Settings workspace from the gear shortcut", () => {
+    useLayoutStore.getState().close("settings");
+    render(<Topbar />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(useLayoutStore.getState().panels.settings.open).toBe(true);
   });
 });

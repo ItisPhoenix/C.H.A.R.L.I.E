@@ -1,5 +1,7 @@
 import { useEffect, useState, type ReactElement } from "react";
+import { GearSixIcon } from "@phosphor-icons/react";
 import { useCharlieStore } from "../store/charlie";
+import { useLayoutStore } from "./layoutStore";
 
 function useClock(): Date {
   const [now, setNow] = useState(() => new Date());
@@ -8,14 +10,6 @@ function useClock(): Date {
     return () => window.clearInterval(timer);
   }, []);
   return now;
-}
-
-function IconButton({ label, path }: { label: string; path: string }): ReactElement {
-  return (
-    <button type="button" aria-label={label} title={label}>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d={path} strokeLinecap="round" strokeLinejoin="round" /></svg>
-    </button>
-  );
 }
 
 export function Topbar(): ReactElement {
@@ -31,6 +25,7 @@ export function Topbar(): ReactElement {
     ? "Unknown"
     : healthValues.some((item) => item.status === "degraded" || item.status === "stopped") ? "Degraded" : "Healthy";
   const voice = subsystemHealth.voice?.detail ?? "Unknown";
+  const openSettings = useLayoutStore((state) => state.open);
 
   return (
     <header className="hud-topbar">
@@ -49,9 +44,7 @@ export function Topbar(): ReactElement {
       </div>
 
       <div className="hud-utilities">
-        <IconButton label="Search" path="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm10 17-5-5" />
-        <IconButton label="Messages" path="M4 5h16v11H8l-4 4V5Z" />
-        <IconButton label="Settings" path="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm0-5 1.4 2.1 2.5.3.7 2.4 2 1.5-1 2.3 1 2.3-2 1.5-.7 2.4-2.5.3-1.4 2.1-2.3-1-2.3 1-1.4-2.1-2.5-.3-.7-2.4-2-1.5 1-2.3-1-2.3 2-1.5.7-2.4 2.5-.3L12 3.5Z" />
+        <button type="button" aria-label="Settings" title="Settings" onClick={() => openSettings("settings")}><GearSixIcon aria-hidden="true" weight="light" /></button>
         <span className="hud-clock"><strong className="hud-time">{time}</strong><small className="hud-date">{date}</small></span>
       </div>
     </header>

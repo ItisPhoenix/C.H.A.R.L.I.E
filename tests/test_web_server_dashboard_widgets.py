@@ -64,3 +64,11 @@ async def test_get_mcp_tools_returns_registered_mcp_definitions(monkeypatch):
     result = await web_server.get_mcp_tools()
 
     assert [tool["function"]["name"] for tool in result["tools"]] == ["mcp_files_read"]
+
+
+def test_dashboard_panel_event_replays_to_late_clients(monkeypatch):
+    monkeypatch.setattr(web_server, "_dashboard_panels", {"terminal": "show"})
+
+    events = web_server._initial_state_events()
+
+    assert {"type": "dashboard_panel", "payload": {"action": "show", "panel_id": "terminal"}} in events

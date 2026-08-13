@@ -62,3 +62,35 @@ def build_capability_roster(registry: "ToolRegistry", config: "Config") -> str:
         label = _OWNER_LABELS.get(owner, owner.capitalize())
         lines.append(f"- {label}: " + "; ".join(groups[owner]))
     return "\n".join(lines)
+
+
+def build_capability_snapshot(registry: "ToolRegistry", config: "Config") -> dict:
+    """Return a secret-free, machine-readable view of currently usable capabilities."""
+    desktop_ok = config.desktop_control_enabled and _DESKTOP_AVAILABLE
+    browser_ok = config.browser_enabled and _BROWSER_AVAILABLE
+    tools = []
+    for definition in registry.get_tool_definitions():
+        function = definition["function"]
+        name = function["name"]
+        owner = registry.get_owner(name) or "tools"
+        if owner == "desktop" and not desktop_ok:
+            continue
+        if owner == "browser" and not browser_ok:
+            continue
+        tools.append({
+            "name": name,
+            "description": function["description"],
+            "owner": owner,
+            "risk_class": registry.get_risk_class(name),
+        })
+    return {
+        "tools": tools,
+        "subsystems": {
+            "desktop": {"enabled": config.desktop_control_enabled, "available": _DESKTOP_AVAILABLE},
+            "browser": {"enabled": config.browser_enabled, "available": _BROWSER_AVAILABLE},
+            "telegram": {
+                "enabled": config.telegram_enabled,
+                "configured": bool(config.telegram_bot_token and config.telegram_user_id > 0),
+            },
+        },
+    }

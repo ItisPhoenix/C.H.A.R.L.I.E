@@ -77,6 +77,13 @@ export interface AudioState {
   volume: number;
 }
 
+export interface DashboardPanelIntent {
+  action: "show" | "hide";
+  panelId: string;
+}
+
+const _DASHBOARD_PANEL_IDS = new Set(["chat", "tasks", "system", "tools", "terminal", "mcp", "media", "calendar", "settings"]);
+
 type SurfaceMap = Record<string, SurfaceSpec>;
 
 // One primitive per selector (CLAUDE.md sec8.5) -- components read a single field, never the whole store.
@@ -98,6 +105,9 @@ interface CharlieState {
   activeAlert: AlertInfo | null;
   audioState: AudioState | null;
   micMuted: boolean | null;
+  audioLevel: number;
+  dashboardPanelIntent: DashboardPanelIntent | null;
+  dashboardVisible: boolean;
   setConnected: (connected: boolean) => void;
   setActiveToolApproval: (req: ToolApprovalRequest | null) => void;
   seedMcpStatus: (servers: Record<string, boolean>) => void;
@@ -160,6 +170,9 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   activeAlert: null,
   audioState: null,
   micMuted: null,
+  audioLevel: 0,
+  dashboardPanelIntent: null,
+  dashboardVisible: true,
 
   setConnected: (connected) => set({ connected }),
   dismissAlert: () => set({ activeAlert: null }),
@@ -251,6 +264,22 @@ export const useCharlieStore = create<CharlieState>((set) => ({
         return;
       case "mic_state":
         set({ micMuted: typeof payload.mic_muted === "boolean" ? payload.mic_muted : null });
+        return;
+      case "audio_level": {
+        const level = numberOrNull(payload.level);
+        set({ audioLevel: level === null ? 0 : Math.max(0, Math.min(1, level)) });
+        return;
+      }
+      case "dashboard_panel": {
+        const action = payload.action;
+        const panelId = payload.panel_id;
+        if ((action === "show" || action === "hide") && typeof panelId === "string" && _DASHBOARD_PANEL_IDS.has(panelId)) {
+          set({ dashboardPanelIntent: { action, panelId } });
+        }
+        return;
+      }
+      case "dashboard_visibility":
+        set({ dashboardVisible: Boolean(payload.visible) });
         return;
       case "token":
         set((s) => {

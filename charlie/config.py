@@ -518,6 +518,14 @@ class Config:
                 touched.add(restart)
         return touched
 
+    def validate_env_updates(self, updates: Dict[str, Any]) -> None:
+        """Validate all recognized values before mutating this config instance."""
+        by_env = {f.metadata.get("env"): f for f in fields(self) if f.metadata.get("env")}
+        for env_key, raw_value in updates.items():
+            f = by_env.get(env_key)
+            if f is not None:
+                _coerce(raw_value, f.type)
+
 
 _LABEL_ACRONYMS = {
     "llm", "url", "asr", "tts", "vad", "mcp", "gpu", "ocr", "id",

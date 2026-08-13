@@ -1,4 +1,7 @@
-from charlie.capabilities import build_capability_roster
+import asyncio
+
+import charlie.web_server as web_server
+from charlie.capabilities import build_capability_roster, build_capability_snapshot
 from charlie.config import Config
 from charlie.tools import ToolRegistry, registry
 
@@ -28,3 +31,27 @@ def test_roster_groups_by_owner_label():
 
 def test_roster_empty_registry_returns_empty_string():
     assert build_capability_roster(ToolRegistry(), Config()) == ""
+
+
+def test_snapshot_is_machine_readable_and_secret_free():
+    reg = ToolRegistry()
+    reg.register_tool("safe", "Safe tool", {"type": "object", "properties": {}}, owner="tools")(lambda: "ok")
+    cfg = Config()
+    cfg.telegram_bot_token = "secret-token"
+    cfg.telegram_user_id = 42
+
+    snapshot = build_capability_snapshot(reg, cfg)
+
+    assert snapshot["tools"][0]["name"] == "safe"
+    assert snapshot["subsystems"]["telegram"] == {"enabled": cfg.telegram_enabled, "configured": True}
+    assert "secret-token" not in str(snapshot)
+
+
+def test_capabilities_endpoint_uses_live_registry(monkeypatch):
+    reg = ToolRegistry()
+    reg.register_tool("live", "Live tool", {"type": "object", "properties": {}}, owner="tools")(lambda: "ok")
+    monkeypatch.setattr("charlie.tools.registry", reg)
+
+    snapshot = asyncio.run(web_server.get_capabilities())
+
+    assert [tool["name"] for tool in snapshot["tools"]] == ["live"]

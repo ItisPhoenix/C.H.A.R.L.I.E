@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import { Background } from "./Background";
 import { Chat } from "./Chat";
 import { McpConnections } from "./McpConnections";
@@ -13,41 +13,67 @@ import { VoiceBar } from "./VoiceBar";
 import { Notification } from "./Notification";
 import { Calendar } from "./Calendar";
 import { MediaPlayer } from "./MediaPlayer";
+import { Settings } from "./Settings";
+import { layoutProfileForWidth, type LayoutProfile } from "./layoutProfile";
+import { useLayoutStore } from "./layoutStore";
+import { useCharlieStore } from "../store/charlie";
 import "./dashboard.css";
 
-const STAGE_WIDTH = 1536;
-const STAGE_HEIGHT = 1024;
-
-function useStageScale(): number {
-  const [scale, setScale] = useState(1);
-
+function useLayoutProfile(): LayoutProfile {
+  const [profile, setProfile] = useState<LayoutProfile>(() => layoutProfileForWidth(window.innerWidth));
   useEffect(() => {
-    const update = () => setScale(Math.min(window.innerWidth / STAGE_WIDTH, window.innerHeight / STAGE_HEIGHT));
-    update();
+    const update = () => setProfile(layoutProfileForWidth(window.innerWidth));
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
   }, []);
-
-  return scale;
+  return profile;
 }
 
 export function Dashboard(): ReactElement {
-  const scale = useStageScale();
-  const stageStyle = { "--hud-scale": scale } as CSSProperties;
+  const profile = useLayoutProfile();
+  const stageRef = useRef<HTMLDivElement>(null);
+  const panelIntent = useCharlieStore((state) => state.dashboardPanelIntent);
+  const dashboardVisible = useCharlieStore((state) => state.dashboardVisible);
+  const open = useLayoutStore((state) => state.open);
+  const close = useLayoutStore((state) => state.close);
+  const setProfile = useLayoutStore((state) => state.setProfile);
+
+  useEffect(() => {
+    setProfile(profile);
+  }, [profile, setProfile]);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const updateScale = () => {
+      const scale = Math.min(1, window.innerWidth / 1536, window.innerHeight / 1024);
+      stage.style.setProperty("--hud-scale", String(Math.max(0.55, scale)));
+    };
+    updateScale();
+    window.addEventListener("resize", updateScale);
+    return () => window.removeEventListener("resize", updateScale);
+  }, []);
+
+  useEffect(() => {
+    if (!panelIntent) return;
+    if (panelIntent.action === "show") open(panelIntent.panelId);
+    else close(panelIntent.panelId);
+  }, [close, open, panelIntent]);
 
   return (
-    <main className="hud-viewport">
-      <div className="hud-stage" style={stageStyle}>
+    <main className={dashboardVisible ? "hud-viewport" : "hud-viewport is-dashboard-hidden"}>
+      <div ref={stageRef} className="hud-stage" data-layout-profile={profile}>
         <Background />
         <Topbar />
         <div className="hud-ring-wrap" aria-hidden="true"><Ring /></div>
-        <div className="hud-chat"><Chat /></div>
+        <Chat />
         <ToolsGrid />
         <Terminal />
-        <VoiceBar />
+        <div className="hud-voice"><VoiceBar /></div>
         <Notification />
         <Calendar />
         <MediaPlayer />
+        <Settings />
         <Tasks />
         <SystemMonitor />
         <McpConnections />

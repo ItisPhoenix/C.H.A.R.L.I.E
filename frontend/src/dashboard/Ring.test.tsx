@@ -14,4 +14,11 @@ describe("Ring", () => {
     expect(screen.getByText("Offline")).toBeInTheDocument();
     expect(screen.queryByText("Online")).not.toBeInTheDocument();
   });
+
+  test("exposes real microphone energy to the reactive ring", () => {
+    useCharlieStore.setState({ connected: true, coreState: "listening", audioLevel: 0.72 });
+    render(<Ring />);
+
+    expect(screen.getByRole("img")).toHaveAttribute("data-audio-level", "0.72");
+  });
 });

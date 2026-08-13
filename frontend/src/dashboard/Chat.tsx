@@ -1,11 +1,13 @@
 import { useEffect, useState, type FormEvent, type ReactElement } from "react";
 import { sendCommand } from "../runtime/bridge";
 import { useCharlieStore, type ChatMessage } from "../store/charlie";
+import { Panel } from "./Panel";
 
 const _SESSION_STORAGE_KEY = "charlie.active-session-id";
 
 interface SessionResponse {
   session_id?: unknown;
+  active_session?: unknown;
 }
 
 interface SessionHistoryResponse {
@@ -38,15 +40,11 @@ export function Chat(): ReactElement {
     async function loadSession(): Promise<void> {
       let activeSessionId = sessionStorage.getItem(_SESSION_STORAGE_KEY);
       if (!activeSessionId) {
-        const response = await fetch("/api/sessions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ source: "web" }),
-        });
+        const response = await fetch("/api/session/active");
         if (!response.ok) return;
         const created = await response.json() as SessionResponse;
-        if (typeof created.session_id !== "string" || !created.session_id) return;
-        activeSessionId = created.session_id;
+        if (typeof created.active_session !== "string" || !created.active_session) return;
+        activeSessionId = created.active_session;
         sessionStorage.setItem(_SESSION_STORAGE_KEY, activeSessionId);
       }
 
@@ -81,7 +79,8 @@ export function Chat(): ReactElement {
   }
 
   return (
-    <section className="chat-panel" aria-label="Charlie assistant">
+    <Panel id="chat" title="Conversation">
+      <section className="chat-panel" aria-label="Charlie assistant">
       <header className="chat-header">
         <span className="hud-ring-dot" />
         <strong>Charlie Assistant</strong>
@@ -99,6 +98,7 @@ export function Chat(): ReactElement {
         <input aria-label="Message Charlie" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Type a message or command..." />
         <button type="submit" aria-label="Send message" disabled={!sessionId}>Send</button>
       </form>
-    </section>
+      </section>
+    </Panel>
   );
 }

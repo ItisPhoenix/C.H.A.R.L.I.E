@@ -18,6 +18,7 @@ dependencies = [
     "sentence-transformers>=2.7.0",
     "psutil>=5.9",
     "pyyaml>=6.0",
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +34,7 @@ desktop = [
     "pytesseract>=0.3.10",
     "mss>=9.0",
     "Pillow>=10.0",
+    "dxcam>=0.3.0; sys_platform == 'win32'",
 ]
 browser = [
     "playwright>=1.48",

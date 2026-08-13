@@ -88,6 +88,18 @@ async def test_update_dashboard_config_ignores_unknown_keys(monkeypatch):
     assert res["status"] == "error"
 
 
+@pytest.mark.asyncio
+async def test_update_dashboard_config_rejects_invalid_types_without_partial_apply(monkeypatch):
+    monkeypatch.setattr(web_server, "_update_env_file", lambda updates: None)
+    before = config.desktop_idle_threshold_s
+
+    res = await web_server.update_dashboard_config({"DESKTOP_IDLE_THRESHOLD_S": "not-a-number", "GPU_DEVICE": "cpu"})
+
+    assert res["status"] == "error"
+    assert "not-a-number" not in res.get("message", "")
+    assert config.desktop_idle_threshold_s == before
+
+
 class _FakeEventBus:
     def __init__(self):
         self.sent = []

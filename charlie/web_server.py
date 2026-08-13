@@ -31,8 +31,16 @@ from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
 from charlie.memory_graph import MemoryGraph
 from charlie.session_store import SessionStore
 from charlie.utils import build_auth_headers
+from charlie.log_redaction import SensitiveDataFilter
+from charlie.terminal_service import TerminalManager
+from charlie.calendar_store import CalendarStore
+from charlie.media_adapter import WindowsMediaAdapter
+from charlie.audit_store import AuditStore
+from charlie.backup_service import export_snapshot
+from charlie.capabilities import build_capability_snapshot
 
 logger = logging.getLogger("charlie.web_server")
+logger.addFilter(SensitiveDataFilter())
 
 _START_TIME = time.time()
 
@@ -181,6 +189,24 @@ event_bus: EventBus | None = None
 LAUNCH_ID: str = config.charlie_launch_id
 _store: SessionStore | None = None
 _memory_graph_cache: "MemoryGraph | None" = None
+_terminal_manager = TerminalManager()
+_calendar_store: CalendarStore | None = None
+_media_adapter = WindowsMediaAdapter()
+_audit_store: AuditStore | None = None
+
+
+def _get_calendar_store() -> CalendarStore:
+    global _calendar_store
+    if _calendar_store is None:
+        _calendar_store = CalendarStore(config.session_db_path)
+    return _calendar_store
+
+
+def _get_audit_store() -> AuditStore:
+    global _audit_store
+    if _audit_store is None:
+        _audit_store = AuditStore(config.session_db_path)
+    return _audit_store
 
 
 def _get_store() -> SessionStore:
@@ -209,7 +235,7 @@ async def lifespan(app: FastAPI):
     """Startup: init EventBus + ZMQ guard + plugin tools. MCP starts lazily,
     see _ensure_mcp_client(). Shutdown: tear down EventBus."""
     # --- startup ---
-    global event_bus, plugin_manager
+    global event_bus, plugin_manager, _calendar_store, _audit_store
     if config.plugins_enabled:
         try:
             from charlie.tools import register_plugin_tools
@@ -242,6 +268,13 @@ async def lifespan(app: FastAPI):
     yield
 
     # --- shutdown ---
+    await _terminal_manager.close_all()
+    if _calendar_store is not None:
+        _calendar_store.close()
+        _calendar_store = None
+    if _audit_store is not None:
+        _audit_store.close()
+        _audit_store = None
     if event_bus:
         try:
             await asyncio.wait_for(
@@ -342,6 +375,22 @@ async def _event_bridge():
         elif etype == "mic_state":
             global _mic_state
             _mic_state = event.get("payload", {})
+        elif etype == "dashboard_panel":
+            payload = event.get("payload", {})
+            panel_id = payload.get("panel_id")
+            action = payload.get("action")
+            if isinstance(panel_id, str) and action in ("show", "hide"):
+                _dashboard_panels[panel_id] = action
+        elif etype == "dashboard_visibility":
+            global _dashboard_visible
+            _dashboard_visible = bool(event.get("payload", {}).get("visible", True))
+        elif etype == "terminal_command_result":
+            payload = event.get("payload", {})
+            if payload.get("approved") is True:
+                try:
+                    await _terminal_manager.write(payload["terminal_session_id"], payload["command"])
+                except (KeyError, RuntimeError):
+                    logger.warning("Terminal command could not be delivered", exc_info=True)
         elif etype == "extension_proposed":
             await _stage_proposed_extension(event.get("payload", {}))
             return
@@ -447,6 +496,157 @@ async def status():
         "desktop_control_enabled": config.desktop_control_enabled,
         "os_host": f"{_platform.system()} {_platform.machine()}",
     }
+
+
+@app.post("/api/terminal/sessions")
+async def create_terminal_session():
+    """Start a real local shell; individual commands still require explicit confirmation."""
+    session = await _terminal_manager.create()
+    return _terminal_manager.snapshot(session.session_id)
+
+
+@app.get("/api/terminal/sessions/{session_id}")
+async def terminal_session(session_id: str):
+    try:
+        return _terminal_manager.snapshot(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="terminal session not found") from exc
+
+
+@app.post("/api/terminal/sessions/{session_id}/input")
+async def terminal_input(session_id: str, data: dict):
+    line = data.get("line")
+    if not isinstance(line, str) or not line.strip():
+        raise HTTPException(status_code=400, detail="line is required")
+    if data.get("confirmed") is not True:
+        raise HTTPException(
+            status_code=409, detail="explicit confirmation is required before requesting command approval"
+        )
+    from charlie.autonomy import Requirement, evaluate
+
+    requirement, _risk, reason = evaluate("shell_execute", {"command": line})
+    if requirement is Requirement.BLOCK:
+        raise HTTPException(status_code=409, detail={"approval_required": True, "reason": reason})
+    if event_bus is None:
+        raise HTTPException(status_code=503, detail="approval channel unavailable")
+    try:
+        _terminal_manager.snapshot(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="terminal session not found") from exc
+    request_id = uuid.uuid4().hex
+    await event_bus.send_command(
+        {
+            "type": "terminal_command_request",
+            "payload": {
+                "request_id": request_id,
+                "terminal_session_id": session_id,
+                "command": line,
+            },
+        }
+    )
+    return {"status": "approval_pending", "request_id": request_id, "session_id": session_id}
+
+
+@app.delete("/api/terminal/sessions/{session_id}")
+async def close_terminal_session(session_id: str):
+    await _terminal_manager.close(session_id)
+    return {"status": "closed", "session_id": session_id}
+
+
+@app.get("/api/calendar/events")
+async def list_calendar_events(day: Optional[str] = None):
+    return {"events": _get_calendar_store().list_events(day)}
+
+
+@app.post("/api/calendar/events")
+async def create_calendar_event(data: dict):
+    title = data.get("title")
+    start_at = data.get("start_at")
+    if not isinstance(title, str) or not title.strip() or not isinstance(start_at, str) or not start_at.strip():
+        raise HTTPException(status_code=400, detail="title and start_at are required")
+    event = _get_calendar_store().create_event(
+        title,
+        start_at,
+        end_at=data.get("end_at") if isinstance(data.get("end_at"), str) else None,
+        reminder_at=data.get("reminder_at") if isinstance(data.get("reminder_at"), str) else None,
+    )
+    return event
+
+
+@app.put("/api/calendar/events/{event_id}")
+async def update_calendar_event(event_id: str, data: dict):
+    try:
+        return _get_calendar_store().update_event(event_id, data)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="calendar event not found") from exc
+
+
+@app.delete("/api/calendar/events/{event_id}")
+async def delete_calendar_event(event_id: str):
+    try:
+        _get_calendar_store().delete_event(event_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="calendar event not found") from exc
+    return {"status": "deleted", "id": event_id}
+
+
+@app.get("/api/media")
+async def media_snapshot():
+    return await _media_adapter.snapshot()
+
+
+@app.post("/api/media/control")
+async def media_control(data: dict):
+    action = data.get("action")
+    if not isinstance(action, str):
+        raise HTTPException(status_code=400, detail="action is required")
+    result = await _media_adapter.control(action)
+    if not result.get("ok") and result.get("reason") == "Unsupported media action":
+        raise HTTPException(status_code=400, detail=result)
+    return result
+
+
+@app.get("/api/audit")
+async def audit_entries(limit: int = 100):
+    return {"entries": _get_audit_store().list(limit)}
+
+
+@app.get("/api/audit/export")
+async def audit_export(limit: int = 500):
+    return {"format": "json", "entries": _get_audit_store().list(limit)}
+
+
+@app.get("/api/backup/status")
+async def backup_status():
+    return {
+        "available": True,
+        "encrypted": False,
+        "default_encrypted": False,
+        "encryption": "scrypt-aesgcm-passphrase",
+        "message": "Encrypted export requires an explicit passphrase; unencrypted export remains visibly labeled.",
+    }
+
+
+@app.post("/api/backup/export")
+async def backup_export(data: dict | None = None):
+    from datetime import datetime, timezone
+
+    passphrase = data.get("passphrase") if isinstance(data, dict) else None
+    if passphrase is not None and not isinstance(passphrase, str):
+        raise HTTPException(status_code=400, detail="passphrase must be text")
+    suffix = ".charlie" if passphrase else ".zip"
+    target = Path("backups") / f"charlie-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}{suffix}"
+    try:
+        manifest = export_snapshot(
+            target,
+            {
+                "sessions.sqlite3": Path(config.session_db_path),
+            },
+            passphrase=passphrase or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="passphrase must be at least 12 characters") from exc
+    return {"path": str(target), "manifest": manifest}
 
 
 @app.get("/api/health")
@@ -610,10 +810,26 @@ _audio_state: dict = {
 _mic_state: dict = {
     "mic_muted": False,
 }
+_dashboard_panels: dict = {}
+_dashboard_visible = True
 # surface_id -> latest spawn/update payload, replayed to webviews that connect after their spawn event fired
 _active_surfaces: dict = {}
 # request_id -> tool_approval_request event, replayed like _active_surfaces so a late-connecting window's store gets it
 _pending_approvals: dict = {}
+
+
+def _primary_session_id() -> str:
+    return _active_frontend_session or f"voice_{config.charlie_launch_id}"
+
+
+@app.get("/api/session/active")
+async def get_active_session():
+    session_id = _primary_session_id()
+    if session_id:
+        _get_store().create_session(
+            session_id, "Primary conversation", source="voice", launch_id=config.charlie_launch_id
+        )
+    return {"active_session": session_id}
 
 
 def _initial_state_events() -> List[dict]:
@@ -625,7 +841,12 @@ def _initial_state_events() -> List[dict]:
         {"type": "task_snapshot", "payload": {"tasks": list(_background_tasks.values())}},
         {"type": "audio_state", "payload": _audio_state},
         {"type": "mic_state", "payload": _mic_state},
+        {"type": "dashboard_visibility", "payload": {"visible": _dashboard_visible}},
     ]
+    events.extend(
+        {"type": "dashboard_panel", "payload": {"action": action, "panel_id": panel_id}}
+        for panel_id, action in _dashboard_panels.items()
+    )
     events.extend(_active_surfaces.values())
     events.extend(_pending_approvals.values())
     return events
@@ -736,6 +957,16 @@ async def get_tools():
     except Exception as e:
         logger.error(f"Error fetching tool roster: {e}", exc_info=True)
         return {"tools": []}
+
+
+@app.get("/api/capabilities")
+async def get_capabilities():
+    """Expose the live capability view used to describe Charlie to the model."""
+    from charlie.tools import registry
+
+    snapshot = build_capability_snapshot(registry, config)
+    snapshot["runtime"] = dict(_subsystem_health)
+    return snapshot
 
 
 @app.get("/api/mcp/status")
@@ -1013,12 +1244,13 @@ async def update_dashboard_config(data: dict):
         return {"status": "error", "message": "no recognized settings in request"}
 
     try:
+        config.validate_env_updates(updates)
         touched = config.apply_env_updates(updates)
         _update_env_file(updates)
         return {"status": "ok", "touched": sorted(touched)}
-    except Exception as e:
-        logger.error(f"Error updating config: {e}", exc_info=True)
-        return {"status": "error", "message": str(e)}
+    except Exception:
+        logger.error("Error updating config", exc_info=True)
+        return {"status": "error", "message": "One or more settings have an invalid value."}
 
 
 @app.post("/api/config/reload")

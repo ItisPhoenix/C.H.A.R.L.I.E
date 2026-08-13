@@ -64,7 +64,7 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 ### 🪟 Dashboard
 | | |
 |---|---|
-| **Glassmorphism web dashboard** | Frost-glass layout built with Next.js 16, React 19, Zustand, and Tailwind CSS v4, synced live over WebSocket. |
+| **Glassmorphism web dashboard** | Frost-glass layout built with Vite, React 19, TypeScript, Zustand, and Tailwind CSS v4, synced live over WebSocket. See `DASHBOARD_HANDOFF.md` for the current in-progress redesign toward an on-demand floating-panel desktop layout at `/dashboard`. |
 | **Smart Activity Panel** | Live feed of the assistant's intermediate thinking, active tool calls, and results. |
 | **Persistent Voice Dock** | Animated waveform reflecting listening, thinking, and speaking phases. |
 | **Active session sync** | Background voice interactions land directly in the active browser chat, in real time -- gated to the visible tab so a background tab can't steal routing. |
@@ -190,7 +190,8 @@ python run.py              # full mode: voice engine + web dashboard + LLM Brain
 
 Charlie will initialize the voice engine, download models on first run (Whisper, Kokoro), build
 the dashboard if it's stale, and start listening. The web dashboard is served at
-http://localhost:8000 by default (override with `CHARLIE_HOST`/`CHARLIE_PORT`).
+http://localhost:8000 by default. `CHARLIE_PORT` is configurable; `CHARLIE_HOST`
+must remain a loopback address because Charlie's local dashboard has no remote authentication.
 
 > **Note on the dashboard and chat:** the web UI and the LLM Brain are one system.
 > In **full mode** the dashboard is fully live -- chat and voice both route through the
@@ -263,11 +264,13 @@ See `.env.example` for the complete, commented list. The most commonly tuned one
 │   ├── web_server.py           # FastAPI app + WebSocket handlers
 │   ├── web_server_entry.py    # Subprocess entry point for the web server
 │   └── desktop/                # UIA tree, OCR, vision grounding, window management, actions
-├── frontend/                   # Next.js 16 / React 19 / Zustand dashboard
+├── frontend/                   # Vite / React 19 / TypeScript / Zustand dashboard
 │   └── src/
-│       ├── app/                # Pages (chat, settings)
-│       ├── components/         # ChatView, SessionRail, InsightRail, VoiceDock, EventLog, ...
-│       └── store/               # useCharlieStore.ts (Zustand)
+│       ├── App.tsx              # react-router: "/" + "/dashboard" -> Dashboard, "/surface/:id" -> SurfaceRoute
+│       ├── dashboard/           # /dashboard page -- floating-panel desktop UI (see DASHBOARD_HANDOFF.md)
+│       ├── surfaces/            # Qt-HUD-hosted surface routing (widgets/modals/workspaces/notifications)
+│       ├── store/charlie.ts     # single shared Zustand store, WS-event-driven
+│       └── runtime/bridge.ts    # WebSocket connect/reconnect + typed event decode
 ├── tests/                      # pytest suite (40 files) -- ruff + pytest must pass before commit
 ├── run.py                      # Unified entry point (full mode / --web-only)
 └── main.py                     # Voice loop orchestration, spawns the web server subprocess

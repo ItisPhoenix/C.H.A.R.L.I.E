@@ -1,34 +1,24 @@
-import charlie.telegram_bot as telegram_bot
-from charlie.telegram_bot import is_authorized, parse_callback_data
+import pytest
+
+from charlie.telegram_bot import is_authorized, parse_callback_data, should_relay_approval
 
 
-class TestIsAuthorized:
-    def test_matching_user_id_is_authorized(self):
-        assert is_authorized(694903315, allowed_user_id=694903315) is True
-
-    def test_other_user_id_is_not_authorized(self):
-        assert is_authorized(111111111, allowed_user_id=694903315) is False
-
-    def test_none_user_id_is_not_authorized(self):
-        assert is_authorized(None, allowed_user_id=694903315) is False
+@pytest.mark.parametrize(
+    ("user_id", "allowed", "expected"),
+    [(42, 42, True), (7, 42, False), (None, 42, False)],
+)
+def test_telegram_owner_gate(user_id, allowed, expected):
+    assert is_authorized(user_id, allowed) is expected
 
 
-class TestParseCallbackData:
-    def test_approve_prefix_parses_true(self):
-        assert parse_callback_data("approve:tool_abc123") == ("tool_abc123", True)
-
-    def test_decline_prefix_parses_false(self):
-        assert parse_callback_data("decline:tool_abc123") == ("tool_abc123", False)
-
-    def test_malformed_data_returns_none(self):
-        assert parse_callback_data("garbage") is None
-
-    def test_unknown_action_returns_none(self):
-        assert parse_callback_data("maybe:tool_abc123") is None
+def test_telegram_approval_relay_requires_live_owner_channel():
+    assert should_relay_approval(True, 42) is True
+    assert should_relay_approval(False, 42) is False
+    assert should_relay_approval(True, 0) is False
 
 
-def test_approval_relay_is_available_for_every_origin_channel():
-    relay = getattr(telegram_bot, "should_relay_approval", None)
-
-    assert relay is not None
-    assert relay(bot_available=True, allowed_user_id=694903315) is True
+def test_telegram_callback_data_is_strictly_parsed():
+    assert parse_callback_data("approve:req-1") == ("req-1", True)
+    assert parse_callback_data("decline:req-1") == ("req-1", False)
+    assert parse_callback_data("approve:") is None
+    assert parse_callback_data("other:req-1") is None

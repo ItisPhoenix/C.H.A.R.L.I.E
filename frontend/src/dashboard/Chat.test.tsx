@@ -7,12 +7,18 @@ beforeEach(() => {
   useCharlieStore.setState({ chatMessages: [] });
   sessionStorage.clear();
   vi.stubGlobal("fetch", vi.fn(async (input: string) => {
-    if (input === "/api/sessions") return new Response(JSON.stringify({ session_id: "new-session" }));
+    if (input === "/api/session/active") return new Response(JSON.stringify({ active_session: "primary-session" }));
     return new Response(JSON.stringify({ messages: [] }));
   }));
 });
 
 describe("Chat", () => {
+  test("uses dashboard panel chrome so it can be managed like other workspaces", () => {
+    render(<Chat />);
+
+    expect(screen.getByRole("heading", { name: "Conversation" })).toBeInTheDocument();
+  });
+
   test("shows an empty conversation instead of a demo exchange", () => {
     render(<Chat />);
 

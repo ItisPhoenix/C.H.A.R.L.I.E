@@ -1,4 +1,5 @@
 import type { ReactElement } from "react";
+import { motion, useReducedMotion } from "motion/react";
 import { useCharlieStore } from "../store/charlie";
 
 const SPOKE_ANGLES = Array.from({ length: 24 }, (_, index) => index * 15);
@@ -8,14 +9,34 @@ const NODES = [
   [525, 408, 2.1], [312, 485, 2.4], [269, 353, 2.1], [438, 524, 2.2],
 ] as const;
 
+const PLASMA_PARTICLES = Array.from({ length: 180 }, (_, index) => {
+  const angle = index * 137.5;
+  const radius = 122 + ((index * 47) % 220);
+  const radians = angle * Math.PI / 180;
+  return {
+    cx: 384 + Math.cos(radians) * radius,
+    cy: 384 + Math.sin(radians) * radius,
+    r: 0.8 + (index % 4) * 0.45,
+    opacity: 0.2 + (index % 5) * 0.12,
+  };
+});
+
 export function Ring(): ReactElement {
   const coreState = useCharlieStore((state) => state.coreState);
   const connected = useCharlieStore((state) => state.connected);
+  const audioLevel = useCharlieStore((state) => state.audioLevel);
+  const reduceMotion = useReducedMotion();
   const label = connected ? coreState : "Offline";
+  const energyScale = reduceMotion ? 1 : 1 + audioLevel * 0.055;
 
   return (
-    <div className="hud-ring">
-      <svg className="hud-ring-svg" viewBox="0 0 768 768" role="img" aria-label={`Charlie ${label}`}>
+    <motion.div
+      className="hud-ring"
+      data-state={label.toLowerCase()}
+      animate={{ scale: energyScale }}
+      transition={{ type: "spring", stiffness: 240, damping: 22, mass: 0.38 }}
+    >
+      <svg className="hud-ring-svg" viewBox="0 0 768 768" role="img" aria-label={`Charlie ${label}`} data-audio-level={audioLevel} data-state={label.toLowerCase()}>
         <defs>
           <filter id="ringGlow" x="-100%" y="-100%" width="300%" height="300%">
             <feGaussianBlur stdDeviation="2.6" result="blur" />
@@ -34,7 +55,22 @@ export function Ring(): ReactElement {
             <stop offset=".44" stopColor="#006ec5" stopOpacity=".08" />
             <stop offset="1" stopColor="#00345e" stopOpacity="0" />
           </radialGradient>
+          <filter id="plasmaDisplace" x="-20%" y="-20%" width="140%" height="140%">
+            <feTurbulence type="fractalNoise" baseFrequency=".035" numOctaves="2" seed="7" result="noise" />
+            <feDisplacementMap in="SourceGraphic" in2="noise" scale="16" />
+          </filter>
+          <radialGradient id="plasmaCore">
+            <stop offset="0" stopColor="var(--plasma-hot)" stopOpacity=".95" />
+            <stop offset=".24" stopColor="var(--plasma-mid)" stopOpacity=".82" />
+            <stop offset=".7" stopColor="var(--plasma-mid)" stopOpacity=".2" />
+            <stop offset="1" stopColor="var(--plasma-deep)" stopOpacity="0" />
+          </radialGradient>
         </defs>
+
+        <g className="ring-plasma" filter="url(#plasmaDisplace)">
+          <circle cx="384" cy="384" r="250" fill="url(#plasmaCore)" />
+          {PLASMA_PARTICLES.map((particle, index) => <circle key={index} {...particle} />)}
+        </g>
 
         <circle cx="384" cy="384" r="306" fill="url(#ringBloom)" />
         <g className="ring-spokes">
@@ -59,12 +95,14 @@ export function Ring(): ReactElement {
         <path className="ring-hairline" d="M384 72v48M384 648v48M72 384h48M648 384h48" strokeWidth=".6" strokeDasharray="2 4" />
       </svg>
 
+      <img className="ring-orb-art" src="/charlie-orb.png" alt="" aria-hidden="true" />
+
       <div className="ring-core">
         <div className="ring-core-copy">
           <strong className="ring-name">CHARLIE</strong>
           <span className="ring-status">{label}</span>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 }

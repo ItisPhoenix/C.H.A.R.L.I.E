@@ -60,6 +60,9 @@ class EventType(StrEnum):
     MCP_STATUS_CHANGED = "mcp_status_changed"
     MEMORY_UPDATED = "memory_updated"
     VISION_OBSERVED = "vision_observed"
+    DASHBOARD_PANEL = "dashboard_panel"
+    DASHBOARD_VISIBILITY = "dashboard_visibility"
+    TERMINAL_COMMAND_RESULT = "terminal_command_result"
 
 
 class EventSource(StrEnum):

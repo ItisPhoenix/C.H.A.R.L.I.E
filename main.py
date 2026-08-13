@@ -89,6 +89,11 @@ console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(console_formatter)
 
 root_logger.handlers = []
+from charlie.log_redaction import SensitiveDataFilter
+
+redaction_filter = SensitiveDataFilter()
+file_handler.addFilter(redaction_filter)
+console_handler.addFilter(redaction_filter)
 root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
 
@@ -97,6 +102,7 @@ from charlie import background_task, telemetry
 from charlie.errors import ErrorClass, classify_exception
 from charlie.config import Config, config
 from charlie.core import Brain
+from charlie.dashboard_intent import match_dashboard_panel_intent
 from charlie.events import EventMeta, EventSource, EventType
 from charlie.ipc import EventBus
 from charlie.memory_store import MemoryStore
@@ -377,6 +383,8 @@ async def main():
     except Exception as e:
         logger.error(f"Failed to initialize SessionStore: {e}")
         return
+    from charlie.audit_store import AuditStore
+    audit_store = AuditStore(config.session_db_path)
     # Initialize vector memory store (graceful degradation if no embedding backend)
     memory_store = None
     try:
@@ -393,6 +401,12 @@ async def main():
     loop = asyncio.get_running_loop()
 
     def on_tool_call(name, args):
+        try:
+            active_audit_store = audit_store
+        except NameError:
+            active_audit_store = None
+        if active_audit_store is not None:
+            active_audit_store.record(name, args, "requested")
         if event_bus:
             asyncio.run_coroutine_threadsafe(
                 event_bus.emit(
@@ -402,6 +416,12 @@ async def main():
             )
 
     def on_tool_result(name, result):
+        try:
+            active_audit_store = audit_store
+        except NameError:
+            active_audit_store = None
+        if active_audit_store is not None:
+            active_audit_store.record(name, {}, "completed" if not str(result).startswith("Error") else "failed")
         if event_bus:
             asyncio.run_coroutine_threadsafe(
                 event_bus.emit(
@@ -448,13 +468,25 @@ async def main():
 
         asyncio.run_coroutine_threadsafe(_expire(), loop)
 
-    async def _summon_conversation_workspace():
+    async def _summon_conversation_workspace(toggle: bool = False):
         """The Dashboard is a plain web page (chat + tools + system monitor + connections +
         tasks), not a Qt window -- this just opens it in the user's real browser. Shared by the
         hud_invoke hotkey and this voice phrase."""
+        nonlocal dashboard_visible
         from charlie.utils import open_url_in_browser
+        if toggle:
+            dashboard_visible = not dashboard_visible
+        elif not dashboard_visible:
+            dashboard_visible = True
         host = "127.0.0.1" if config.charlie_host == "0.0.0.0" else config.charlie_host
-        open_url_in_browser(f"http://{host}:{config.charlie_port}/dashboard")
+        if dashboard_visible:
+            open_url_in_browser(f"http://{host}:{config.charlie_port}/dashboard")
+        if event_bus:
+            await event_bus.emit(
+                "dashboard_visibility",
+                {"visible": dashboard_visible},
+                meta=EventMeta(source=EventSource.SURFACE, rationale="pet or HUD invocation toggled dashboard"),
+            )
 
     def _resolve_tool_approval_and_notify(request_id: str, approved: bool) -> None:
         """Resolve the pending future, then tell web_server.py's replay cache the
@@ -620,6 +652,7 @@ async def main():
     # Per-launch fallback, not the old shared "default" bucket across all launches.
     current_web_session_id = f"voice_{_LAUNCH_ID}"
     _voice_fallback_session_id = current_web_session_id
+    dashboard_visible = False
 
     def ensure_session_ready(session_id: str):
         if not session_id:
@@ -789,7 +822,19 @@ async def main():
             print(f"\n{response_str}", flush=True)
             voice.speak(response_str, last_emotion)
             return
-        # Route "show me the chat" / "open the conversation" -- summons the same workspace as the hud_invoke hotkey.
+        panel_intent = match_dashboard_panel_intent(text)
+        if panel_intent is not None:
+            await _summon_conversation_workspace()
+            if event_bus:
+                await event_bus.emit(
+                    "dashboard_panel",
+                    {"action": panel_intent.action, "panel_id": panel_intent.panel_id},
+                    meta=EventMeta(source=EventSource.VOICE),
+                )
+            voice.speak("Here you go." if panel_intent.action == "show" else "Hidden.", last_emotion)
+            return
+
+        # Route conversation-only phrase to the normal HUD summon path.
         if _CONVERSATION_SUMMON_RE.search(text):
             await _summon_conversation_workspace()
             voice.speak("Here you go.", last_emotion)
@@ -1167,11 +1212,34 @@ async def main():
                     request_id = payload.get("request_id")
                     if request_id:
                         _resolve_tool_approval_and_notify(request_id, False)
+                elif cmd_type == "terminal_command_request":
+                    payload = cmd.get("payload", {})
+                    request_id = payload.get("request_id")
+                    terminal_session_id = payload.get("terminal_session_id")
+                    command = payload.get("command")
+                    if request_id and terminal_session_id and isinstance(command, str):
+                        approved = await brain.request_tool_approval(
+                            "shell_execute",
+                            {"command": command},
+                            "A terminal command needs approval",
+                            platform="web",
+                            risk_class="security_sensitive",
+                        )
+                        await event_bus.emit(
+                            "terminal_command_result",
+                            {
+                                "request_id": request_id,
+                                "terminal_session_id": terminal_session_id,
+                                "command": command,
+                                "approved": approved,
+                            },
+                            meta=EventMeta(source=EventSource.BRAIN, rationale="terminal command approval resolved"),
+                        )
                 elif cmd_type == "stop":
                     voice.stop_tts()
                     brain.cancel_chat()
                 elif cmd_type == "hud_invoke":
-                    await _summon_conversation_workspace()
+                    await _summon_conversation_workspace(toggle=True)
                 elif cmd_type == "audio_control":
                     payload = cmd.get("payload", {})
                     state = voice.set_audio_state(
@@ -1218,6 +1286,7 @@ async def main():
                             f"Failed to mirror extension install '{payload.get('name')}': {ex}",
                             exc_info=True,
                         )
+                    brain.rebuild_stable_tier()
                 elif cmd_type == "extension_enabled":
                     payload = cmd.get("payload", {})
                     kind = payload.get("kind", "")
@@ -1237,6 +1306,7 @@ async def main():
                         # unregisters those tools (see web_server.py's comment).
                     except Exception as ex:
                         logger.warning(f"Failed to mirror extension enable '{ext_name}': {ex}", exc_info=True)
+                    brain.rebuild_stable_tier()
                 elif cmd_type == "extension_disabled":
                     payload = cmd.get("payload", {})
                     kind = payload.get("kind", "")
@@ -1250,6 +1320,7 @@ async def main():
                             disable_plugin(_ext_registry, plugin_manager, ext_name)
                     except Exception as ex:
                         logger.warning(f"Failed to mirror extension disable '{ext_name}': {ex}", exc_info=True)
+                    brain.rebuild_stable_tier()
                 elif cmd_type == "extension_uninstalled":
                     payload = cmd.get("payload", {})
                     kind = payload.get("kind", "")
@@ -1265,6 +1336,7 @@ async def main():
                             brain.remove_installed_skill_block(ext_name)
                     except Exception as ex:
                         logger.warning(f"Failed to mirror extension uninstall '{ext_name}': {ex}", exc_info=True)
+                    brain.rebuild_stable_tier()
                 elif cmd_type == "system_restart":
                     logger.info("System restart command received. Reloading configuration and engine...")
 
@@ -1548,6 +1620,31 @@ async def main():
             import charlie.mcp_client
             charlie.mcp_client.set_event_bus(bus, asyncio.get_running_loop())
 
+            from charlie.calendar_scheduler import deliver_due_reminders
+            from charlie.calendar_store import CalendarStore
+            from charlie.utils import utc_now_iso
+
+            calendar_store = CalendarStore(config.session_db_path)
+
+            async def _calendar_reminder_loop() -> None:
+                while True:
+                    async def _deliver(event: dict) -> None:
+                        message = f"Reminder: {event['title']}"
+                        await bus.emit(
+                            "alert",
+                            {"severity": "info", "message": message, "reminder_id": event["id"]},
+                            meta=EventMeta(source=EventSource.WATCHER, rationale="local reminder became due"),
+                        )
+                        voice.speak(message, "neutral")
+                        if telegram_bot is not None and config.telegram_user_id > 0:
+                            try:
+                                await telegram_bot.send_message(config.telegram_user_id, message)
+                            except Exception:
+                                logger.warning("Failed to relay reminder to Telegram", exc_info=True)
+
+                    await deliver_due_reminders(calendar_store, utc_now_iso(), _deliver)
+                    await asyncio.sleep(15)
+
             from charlie import background_task as _background_task
             interrupted_task = _background_task.check_interrupted_task()
             if interrupted_task is not None:
@@ -1624,6 +1721,13 @@ async def main():
                         asyncio.run_coroutine_threadsafe(_spawn_watcher_surface(event, message, reason), _watcher_loop)
                     except Exception:
                         logger.warning("Failed to spawn watcher alert surface", exc_info=True)
+                if telegram_bot is not None and config.telegram_user_id > 0:
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            telegram_bot.send_message(config.telegram_user_id, message), _watcher_loop
+                        )
+                    except Exception:
+                        logger.warning("Failed to relay watcher alert to Telegram", exc_info=True)
 
             _watcher_registry = WatcherRegistry()
             _watcher_registry.register(
@@ -1659,6 +1763,8 @@ async def main():
                         pass
 
             zmq_handler = ZmqLogHandler()
+            from charlie.log_redaction import SensitiveDataFilter
+            zmq_handler.addFilter(SensitiveDataFilter())
             zmq_handler.setFormatter(
                 logging.Formatter("%(asctime)s [%(name)s] [%(levelname)s] - %(message)s")
             )
@@ -1671,9 +1777,11 @@ async def main():
                     consume_web_commands(bus, brain),
                     _emit_system_status(bus),
                     mcp_start_task,
+                    _calendar_reminder_loop(),
                 )
             finally:
                 logging.getLogger().removeHandler(zmq_handler)
+                calendar_store.close()
     except KeyboardInterrupt:
         logger.info("Interrupt received, shutting down...")
     except asyncio.CancelledError:
@@ -1687,6 +1795,8 @@ async def main():
             await brain.close()
         if "store" in locals() and store is not None:
             store.close()
+        if "audit_store" in locals() and audit_store is not None:
+            audit_store.close()
         if mcp_client is not None:
             try:
                 mcp_client.stop()

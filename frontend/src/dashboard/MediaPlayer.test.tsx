@@ -1,12 +1,15 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, test } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, test, vi } from "vitest";
 import { MediaPlayer } from "./MediaPlayer";
+import { useLayoutStore } from "./layoutStore";
 
 describe("MediaPlayer", () => {
-  test("does not fabricate playback data without a media contract", () => {
+  test("renders real metadata and an honest unavailable state", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ available: true, title: "Echoes", artist: "Charlie", album: "Tomorrow", status: "playing", position_seconds: 12, duration_seconds: 120, art_uri: null }), { status: 200 })));
+    useLayoutStore.getState().open("media");
     render(<MediaPlayer />);
 
-    expect(screen.getByText("Media playback is unavailable.")).toBeInTheDocument();
-    expect(screen.queryByText("Echoes of Tomorrow")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Echoes")).toBeInTheDocument());
+    expect(screen.getByText("Charlie")).toBeInTheDocument();
   });
 });

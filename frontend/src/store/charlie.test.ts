@@ -80,6 +80,23 @@ describe("applyEvent", () => {
     expect(useCharlieStore.getState().micMuted).toBe(true);
   });
 
+  test("audio level keeps bounded live microphone energy for reactive HUD motion", () => {
+    useCharlieStore.getState().applyEvent({ type: "audio_level", payload: { level: 1.8 } });
+
+    expect(useCharlieStore.getState().audioLevel).toBe(1);
+  });
+
+  test("retains only registered dashboard panel visibility intents", () => {
+    useCharlieStore.getState().applyEvent({ type: "dashboard_panel", payload: { action: "show", panel_id: "terminal" } });
+
+    expect(useCharlieStore.getState().dashboardPanelIntent).toEqual({ action: "show", panelId: "terminal" });
+  });
+
+  test("dashboard visibility follows the pet toggle event", () => {
+    useCharlieStore.getState().applyEvent({ type: "dashboard_visibility", payload: { visible: false } });
+    expect(useCharlieStore.getState().dashboardVisible).toBe(false);
+  });
+
   test("addUserMessage appends a user chat message", () => {
     useCharlieStore.getState().addUserMessage("hello");
     const messages = useCharlieStore.getState().chatMessages;
