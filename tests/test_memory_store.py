@@ -75,6 +75,29 @@ class TestMemoryStore:
         from charlie.memory_store import MemoryStore
         assert MemoryStore is not None
 
+    def test_native_embedding_endpoint_uses_batch_payload(self, monkeypatch):
+        import httpx
+
+        from charlie.memory_store import _RemoteEmbeddingFunction
+
+        response = MagicMock()
+        response.json.return_value = {"embeddings": [[0.1, 0.2], [0.3, 0.4]]}
+        monkeypatch.setattr(httpx, "post", MagicMock(return_value=response))
+
+        ef = _RemoteEmbeddingFunction(
+            model="nomic-embed-text",
+            base_url="http://192.168.1.144:11434",
+        )
+
+        assert ef.embed_documents(["first", "second"]) == [[0.1, 0.2], [0.3, 0.4]]
+        httpx.post.assert_called_once_with(
+            "http://192.168.1.144:11434/api/embed",
+            json={"model": "nomic-embed-text", "input": ["first", "second"]},
+            timeout=10.0,
+            trust_env=False,
+        )
+        response.raise_for_status.assert_called_once_with()
+
     def test_init_collection_created(self, monkeypatch):
         store = self._make_store(monkeypatch)
         assert store._collection is not None
@@ -356,3 +379,38 @@ class TestBuildEmbeddingFunctionRetry:
 
         assert slept == []
         assert isinstance(ef, HealthyRemoteEmbeddingFunction)
+
+
+class TestFactExtractionResponseHandling:
+    def _make_store(self, monkeypatch):
+        import charlie.memory_store as memory_store
+
+        mock_ef = MagicMock()
+        mock_ef.embed_query.return_value = [[0.1] * 384]
+        monkeypatch.setattr(memory_store, "_build_embedding_function", lambda _: mock_ef)
+        from charlie.memory_store import MemoryStore
+        config = FakeConfig()
+        config.llm_url = "http://localhost:1234"
+        return MemoryStore(config)
+
+    def test_empty_content_does_not_raise_or_store_facts(self, monkeypatch):
+        import httpx
+
+        response = MagicMock()
+        response.json.return_value = {"choices": [{"message": {"content": None}}]}
+        monkeypatch.setattr(httpx, "post", MagicMock(return_value=response))
+        store = self._make_store(monkeypatch)
+        assert store._extract_facts("The user has a durable preference that matters.") == []
+
+    def test_fenced_and_surrounded_json_stores_fact(self, monkeypatch):
+        import httpx
+
+        response = MagicMock()
+        response.json.return_value = {
+            "choices": [{"message": {"content": 'Result:\n```json\n{"facts": ["User prefers concise answers."]}\n```'}}]
+        }
+        monkeypatch.setattr(httpx, "post", MagicMock(return_value=response))
+        store = self._make_store(monkeypatch)
+        assert store._extract_facts("The user has a durable preference that matters.") == [
+            "User prefers concise answers."
+        ]

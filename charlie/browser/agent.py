@@ -6,6 +6,7 @@ and an optional describe_image() for the vision fallback; Brain.browser_task() w
 """
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -64,6 +65,37 @@ def _parse_action(raw: str) -> Optional[_Action]:
     if not raw.strip():
         return None
     line = raw.strip().splitlines()[0].strip()
+    if line.startswith("```"):
+        lines = [candidate.strip() for candidate in raw.strip().splitlines() if not candidate.strip().startswith("```")]
+        line = lines[0] if lines else ""
+    if line.lower().startswith("action:"):
+        line = line.split(":", 1)[1].strip()
+    if line.startswith("{"):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            command = str(payload.get("action", payload.get("command", ""))).strip()
+            if command.upper() == "CLICK" and str(payload.get("mark_id", "")).isdigit():
+                return _Action(kind="click", mark_id=int(payload["mark_id"]))
+            if command.upper() == "TYPE" and str(payload.get("mark_id", "")).isdigit():
+                return _Action(
+                    kind="type",
+                    mark_id=int(payload["mark_id"]),
+                    text=str(payload.get("text", "")),
+                    submit=bool(payload.get("submit", False)),
+                )
+            if command.upper() == "SCROLL" and str(payload.get("direction", "")).lower() in {"up", "down"}:
+                return _Action(kind="scroll", direction=str(payload["direction"]).lower())
+            if command.upper() == "NAVIGATE" and payload.get("url"):
+                return _Action(kind="navigate", url=str(payload["url"]))
+            if command.upper() == "DONE":
+                return _Action(
+                    kind="done",
+                    url=str(payload.get("url", "")) or None,
+                    answer=str(payload.get("answer", "")) or None,
+                )
     match = _DONE_RE.match(line)
     if match:
         return _Action(kind="done", url=match.group(1) or None, answer=match.group(2) or None)
@@ -88,7 +120,9 @@ def _build_prompt(task: str, observation: str) -> str:
         f"You are controlling a headless browser to complete this task: {task}\n\n"
         f"Current page:\n{observation}\n\n"
         f"{_ACTION_GRAMMAR}\n"
-        "Pick DONE as soon as the task is satisfied or the answer is visible in TEXT."
+        "Pick DONE only after verifying the requested result in TEXT or the current URL. "
+        "You may return the same command as a fenced line, an Action: line, or a JSON object, "
+        "but never include an explanation before the command."
     )
 
 
@@ -196,7 +230,15 @@ async def run_task(
             fail_count += 1
             continue
         if action.kind == "done":
-            return BrowserResult(url=action.url or None, answer=action.answer or None)
+            if not action.url and not action.answer:
+                fail_count += 1
+                continue
+            return BrowserResult(
+                url=action.url or None,
+                answer=action.answer or None,
+                success=True,
+                verification="agent-confirmed",
+            )
         if action.kind == "click" and approve_click is not None:
             mark = session.get_session().marks.get(action.mark_id)
             if mark and any(k in mark.name.lower() for k in _PURCHASE_KEYWORDS):

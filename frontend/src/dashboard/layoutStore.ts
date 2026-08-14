@@ -43,7 +43,7 @@ const HUD_WIDTH = 1536;
 const HUD_HEIGHT = 1024;
 const MIN_PANEL_WIDTH = 280;
 const MIN_PANEL_HEIGHT = 160;
-const LAYOUT_STORAGE_KEY = "charlie.dashboard.layouts.v1";
+const LAYOUT_STORAGE_KEY = "charlie.dashboard.layouts.v2";
 
 function freshDefaultLayout(): Record<string, PanelLayout> {
   return Object.fromEntries(Object.entries(DEFAULT_LAYOUT).map(([id, layout]) => [id, { ...layout }]));

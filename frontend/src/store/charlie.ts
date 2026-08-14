@@ -28,6 +28,7 @@ export interface SystemStatus {
   cpu: number | null;
   ram: number | null;
   gpu: number | null;
+  disk: number | null;
   netKbps: number | null;
   uptimeSeconds: number | null;
   batteryPercent: number | null;
@@ -43,6 +44,17 @@ export interface ChatMessage {
   role: "user" | "charlie";
   text: string;
   pending: boolean;
+}
+
+export interface ResearchResultPayload {
+  query: string;
+  mode: string;
+  confidence: number;
+  stop_reason: string;
+  citations: Array<Record<string, unknown>>;
+  sources: Array<Record<string, unknown>>;
+  products: Array<Record<string, unknown>>;
+  media: Array<Record<string, unknown>>;
 }
 
 export interface ToolApprovalRequest {
@@ -102,6 +114,7 @@ interface CharlieState {
   tasks: Record<string, RuntimeTask>;
   mcpStatus: Record<string, McpServerStatus>;
   chatMessages: ChatMessage[];
+  latestResearchResult: ResearchResultPayload | null;
   activeAlert: AlertInfo | null;
   audioState: AudioState | null;
   micMuted: boolean | null;
@@ -167,6 +180,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   tasks: {},
   mcpStatus: {},
   chatMessages: [],
+  latestResearchResult: null,
   activeAlert: null,
   audioState: null,
   micMuted: null,
@@ -215,6 +229,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
             cpu: numberOrNull(payload.cpu),
             ram: numberOrNull(payload.ram),
             gpu: numberOrNull(payload.gpu),
+            disk: numberOrNull(payload.disk_percent),
             netKbps,
             uptimeSeconds: numberOrNull(payload.uptime_seconds),
             batteryPercent: numberOrNull(payload.battery_percent),
@@ -300,6 +315,9 @@ export const useCharlieStore = create<CharlieState>((set) => ({
           if (!last || last.role !== "charlie" || !last.pending) return {};
           return { chatMessages: [...s.chatMessages.slice(0, -1), { ...last, pending: false }] };
         });
+        return;
+      case "research_result":
+        set({ latestResearchResult: payload as unknown as ResearchResultPayload });
         return;
       case "surface_spawn":
       case "surface_update":

@@ -54,20 +54,20 @@ class TestClassifyActionInjection:
 
 
 class TestClassifyActionDesktop:
-    def test_desktop_window_close_requires_approval(self):
+    def test_desktop_window_close_is_allowed(self):
         risk, reason = classify_action("desktop_window", {"window": "notepad", "action": "close"})
-        assert risk == RiskClass.SECURITY_SENSITIVE
-        assert "desktop" in reason.lower()
+        assert risk == RiskClass.SAFE
+        assert reason == ""
 
-    def test_desktop_window_minimize_requires_approval(self):
+    def test_desktop_window_minimize_is_allowed(self):
         risk, reason = classify_action("desktop_window", {"window": "notepad", "action": "minimize"})
-        assert risk == RiskClass.SECURITY_SENSITIVE
-        assert "desktop" in reason.lower()
+        assert risk == RiskClass.SAFE
+        assert reason == ""
 
-    def test_desktop_click_requires_approval(self):
+    def test_desktop_click_is_allowed(self):
         risk, reason = classify_action("desktop_click", {"mark_id": 1})
-        assert risk == RiskClass.SECURITY_SENSITIVE
-        assert "desktop" in reason.lower()
+        assert risk == RiskClass.SAFE
+        assert reason == ""
 
 
 class TestEvaluate:

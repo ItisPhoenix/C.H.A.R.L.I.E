@@ -1,11 +1,35 @@
+from pathlib import Path
+
 from charlie.pet_window import (
+    ANIMATION_CLIPS,
+    CHARLIE_ATLAS_PATH,
+    SPRITE_CLIP_FRAMES,
+    PetActivityModel,
+    PetAnimator,
+    PetLayoutEngine,
+    PositionRecord,
+    ScreenInfo,
     _elide_text,
     _extract_last_sentence,
     _map_event_to_caption_desc,
     _map_event_to_state,
     _state_caption_title,
     _track_workspace_surface,
+    activity_orientation,
+    clamp_position,
+    detect_anchor,
+    load_position_record,
+    position_record_json,
+    resolve_animation_clip,
+    snapped_position,
 )
+
+
+def test_charlie_uses_one_original_sprite_atlas_for_all_visual_states():
+    assert CHARLIE_ATLAS_PATH.is_file()
+    assert len(SPRITE_CLIP_FRAMES) >= 18
+    assert all(len(frames) >= 2 for frames in SPRITE_CLIP_FRAMES.values())
+    assert max(frame for frames in SPRITE_CLIP_FRAMES.values() for frame in frames) < 20
 
 
 def test_map_event_to_state_passes_through_all_nine_core_states():
@@ -116,3 +140,156 @@ def test_elide_text_truncates_with_ellipsis_when_too_wide():
 
 def test_elide_text_empty_string():
     assert _elide_text("", len, max_width=10) == ""
+
+
+def test_animation_clip_catalog_covers_required_motion_language():
+    required = {
+        "idle",
+        "idle_blink",
+        "idle_look",
+        "hover",
+        "pressed",
+        "drag_left",
+        "drag_right",
+        "drag_up",
+        "drag_down",
+        "landing",
+        "listening",
+        "thinking",
+        "speaking",
+        "working",
+        "waiting",
+        "attention",
+        "completed",
+        "error",
+        "ptt_listening",
+    }
+    assert required <= ANIMATION_CLIPS.keys()
+
+
+def test_interaction_resolver_preserves_semantic_state_under_drag():
+    assert resolve_animation_clip("working", "dragging") == "drag_right"
+    assert resolve_animation_clip("error", "dragging") == "drag_right"
+    assert resolve_animation_clip("working", "normal") == "working"
+    assert resolve_animation_clip("working", "normal", ptt=True) == "ptt_listening"
+
+
+def test_animator_returns_to_semantic_clip_after_landing():
+    animator = PetAnimator()
+    animator.set_semantic("working")
+    animator.set_interaction("landing")
+    for _ in range(8):
+        animator.tick(0.1)
+    assert animator.semantic == "working"
+    assert animator.clip_name == "working"
+
+
+def test_animator_returns_from_completion_clip_to_stable_motion():
+    animator = PetAnimator()
+    animator.set_semantic("working")
+    animator.set_semantic("completed")
+    for _ in range(8):
+        animator.tick(0.1)
+    assert animator.semantic == "completed"
+    assert animator.clip_name == "idle"
+
+
+def test_geometry_detects_only_near_edges_and_corners():
+    screen = ScreenInfo("main", 0, 0, 1920, 1080)
+    assert detect_anchor(10, 20, 200, 120, screen) == "top_left"
+    assert detect_anchor(1710, 940, 200, 120, screen) == "bottom_right"
+    assert detect_anchor(800, 400, 200, 120, screen) == "free"
+
+
+def test_snapping_is_soft_and_clamped():
+    screen = ScreenInfo("main", 0, 0, 1920, 1080)
+    position, anchor = snapped_position(4, 500, 200, 120, screen)
+    assert anchor == "left"
+    assert position == (14, 500)
+    assert clamp_position(-100, 1000, 200, 120, screen) == (0, 960)
+
+
+def test_activity_orientation_points_toward_screen_space():
+    assert activity_orientation("bottom_right") == "left"
+    assert activity_orientation("top_left") == "right"
+    assert activity_orientation("top") == "down"
+    assert activity_orientation("free") == "up"
+
+
+def test_position_record_json_is_v2_and_old_shape_migrates():
+    path = Path("pet_position_test.json")
+    try:
+        path.write_text('{"x": 12, "y": 34, "scale": 3}', encoding="utf-8")
+        record = load_position_record(path)
+        assert record.x == 12 and record.y == 34
+        assert record.scale == 2.0
+        assert position_record_json(PositionRecord(1, 2))["version"] == 2
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_invalid_position_json_uses_safe_defaults():
+    path = Path("pet_position_invalid_test.json")
+    try:
+        path.write_text("not json", encoding="utf-8")
+        record = load_position_record(path, default_scale=0.8)
+        assert record == PositionRecord(0, 0, 0.8)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_activity_model_tracks_tasks_and_approval():
+    model = PetActivityModel()
+    model.apply({"type": "background_task", "payload": {"id": "t1", "title": "Index files", "status": "running"}})
+    assert model.active_count == 1
+    model.apply(
+        {
+            "type": "tool_approval_request",
+            "payload": {"request_id": "r1", "tool_name": "delete", "reason": "Remove temp"},
+        }
+    )
+    assert model.approval is not None and model.approval.request_id == "r1"
+    model.apply({"type": "tool_approval_resolved", "payload": {"request_id": "r1"}})
+    assert model.approval is None
+
+
+def test_activity_model_accepts_approval_surface_when_dashboard_is_absent():
+    model = PetActivityModel()
+    model.apply({
+        "type": "surface_spawn",
+        "payload": {
+            "surface_id": "r2",
+            "title": "Approval needed: delete",
+            "body": "Remove temporary file?",
+            "actions": [{"id": "approve"}, {"id": "decline"}],
+        },
+    })
+    assert model.approval is not None
+    assert model.approval.request_id == "r2"
+
+
+def test_expanded_layout_stays_inside_logical_window_for_each_edge():
+    engine = PetLayoutEngine()
+    for anchor in ("top", "bottom", "left", "right", "top_left", "bottom_right"):
+        layout = engine.calculate(anchor, expanded=True, approval=True)
+        assert layout.activity.left() >= 0
+        assert layout.activity.top() >= 0
+        assert layout.activity.right() <= engine.width
+        assert layout.activity.bottom() <= engine.height
+
+
+def test_normal_layout_is_one_compact_attached_cluster():
+    layout = PetLayoutEngine().calculate("bottom", expanded=False, approval=False)
+    assert 160 <= layout.window_width <= 230
+    assert layout.title.bottom() + 10 == layout.body.top()
+    assert layout.badge.top() == layout.body.bottom() + 8
+    assert layout.ptt.top() == layout.body.bottom() + 8
+    assert layout.body.width() >= 100
+
+
+def test_activity_model_terminal_task_is_bounded():
+    model = PetActivityModel()
+    model.apply({"type": "background_task", "payload": {"id": "t1", "title": "Done", "status": "done"}})
+    model._updated["t1"] -= 5
+    model.prune()
+    assert "t1" not in model.tasks

@@ -19,7 +19,7 @@ describe("SystemMonitor", () => {
 
   test("renders real runtime metrics when present", () => {
     useCharlieStore.setState({
-      systemStatus: { cpu: 12.4, ram: 43.6, gpu: 7.8, netKbps: 99.2, uptimeSeconds: 3661, batteryPercent: null },
+      systemStatus: { cpu: 12.4, ram: 43.6, gpu: 7.8, disk: 66.2, netKbps: 99.2, uptimeSeconds: 3661, batteryPercent: null },
       netHistory: [12, 30, 99],
     });
     render(<SystemMonitor />);
@@ -28,6 +28,8 @@ describe("SystemMonitor", () => {
     expect(screen.getByText("44%")).toBeInTheDocument();
     expect(screen.getByText("99.2 KB/s")).toBeInTheDocument();
     expect(screen.getByText("1h 1m")).toBeInTheDocument();
-    expect(screen.queryByText("Battery")).not.toBeInTheDocument();
+    expect(screen.getByText("Battery")).toBeInTheDocument();
+    expect(screen.getAllByText("Unavailable").length).toBeGreaterThan(0);
+    expect(screen.getByText("66%")).toBeInTheDocument();
   });
 });

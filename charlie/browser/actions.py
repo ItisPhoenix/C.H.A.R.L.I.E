@@ -6,6 +6,7 @@ them. Every action runs on the controller's dedicated browser thread via control
 
 import logging
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 from charlie.browser import controller, session
 from charlie.browser.observation import extract_visible_text
@@ -17,14 +18,21 @@ _DEFAULT_NAV_TIMEOUT_MS = 8000
 _DEFAULT_SELECTOR_TIMEOUT_MS = 5000
 _READ_TIMEOUT_SEC = 15.0
 _READ_MAX_CHARS = 50000
-_MIN_EXTRACTED_CHARS = 200
-_JINA_TIMEOUT_SEC = 20.0
 
 
 def navigate(page: Any, url: str, wait_selector: Optional[str] = None) -> None:
     """Go to url, optionally waiting for a specific selector -- never networkidle (too slow)."""
     controller.wait_host_cooldown(url)
-    page.goto(url, wait_until="domcontentloaded", timeout=_DEFAULT_NAV_TIMEOUT_MS)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=_DEFAULT_NAV_TIMEOUT_MS)
+    except Exception as exc:
+        if type(exc).__name__ not in {"TimeoutError", "PlaywrightTimeoutError"}:
+            raise
+        current_host = urlparse(getattr(page, "url", "")).netloc.lower()
+        requested_host = urlparse(url).netloc.lower()
+        if not current_host or not (current_host == requested_host or current_host.endswith(f".{requested_host}")):
+            raise
+        logger.debug("Navigation load timed out after reaching %s; continuing with the loaded document", page.url)
     if wait_selector:
         try:
             page.wait_for_selector(wait_selector, timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
@@ -100,36 +108,47 @@ def open_in_real_browser(url: str) -> bool:
 
 
 def read_url(url: str) -> Dict[str, Any]:
-    """Fetch and extract one page's text, no headless browser -- trafilatura first, Jina Reader
-    fallback for JS-rendered shells. Moved from the deleted BrowserPlugin._fetch unchanged."""
-    import httpx
-    import trafilatura
+    """Read one public URL through HTTP, Crawl4AI, then Playwright if needed.
 
-    text = ""
+    This is a page-reading compatibility entry point, not the primary research
+    path. It deliberately has no Jina dependency.
+    """
+    import asyncio
+
+    from charlie.research.crawler import crawl_document
+    from charlie.research.fetch import (
+        document_from_content,
+        extract_text,
+        fetch_document,
+        validate_public_url,
+    )
+    from charlie.research.models import SearchResult
+
+    result = SearchResult(title=url, url=url, provider="browser_read")
     try:
-        resp = httpx.get(
-            url, timeout=_READ_TIMEOUT_SEC, follow_redirects=True,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-                )
-            },
-        )
-        resp.raise_for_status()
-        text = trafilatura.extract(resp.text) or ""
+        safe_url = validate_public_url(url)
+    except ValueError:
+        return {"error": "Only public HTTP(S) URLs can be read."}
+    try:
+        document = asyncio.run(fetch_document(result, timeout_s=_READ_TIMEOUT_SEC))
+        if document is None:
+            document = asyncio.run(crawl_document(result, timeout_s=_READ_TIMEOUT_SEC))
     except Exception as exc:
-        logger.debug("Direct fetch failed for %s: %s", url, exc)
+        logger.debug("Research fetch failed for %s: %s", url, exc)
+        document = None
 
-    if len(text.strip()) < _MIN_EXTRACTED_CHARS:
+    if document is None:
         try:
-            jina_resp = httpx.get(f"https://r.jina.ai/{url}", timeout=_JINA_TIMEOUT_SEC)
-            if jina_resp.status_code == 200 and jina_resp.text.strip():
-                text = jina_resp.text
-        except Exception as exc:
-            logger.debug("Jina Reader fallback failed for %s: %s", url, exc)
+            def read_with_playwright(page):
+                page.goto(safe_url, wait_until="domcontentloaded", timeout=int(_READ_TIMEOUT_SEC * 1000))
+                text, method = extract_text(page.content())
+                return document_from_content(result, text, extraction_method=f"playwright:{method}")
 
-    if not text.strip():
+            document = controller.run(read_with_playwright, timeout=_READ_TIMEOUT_SEC)
+        except Exception as exc:
+            logger.debug("Playwright extraction failed for %s: %s", url, exc)
+
+    if document is None:
         return {"error": f"Could not extract content from {url}"}
-    content = text[:_READ_MAX_CHARS]
-    return {"url": url, "content": content, "length": len(content)}
+    content = document.content[:_READ_MAX_CHARS]
+    return {"url": document.url or url, "content": content, "length": len(content)}

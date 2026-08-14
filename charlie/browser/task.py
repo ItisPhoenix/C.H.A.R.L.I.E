@@ -11,7 +11,7 @@ import time
 from typing import Optional
 
 from charlie import resource_locks
-from charlie.browser import agent, fastpath, intent, recipes, session, stealth
+from charlie.browser import agent, controller, fastpath, intent, recipes, session, stealth
 from charlie.browser.recipes import BrowserResult
 from charlie.known_apps import APP_REGISTRY
 from charlie.utils import make_id
@@ -23,11 +23,11 @@ _LOCK_POLL_INTERVAL_S = 0.5
 
 
 async def _acquire_browser(owner_id: str, max_wait_s: float) -> bool:
-    """Poll for the browser capability; fails open after max_wait_s so a stuck lock can't hang a caller forever."""
+    """Poll for the browser capability without allowing concurrent page mutations."""
     elapsed = 0.0
     while not resource_locks.acquire(_CAPABILITY, owner_id):
         if elapsed >= max_wait_s:
-            logger.warning("Browser capability lock wait timed out after %.1fs, proceeding anyway", max_wait_s)
+            logger.warning("Browser capability lock wait timed out after %.1fs", max_wait_s)
             return False
         await asyncio.sleep(_LOCK_POLL_INTERVAL_S)
         elapsed += _LOCK_POLL_INTERVAL_S
@@ -84,7 +84,15 @@ async def _resolve_inner(
     wait_start = time.monotonic()
     owner_id = make_id()
     acquired = await _acquire_browser(owner_id, max_wait_s=deadline_s)
+    if not acquired:
+        return BrowserResult(
+            answer="The browser is busy with another task. Try again shortly.",
+            verification="capability-busy",
+        )
+    controller_lease = False
     try:
+        controller.acquire_task_lease()
+        controller_lease = True
         # deadline_s is a total budget -- subtract lock-wait time already spent, or a slow lock can double it.
         remaining_deadline_s = max(0.0, deadline_s - (time.monotonic() - wait_start))
         loop = asyncio.get_running_loop()
@@ -92,15 +100,31 @@ async def _resolve_inner(
         lowered = task.lower()
 
         if "youtube" in lowered:
-            url = await loop.run_in_executor(None, fastpath.youtube_play, task)
-            result = BrowserResult(url=url) if url else await loop.run_in_executor(
-                None, recipes.youtube_play, task
+            youtube_intent = intent.parse_site_intent(task, "youtube")
+            query = youtube_intent.query if youtube_intent else task
+            url = await loop.run_in_executor(None, fastpath.youtube_play, query)
+            result = (
+                BrowserResult(
+                    url=url,
+                    success=True,
+                    verification="youtube-watch-url",
+                    site="youtube",
+                    query=query,
+                )
+                if url
+                else await loop.run_in_executor(None, recipes.youtube_play, query)
             )
 
         if result is None:
             site = _resolve_known_site(task)
             if site:
-                result = await loop.run_in_executor(None, recipes.site_search, site, task)
+                site_name = next(
+                    (name for name, entry in APP_REGISTRY.items() if entry.is_website and entry.open_cmd == site),
+                    None,
+                )
+                site_intent = intent.parse_site_intent(task, site_name or "")
+                query = site_intent.query if site_intent else task
+                result = await loop.run_in_executor(None, recipes.site_search, site, query, site_name)
 
         if result is None:
             result = await agent.run_task(
@@ -114,9 +138,11 @@ async def _resolve_inner(
                 )
                 result = retried or BrowserResult(answer="That site blocked me and I couldn't get through.")
 
-        if result is not None and not freshness_sensitive:
+        if result is not None and result.success and not freshness_sensitive:
             session.cache_set(task, result)
         return result
     finally:
+        if controller_lease:
+            controller.release_task_lease()
         if acquired:
             resource_locks.release(_CAPABILITY, owner_id)

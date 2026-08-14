@@ -28,11 +28,16 @@ class EventType(StrEnum):
     AUDIO_STATE = "audio_state"
     MIC_STATE = "mic_state"
     AUDIO_LEVEL = "audio_level"
+    PTT_START = "ptt_start"
+    PTT_STOP = "ptt_stop"
+    PTT_CANCEL = "ptt_cancel"
 
     # Tool loop
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     TOOL_APPROVAL_REQUEST = "tool_approval_request"
+    RESEARCH_PROGRESS = "research_progress"
+    RESEARCH_RESULT = "research_result"
 
     # Session / system
     SESSION_UPDATED = "session_updated"

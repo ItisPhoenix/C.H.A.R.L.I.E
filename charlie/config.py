@@ -41,6 +41,10 @@ class Config:
         metadata=_meta("LLM_API_KEY", "LLM", secret=True),
     )
     llm_model: str = field(default=os.getenv("LLM_MODEL", ""), metadata=_meta("LLM_MODEL", "LLM"))
+    llm_trust_env: bool = field(
+        default=os.getenv("LLM_TRUST_ENV", "false").lower() == "true",
+        metadata=_meta("LLM_TRUST_ENV", "LLM"),
+    )
 
     # -1 = system default input device; >=0 = specific device index
     mic_index: int = field(
@@ -200,6 +204,80 @@ class Config:
     tavily_api_key: str = field(
         default=os.getenv("TAVILY_API_KEY", ""),
         metadata=_meta("TAVILY_API_KEY", "Search Providers", secret=True),
+    )
+
+    # Web Research -- public-web acquisition stays separate from interactive browser control.
+    research_enabled: bool = field(
+        default=os.getenv("RESEARCH_ENABLED", "true").lower() == "true",
+        metadata=_meta("RESEARCH_ENABLED", "Web Research"),
+    )
+    research_default_mode: str = field(
+        default=os.getenv("RESEARCH_DEFAULT_MODE", "auto"),
+        metadata=_meta("RESEARCH_DEFAULT_MODE", "Web Research"),
+    )
+    research_market: str = field(
+        default=os.getenv("RESEARCH_MARKET", "IN"),
+        metadata=_meta("RESEARCH_MARKET", "Web Research"),
+    )
+    research_currency: str = field(
+        default=os.getenv("RESEARCH_CURRENCY", "INR"),
+        metadata=_meta("RESEARCH_CURRENCY", "Web Research"),
+    )
+    research_locale: str = field(
+        default=os.getenv("RESEARCH_LOCALE", "en-IN"),
+        metadata=_meta("RESEARCH_LOCALE", "Web Research"),
+    )
+    research_max_concurrency: int = field(
+        default=int(os.getenv("RESEARCH_MAX_CONCURRENCY", "6")),
+        metadata=_meta("RESEARCH_MAX_CONCURRENCY", "Research Advanced"),
+    )
+    research_max_search_queries: int = field(
+        default=int(os.getenv("RESEARCH_MAX_SEARCH_QUERIES", "6")),
+        metadata=_meta("RESEARCH_MAX_SEARCH_QUERIES", "Research Advanced"),
+    )
+    research_max_sources: int = field(
+        default=int(os.getenv("RESEARCH_MAX_SOURCES", "12")),
+        metadata=_meta("RESEARCH_MAX_SOURCES", "Research Advanced"),
+    )
+    research_max_pages_per_domain: int = field(
+        default=int(os.getenv("RESEARCH_MAX_PAGES_PER_DOMAIN", "4")),
+        metadata=_meta("RESEARCH_MAX_PAGES_PER_DOMAIN", "Research Advanced"),
+    )
+    research_crawl_enabled: bool = field(
+        default=os.getenv("RESEARCH_CRAWL_ENABLED", "true").lower() == "true",
+        metadata=_meta("RESEARCH_CRAWL_ENABLED", "Web Research"),
+    )
+    research_ddg_enabled: bool = field(
+        default=os.getenv("RESEARCH_DDG_ENABLED", "true").lower() == "true",
+        metadata=_meta("RESEARCH_DDG_ENABLED", "Research Advanced"),
+    )
+    research_crawl_max_depth: int = field(
+        default=int(os.getenv("RESEARCH_CRAWL_MAX_DEPTH", "2")),
+        metadata=_meta("RESEARCH_CRAWL_MAX_DEPTH", "Research Advanced"),
+    )
+    research_crawl_max_pages: int = field(
+        default=int(os.getenv("RESEARCH_CRAWL_MAX_PAGES", "20")),
+        metadata=_meta("RESEARCH_CRAWL_MAX_PAGES", "Research Advanced"),
+    )
+    research_fetch_timeout_s: float = field(
+        default=float(os.getenv("RESEARCH_FETCH_TIMEOUT_S", "12")),
+        metadata=_meta("RESEARCH_FETCH_TIMEOUT_S", "Research Advanced"),
+    )
+    research_total_timeout_quick_s: float = field(
+        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_QUICK_S", "15")),
+        metadata=_meta("RESEARCH_TOTAL_TIMEOUT_QUICK_S", "Research Advanced"),
+    )
+    research_total_timeout_standard_s: float = field(
+        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_STANDARD_S", "45")),
+        metadata=_meta("RESEARCH_TOTAL_TIMEOUT_STANDARD_S", "Research Advanced"),
+    )
+    research_total_timeout_deep_s: float = field(
+        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_DEEP_S", "120")),
+        metadata=_meta("RESEARCH_TOTAL_TIMEOUT_DEEP_S", "Research Advanced"),
+    )
+    research_jina_enabled: bool = field(
+        default=os.getenv("RESEARCH_JINA_ENABLED", "false").lower() == "true",
+        metadata=_meta("RESEARCH_JINA_ENABLED", "Research Advanced"),
     )
 
     # Wake Word Configuration -- classifier is loaded once when VoiceEngine starts.
@@ -440,6 +518,18 @@ class Config:
     pet_scale: float = field(
         default=float(os.getenv("PET_SCALE", "1.0")),
         metadata=_meta("PET_SCALE", "Companion", restart="process"),
+    )
+    pet_captions: bool = field(
+        default=os.getenv("PET_CAPTIONS", "true").lower() == "true",
+        metadata=_meta("PET_CAPTIONS", "Companion", restart="process"),
+    )
+    pet_cursor_tracking: bool = field(
+        default=os.getenv("PET_CURSOR_TRACKING", "true").lower() == "true",
+        metadata=_meta("PET_CURSOR_TRACKING", "Companion", restart="process"),
+    )
+    pet_edge_snap: bool = field(
+        default=os.getenv("PET_EDGE_SNAP", "true").lower() == "true",
+        metadata=_meta("PET_EDGE_SNAP", "Companion", restart="process"),
     )
 
     charlie_host: str = field(

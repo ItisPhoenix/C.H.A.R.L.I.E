@@ -53,14 +53,10 @@ class SafeStreamWrapper:
 
 if sys.platform == "win32":
     sys.stdout = SafeStreamWrapper(
-        io.TextIOWrapper(
-            sys.stdout.buffer, encoding="utf-8", line_buffering=True, write_through=True
-        )
+        io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", line_buffering=True, write_through=True)
     )
     sys.stderr = SafeStreamWrapper(
-        io.TextIOWrapper(
-            sys.stderr.buffer, encoding="utf-8", line_buffering=True, write_through=True
-        )
+        io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", line_buffering=True, write_through=True)
     )
 else:
     sys.stdout = SafeStreamWrapper(sys.stdout)
@@ -73,17 +69,13 @@ LOG_FILE = "logs/charlie.log"
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)
 
-file_formatter = logging.Formatter(
-    "%(asctime)s [%(name)s] [%(levelname)s] %(funcName)s:%(lineno)d - %(message)s"
-)
+file_formatter = logging.Formatter("%(asctime)s [%(name)s] [%(levelname)s] %(funcName)s:%(lineno)d - %(message)s")
 file_handler = logging.handlers.RotatingFileHandler(
     LOG_FILE, encoding="utf-8", maxBytes=20 * 1024 * 1024, backupCount=5
 )
 file_handler.setFormatter(file_formatter)
 
-console_formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+console_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(console_formatter)
@@ -125,13 +117,22 @@ from charlie.watchers import (
 
 logger = logging.getLogger("charlie.main")
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
-_hud_surface_engine = SurfaceEngine(
-    widget_cap=config.surface_widget_cap, workspace_cap=config.surface_workspace_cap
-)
+_hud_surface_engine = SurfaceEngine(widget_cap=config.surface_widget_cap, workspace_cap=config.surface_workspace_cap)
 _state_machine = StateMachine()  # single authoritative CoreState instance for this process
-_runtime_health = HealthRegistry((
-    "brain", "memory", "plugins", "mcp", "web", "companion", "hud", "telegram", "voice", "watchers",
-))
+_runtime_health = HealthRegistry(
+    (
+        "brain",
+        "memory",
+        "plugins",
+        "mcp",
+        "web",
+        "companion",
+        "hud",
+        "telegram",
+        "voice",
+        "watchers",
+    )
+)
 
 
 async def _publish_subsystem_health(bus: Optional[EventBus] = None) -> None:
@@ -196,9 +197,7 @@ class _UnavailableVoiceEngine:
     def set_wake_word_callback(self, callback: Callable[[], None]) -> None:
         return None
 
-    def set_audio_state(
-        self, muted: Optional[bool] = None, volume: Optional[float] = None
-    ) -> Dict[str, object]:
+    def set_audio_state(self, muted: Optional[bool] = None, volume: Optional[float] = None) -> Dict[str, object]:
         if muted is not None:
             self._muted = muted
         if volume is not None:
@@ -208,6 +207,15 @@ class _UnavailableVoiceEngine:
     def set_mic_state(self, mic_muted: bool) -> Dict[str, object]:
         self._muted = mic_muted
         return {"mic_muted": self._muted, "available": False}
+
+    def start_ptt(self) -> None:
+        return None
+
+    def stop_ptt(self) -> None:
+        return None
+
+    def cancel_ptt(self) -> None:
+        return None
 
 
 def _start_voice_or_degrade(
@@ -260,9 +268,7 @@ _MAX_FLUSH_CHARS = 200  # Force-flush at word boundary if no sentence boundary s
 _IDLE_RETURN_THRESHOLD_S = 60.0  # idle_seconds below this after being above it counts as "user returned"
 
 
-def _flush_complete_sentences(
-    buffer: str, sink: "Callable[[str], None]"
-) -> Tuple[str, bool]:
+def _flush_complete_sentences(buffer: str, sink: "Callable[[str], None]") -> Tuple[str, bool]:
     """Split `buffer` on sentence boundaries and feed complete sentences to `sink`.
 
     Returns the leftover (incomplete trailing sentence) and whether any complete
@@ -276,7 +282,6 @@ def _flush_complete_sentences(
         if part.strip():
             sink(part)
     return parts[-1], len(parts) > 1
-
 
 
 def _strip_think(text: str) -> str:
@@ -325,11 +330,7 @@ def _schedule_process(coro, loop):
     fut = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
         fut.add_done_callback(
-            lambda f: (
-                logger.error("Answer turn failed", exc_info=f.exception())
-                if f.exception() is not None
-                else None
-            )
+            lambda f: logger.error("Answer turn failed", exc_info=f.exception()) if f.exception() is not None else None
         )
     except Exception:  # pragma: no cover - add_done_callback itself failed
         logger.warning("Could not attach failure callback to answer task", exc_info=True)
@@ -349,6 +350,7 @@ async def _restart_mcp_client(old_client, config):
     if not config.mcp_enabled:
         return None
     from charlie.mcp_client import start_mcp
+
     return await asyncio.to_thread(start_mcp, config)
 
 
@@ -384,6 +386,7 @@ async def main():
         logger.error(f"Failed to initialize SessionStore: {e}")
         return
     from charlie.audit_store import AuditStore
+
     audit_store = AuditStore(config.session_db_path)
     # Initialize vector memory store (graceful degradation if no embedding backend)
     memory_store = None
@@ -410,9 +413,11 @@ async def main():
         if event_bus:
             asyncio.run_coroutine_threadsafe(
                 event_bus.emit(
-                    "tool_call", {"name": name, "args": args, "session_id": current_web_session_id},
+                    "tool_call",
+                    {"name": name, "args": args, "session_id": current_web_session_id},
                     meta=EventMeta(source=EventSource.BRAIN),
-                ), loop
+                ),
+                loop,
             )
 
     def on_tool_result(name, result):
@@ -440,9 +445,11 @@ async def main():
                 desc += f" with {summary}"
             asyncio.run_coroutine_threadsafe(
                 event_bus.emit(
-                    "thinking_update", {"text": desc, "session_id": current_web_session_id},
+                    "thinking_update",
+                    {"text": desc, "session_id": current_web_session_id},
                     meta=EventMeta(source=EventSource.BRAIN),
-                ), loop
+                ),
+                loop,
             )
 
     _CONVERSATION_SUMMON_RE = re.compile(r"\b(?:show|open) (?:me )?(?:the )?(?:chat|conversation)\b", re.IGNORECASE)
@@ -474,6 +481,7 @@ async def main():
         hud_invoke hotkey and this voice phrase."""
         nonlocal dashboard_visible
         from charlie.utils import open_url_in_browser
+
         if toggle:
             dashboard_visible = not dashboard_visible
         elif not dashboard_visible:
@@ -494,11 +502,13 @@ async def main():
         still finds the (now-stale) tool_approval_request via replay. Also closes
         the HUD approval modal, which is spawned with surface_id == request_id."""
         from charlie.core import resolve_tool_approval
+
         resolve_tool_approval(request_id, approved)
         if event_bus is not None:
             asyncio.run_coroutine_threadsafe(
                 event_bus.emit(
-                    "tool_approval_resolved", {"request_id": request_id},
+                    "tool_approval_resolved",
+                    {"request_id": request_id},
                     meta=EventMeta(source=EventSource.BRAIN),
                 ),
                 loop,
@@ -508,7 +518,7 @@ async def main():
 
     def on_tool_approval_request(request_id, tool_name, reason, platform, risk_class):
         # telegram_bot is None until its startup block below runs -- read at call time, not def time.
-        if telegram_bot and should_relay_approval(True, config.telegram_user_id):
+        if platform == "telegram" and telegram_bot and should_relay_approval(True, config.telegram_user_id):
             asyncio.run_coroutine_threadsafe(
                 telegram_bot.send_approval_request(config.telegram_user_id, request_id, tool_name, reason), loop
             )
@@ -541,10 +551,13 @@ async def main():
         if event_bus is None:
             return
         from charlie.utils import make_id
+
         surface_id = make_id()
         spec = _hud_surface_engine.decide(
-            {"type": "result_stored"}, attention=AttentionLevel(attention_level),
-            title="Task finished", body=summary,
+            {"type": "result_stored"},
+            attention=AttentionLevel(attention_level),
+            title="Task finished",
+            body=summary,
         )
         if spec is None:
             return
@@ -553,13 +566,29 @@ async def main():
         spawn_event = _hud_surface_engine.spawn_event(surface_id, spec)
         asyncio.run_coroutine_threadsafe(
             event_bus.emit(
-                spawn_event["type"], spawn_event["payload"],
+                spawn_event["type"],
+                spawn_event["payload"],
                 meta=EventMeta(source=EventSource.SURFACE, task_id=task_id),
             ),
             loop,
         )
         for evicted_id in evicted:
             asyncio.run_coroutine_threadsafe(_emit_surface_dismiss(evicted_id), loop)
+
+    def on_research_result(report):
+        """Forward typed research cards; chat remains the text fallback."""
+        if event_bus is None:
+            return
+        payload = report.structured_payload()
+        payload["session_id"] = current_web_session_id
+        asyncio.run_coroutine_threadsafe(
+            event_bus.emit(
+                "research_result",
+                payload,
+                meta=EventMeta(source=EventSource.TASK),
+            ),
+            loop,
+        )
 
     try:
         brain = Brain(
@@ -572,6 +601,7 @@ async def main():
             on_thinking_update=on_thinking_update,
             on_tool_approval_request=on_tool_approval_request,
             on_result_stored=on_result_stored,
+            on_research_result=on_research_result,
         )
         _set_subsystem_health("brain", HealthStatus.RUNNING)
     except Exception as e:
@@ -583,6 +613,7 @@ async def main():
 
     # Wire vector memory store into tool registry
     from charlie.tools import registry as tool_registry
+
     if memory_store is not None:
         tool_registry.set_memory_store(memory_store)
     # Wire knowledge graph into tool registry
@@ -658,9 +689,7 @@ async def main():
         if not session_id:
             return
         try:
-            store.create_session(
-                session_id, title="New Chat", source="voice", launch_id=_LAUNCH_ID
-            )
+            store.create_session(session_id, title="New Chat", source="voice", launch_id=_LAUNCH_ID)
         except Exception as exc:
             logger.debug(f"ensure_session_ready skipped: {exc}")
 
@@ -683,7 +712,8 @@ async def main():
             if event_bus:
                 asyncio.run_coroutine_threadsafe(
                     event_bus.emit(
-                        "session_updated", {"session_id": session_id, "title": candidate},
+                        "session_updated",
+                        {"session_id": session_id, "title": candidate},
                         meta=EventMeta(source=EventSource.VOICE),
                     ),
                     loop,
@@ -723,6 +753,7 @@ async def main():
         """
         nonlocal turn_active
         from charlie.core import get_active_voice_approval
+
         # A gated tool call inside the still-running turn is waiting on a
         # spoken yes/no -- that answer must reach _process() immediately
         # (it routes to resolve_tool_approval), never queued behind the
@@ -744,6 +775,7 @@ async def main():
         # instead of starting a new chat turn. See
         # charlie.core.Brain.request_tool_approval / get_active_voice_approval.
         from charlie.core import get_active_voice_approval
+
         pending_approval_id = get_active_voice_approval()
         if pending_approval_id:
             answer = parse_yes_no(text)
@@ -818,7 +850,7 @@ async def main():
                         for pred in preds[:3]:
                             response_str += f"    {pred}\n"
                         if len(preds) > 3:
-                            response_str += f"    ... +{len(preds)-3} more\n"
+                            response_str += f"    ... +{len(preds) - 3} more\n"
             print(f"\n{response_str}", flush=True)
             voice.speak(response_str, last_emotion)
             return
@@ -906,7 +938,7 @@ async def main():
         is_first_flush = True
         turn_active = True
         try:
-            async for chunk in brain.chat_stream(text, platform=platform):
+            async for chunk in brain.chat_stream(text, platform=platform, session_id=session_id):
                 if is_first_chunk:
                     print("\r" + " " * 30 + "\r", end="", flush=True)
                     is_first_chunk = False
@@ -929,15 +961,13 @@ async def main():
                             safe = _strip_tool_lines(safe)
                             safe = _strip_think(safe)
                             if safe:
-                                asyncio.create_task(
-                                    event_bus.emit(
-                                        "token",
-                                        {
-                                            "text": safe if safe.endswith((".", "!", "?")) else safe + ". ",
-                                            "session_id": session_id,
-                                        },
-                                        meta=EventMeta(source=EventSource.BRAIN),
-                                    )
+                                await event_bus.emit(
+                                    "token",
+                                    {
+                                        "text": safe if safe.endswith((".", "!", "?")) else safe + ". ",
+                                        "session_id": session_id,
+                                    },
+                                    meta=EventMeta(source=EventSource.BRAIN),
                                 )
                     web_buffer = parts[-1]
 
@@ -990,19 +1020,13 @@ async def main():
 
             # Final web UI flush - emit any remaining text stuck in web_buffer
             if event_bus and web_buffer.strip():
-                asyncio.create_task(
-                    event_bus.emit(
-                        "token",
-                        {
-                            "text": _strip_think(
-                                _strip_tool_lines(
-                                    _strip_search_result_tags(web_buffer.strip())
-                                )
-                            ),
-                            "session_id": session_id,
-                        },
-                        meta=EventMeta(source=EventSource.BRAIN),
-                    )
+                await event_bus.emit(
+                    "token",
+                    {
+                        "text": _strip_think(_strip_tool_lines(_strip_search_result_tags(web_buffer.strip()))),
+                        "session_id": session_id,
+                    },
+                    meta=EventMeta(source=EventSource.BRAIN),
                 )
 
             # Final TTS
@@ -1016,9 +1040,7 @@ async def main():
                     store.append("assistant", final_reply, session_id=session_id)
                     store.touch_session(session_id)
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to archive assistant message or touch session: {e}"
-                    )
+                    logger.warning(f"Failed to archive assistant message or touch session: {e}")
                 if platform == "telegram" and telegram_bot:
                     try:
                         await telegram_bot.send_message(config.telegram_user_id, final_reply)
@@ -1027,11 +1049,10 @@ async def main():
 
             # Emit response_done event so the UI can stop its typing indicator.
             if event_bus:
-                asyncio.create_task(
-                    event_bus.emit(
-                        "response_done", {"session_id": session_id},
-                        meta=EventMeta(source=EventSource.BRAIN),
-                    )
+                await event_bus.emit(
+                    "response_done",
+                    {"session_id": session_id},
+                    meta=EventMeta(source=EventSource.BRAIN),
                 )
         except Exception as exc:
             logger.error("Turn failed", exc_info=True)
@@ -1039,17 +1060,15 @@ async def main():
             _safe_speak(voice, message, last_emotion, "turn-failed")
             if event_bus:
                 severity = "error" if error_class == ErrorClass.CRITICAL else "warning"
-                asyncio.create_task(
-                    event_bus.emit(
-                        "alert", {"severity": severity, "message": message},
-                        meta=EventMeta(source=EventSource.BRAIN, rationale=f"turn failed: {error_class.value}"),
-                    )
+                await event_bus.emit(
+                    "alert",
+                    {"severity": severity, "message": message},
+                    meta=EventMeta(source=EventSource.BRAIN, rationale=f"turn failed: {error_class.value}"),
                 )
-                asyncio.create_task(
-                    event_bus.emit(
-                        "response_done", {"session_id": session_id},
-                        meta=EventMeta(source=EventSource.BRAIN, rationale="turn failed with an unhandled exception"),
-                    )
+                await event_bus.emit(
+                    "response_done",
+                    {"session_id": session_id},
+                    meta=EventMeta(source=EventSource.BRAIN, rationale="turn failed with an unhandled exception"),
                 )
             raise
         finally:
@@ -1057,9 +1076,7 @@ async def main():
             if pending_turns:
                 next_text, next_session, next_platform = pending_turns.pop(0)
                 logger.info(f"Dequeuing pending turn: {next_text}")
-                _schedule_process(
-                    _dispatch_or_queue(next_text, next_session, next_platform), loop
-                )
+                _schedule_process(_dispatch_or_queue(next_text, next_session, next_platform), loop)
 
         # Learning loop: deferred to background -- doesn't block next turn.
         # Skipped for screen-content queries -- the reply is a description of
@@ -1067,29 +1084,41 @@ async def main():
         # and storing it as one pollutes memory with stale screen snapshots that
         # resurface on later "what's on my screen" queries.
         from charlie.router import SCREEN_QUERY_RE as _screen_query_re
+
         if full_reply_buffer.strip() and text.strip() and not _screen_query_re.search(text):
 
             async def _background_learn(user_text: str, reply_text: str):
                 try:
+                    if not config.llm_url:
+                        return
                     learning_prompt = (
                         f"User said: {user_text}\n"
                         f"Charlie replied: {reply_text}\n"
                         "Extract 0-1 new user preferences (e.g., 'prefers short answers'). "
                         "Output ONLY the preference line, or output nothing if nothing new."
                     )
-                    learning = ""
-                    async for chunk in brain.chat_stream(
-                        learning_prompt, skip_pre_search=True, skip_tools=True
-                    ):
-                        learning += chunk
-                    learning = learning.strip()
+                    response = await brain.client.post(
+                        "chat/completions",
+                        json={
+                            "model": config.llm_model,
+                            "messages": [{"role": "user", "content": learning_prompt}],
+                            "temperature": 0.0,
+                            "max_tokens": 120,
+                            "stream": False,
+                        },
+                    )
+                    response.raise_for_status()
+                    content = response.json()["choices"][0]["message"].get("content")
+                    learning = content.strip() if isinstance(content, str) else ""
                     clean_learning = learning.lower().rstrip(".")
-                    if not learning or any(clean_learning.startswith(p) for p in (
-                        "nothing", "none", "no new", "no preference", "no change", "no update"
-                    )):
+                    if not learning or any(
+                        clean_learning.startswith(p)
+                        for p in ("nothing", "none", "no new", "no preference", "no change", "no update")
+                    ):
                         return
 
                     from charlie.tools import registry as tool_registry
+
                     existing = ""
                     u_path = Path(config.user_file)
                     if u_path.exists():
@@ -1106,6 +1135,7 @@ async def main():
                                 "content": learning,
                             },
                         )
+                        brain.reload_context()
                         logger.info(f"Learning: {learning}")
                 except Exception as e:
                     logger.debug(f"Learning loop skipped: {e}")
@@ -1142,6 +1172,7 @@ async def main():
         """Stop the MCP subprocess client and restart it if still enabled."""
         nonlocal mcp_client
         from charlie.tools import registry
+
         for k in [k for k in registry._tools if k.startswith("mcp_")]:
             registry._tools.pop(k, None)
         try:
@@ -1153,11 +1184,13 @@ async def main():
     def _reload_plugin_tools():
         """Re-register plugin tools to match the current enabled flag / allow-dirs."""
         from charlie.tools import registry
+
         for k in [k for k in registry._tools if k.startswith("plugin_")]:
             registry._tools.pop(k, None)
         if config.plugins_enabled:
             try:
                 from charlie.tools import register_plugin_tools
+
                 register_plugin_tools(config)
             except Exception as ex:
                 logger.warning(f"Error registering plugins on reload: {ex}")
@@ -1174,6 +1207,7 @@ async def main():
                     payload_sid = cmd.get("payload", {}).get("session_id")
                     current_web_session_id = cmd.get("session_id") or payload_sid or _voice_fallback_session_id
                     from charlie.recovery import set_active_session_id
+
                     set_active_session_id(current_web_session_id)
                     chat_text = cmd.get("text") or cmd.get("payload", {}).get("text", "")
                     await _dispatch_or_queue(chat_text, current_web_session_id, platform="web")
@@ -1181,16 +1215,19 @@ async def main():
                     payload_sid = cmd.get("payload", {}).get("session_id")
                     current_web_session_id = cmd.get("session_id") or payload_sid or _voice_fallback_session_id
                     from charlie.recovery import set_active_session_id
+
                     set_active_session_id(current_web_session_id)
                     logger.info(f"Active session updated to: {current_web_session_id}")
                 elif cmd_type == "ws_connection_count":
                     from charlie.recovery import set_active_ws_count
+
                     set_active_ws_count(cmd.get("count", 0))
                 elif cmd_type == "recovery_approve":
                     payload = cmd.get("payload", {})
                     proposal_id = payload.get("proposal_id")
                     if proposal_id:
                         from charlie.recovery import pending_proposals
+
                         fut = pending_proposals.get(proposal_id)
                         if fut and not fut.done():
                             fut.set_result(True)
@@ -1199,6 +1236,7 @@ async def main():
                     proposal_id = payload.get("proposal_id")
                     if proposal_id:
                         from charlie.recovery import pending_proposals
+
                         fut = pending_proposals.get(proposal_id)
                         if fut and not fut.done():
                             fut.set_result(False)
@@ -1251,6 +1289,16 @@ async def main():
                     payload = cmd.get("payload", {})
                     mic_state = voice.set_mic_state(bool(payload.get("mic_muted", True)))
                     await event_bus.emit("mic_state", mic_state, meta=EventMeta(source=EventSource.VOICE))
+                elif cmd_type == "ptt_start":
+                    voice.start_ptt()
+                    await event_bus.emit("ptt_start", {}, meta=EventMeta(source=EventSource.VOICE))
+                    await event_bus.emit("vad_start", {"source": "ptt"}, meta=EventMeta(source=EventSource.VOICE))
+                elif cmd_type == "ptt_stop":
+                    voice.stop_ptt()
+                    await event_bus.emit("ptt_stop", {}, meta=EventMeta(source=EventSource.VOICE))
+                elif cmd_type == "ptt_cancel":
+                    voice.cancel_ptt()
+                    await event_bus.emit("ptt_cancel", {}, meta=EventMeta(source=EventSource.VOICE))
                 elif cmd_type == "extension_installed":
                     # Mirrors charlie/web_server.py's confirm_extension(): the
                     # dashboard's Extensions tab only registers tools into that
@@ -1275,11 +1323,14 @@ async def main():
                         )
                         if payload.get("kind") == "skill":
                             from charlie.extensions.skills import format_skill_block, parse_skill_md
+
                             manifest = parse_skill_md(payload.get("raw_text", ""))
                             brain.add_installed_skill_block(payload.get("name", ""), format_skill_block(manifest))
                         logger.info(
                             "Mirrored extension install '%s' (%s) into voice process: %s",
-                            payload.get("name"), payload.get("kind"), tool_names,
+                            payload.get("name"),
+                            payload.get("kind"),
+                            tool_names,
                         )
                     except Exception as ex:
                         logger.warning(
@@ -1293,13 +1344,16 @@ async def main():
                     ext_name = payload.get("name", "")
                     try:
                         from charlie.tools import registry as _ext_registry
+
                         if kind == "mcp" and mcp_client is not None:
                             mcp_client.enable_server(_ext_registry, ext_name)
                         elif kind == "plugin":
                             from charlie.extensions.install import builtin_plugin
                             from charlie.tools import enable_plugin
+
                             enable_plugin(
-                                _ext_registry, plugin_manager,
+                                _ext_registry,
+                                plugin_manager,
                                 builtin_plugin(ext_name, config.plugin_allow_dirs),
                             )
                         # skill/openapi: nothing to do, disable_extension() never
@@ -1313,10 +1367,12 @@ async def main():
                     ext_name = payload.get("name", "")
                     try:
                         from charlie.tools import registry as _ext_registry
+
                         if kind == "mcp" and mcp_client is not None:
                             mcp_client.disable_server(_ext_registry, ext_name)
                         elif kind == "plugin":
                             from charlie.tools import disable_plugin
+
                             disable_plugin(_ext_registry, plugin_manager, ext_name)
                     except Exception as ex:
                         logger.warning(f"Failed to mirror extension disable '{ext_name}': {ex}", exc_info=True)
@@ -1327,6 +1383,7 @@ async def main():
                     ext_name = payload.get("name", "")
                     try:
                         from charlie.tools import registry as _ext_registry
+
                         if kind == "mcp" and mcp_client is not None:
                             mcp_client.remove_server(_ext_registry, ext_name)
                         elif kind in ("skill", "openapi"):
@@ -1341,6 +1398,7 @@ async def main():
                     logger.info("System restart command received. Reloading configuration and engine...")
 
                     from dotenv import load_dotenv
+
                     load_dotenv(override=True)
 
                     env_values = {
@@ -1356,7 +1414,8 @@ async def main():
                     brain.rebuild_stable_tier()
 
                     await event_bus.emit(
-                        "alert", {
+                        "alert",
+                        {
                             "severity": "success",
                             "message": "System configuration successfully reloaded and engine restarted.",
                         },
@@ -1365,19 +1424,26 @@ async def main():
                 elif cmd_type == "background_task_start":
                     payload = cmd.get("payload", {})
                     from charlie import background_task
+
                     try:
                         await background_task.start(
-                            config, event_bus, payload.get("text", ""),
-                            session_store=store, memory_store=memory_store, voice=voice,
+                            config,
+                            event_bus,
+                            payload.get("text", ""),
+                            session_store=store,
+                            memory_store=memory_store,
+                            voice=voice,
                         )
                     except RuntimeError as ex:
                         await event_bus.emit(
-                            "alert", {"severity": "warning", "message": str(ex)},
+                            "alert",
+                            {"severity": "warning", "message": str(ex)},
                             meta=EventMeta(source=EventSource.TASK, rationale=str(ex)),
                         )
                 elif cmd_type == "background_task_cancel":
                     payload = cmd.get("payload", {})
                     from charlie import background_task
+
                     background_task.cancel(payload.get("task_id", ""))
             except asyncio.CancelledError:
                 break
@@ -1428,18 +1494,22 @@ async def main():
             if event_bus:
                 asyncio.run_coroutine_threadsafe(
                     event_bus.emit(
-                        "speaking_start", {"session_id": current_web_session_id},
+                        "speaking_start",
+                        {"session_id": current_web_session_id},
                         meta=EventMeta(source=EventSource.VOICE),
-                    ), loop
+                    ),
+                    loop,
                 )
 
         def on_tts_stop():
             if event_bus:
                 asyncio.run_coroutine_threadsafe(
                     event_bus.emit(
-                        "speaking_stop", {"session_id": current_web_session_id},
+                        "speaking_stop",
+                        {"session_id": current_web_session_id},
                         meta=EventMeta(source=EventSource.VOICE),
-                    ), loop
+                    ),
+                    loop,
                 )
 
         voice = _start_voice_or_degrade(
@@ -1456,6 +1526,7 @@ async def main():
                 )
             if config.browser_enabled and config.browser_warm_on_wake:
                 from charlie.browser import controller as browser_controller
+
                 browser_controller.warm()
 
         voice.set_wake_word_callback(on_wake_word)
@@ -1470,16 +1541,14 @@ async def main():
                     "Give me a very brief, one-sentence startup welcome. Be warm, natural, "
                     "and speak like a human colleague (not an AI assistant). "
                     "Do NOT say 'How can I help you' or 'How can I assist'. Speak only in English.",
-                    skip_tools=True
+                    skip_tools=True,
                 ):
                     welcome_msg += chunk
         except asyncio.TimeoutError:
             logger.warning("Dynamic welcome timed out after 25s. Using fallback.")
             welcome_msg = "Hey there. I'm online and listening."
         except Exception as e:
-            logger.warning(
-                f"Dynamic welcome failed: {type(e).__name__}: {e}. Using fallback."
-            )
+            logger.warning(f"Dynamic welcome failed: {type(e).__name__}: {e}. Using fallback.")
             welcome_msg = "Hey there. I'm online and listening."
 
         print("=" * 40, flush=True)
@@ -1521,6 +1590,7 @@ async def main():
         async def _emit_system_status(bus):
             import psutil
             from charlie.results import ResultsStore
+
             results_store = ResultsStore(db_path=config.session_db_path)
             was_idle = False
             boot_time = psutil.boot_time()
@@ -1538,8 +1608,7 @@ async def main():
                         try:
                             net_now = psutil.net_io_counters()
                             net_kbps = (
-                                (net_now.bytes_sent + net_now.bytes_recv)
-                                - (last_net.bytes_sent + last_net.bytes_recv)
+                                (net_now.bytes_sent + net_now.bytes_recv) - (last_net.bytes_sent + last_net.bytes_recv)
                             ) / 1024.0
                             last_net = net_now
                         except (OSError, psutil.Error) as e:
@@ -1550,39 +1619,49 @@ async def main():
                         battery_percent = battery.percent if battery else None
                     except (OSError, psutil.Error, NotImplementedError) as e:
                         logger.debug(f"sensors_battery unavailable: {type(e).__name__}: {e}")
+                    disk_percent = None
+                    try:
+                        disk_percent = psutil.disk_usage(Path.cwd().anchor or "C:\\").percent
+                    except (OSError, psutil.Error) as e:
+                        logger.debug(f"disk_usage unavailable: {type(e).__name__}: {e}")
                     await bus.emit(
-                        "system_status", {
+                        "system_status",
+                        {
                             "cpu": cpu_percent,
                             "ram": ram_percent,
                             "gpu": await asyncio.to_thread(_read_gpu_percent),
                             "net_kbps": max(0.0, net_kbps),
                             "uptime_seconds": time.time() - boot_time,
                             "battery_percent": battery_percent,
+                            "disk_percent": disk_percent,
                         },
                         meta=EventMeta(source=EventSource.VOICE),
                     )
                     if _state_machine.expire_if_due() is not None:
                         envelope = _charlie_state_envelope()
-                        await bus.emit(
-                            envelope["type"], envelope["payload"], meta=EventMeta(source=EventSource.VOICE)
-                        )
+                        await bus.emit(envelope["type"], envelope["payload"], meta=EventMeta(source=EventSource.VOICE))
                     if sys.platform == "win32":
                         from charlie.desktop.session import user_idle_seconds
+
                         idle_s = await asyncio.to_thread(user_idle_seconds)
                         is_idle = idle_s >= _IDLE_RETURN_THRESHOLD_S
                         if was_idle and not is_idle:
                             catchup_msg = await asyncio.to_thread(results_store.consume_catchup)
                             if catchup_msg:
                                 await bus.emit(
-                                    "alert", {"severity": "info", "message": catchup_msg},
+                                    "alert",
+                                    {"severity": "info", "message": catchup_msg},
                                     meta=EventMeta(source=EventSource.TASK, rationale="idle-return catch-up"),
                                 )
                                 voice.speak(catchup_msg, "neutral")
                                 from charlie.surfaces import UserIntent
                                 from charlie.utils import make_id
+
                                 catchup_spec = _hud_surface_engine.decide(
-                                    {"type": "alert"}, user_intent=UserIntent.SHOW,
-                                    title="While you were away", body=catchup_msg,
+                                    {"type": "alert"},
+                                    user_intent=UserIntent.SHOW,
+                                    title="While you were away",
+                                    body=catchup_msg,
                                 )
                                 if catchup_spec is not None:
                                     catchup_id = make_id()
@@ -1590,13 +1669,15 @@ async def main():
                                     _schedule_surface_expiry(catchup_id, catchup_spec)
                                     catchup_event = _hud_surface_engine.spawn_event(catchup_id, catchup_spec)
                                     await bus.emit(
-                                        catchup_event["type"], catchup_event["payload"],
+                                        catchup_event["type"],
+                                        catchup_event["payload"],
                                         meta=EventMeta(source=EventSource.SURFACE),
                                     )
                                     for evicted_id in catchup_evicted:
                                         dismiss_event = _hud_surface_engine.dismiss_event(evicted_id)
                                         await bus.emit(
-                                            dismiss_event["type"], dismiss_event["payload"],
+                                            dismiss_event["type"],
+                                            dismiss_event["payload"],
                                             meta=EventMeta(source=EventSource.SURFACE),
                                         )
                         was_idle = is_idle
@@ -1613,11 +1694,14 @@ async def main():
             bus.set_state_listener(_on_event_for_state)
             voice.set_event_bus(bus)
             import charlie.recovery
+
             charlie.recovery._event_bus = bus
             charlie.recovery.set_active_session_id(current_web_session_id)
             import charlie.tools
+
             charlie.tools.set_event_bus(bus, asyncio.get_running_loop())
             import charlie.mcp_client
+
             charlie.mcp_client.set_event_bus(bus, asyncio.get_running_loop())
 
             from charlie.calendar_scheduler import deliver_due_reminders
@@ -1628,6 +1712,7 @@ async def main():
 
             async def _calendar_reminder_loop() -> None:
                 while True:
+
                     async def _deliver(event: dict) -> None:
                         message = f"Reminder: {event['title']}"
                         await bus.emit(
@@ -1636,26 +1721,23 @@ async def main():
                             meta=EventMeta(source=EventSource.WATCHER, rationale="local reminder became due"),
                         )
                         voice.speak(message, "neutral")
-                        if telegram_bot is not None and config.telegram_user_id > 0:
-                            try:
-                                await telegram_bot.send_message(config.telegram_user_id, message)
-                            except Exception:
-                                logger.warning("Failed to relay reminder to Telegram", exc_info=True)
 
                     await deliver_due_reminders(calendar_store, utc_now_iso(), _deliver)
                     await asyncio.sleep(15)
 
             from charlie import background_task as _background_task
+
             interrupted_task = _background_task.check_interrupted_task()
             if interrupted_task is not None:
                 _interrupted_msg = (
-                    f"Note: your background task \"{interrupted_task.get('text', '')}\" was "
+                    f'Note: your background task "{interrupted_task.get("text", "")}" was '
                     f"interrupted by a restart at step {interrupted_task.get('current_step', 0) + 1} "
                     f"of {len(interrupted_task.get('steps', []))}."
                 )
                 logger.info(_interrupted_msg)
                 await bus.emit(
-                    "alert", {"severity": "warning", "message": _interrupted_msg},
+                    "alert",
+                    {"severity": "warning", "message": _interrupted_msg},
                     meta=EventMeta(
                         source=EventSource.TASK,
                         rationale="process restarted while a background task was still running",
@@ -1665,6 +1747,7 @@ async def main():
 
             def _read_cpu_ram_percent() -> Tuple[float, float]:
                 import psutil
+
                 return psutil.cpu_percent(), psutil.virtual_memory().percent
 
             def _get_mcp_status() -> Dict[str, bool]:
@@ -1676,9 +1759,12 @@ async def main():
                 # Runs on the main loop -- _hud_surface_engine is only ever mutated here, never from the watcher thread.
                 from charlie.surfaces import UserIntent
                 from charlie.utils import make_id
+
                 watcher_spec = _hud_surface_engine.decide(
-                    {"type": event.get("type", "alert")}, user_intent=UserIntent.SHOW,
-                    title="Heads up", body=message,
+                    {"type": event.get("type", "alert")},
+                    user_intent=UserIntent.SHOW,
+                    title="Heads up",
+                    body=message,
                 )
                 if watcher_spec is None:
                     return
@@ -1687,13 +1773,15 @@ async def main():
                 _schedule_surface_expiry(watcher_id, watcher_spec)
                 watcher_event = _hud_surface_engine.spawn_event(watcher_id, watcher_spec)
                 await bus.emit(
-                    watcher_event["type"], watcher_event["payload"],
+                    watcher_event["type"],
+                    watcher_event["payload"],
                     meta=EventMeta(source=EventSource.SURFACE, rationale=reason),
                 )
                 for evicted_id in watcher_evicted:
                     dismiss_event = _hud_surface_engine.dismiss_event(evicted_id)
                     await bus.emit(
-                        dismiss_event["type"], dismiss_event["payload"],
+                        dismiss_event["type"],
+                        dismiss_event["payload"],
                         meta=EventMeta(source=EventSource.SURFACE),
                     )
 
@@ -1705,7 +1793,8 @@ async def main():
                 try:
                     asyncio.run_coroutine_threadsafe(
                         bus.emit(
-                            event.get("type", "alert"), payload,
+                            event.get("type", "alert"),
+                            payload,
                             meta=EventMeta(source=EventSource.WATCHER, rationale=reason),
                         ),
                         _watcher_loop,
@@ -1721,13 +1810,6 @@ async def main():
                         asyncio.run_coroutine_threadsafe(_spawn_watcher_surface(event, message, reason), _watcher_loop)
                     except Exception:
                         logger.warning("Failed to spawn watcher alert surface", exc_info=True)
-                if telegram_bot is not None and config.telegram_user_id > 0:
-                    try:
-                        asyncio.run_coroutine_threadsafe(
-                            telegram_bot.send_message(config.telegram_user_id, message), _watcher_loop
-                        )
-                    except Exception:
-                        logger.warning("Failed to relay watcher alert to Telegram", exc_info=True)
 
             _watcher_registry = WatcherRegistry()
             _watcher_registry.register(
@@ -1764,10 +1846,9 @@ async def main():
 
             zmq_handler = ZmqLogHandler()
             from charlie.log_redaction import SensitiveDataFilter
+
             zmq_handler.addFilter(SensitiveDataFilter())
-            zmq_handler.setFormatter(
-                logging.Formatter("%(asctime)s [%(name)s] [%(levelname)s] - %(message)s")
-            )
+            zmq_handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] [%(levelname)s] - %(message)s"))
             zmq_handler.setLevel(logging.INFO)
             logging.getLogger().addHandler(zmq_handler)
 

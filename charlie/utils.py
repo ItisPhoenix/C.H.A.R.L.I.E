@@ -3,7 +3,7 @@
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 def json_dumps(obj: Any) -> str:
@@ -17,6 +17,40 @@ def json_loads(s: str) -> Any:
         return json.loads(s)
     except (json.JSONDecodeError, TypeError):
         return s
+
+
+def parse_json_object(content: Any) -> Optional[Dict[str, Any]]:
+    """Parse a JSON object from model content without trusting its formatting.
+
+    Local model servers may return empty content, a fenced code block, or a
+    short explanation around otherwise valid JSON.  This helper accepts those
+    harmless variations while rejecting non-object output and never raises.
+    """
+    if not isinstance(content, str):
+        return None
+
+    text = content.strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 2:
+            text = "\n".join(lines[1:])
+            if text.rstrip().endswith("```"):
+                text = text.rstrip()[:-3].rstrip()
+
+    decoder = json.JSONDecoder()
+    candidate: Optional[Dict[str, Any]] = None
+    for index, character in enumerate(text):
+        if character != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(value, dict):
+            candidate = value
+    return candidate
 
 
 def make_id(length: int = 12) -> str:

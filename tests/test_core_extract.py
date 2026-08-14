@@ -376,7 +376,7 @@ class TestRebuildStableTier:
     into _stable_tier kept describing the OLD config until process restart."""
 
     def test_rebuild_stable_tier_reflects_new_config(self):
-        import charlie.core as core_module
+        import charlie.capabilities as capabilities_module
         brain = _make_brain(use_native_tools=True)
         brain.config.desktop_control_enabled = False
         brain.config.mcp_enabled = False
@@ -386,7 +386,7 @@ class TestRebuildStableTier:
         assert "Desktop control" not in before
 
         brain.config.desktop_control_enabled = True
-        with patch.object(core_module, "_DESKTOP_AVAILABLE", True):
+        with patch.object(capabilities_module, "_DESKTOP_AVAILABLE", True):
             brain.rebuild_stable_tier()
         after = brain._stable_tier
 

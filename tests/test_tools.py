@@ -34,6 +34,7 @@ def test_registry_registration_and_schema():
     names = {d["function"]["name"] for d in definitions}
     assert names == {
         "web_search",
+        "web_research",
         "shell_execute",
         "system_diagnostics",
         "file_read",
@@ -705,6 +706,7 @@ def test_builtin_tools_carry_real_registry_metadata():
 def test_web_search_returns_fallback_without_api_keys(monkeypatch):
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.setattr("charlie.research.engine.ResearchEngine._providers", lambda self: [])
 
     result = web_search("unit-test-only-query")
     assert isinstance(result, str)

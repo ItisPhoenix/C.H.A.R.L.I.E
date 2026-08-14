@@ -180,6 +180,7 @@ describe("applyEvent", () => {
       cpu: null,
       ram: null,
       gpu: null,
+      disk: null,
       netKbps: null,
       uptimeSeconds: null,
       batteryPercent: null,

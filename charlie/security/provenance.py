@@ -15,6 +15,7 @@ TrustLevel = Literal["config", "user_turn", "tool_external"]
 _EXTERNAL_TOOL_NAMES = frozenset(
     {
         "web_search",
+        "web_research",
         "browser_read",
         "browser_task",
         "desktop_read_screen",

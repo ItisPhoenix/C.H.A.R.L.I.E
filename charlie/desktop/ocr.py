@@ -40,7 +40,7 @@ def capture(
     """
     if not OCR_AVAILABLE:
         raise RuntimeError("mss/pytesseract/Pillow not installed -- OCR unavailable.")
-    with mss.mss() as sct:
+    with mss.MSS() as sct:
         if region is not None:
             grab_target = {
                 "left": region[0],

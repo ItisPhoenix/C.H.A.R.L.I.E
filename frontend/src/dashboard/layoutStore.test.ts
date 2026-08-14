@@ -28,6 +28,6 @@ describe("layout store", () => {
   it("stores panel layouts in browser storage", () => {
     useLayoutStore.getState().move("chat", 300, 120);
 
-    expect(window.localStorage.getItem("charlie.dashboard.layouts.v1")).toContain('"x":300');
+    expect(window.localStorage.getItem("charlie.dashboard.layouts.v2")).toContain('"x":300');
   });
 });

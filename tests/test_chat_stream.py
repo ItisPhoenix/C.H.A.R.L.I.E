@@ -77,6 +77,36 @@ async def test_budget_exhaustion(monkeypatch, brain_config):
 
 
 @pytest.mark.asyncio
+async def test_explicit_remember_bypasses_model_tool_calling(monkeypatch, brain_config):
+    brain = Brain(brain_config)
+    calls = []
+    monkeypatch.setattr(
+        "charlie.tools.registry.execute_tool",
+        lambda name, args: calls.append((name, args)) or "Remembered: my name is Alex",
+    )
+
+    result = [chunk async for chunk in brain.chat_stream("Please remember that my name is Alex")]
+
+    assert result == ["Remembered: my name is Alex"]
+    assert calls == [("vector_memory", {"action": "remember", "content": "my name is Alex"})]
+
+
+@pytest.mark.asyncio
+async def test_explicit_recall_bypasses_model_tool_calling(monkeypatch, brain_config):
+    brain = Brain(brain_config)
+    calls = []
+    monkeypatch.setattr(
+        "charlie.tools.registry.execute_tool",
+        lambda name, args: calls.append((name, args)) or "- my name is Alex",
+    )
+
+    result = [chunk async for chunk in brain.chat_stream("Do you remember my name?")]
+
+    assert result == ["- my name is Alex"]
+    assert calls == [("vector_memory", {"action": "recall", "content": "my name"})]
+
+
+@pytest.mark.asyncio
 async def test_partial_budget_spend_runs_affordable_calls_not_whole_batch_abort(monkeypatch):
     # Budget for 1 call, model requests 2 in one round -- the affordable one must still execute.
     config = Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy", iteration_budget_max=1)

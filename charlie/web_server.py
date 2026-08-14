@@ -183,8 +183,13 @@ async def _forward_to_voice(command_type: str, payload: dict) -> None:
         logger.warning("Failed to mirror %s to voice process", command_type, exc_info=True)
 
 
-# Events that carry a session_id and must only reach clients subscribed to it.
-_SESSION_SCOPED_EVENTS = ("token", "transcript", "desktop_frame")
+# Per-turn events must only reach clients subscribed to their session.
+# The process-level thinking indicator is intentionally broadcast to all clients.
+_SESSION_SCOPED_EVENTS = (
+    "token", "transcript", "desktop_frame", "thinking_update",
+    "tool_call", "tool_result", "research_progress", "research_result",
+    "response_done", "speaking_start", "speaking_stop",
+)
 event_bus: EventBus | None = None
 LAUNCH_ID: str = config.charlie_launch_id
 _store: SessionStore | None = None
@@ -317,7 +322,10 @@ async def serve_surface(surface_id: Optional[str] = None) -> FileResponse:
     index_path = _FRONTEND_DIST / "index.html"
     if not index_path.is_file():
         raise HTTPException(status_code=404, detail="frontend not built -- run `npm run build` in frontend/")
-    return FileResponse(index_path)
+    return FileResponse(
+        index_path,
+        headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
+    )
 
 
 async def broadcast(data: dict):
@@ -790,12 +798,14 @@ async def session_chat(session_id: str, data: dict):
     text = data.get("text", "").strip()
     if not text:
         return {"status": "error", "detail": "empty message"}
-    store = _get_store()
-    store.append("user", text, session_id=session_id)
     if event_bus:
         await event_bus.send_command(
             {"type": "chat", "session_id": session_id, "text": text}
         )
+    else:
+        # In web-only mode there is no main-process turn handler to persist the
+        # user message. Full mode persists it exactly once in main.py.
+        _get_store().append("user", text, session_id=session_id)
     return {"status": "ok"}
 # ---------------------------------------------------------------------------
 _system_status: dict = {}
@@ -1334,7 +1344,10 @@ async def get_available_models():
             headers = build_auth_headers(config.llm_key)
             url = config.llm_url.rstrip("/")
             endpoint = f"{url}/models" if url.endswith("/v1") else f"{url}/v1/models"
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(
+                timeout=3.0,
+                trust_env=config.llm_trust_env,
+            ) as client:
                 r = await client.get(endpoint, headers=headers)
                 if r.status_code == 200:
                     data = r.json()

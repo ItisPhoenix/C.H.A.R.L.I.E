@@ -37,7 +37,7 @@ def test_capture_full_screen_records_bounds():
 
     monitor = {"left": 10, "top": 20, "width": 1920, "height": 1080}
     sct = _make_mock_sct(monitor)
-    with patch.object(ocr, "OCR_AVAILABLE", True), patch("mss.mss", return_value=sct):
+    with patch.object(ocr, "OCR_AVAILABLE", True), patch("mss.MSS", return_value=sct):
         ocr.capture()
     assert uia.get_last_capture_bounds() == (10, 20, 1930, 1100)
 
@@ -48,7 +48,7 @@ def test_capture_region_records_bounds_exactly():
     region = (10, 20, 500, 600)
     monitor = {"left": region[0], "top": region[1], "width": region[2] - region[0], "height": region[3] - region[1]}
     sct = _make_mock_sct(monitor)
-    with patch.object(ocr, "OCR_AVAILABLE", True), patch("mss.mss", return_value=sct):
+    with patch.object(ocr, "OCR_AVAILABLE", True), patch("mss.MSS", return_value=sct):
         ocr.capture(region=region)
     assert uia.get_last_capture_bounds() == (10, 20, 500, 600)
 
@@ -79,7 +79,7 @@ def test_capture_specific_monitor_records_its_bounds():
         {"left": 1920, "top": 0, "width": 1920, "height": 1080},
     ]
     sct = _make_mock_sct_multi(monitors)
-    with patch.object(ocr, "OCR_AVAILABLE", True), patch("mss.mss", return_value=sct):
+    with patch.object(ocr, "OCR_AVAILABLE", True), patch("mss.MSS", return_value=sct):
         ocr.capture(monitor=2)
     assert uia.get_last_capture_bounds() == (1920, 0, 3840, 1080)
 
@@ -94,7 +94,7 @@ def test_capture_region_ignores_monitor_arg():
     ]
     sct = _make_mock_sct_multi(monitors)
     region = (10, 20, 500, 600)
-    with patch.object(ocr, "OCR_AVAILABLE", True), patch("mss.mss", return_value=sct):
+    with patch.object(ocr, "OCR_AVAILABLE", True), patch("mss.MSS", return_value=sct):
         ocr.capture(region=region, monitor=2)
     assert uia.get_last_capture_bounds() == (10, 20, 500, 600)
 

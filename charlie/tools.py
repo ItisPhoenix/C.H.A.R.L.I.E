@@ -17,8 +17,6 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-import httpx
-
 from charlie import recovery
 from charlie.config import config
 from charlie.events import EventMeta, EventSource
@@ -69,7 +67,10 @@ _DESKTOP_FRAME_FPS = 2.0
 _DESKTOP_FRAME_MAX_EDGE = 960
 
 # --- SearXNG keyword detection ---
-_TIME_SENSITIVE_KEYWORDS = ("today", "new", "recent", "latest", "breaking")
+_TIME_SENSITIVE_KEYWORDS = (
+    "today", "new", "recent", "latest", "breaking", "now", "live", "news",
+    "headline", "headlines", "update", "updates", "score", "scores", "standings", "schedule",
+)
 _NEWS_KEYWORDS = ("news", "headline", "story", "stories")
 
 # --- Query decomposition ---
@@ -110,6 +111,7 @@ _OSCRIPT_VOL_RE = re.compile(
 # Baseline (owner, risk_class) per tool, read by autonomy.classify_action() -- plain strings to avoid a circular import.
 _DEFAULT_TOOL_METADATA: Dict[str, tuple] = {
     "web_search": ("tools", "safe"),
+    "web_research": ("research", "safe"),
     "shell_execute": ("tools", "reversible"),
     "system_diagnostics": ("tools", "safe"),
     "file_read": ("tools", "safe"),
@@ -396,178 +398,46 @@ def _merge_search_results(results: List[str]) -> str:
     },
 )
 def web_search(query: str) -> str:
-    # Check if query needs decomposition
-    sub_queries = _decompose_query(query)
-    if len(sub_queries) > 1:
-        logger.info(
-            "Decomposing query into %d sub-queries: %s", len(sub_queries), sub_queries
-        )
-        # Execute sub-queries in parallel using thread pool
-        from concurrent.futures import ThreadPoolExecutor
+    """Backward-compatible quick-search wrapper over ResearchEngine."""
+    from charlie.research.engine import ResearchEngine
 
-        with ThreadPoolExecutor(max_workers=len(sub_queries)) as executor:
-            futures = [executor.submit(_single_search, q) for q in sub_queries]
-            results = [f.result() for f in futures if f.result()]
-        if results:
-            merged = _merge_search_results(results)
-            return (
-                f"[Multi-query search: {len(sub_queries)} sub-queries]\n\n{merged}"
-                if merged
-                else "No results found."
-            )
-        return "No results found for any sub-query."
-    return _single_search(query)
+    return ResearchEngine(config).run_sync(query, "quick").legacy_text()
+
+
+@registry.register_tool(
+    name="web_research",
+    description=(
+        "Research the public web and return bounded evidence with source IDs. "
+        "Use quick, standard, or deep mode; ordinary research does not launch the interactive browser."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Research goal."},
+            "mode": {
+                "type": "string",
+                "enum": ["auto", "quick", "standard", "deep"],
+                "description": "Research depth. Auto selects from the request.",
+            },
+            "domain": {"type": "string", "description": "Optional comma-separated domain constraint."},
+        },
+        "required": ["query"],
+    },
+)
+def web_research(query: str, mode: str = "auto", domain: str = "") -> str:
+    """Run bounded structured research while retaining string tool compatibility."""
+    from charlie.research.engine import ResearchEngine
+
+    effective_query = f"{query} site:{domain.strip()}" if domain.strip() else query
+    report = ResearchEngine(config).run_sync(effective_query, mode)
+    return report.legacy_text()
 
 
 def _single_search(query: str) -> str:
-    """Execute a single search query across all providers."""
-    cleaned = _clean_search_query(query)
+    """Compatibility helper retained for callers of the old private function."""
+    from charlie.research.engine import ResearchEngine
 
-    searxng_url = config.searxng_url
-    tavily_key = config.tavily_api_key
-    exa_key = config.exa_api_key
-
-    # Tier 1: SearXNG (self-hosted, no API key needed)
-    if searxng_url:
-        try:
-            logger.info("SearXNG search: original=%r cleaned=%r", query, cleaned)
-            base = searxng_url.rstrip("/")
-            q_lower = cleaned.lower()
-            params: Dict[str, str] = {"q": cleaned, "format": "json", "language": "en"}
-            if any(kw in q_lower for kw in _TIME_SENSITIVE_KEYWORDS):
-                params["time_range"] = "day"
-            if any(kw in q_lower for kw in _NEWS_KEYWORDS):
-                params["categories"] = "news"
-            response = httpx.get(
-                f"{base}/search", params=params, timeout=SEARXNG_TIMEOUT
-            )
-            if response.status_code == 200:
-                results = []
-                for item in response.json().get("results", [])[:SEARCH_RESULT_LIMIT]:
-                    content = item.get("content", "") or ""
-                    if not _is_ddg_result_valid(content):
-                        continue
-                    results.append(
-                        f"Title: {item.get('title', 'No Title')}\n"
-                        f"URL: {item.get('url', 'No URL')}\n"
-                        f"Content: {_truncate(content)}"
-                    )
-                if results:
-                    return "\n\n".join(results)
-            logger.error(
-                "SearXNG failed with status %s for query %r: %s",
-                response.status_code,
-                cleaned,
-                response.text,
-            )
-        except Exception:
-            logger.exception("SearXNG search error for query: %s", cleaned)
-
-    # Tier 2: Exa
-    if exa_key:
-        try:
-            logger.info("Exa search: original=%r cleaned=%r", query, cleaned)
-            response = httpx.post(
-                "https://api.exa.ai/search",
-                headers={"x-api-key": exa_key, "content-type": "application/json"},
-                json={
-                    "query": cleaned,
-                    "numResults": SEARCH_RESULT_LIMIT,
-                    "text": True,
-                },
-                timeout=EXA_TIMEOUT,
-            )
-            if response.status_code == 200:
-                results = []
-                for item in response.json().get("results", []):
-                    results.append(
-                        f"Title: {item.get('title', 'No Title')}\n"
-                        f"URL: {item.get('url', 'No URL')}\n"
-                        f"Content: {_truncate(item.get('text', '') or '')}"
-                    )
-                return "\n\n".join(results) or "No results found."
-            logger.error(
-                "Exa search failed with status %s for query %r: %s",
-                response.status_code,
-                cleaned,
-                response.text,
-            )
-        except Exception:
-            logger.exception("Exa search error for query: %s", cleaned)
-
-    # Tier 3: Tavily
-    if tavily_key:
-        try:
-            logger.info("Tavily search: original=%r cleaned=%r", query, cleaned)
-            response = httpx.post(
-                "https://api.tavily.com/search",
-                json={
-                    "api_key": tavily_key,
-                    "query": cleaned,
-                    "max_results": SEARCH_RESULT_LIMIT,
-                    "include_raw_content": False,
-                },
-                timeout=TAVILY_TIMEOUT,
-            )
-            if response.status_code == 200:
-                results = []
-                for item in response.json().get("results", []):
-                    results.append(
-                        f"Title: {item.get('title', 'No Title')}\n"
-                        f"URL: {item.get('url', 'No URL')}\n"
-                        f"Content: {item.get('content', '') or ''}"
-                    )
-                return "\n\n".join(results) or "No results found."
-            logger.error(
-                "Tavily search failed with status %s for query %r: %s",
-                response.status_code,
-                cleaned,
-                response.text,
-            )
-        except Exception:
-            logger.exception("Tavily search error for query: %s", cleaned)
-
-    # Tier 4: DuckDuckGo fallback
-    try:
-        logger.info(
-            "DuckDuckGo fallback search: original=%r cleaned=%r", query, cleaned
-        )
-        from bs4 import BeautifulSoup
-
-        for endpoint in ("lite", "html"):
-            try:
-                response = httpx.get(
-                    f"https://{endpoint}.duckduckgo.com/{endpoint}/",
-                    params={"q": cleaned},
-                    headers={"User-Agent": DDG_USER_AGENT},
-                    timeout=DDG_TIMEOUT,
-                )
-                if response.status_code in DDG_ACCEPTED_STATUSES:
-                    soup = BeautifulSoup(response.text, "html.parser")
-                    if endpoint == "lite":
-                        snippets = soup.find_all("td", class_="result-snippet")[
-                            :SEARCH_RESULT_LIMIT
-                        ]
-                    else:
-                        snippets = soup.find_all("a", class_="result__snippet")[
-                            :SEARCH_RESULT_LIMIT
-                        ]
-                    results = [s.get_text(strip=True) for s in snippets]
-                    if results:
-                        return "\n".join(results)
-            except Exception:
-                logger.warning(
-                    "DuckDuckGo %s endpoint failed for query %r",
-                    endpoint,
-                    cleaned,
-                    exc_info=True,
-                )
-                continue
-    except ImportError:
-        logger.warning("BeautifulSoup not installed, DuckDuckGo fallback unavailable")
-
-    return "Error: Web search failed and no search API keys were configured."
-
+    return ResearchEngine(config).run_sync(query, "quick").legacy_text()
 
 # --- Shell safety ---
 # Keywords that are always refused outright, no approval can override them:

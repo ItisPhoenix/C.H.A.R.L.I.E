@@ -11,8 +11,7 @@ describe("Ring", () => {
   test("shows offline when no runtime connection exists", () => {
     render(<Ring />);
 
-    expect(screen.getByText("Offline")).toBeInTheDocument();
-    expect(screen.queryByText("Online")).not.toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Charlie Offline" })).toBeInTheDocument();
   });
 
   test("exposes real microphone energy to the reactive ring", () => {
@@ -20,5 +19,14 @@ describe("Ring", () => {
     render(<Ring />);
 
     expect(screen.getByRole("img")).toHaveAttribute("data-audio-level", "0.72");
+  });
+
+  test("renders the layered vector outer HUD", () => {
+    const { container } = render(<Ring />);
+
+    expect(container.querySelector(".hud-outer-svg")).toBeInTheDocument();
+    expect(container.querySelectorAll(".hud-vector-major path")).toHaveLength(7);
+    expect(container.querySelectorAll(".hud-vector-dots circle")).toHaveLength(132);
+    expect(container.querySelectorAll(".hud-vector-ticks line").length).toBeGreaterThan(100);
   });
 });

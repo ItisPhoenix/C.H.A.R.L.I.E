@@ -1,13 +1,14 @@
 """Chroma-backed vector memory store for cross-session fact persistence.
 
-Provides semantic search over past assistant/user facts using local embeddings.
+Provides semantic search over past assistant/user facts using remote embeddings.
 Falls back to sentence-transformers if the primary embedding endpoint is unavailable.
 """
 
-import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
+
+from charlie.utils import build_auth_headers, parse_json_object
 
 logger = logging.getLogger("charlie.memory_store")
 
@@ -18,10 +19,10 @@ _DEFAULT_EMBEDDING_MODEL = ""
 _DEFAULT_EMBEDDING_URL = ""
 _DEFAULT_RELEVANCE_THRESHOLD = 0.3
 _FACT_EXTRACT_MAX_CHARS = 2000
+_FACT_EXTRACT_MAX_TOKENS = 512
 _FACT_EXTRACT_MODEL = ""
 # Retries for the primary embedding service before falling back to a local
-# (different-dimension) model -- covers the common startup race where LM
-# Studio is still loading the embedding model when Charlie boots.
+# (different-dimension) model while the remote service is starting.
 _EMBEDDING_RETRY_ATTEMPTS = 3
 _EMBEDDING_RETRY_DELAY_SEC = 2.0
 
@@ -29,21 +30,28 @@ _EMBEDDING_RETRY_DELAY_SEC = 2.0
 class _RemoteEmbeddingFunction:
     """Embedding function for ChromaDB using a remote embedding service.
 
-    Supports two request shapes, auto-detected from the base URL: a batch
-    endpoint (POST {model, input: [...]} to <base>/v1/embeddings) and a
-    single-input endpoint (POST {model, prompt} per text to
-    <base>/api/embeddings).
+    Supports standard-compatible, native batch, and legacy single-input endpoints.
+    A bare service URL uses the native batch endpoint at /api/embed.
     """
 
     def __init__(self, model: str = _DEFAULT_EMBEDDING_MODEL, base_url: str = _DEFAULT_EMBEDDING_URL):
         self.model = model
         base = base_url.rstrip("/")
-        if "/v1" in base:
+        if base.endswith("/v1/embeddings"):
+            self._url = base
+            self._request_shape = "batch"
+        elif base.endswith("/v1"):
             self._url = f"{base}/embeddings"
             self._request_shape = "batch"
-        else:
-            self._url = f"{base}/api/embeddings"
+        elif base.endswith("/api/embed"):
+            self._url = base
+            self._request_shape = "native_batch"
+        elif base.endswith("/api/embeddings"):
+            self._url = base
             self._request_shape = "single"
+        else:
+            self._url = f"{base}/api/embed"
+            self._request_shape = "native_batch"
         self._name = f"remote-{model}"
 
     def name(self) -> str:
@@ -52,11 +60,16 @@ class _RemoteEmbeddingFunction:
     def _call_api(self, texts: List[str]) -> List[List[float]]:
         import httpx
 
-        if self._request_shape == "batch":
+        if self._request_shape in ("batch", "native_batch"):
             payload = {"model": self.model, "input": texts}
-            resp = httpx.post(self._url, json=payload, timeout=10.0)
+            request_options = {"json": payload, "timeout": 10.0}
+            if self._request_shape == "native_batch":
+                request_options["trust_env"] = False
+            resp = httpx.post(self._url, **request_options)
             resp.raise_for_status()
             data = resp.json()
+            if self._request_shape == "native_batch":
+                return data["embeddings"]
             return [item["embedding"] for item in data["data"]]
         else:
             results: List[List[float]] = []
@@ -145,7 +158,7 @@ def _existing_embedding_dim(collection: Any) -> Optional[int]:
 
 
 class MemoryStore:
-    """Persistent vector memory backed by ChromaDB with local embeddings.
+    """Persistent vector memory backed by ChromaDB with configured embeddings.
 
     Stores facts extracted from conversations and retrieves them semantically.
     """
@@ -337,9 +350,7 @@ class MemoryStore:
                 logger.debug("No LLM configured for fact extraction")
                 return []
 
-            headers = {"Content-Type": "application/json"}
-            if fast_key and fast_key not in ("no-key", "no_key"):
-                headers["Authorization"] = f"Bearer {fast_key}"
+            headers = {"Content-Type": "application/json", **build_auth_headers(fast_key)}
 
             payload = {
                 "model": fast_model,
@@ -348,7 +359,7 @@ class MemoryStore:
                     {"role": "user", "content": prompt},
                 ],
                 "temperature": 0.0,
-                "max_tokens": 256,
+                "max_tokens": _FACT_EXTRACT_MAX_TOKENS,
                 "stream": False,
             }
 
@@ -357,23 +368,21 @@ class MemoryStore:
                 json=payload,
                 headers=headers,
                 timeout=10.0,
+                trust_env=getattr(self.config, "llm_trust_env", False),
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
 
-            # Parse JSON from response (handle markdown code blocks)
-            content = content.strip()
-            if content.startswith("```"):
-                lines = content.split("\n")
-                content = "\n".join(lines[1:-1])
-
-            data = json.loads(content)
+            data = parse_json_object(content)
+            if data is None:
+                logger.info("Fact extraction returned no valid JSON; candidate was not stored")
+                return []
             facts = data.get("facts", [])
             if isinstance(facts, list):
-                return [str(f) for f in facts if f]
+                return [f.strip() for f in facts if isinstance(f, str) and f.strip()]
             return []
         except Exception as e:
-            logger.debug("Fact extraction failed: %s", e)
+            logger.info("Fact extraction unavailable; candidate was not stored: %s", e)
             return []
 
     def format_for_prompt(self, results: List[Dict[str, Any]]) -> str:

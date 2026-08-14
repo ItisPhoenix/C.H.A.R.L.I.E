@@ -17,6 +17,7 @@ export function reconnectDelayMs(attempt: number): number {
 let socket: WebSocket | null = null;
 let reconnectAttempt = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+const pendingCommands: string[] = [];
 
 function wsUrl(): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -24,9 +25,12 @@ function wsUrl(): string {
 }
 
 export function sendCommand(type: string, payload?: Record<string, unknown>): void {
+  const message = JSON.stringify({ type, payload });
   if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type, payload }));
+    socket.send(message);
+    return;
   }
+  if (pendingCommands.length < 50) pendingCommands.push(message);
 }
 
 function handleMessage(event: MessageEvent<string>): void {
@@ -50,6 +54,9 @@ export function connectBridge(): () => void {
     ws.onopen = () => {
       reconnectAttempt = 0;
       useCharlieStore.getState().setConnected(true);
+      while (pendingCommands.length > 0 && ws.readyState === WebSocket.OPEN) {
+        ws.send(pendingCommands.shift() as string);
+      }
     };
     ws.onmessage = handleMessage;
     ws.onerror = () => ws.close();

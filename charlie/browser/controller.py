@@ -23,11 +23,7 @@ T = TypeVar("T")
 # be more than one, since BROWSER_EXECUTOR has one worker) from racing the swap-back
 _POLICY_SWAP_LOCK = threading.Lock()
 
-_REAL_CHROME_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-)
-_BLOCKED_RESOURCE_TYPES = {"image", "font", "media", "stylesheet"}
+_BLOCKED_RESOURCE_TYPES = {"image", "font", "media"}
 _NAV_HOST_COOLDOWN_S = 1.0
 
 _playwright = None
@@ -37,6 +33,9 @@ _last_used_at = 0.0
 _resources_blocked = True
 _idle_timer: Optional[threading.Timer] = None
 _last_nav_by_host: Dict[str, float] = {}
+_activity_lock = threading.Lock()
+_active_task_leases = 0
+_active_operations = 0
 
 
 def _block_heavy_resources(route: Any) -> None:
@@ -68,13 +67,12 @@ def _launch() -> None:
         user_data_dir=config.browser_profile_path,
         headless=config.browser_headless,
         viewport={"width": 1280, "height": 900},
-        user_agent=_REAL_CHROME_UA,
     )
     try:
-        _context = _playwright.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
-    except Exception:
-        logger.warning("Chrome channel unavailable, falling back to bundled Chromium", exc_info=True)
         _context = _playwright.chromium.launch_persistent_context(**launch_kwargs)
+    except Exception:
+        logger.warning("Bundled Chromium unavailable, falling back to the installed browser", exc_info=True)
+        _context = _playwright.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
     _context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
     _page = _context.new_page()
     _page.route("**/*", _block_heavy_resources)
@@ -88,7 +86,7 @@ def _ensure_launched() -> Any:
 
 
 def set_resource_blocking(enabled: bool) -> None:
-    """Toggle image/font/media/stylesheet blocking; the vision fallback disables it for a real screenshot."""
+    """Toggle image/font/media blocking; the vision fallback disables it for a real screenshot."""
     global _resources_blocked
     if enabled == _resources_blocked or _page is None:
         _resources_blocked = enabled
@@ -111,12 +109,20 @@ def wait_host_cooldown(url: str) -> None:
 
 
 def _run_on_thread(fn: Callable[[Any], T]) -> T:
-    global _last_used_at
+    global _last_used_at, _active_operations
     page = _ensure_launched()
-    _last_used_at = time.monotonic()
-    result = fn(page)
-    _schedule_idle_shutdown()
-    return result
+    with _activity_lock:
+        _active_operations += 1
+        _last_used_at = time.monotonic()
+    try:
+        return fn(page)
+    finally:
+        with _activity_lock:
+            _active_operations -= 1
+            _last_used_at = time.monotonic()
+            can_schedule = _active_task_leases == 0
+        if can_schedule:
+            _schedule_idle_shutdown()
 
 
 def run(fn: Callable[[Any], T], timeout: Optional[float] = None) -> T:
@@ -164,9 +170,34 @@ def _schedule_idle_shutdown() -> None:
 
 
 def _idle_check() -> None:
-    if _page is not None and time.monotonic() - _last_used_at >= config.browser_idle_timeout_s:
-        if BROWSER_EXECUTOR:
-            BROWSER_EXECUTOR.submit(_shutdown_on_thread)
+    with _activity_lock:
+        idle = (
+            _page is not None
+            and _active_task_leases == 0
+            and _active_operations == 0
+            and time.monotonic() - _last_used_at >= config.browser_idle_timeout_s
+        )
+    if idle and BROWSER_EXECUTOR:
+        BROWSER_EXECUTOR.submit(_shutdown_on_thread)
+
+
+def acquire_task_lease() -> None:
+    """Keep the browser alive for the full duration of one browser task."""
+    global _active_task_leases
+    with _activity_lock:
+        _active_task_leases += 1
+        if _idle_timer is not None:
+            _idle_timer.cancel()
+
+
+def release_task_lease() -> None:
+    """Release a task lease and let the normal idle timer reclaim the browser."""
+    global _active_task_leases
+    with _activity_lock:
+        _active_task_leases = max(0, _active_task_leases - 1)
+        can_schedule = _active_task_leases == 0 and _active_operations == 0 and _page is not None
+    if can_schedule:
+        _schedule_idle_shutdown()
 
 
 def shutdown() -> None:

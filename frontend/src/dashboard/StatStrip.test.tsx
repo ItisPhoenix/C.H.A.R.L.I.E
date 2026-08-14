@@ -18,7 +18,7 @@ describe("StatStrip", () => {
 
   test("shows values received from the runtime", () => {
     useCharlieStore.setState({
-      systemStatus: { cpu: 12.4, ram: 43.6, gpu: 7.8, netKbps: 99.2, uptimeSeconds: 3661, batteryPercent: null },
+      systemStatus: { cpu: 12.4, ram: 43.6, gpu: 7.8, disk: 66.2, netKbps: 99.2, uptimeSeconds: 3661, batteryPercent: null },
     });
     render(<StatStrip />);
 

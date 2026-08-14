@@ -46,15 +46,14 @@ def _frontend_build_is_stale(frontend_dir: Path, dist_dir: Path) -> bool:
     )
 
 
-def check_and_build_frontend():
-    """Ensure the frontend is built, compiling it if the build is missing or stale."""
+def check_and_build_frontend() -> None:
+    """Ensure a current frontend exists; refuse to serve stale output after a failed build."""
     root = Path(__file__).parent
     frontend_dir = root / "frontend"
     dist_dir = frontend_dir / "dist"
 
     if not frontend_dir.exists():
-        print("Warning: frontend directory not found. Web UI cannot be built.")
-        return
+        raise RuntimeError("Frontend directory not found; refusing to start without the dashboard build.")
 
     if not _frontend_build_is_stale(frontend_dir, dist_dir):
         return
@@ -65,8 +64,7 @@ def check_and_build_frontend():
 
     npm_path = shutil.which("npm")
     if not npm_path:
-        print("Warning: npm not found. Please install node/npm and run 'npm run build' inside 'frontend' manually.")
-        return
+        raise RuntimeError("npm was not found; install Node.js/npm and run 'npm run build' in frontend/.")
 
     try:
         if not (frontend_dir / "node_modules").exists():
@@ -75,20 +73,19 @@ def check_and_build_frontend():
                 [npm_path, "install"],
                 cwd=str(frontend_dir),
                 check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
             )
         print("Running 'npm run build' in frontend...")
         subprocess.run(
             [npm_path, "run", "build"],
             cwd=str(frontend_dir),
             check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
         )
         print("Frontend built successfully!")
     except subprocess.CalledProcessError as e:
-        print(f"Warning: Failed to compile frontend automatically: {e}")
+        raise RuntimeError(
+            "Frontend build failed; refusing to start with stale dashboard assets. "
+            "See the npm output above and fix the build before restarting."
+        ) from e
 
 
 def run_full():

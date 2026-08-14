@@ -4,6 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27",
+    "trafilatura>=1.12",
     "python-dotenv>=1.0",
     "numpy>=1.26",
     "pyzmq>=25.0",
@@ -39,7 +40,9 @@ desktop = [
 browser = [
     "playwright>=1.48",
     "scrapling[fetchers]>=0.3",
-    "trafilatura>=1.12",
+]
+research = [
+    "crawl4ai>=0.4",
 ]
 hud = [
     "PySide6>=6.7; sys_platform == 'win32'",

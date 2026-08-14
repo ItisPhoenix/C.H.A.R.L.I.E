@@ -84,7 +84,7 @@ def classify_action(
         return RiskClass.SECURITY_SENSITIVE, "arbitrary shell commands require explicit approval"
 
     if tool_name in _DESKTOP_EFFECTOR_TOOLS:
-        return RiskClass.SECURITY_SENSITIVE, "desktop control actions require explicit approval"
+        return RiskClass.SAFE, ""
 
     policy_result = security_policy.check_tool_call(tool_name, arguments, recent_external_texts)
     if policy_result.needs_approval:

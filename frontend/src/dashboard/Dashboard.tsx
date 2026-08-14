@@ -16,6 +16,7 @@ import { MediaPlayer } from "./MediaPlayer";
 import { Settings } from "./Settings";
 import { layoutProfileForWidth, type LayoutProfile } from "./layoutProfile";
 import { useLayoutStore } from "./layoutStore";
+import { PanelDock } from "./PanelDock";
 import { useCharlieStore } from "../store/charlie";
 import "./dashboard.css";
 
@@ -65,6 +66,7 @@ export function Dashboard(): ReactElement {
         <SystemMonitor />
         <McpConnections />
         <StatStrip />
+        <PanelDock />
       </div>
     </main>
   );

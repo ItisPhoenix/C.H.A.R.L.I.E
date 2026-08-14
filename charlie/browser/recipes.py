@@ -22,7 +22,6 @@ _SHORTS_MARKER = "/shorts/"
 _SPELLED_DURATION_RE = re.compile(r"(?:(\d+)\s*hours?)?,?\s*(?:(\d+)\s*minutes?)?,?\s*(?:(\d+)\s*seconds?)?")
 # ponytail: denylist, not a real chrome/content classifier -- good enough for the generic fallback
 _CHROME_LINK_NAMES = {"home", "ask", "sign up", "log in", "about", "help", "settings", "skip to main content"}
-_SETTLE_WAIT_MS = 800
 # Outer bound in case a page hangs somewhere actions.py's own goto/selector timeouts don't cover.
 _RECIPE_TIMEOUT_S = 20.0
 
@@ -31,6 +30,10 @@ _RECIPE_TIMEOUT_S = 20.0
 class BrowserResult:
     url: Optional[str] = None
     answer: Optional[str] = None
+    success: bool = False
+    verification: str = "unverified"
+    site: Optional[str] = None
+    query: Optional[str] = None
 
 
 def resolve_site(name: str) -> Optional[str]:
@@ -45,6 +48,68 @@ def _observe(page) -> List[Mark]:
     marks = rank_and_cap(parse_snapshot(page.locator("body").aria_snapshot(mode="ai")))
     session.record_marks(marks)
     return marks
+
+
+def _link_count(page) -> int:
+    try:
+        return page.locator("a[href]").count()
+    except Exception:
+        return 0
+
+
+def _wait_for_search_results(page, before_url: str, before_links: int) -> bool:
+    """Wait for navigation or a changed main-content link set instead of sleeping."""
+    try:
+        page.wait_for_function(
+            """state => {
+                const root = document.querySelector('main, [role="main"], article, #mw-content-text') || document.body;
+                return location.href !== state.url || root.querySelectorAll('a[href]').length > state.links;
+            }""",
+            {"url": before_url, "links": before_links},
+            timeout=5000,
+        )
+        return True
+    except Exception:
+        logger.debug("site_search: result condition did not settle before timeout")
+        return False
+
+
+def _content_root(page, preferred_selector: Optional[str] = None):
+    """Prefer semantic content containers so navigation chrome is not reported as a result."""
+    selectors = ([preferred_selector] if preferred_selector else []) + [
+        "main", '[role="main"]', "article", "#mw-content-text"
+    ]
+    for selector in selectors:
+        locator = page.locator(selector)
+        if locator.count():
+            return locator.first
+    return None
+
+
+def _content_text(page, preferred_selector: Optional[str] = None) -> str:
+    root = _content_root(page, preferred_selector)
+    if root is None:
+        return ""
+    try:
+        return root.inner_text(timeout=1500).strip()
+    except Exception:
+        return ""
+
+
+def _content_links(page, preferred_selector: Optional[str] = None) -> List[str]:
+    root = _content_root(page, preferred_selector)
+    if root is None:
+        return []
+    links = []
+    locator = root.locator("a[href]")
+    for index in range(min(locator.count(), 12)):
+        try:
+            name = locator.nth(index).inner_text(timeout=500).strip()
+        except Exception:
+            continue
+        if name and name.lower() not in _CHROME_LINK_NAMES:
+            links.append(name)
+    return links
 
 
 def _spelled_duration_to_seconds(text: str) -> Optional[int]:
@@ -73,10 +138,22 @@ def youtube_play(query: str) -> Optional[BrowserResult]:
 
         for mark in candidates:
             if long_enough(mark) and query_words & set(mark.name.lower().split()):
-                return BrowserResult(url=urljoin(page.url, mark.href))
+                return BrowserResult(
+                    url=urljoin(page.url, mark.href),
+                    success=True,
+                    verification="youtube-watch-url",
+                    site="youtube",
+                    query=query,
+                )
         for mark in candidates:
             if long_enough(mark):
-                return BrowserResult(url=urljoin(page.url, mark.href))
+                return BrowserResult(
+                    url=urljoin(page.url, mark.href),
+                    success=True,
+                    verification="youtube-watch-url",
+                    site="youtube",
+                    query=query,
+                )
         return None
 
     try:
@@ -86,11 +163,38 @@ def youtube_play(query: str) -> Optional[BrowserResult]:
         return None
 
 
-def site_search(site_url: str, query: str) -> Optional[BrowserResult]:
+def site_search(site_url: str, query: str, site_name: Optional[str] = None) -> Optional[BrowserResult]:
     """Tier 2: works on any site with a visible search box -- no site-specific knowledge needed."""
     def run(page):
+        is_wikipedia = bool(site_name and site_name.lower() == "wikipedia") or "wikipedia.org" in site_url
+        if is_wikipedia:
+            search_url = f"https://en.wikipedia.org/w/index.php?search={quote(query)}"
+            actions.navigate(page, search_url, wait_selector="#mw-content-text")
+            content = _content_text(page, "#mw-content-text")
+            title = page.title().strip()
+            query_words = [word.lower() for word in query.split() if len(word) > 2]
+            lowered_content = f"{title}\n{content}".lower()
+            if len(content) >= 80 and query_words and all(word in lowered_content for word in query_words):
+                return BrowserResult(
+                    url=page.url,
+                    answer=f"{title}: {content[:500]}",
+                    success=True,
+                    verification="wikipedia-content",
+                    site=site_name,
+                    query=query,
+                )
+            return BrowserResult(
+                url=page.url,
+                answer=f"I reached Wikipedia, but couldn't verify an article for '{query}'.",
+                verification="wikipedia-content-not-found",
+                site=site_name,
+                query=query,
+            )
+
         actions.navigate(page, site_url)
         marks = _observe(page)
+        before_url = page.url
+        before_links = _link_count(page)
         # combobox can be a <select> (e.g. Amazon's category dropdown) that .fill() rejects -- text inputs first.
         candidates = [m for m in marks if m.role in ("textbox", "searchbox")]
         candidates += [m for m in marks if m.role == "combobox"]
@@ -106,15 +210,41 @@ def site_search(site_url: str, query: str) -> Optional[BrowserResult]:
             page.wait_for_load_state("domcontentloaded", timeout=8000)
         except Exception:
             logger.debug("site_search: no navigation detected after submit on %s", site_url)
-        page.wait_for_timeout(_SETTLE_WAIT_MS)  # most client-rendered results settle quickly after domcontentloaded
-        marks_after = _observe(page)
-        links = [
-            m for m in marks_after
-            if m.role == "link" and m.name and m.name.lower() not in _CHROME_LINK_NAMES
-        ][:5]
+        settled = _wait_for_search_results(page, before_url, before_links)
+        if not settled:
+            return BrowserResult(
+                url=page.url,
+                answer=f"I reached {site_name or site_url}, but couldn't verify search results for '{query}'.",
+                verification="search-not-settled",
+                site=site_name,
+                query=query,
+            )
+        links = _content_links(page)[:5]
         if not links:
-            return BrowserResult(url=page.url)
-        return BrowserResult(url=page.url, answer="; ".join(m.name for m in links)[:400])
+            return BrowserResult(
+                url=page.url,
+                answer=f"I reached {site_name or site_url}, but couldn't verify search results for '{query}'.",
+                verification="content-not-found",
+                site=site_name,
+                query=query,
+            )
+        content = _content_text(page)
+        if len(content) < 40:
+            return BrowserResult(
+                url=page.url,
+                answer=f"I reached {site_name or site_url}, but couldn't verify search results for '{query}'.",
+                verification="content-too-short",
+                site=site_name,
+                query=query,
+            )
+        return BrowserResult(
+            url=page.url,
+            answer="; ".join(links)[:400],
+            success=True,
+            verification="content-links",
+            site=site_name,
+            query=query,
+        )
 
     try:
         return controller.run(run, timeout=_RECIPE_TIMEOUT_S)

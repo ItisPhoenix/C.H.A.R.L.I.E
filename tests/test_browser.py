@@ -193,7 +193,21 @@ def test_is_freshness_sensitive():
     assert intent.is_freshness_sensitive("play DL91 on youtube") is False
 
 
+def test_parse_site_intent_removes_command_words_and_site_name():
+    assert intent.parse_site_intent("search for Ada Lovelace on wikipedia", "wikipedia").query == "Ada Lovelace"
+    assert intent.parse_site_intent("search for lo-fi music on youtube", "youtube").query == "lo-fi music"
+    assert intent.parse_site_intent("open youtube and search for synthwave", "youtube").query == "synthwave"
+
+
 # --- agent (tier 3) ----------------------------------------------------------
+
+def test_parse_action_accepts_common_structured_variants():
+    from charlie.browser.agent import _parse_action
+
+    assert _parse_action('Action: CLICK 2').kind == "click"
+    assert _parse_action('```json\n{"action":"TYPE","mark_id":3,"text":"hello","submit":true}\n```').submit is True
+    assert _parse_action('{"action":"DONE","url":"https://x.com","answer":"ready"}').answer == "ready"
+
 
 def _fake_observation(marks=None):
     marks = marks or []
@@ -211,7 +225,9 @@ async def test_run_task_done_action_returns_result(monkeypatch):
         return 'DONE url="https://x.com" answer="found it"'
 
     result = await run_task("do something", complete)
-    assert result == BrowserResult(url="https://x.com", answer="found it")
+    assert result == BrowserResult(
+        url="https://x.com", answer="found it", success=True, verification="agent-confirmed"
+    )
 
 
 @pytest.mark.asyncio
@@ -391,6 +407,35 @@ async def test_resolve_holds_and_releases_the_browser_capability(monkeypatch):
     assert resource_locks.current_owner("browser") is None  # released after
 
 
+def test_idle_check_does_not_shutdown_during_active_browser_task(monkeypatch):
+    from charlie.browser import controller
+
+    submitted = []
+    original_page = controller._page
+    original_leases = controller._active_task_leases
+    original_operations = controller._active_operations
+    original_executor = controller.BROWSER_EXECUTOR
+    try:
+        controller._page = object()
+        controller._active_task_leases = 0
+        controller._active_operations = 0
+        controller._last_used_at = 0.0
+        monkeypatch.setattr(controller.config, "browser_idle_timeout_s", 0.0)
+        controller.BROWSER_EXECUTOR = type(
+            "Executor", (), {"submit": lambda self, *args, **kwargs: submitted.append(args)}
+        )()
+        controller.acquire_task_lease()
+        controller._idle_check()
+        assert submitted == []
+    finally:
+        controller._page = None
+        controller.release_task_lease()
+        controller._page = original_page
+        controller._active_task_leases = original_leases
+        controller._active_operations = original_operations
+        controller.BROWSER_EXECUTOR = original_executor
+
+
 @pytest.mark.asyncio
 async def test_resolve_serializes_two_concurrent_browser_tasks(monkeypatch):
     from charlie import resource_locks
@@ -419,23 +464,18 @@ async def test_resolve_serializes_two_concurrent_browser_tasks(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_resolve_fails_open_when_lock_wait_exceeds_deadline(monkeypatch):
+async def test_resolve_reports_busy_when_lock_wait_exceeds_deadline(monkeypatch):
     from charlie import resource_locks
     resource_locks._owners.pop("browser", None)
     monkeypatch.setattr(task, "_LOCK_POLL_INTERVAL_S", 0.01)
     resource_locks.acquire("browser", "someone-else")  # never released this test
-
-    async def fake_agent_run_task(*a, **k):
-        return BrowserResult(answer="proceeded anyway")
-
-    monkeypatch.setattr(task.agent, "run_task", fake_agent_run_task)
 
     async def complete(prompt):
         return ""
 
     result = await task.resolve("find a good recipe for soup", complete, deadline_s=0.03)
 
-    assert result.answer == "proceeded anyway"
+    assert result.answer == "The browser is busy with another task. Try again shortly."
     resource_locks.release("browser", "someone-else")
 
 
@@ -531,14 +571,14 @@ def test_site_search_skips_unfillable_combobox_falls_back_to_textbox(monkeypatch
 
     monkeypatch.setattr(recipes.actions, "type_text", fake_type_text)
     monkeypatch.setattr(recipes.actions, "navigate", lambda page, url: None)
+    monkeypatch.setattr(recipes, "_wait_for_search_results", lambda page, before_url, before_links: True)
+    monkeypatch.setattr(recipes, "_content_links", lambda page: ["Mechanical keyboards"])
+    monkeypatch.setattr(recipes, "_content_text", lambda page: "Verified search result content " * 3)
 
     class FakePage:
         url = "https://amazon.com/s?k=x"
 
         def wait_for_load_state(self, *a, **k):
-            pass
-
-        def wait_for_timeout(self, *a):
             pass
 
     monkeypatch.setattr(recipes.controller, "run", lambda fn, timeout=None: fn(FakePage()))

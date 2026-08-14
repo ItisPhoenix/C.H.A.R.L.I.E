@@ -144,6 +144,10 @@ class VoiceEngine:
         # they reach ASR so the assistant stops listening without killing the
         # audio device. Distinct from `muted`, which only affects speakers.
         self.mic_muted: bool = False
+        self._ptt_lock = threading.Lock()
+        self._ptt_active = False
+        self._ptt_stop_requested = False
+        self._ptt_chunks: list[np.ndarray] = []
 
         # ASR state
         self.asr_input_queue: mp.Queue = mp.Queue(maxsize=8)
@@ -364,6 +368,26 @@ class VoiceEngine:
 
     def get_mic_state(self) -> dict:
         return {"mic_muted": self.mic_muted}
+
+    def start_ptt(self) -> None:
+        """Start a real hold-to-talk capture using the existing mic/ASR path."""
+        with self._ptt_lock:
+            self._ptt_chunks.clear()
+            self._ptt_stop_requested = False
+            self._ptt_active = True
+
+    def stop_ptt(self) -> None:
+        """Stop PTT; the capture loop submits the collected audio to existing ASR."""
+        with self._ptt_lock:
+            if self._ptt_active:
+                self._ptt_active = False
+                self._ptt_stop_requested = True
+
+    def cancel_ptt(self) -> None:
+        with self._ptt_lock:
+            self._ptt_active = False
+            self._ptt_stop_requested = False
+            self._ptt_chunks.clear()
 
     # -----------------------------------------------------------------------
     # Text humanization -- the single control point for TTS prosody
@@ -1074,6 +1098,29 @@ class VoiceEngine:
             try:
                 data = self._audio_queue.get(timeout=0.1)
             except queue.Empty:
+                continue
+
+            # PTT bypasses VAD timing but still uses the same capture device,
+            # ASR worker, and on_speech callback as ordinary voice input.
+            with self._ptt_lock:
+                ptt_active = self._ptt_active
+                ptt_stop = self._ptt_stop_requested
+                if ptt_active:
+                    self._ptt_chunks.append(data.copy())
+                ptt_audio = np.concatenate(self._ptt_chunks) if ptt_stop and self._ptt_chunks else None
+                if ptt_stop:
+                    self._ptt_chunks.clear()
+                    self._ptt_stop_requested = False
+            if ptt_active or ptt_stop:
+                # Do not carry a VAD phrase across a PTT turn boundary.
+                is_speech = False
+                speech_buffer = []
+                _consecutive_loud_frames = 0
+                if ptt_audio is not None and len(ptt_audio) >= block_size:
+                    try:
+                        self.asr_input_queue.put_nowait((ptt_audio.tobytes(), samplerate))
+                    except queue.Full:
+                        logger.debug("ptt_asr_queue_full")
                 continue
 
             # -- Wake word gating --

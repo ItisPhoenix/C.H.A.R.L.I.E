@@ -33,13 +33,13 @@ export function SystemMonitor(): ReactElement {
         <Gauge label="CPU" value={status?.cpu ?? null} />
         <Gauge label="RAM" value={status?.ram ?? null} />
         <Gauge label="GPU" value={status?.gpu ?? null} />
-        <Gauge label="Disk" value={null} />
+        <Gauge label="Disk" value={status?.disk ?? null} />
       </div>
       <div className="monitor-readout">
         <dl>
           <div><dt>Network</dt><dd>{status?.netKbps !== null && status?.netKbps !== undefined ? `${status.netKbps.toFixed(1)} KB/s` : "Unavailable"}</dd></div>
           <div><dt>Uptime</dt><dd>{status?.uptimeSeconds !== null && status?.uptimeSeconds !== undefined ? formatUptime(status.uptimeSeconds) : "Unavailable"}</dd></div>
-          {status?.batteryPercent !== null && status?.batteryPercent !== undefined && <div><dt>Battery</dt><dd className="is-good">{status.batteryPercent}%</dd></div>}
+          <div><dt>Battery</dt><dd className={status?.batteryPercent !== null && status?.batteryPercent !== undefined ? "is-good" : ""}>{status?.batteryPercent !== null && status?.batteryPercent !== undefined ? `${status.batteryPercent}%` : "Unavailable"}</dd></div>
         </dl>
         {points ? <svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><polyline points={points} /></svg> : <span className="monitor-unavailable">Unavailable</span>}
       </div>
