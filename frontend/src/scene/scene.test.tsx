@@ -7,7 +7,11 @@ import { EnvironmentLayer } from "./EnvironmentLayer";
 import { WorkspaceLayer } from "./WorkspaceLayer";
 import { ContentMaskLayer } from "./ContentMaskLayer";
 
+import { useWorkspaceStore } from "../layout/workspaceStore";
+import { useWidgetStore } from "../layout/widgetStore";
+
 beforeEach(() => {
+  localStorage.clear();
   useCharlieStore.setState({
     connected: true,
     coreState: "idle",
@@ -18,6 +22,17 @@ beforeEach(() => {
     modals: {},
     workspaces: {},
     notifications: {},
+  });
+  useWorkspaceStore.setState({
+    workspaces: {},
+    activeWorkspaceId: null,
+    recentWorkspaces: [],
+  });
+  useWidgetStore.setState({
+    widgets: {},
+    topZIndex: 10,
+    focusedWidgetId: null,
+    pinnedLayouts: {},
   });
 });
 
@@ -195,18 +210,19 @@ describe("CharlieScene spatial projection & layers", () => {
     let dismissedId = "";
     const mockWs = {
       id: "ws-direct-1",
-      kind: "workspace" as const,
+      type: "terminal",
+      presentationIntentId: "ws-direct-1",
+      taskId: null,
       title: "Direct Workspace Test",
       summary: "Testing direct component render",
-      workspaceType: "terminal",
-      content: {},
-      priority: 50,
-      attentionLevel: "normal" as const,
-      dismissPolicy: "manual" as const,
-      preferredZone: "center" as const,
-      anchor: "screen" as const,
-      createdAt: new Date().toISOString(),
+      status: "active",
+      lifecycleState: "active" as const,
+      focused: true,
+      openedAt: new Date().toISOString(),
+      lastFocusedAt: new Date().toISOString(),
+      persistent: false,
       replayable: true,
+      contentState: {},
     };
 
     render(

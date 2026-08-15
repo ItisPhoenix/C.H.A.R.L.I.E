@@ -1,41 +1,52 @@
-import type { ReactElement } from "react";
-import type { PresentationIntent } from "../store/charlie";
+import { useEffect, type ReactElement } from "react";
+import { WidgetContainer } from "../layout/WidgetContainer";
+import { useWidgetStore } from "../layout/widgetStore";
 
-interface WidgetLayerProps {
-  widgets: PresentationIntent[];
-  onDismiss?: (id: string) => void;
-}
+export function WidgetLayer(): ReactElement | null {
+  const widgets = useWidgetStore((s) => s.widgets);
+  const focusWidget = useWidgetStore((s) => s.focusWidget);
+  const dragWidget = useWidgetStore((s) => s.dragWidget);
+  const resizeWidget = useWidgetStore((s) => s.resizeWidget);
+  const pinWidget = useWidgetStore((s) => s.pinWidget);
+  const unpinWidget = useWidgetStore((s) => s.unpinWidget);
+  const pauseExpiry = useWidgetStore((s) => s.pauseExpiry);
+  const resumeExpiry = useWidgetStore((s) => s.resumeExpiry);
+  const dismissWidget = useWidgetStore((s) => s.dismissWidget);
+  const tickAutoDismiss = useWidgetStore((s) => s.tickAutoDismiss);
 
-export function WidgetLayer({ widgets, onDismiss }: WidgetLayerProps): ReactElement | null {
-  if (!widgets.length) return null;
+  // Auto-dismiss countdown ticker
+  useEffect(() => {
+    const interval = setInterval(() => {
+      tickAutoDismiss(Date.now());
+    }, 500);
+    return () => clearInterval(interval);
+  }, [tickAutoDismiss]);
+
+  const widgetList = Object.values(widgets);
+  if (!widgetList.length) return null;
 
   return (
     <div className="charlie-widget-layer" role="region" aria-label="Contextual Widgets">
-      <div className="charlie-widget-zone charlie-zone-top-right">
-        {widgets.map((w) => (
-          <div
-            key={w.id}
-            className="p-4 rounded-xl bg-slate-950/80 border border-cyan-500/25 backdrop-blur-md shadow-xl text-left min-w-[260px] max-w-[340px]"
-          >
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <span className="text-[11px] font-mono text-cyan-400 uppercase">
-                {w.widgetType || "WIDGET"}
-              </span>
-              {onDismiss && (
-                <button
-                  type="button"
-                  onClick={() => onDismiss(w.id)}
-                  className="text-xs text-slate-400 hover:text-cyan-300 cursor-pointer"
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-            <h4 className="text-xs font-semibold text-slate-200">{w.title}</h4>
-            <p className="text-xs text-cyan-100/80 mt-1 leading-normal">{w.summary}</p>
-          </div>
-        ))}
-      </div>
+      {widgetList.map((w) => (
+        <WidgetContainer
+          key={w.id}
+          widget={w}
+          onFocus={focusWidget}
+          onDrag={(id, pos) =>
+            dragWidget(id, pos, { width: window.innerWidth, height: window.innerHeight })
+          }
+          onResize={(id, size) =>
+            resizeWidget(id, size, { width: window.innerWidth, height: window.innerHeight })
+          }
+          onPin={(id) =>
+            pinWidget(id, { width: window.innerWidth, height: window.innerHeight })
+          }
+          onUnpin={unpinWidget}
+          onPauseExpiry={pauseExpiry}
+          onResumeExpiry={resumeExpiry}
+          onDismiss={dismissWidget}
+        />
+      ))}
     </div>
   );
 }

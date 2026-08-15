@@ -6,6 +6,7 @@ interface CharlieCoreProps {
   position: CorePosition;
   coreState: string;
   onClearScreen?: () => void;
+  onOpenRecent?: () => void;
   onOpenLegacyDashboard?: () => void;
 }
 
@@ -13,6 +14,7 @@ export function CharlieCore({
   position,
   coreState,
   onClearScreen,
+  onOpenRecent,
   onOpenLegacyDashboard,
 }: CharlieCoreProps): ReactElement {
   const [showMenu, setShowMenu] = useState(false);
@@ -41,9 +43,21 @@ export function CharlieCore({
         {/* Compact core context menu */}
         {showMenu && (
           <div
-            className="absolute -top-32 left-1/2 transform -translate-x-1/2 p-2 rounded-xl bg-slate-950/95 border border-cyan-400/40 shadow-2xl backdrop-blur-lg flex flex-col gap-1 z-50 min-w-[140px]"
+            className="absolute -top-40 left-1/2 transform -translate-x-1/2 p-2 rounded-xl bg-slate-950/95 border border-cyan-400/40 shadow-2xl backdrop-blur-lg flex flex-col gap-1 z-50 min-w-[150px]"
             onClick={(e) => e.stopPropagation()}
           >
+            {onOpenRecent && (
+              <button
+                type="button"
+                onClick={() => {
+                  onOpenRecent();
+                  setShowMenu(false);
+                }}
+                className="px-3 py-1.5 text-xs text-left text-cyan-200 hover:bg-cyan-900/50 rounded transition cursor-pointer"
+              >
+                Recent Workspaces
+              </button>
+            )}
             {onClearScreen && (
               <button
                 type="button"

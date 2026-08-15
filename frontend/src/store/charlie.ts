@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import type { WSEvent } from "../runtime/bridge";
+import { useWorkspaceStore } from "../layout/workspaceStore";
+import { useWidgetStore } from "../layout/widgetStore";
 
 export interface SurfaceAction {
   id: string;
@@ -234,12 +236,15 @@ export const useCharlieStore = create<CharlieState>((set) => ({
 
   setConnected: (connected) => set({ connected }),
   dismissAlert: () => set({ activeAlert: null }),
-  dismissPresentationIntent: (id: string) =>
+  dismissPresentationIntent: (id: string) => {
+    useWorkspaceStore.getState().closeWorkspace(id);
+    useWidgetStore.getState().dismissWidget(id);
     set((s) => {
       if (!(id in s.presentationIntents)) return {};
       const { [id]: _removed, ...rest } = s.presentationIntents;
       return { presentationIntents: rest };
-    }),
+    });
+  },
   setActiveToolApproval: (activeToolApproval) => set({ activeToolApproval }),
   seedMcpStatus: (servers) =>
     set((s) => {
@@ -529,6 +534,8 @@ function applyPresentationIntentDismiss(
 ): void {
   const id = String(payload.id ?? "");
   if (!id) return;
+  useWorkspaceStore.getState().closeWorkspace(id);
+  useWidgetStore.getState().dismissWidget(id);
   set((s) => {
     if (!(id in s.presentationIntents)) return {};
     const { [id]: _removed, ...rest } = s.presentationIntents;
