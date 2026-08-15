@@ -8,8 +8,8 @@ import time
 from enum import StrEnum
 from typing import FrozenSet, Optional
 
-from charlie.background_task import ACTIVE_STATUSES as _BACKGROUND_TASK_ACTIVE_STATUSES
 from charlie.events import EventType
+from charlie.task_journal import TaskStatus, normalize_task_status
 from charlie.utils import utc_now_iso
 
 _TRANSIENT_STATE_TTL_SECONDS = 3.0
@@ -42,10 +42,14 @@ _DIRECT_TRANSITIONS = {
 }
 
 _BACKGROUND_TASK_STATUS_TO_STATE = {
+    "queued": CoreState.WORKING,
     "planning": CoreState.WORKING,
+    "waiting": CoreState.WAITING,
     "running": CoreState.WORKING,
     "paused": CoreState.WAITING,
-    "done": CoreState.COMPLETED,
+    "approval_required": CoreState.WAITING,
+    "verifying": CoreState.WORKING,
+    "completed": CoreState.COMPLETED,
     "cancelled": CoreState.COMPLETED,
     "failed": CoreState.ERROR,
 }
@@ -103,14 +107,20 @@ class StateMachine:
             return None
 
     def _resolve_background_task(self, payload: dict) -> Optional[CoreState]:
-        status = payload.get("status")
+        try:
+            status = normalize_task_status(payload.get("status", ""))
+        except ValueError:
+            return None
+        status_value = status.value
         task_id = payload.get("id")
         if task_id:
-            if status in _BACKGROUND_TASK_ACTIVE_STATUSES:
+            if status not in {
+                TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED,
+            }:
                 self._activities.add(task_id)
             else:
                 self._activities.discard(task_id)
-        return _BACKGROUND_TASK_STATUS_TO_STATE.get(status)
+        return _BACKGROUND_TASK_STATUS_TO_STATE.get(status_value)
 
     def _transition(self, new_state: CoreState, now: float) -> CoreState:
         if new_state not in _TRANSIENT_STATES:

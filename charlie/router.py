@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from charlie.known_apps import APP_REGISTRY as _APP_REGISTRY
+from charlie.task_journal import TaskStatus, normalize_task_status
 from charlie.text_utils import format_app_list
 from charlie.utils import is_process_running, make_id
 
@@ -378,11 +379,17 @@ def current_task_status_text() -> Optional[str]:
     from charlie import background_task  # lazy: background_task imports Brain from charlie.core
 
     task = background_task.get_current_task()
-    if task is None or task.status in ("done", "failed", "cancelled"):
+    if task is None:
+        return None
+    try:
+        status = normalize_task_status(task.status)
+    except ValueError:
+        return None
+    if status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
         return None
 
     total = len(task.steps)
-    if task.status == "paused":
+    if status is TaskStatus.PAUSED:
         return f'Background task "{task.text}" is paused, waiting for you to step away from the keyboard.'
     step_desc = task.steps[task.current_step] if task.current_step < total else "wrapping up"
     return f'Background task "{task.text}" is on step {task.current_step + 1} of {total}: {step_desc}.'

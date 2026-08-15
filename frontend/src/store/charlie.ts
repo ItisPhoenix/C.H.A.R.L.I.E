@@ -82,6 +82,16 @@ export interface RuntimeTask {
   status: string;
   currentStep: number;
   totalSteps: number;
+  origin?: string;
+  priority?: string;
+  sessionId?: string;
+  parentTaskId?: string;
+  progress?: number | null;
+  currentAction?: string;
+  waitingReason?: string;
+  resultReference?: string;
+  approvalReference?: string;
+  capabilityRequirements?: string[];
 }
 
 export interface AudioState {
@@ -350,13 +360,38 @@ function taskFromPayload(rawTask: unknown): RuntimeTask | null {
   const task = rawTask as Record<string, unknown>;
   const id = String(task.id ?? "");
   if (!id) return null;
-  return {
+  const status = normalizeTaskStatus(task.status);
+  const runtimeTask: RuntimeTask = {
     id,
     title: String(task.title ?? ""),
-    status: String(task.status ?? "unknown"),
+    status,
     currentStep: Number(task.current_step ?? 0),
     totalSteps: Number(task.total_steps ?? 0),
   };
+  if (typeof task.origin === "string") runtimeTask.origin = task.origin;
+  if (typeof task.priority === "string") runtimeTask.priority = task.priority;
+  if (typeof task.session_id === "string") runtimeTask.sessionId = task.session_id;
+  if (typeof task.parent_task_id === "string") runtimeTask.parentTaskId = task.parent_task_id;
+  if (typeof task.progress === "number" || task.progress === null) runtimeTask.progress = task.progress as number | null;
+  if (typeof task.current_action === "string") runtimeTask.currentAction = task.current_action;
+  if (typeof task.waiting_reason === "string") runtimeTask.waitingReason = task.waiting_reason;
+  if (typeof task.result_reference === "string") runtimeTask.resultReference = task.result_reference;
+  if (typeof task.approval_reference === "string") runtimeTask.approvalReference = task.approval_reference;
+  if (Array.isArray(task.capability_requirements)) {
+    runtimeTask.capabilityRequirements = task.capability_requirements.filter((value): value is string => typeof value === "string");
+  }
+  return runtimeTask;
+}
+
+function normalizeTaskStatus(status: unknown): string {
+  switch (status) {
+    case "done":
+      return "completed";
+    case "awaiting_approval":
+      return "approval_required";
+    default:
+      return String(status ?? "unknown");
+  }
 }
 
 function subsystemHealthFromPayload(payload: Record<string, unknown>): Record<string, SubsystemHealth> {

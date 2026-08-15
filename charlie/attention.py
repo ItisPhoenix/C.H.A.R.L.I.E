@@ -41,6 +41,8 @@ _BACKGROUND_TASK_STATUS_TO_LEVEL: Dict[str, AttentionLevel] = {
     "planning": AttentionLevel.SILENT,
     "running": AttentionLevel.SILENT,
     "paused": AttentionLevel.INFORM,
+    "approval_required": AttentionLevel.INTERRUPT,
+    "completed": AttentionLevel.INFORM,
     "done": AttentionLevel.INFORM,
     "cancelled": AttentionLevel.INFORM,
     "failed": AttentionLevel.ATTENTION,

@@ -163,6 +163,20 @@ describe("applyEvent", () => {
     });
   });
 
+  test("task state normalizes legacy lifecycle names at the runtime boundary", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "background_task",
+      payload: { id: "t1", title: "Check deployment", status: "done", current_step: 2, total_steps: 2 },
+    });
+    useCharlieStore.getState().applyEvent({
+      type: "background_task",
+      payload: { id: "t2", title: "Approve change", status: "awaiting_approval", current_step: 0, total_steps: 1 },
+    });
+
+    expect(useCharlieStore.getState().tasks.t1.status).toBe("completed");
+    expect(useCharlieStore.getState().tasks.t2.status).toBe("approval_required");
+  });
+
   test("subsystem_health stores only public health state", () => {
     useCharlieStore.getState().applyEvent({
       type: "subsystem_health",

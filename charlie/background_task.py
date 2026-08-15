@@ -28,7 +28,18 @@ from charlie.attention import decide as _attention_decide
 from charlie.config import Config
 from charlie.core import Brain
 from charlie.events import EventMeta, EventSource, EventType
+from charlie.resource_locks import CapabilityLease, CapabilityLeaseManager
 from charlie.results import ResultsStore
+from charlie.task_journal import (
+    TaskJournal,
+    TaskOrigin,
+    TaskPriority,
+    TaskTransitionError,
+    normalize_task_status,
+)
+from charlie.task_journal import (
+    TaskStatus as CanonicalTaskStatus,
+)
 from charlie.tasks import TaskManager
 from charlie.tools import get_path_gate_reason, is_shell_command_gated
 from charlie.utils import json_dumps, json_loads, make_id
@@ -42,12 +53,25 @@ except ImportError:  # pragma: no cover - guard mirrors charlie/desktop/__init__
     desktop_session = None
     _DESKTOP_AVAILABLE = False
 
+_REAL_DESKTOP_SESSION = desktop_session
+
+
+def _on_manual_takeover(owner_id: str, resources: tuple[str, ...]) -> None:
+    task = _manager.get(owner_id) if "_manager" in globals() else None
+    if task is not None:
+        task.cancel_requested = True
+        logger.info("Manual takeover requested cancellation of task %s for %s", owner_id, resources)
+
+
+_capability_leases = CapabilityLeaseManager(on_takeover=_on_manual_takeover)
+
 logger = logging.getLogger("charlie.background_task")
 
 _POLL_INTERVAL_SEC = 2.0
 _STEP_RE = re.compile(r"^\s*\d+[.)]\s+(.+)$")
 # Mirrors charlie/recovery_cache.py's dotfile-in-cwd convention.
 _STATE_FILE = ".charlie_background_task_state.json"
+_JOURNAL_FILE = ".charlie_task_journal.json"
 _TERMINAL_STATUSES = ("done", "failed", "cancelled")
 # Heuristic pre-scan over free-text plan steps, not a guarantee -- the real gate runs during execution.
 _DESKTOP_KEYWORD_RE = re.compile(
@@ -77,6 +101,7 @@ class BackgroundTask:
     depends_on: List[str] = field(default_factory=list)
     # Read by charlie.surfaces._categorize to route "workspace" hints to a sustained-interaction surface.
     visibility_hint: str = ""
+    desktop_lease: Optional[CapabilityLease] = field(default=None, repr=False, compare=False)
 
     def to_event(self) -> Dict[str, Any]:
         return {
@@ -89,15 +114,25 @@ class BackgroundTask:
             "error": self.error,
         }
 
-    def to_public_event(self) -> Dict[str, Any]:
+    def to_public_event(self, *, include_metadata: bool = False) -> Dict[str, Any]:
         """Return the client-safe task state without local exception detail."""
-        return {
+        public = {
             "id": self.id,
             "title": self.text,
-            "status": self.status,
+            "status": normalize_task_status(self.status).value,
             "current_step": self.current_step,
             "total_steps": len(self.steps),
         }
+        if include_metadata:
+            public.update({
+                "origin": TaskOrigin.BACKGROUND.value,
+                "priority": _priority_name(self.priority).value,
+                "session_id": self.session_id or None,
+                "progress": (self.current_step / len(self.steps)) if self.steps else None,
+                "current_action": self.steps[self.current_step] if self.current_step < len(self.steps) else None,
+                "capability_requirements": ["desktop"],
+            })
+        return public
 
     def to_state_dict(self) -> Dict[str, Any]:
         """to_event() plus session_id, for on-disk persistence."""
@@ -106,6 +141,54 @@ class BackgroundTask:
 
 _current_task: Optional[BackgroundTask] = None
 _active_event_bus: Optional[Any] = None
+_journal = TaskJournal(state_path=_JOURNAL_FILE)
+
+
+def _priority_name(priority: int) -> TaskPriority:
+    if priority > 0:
+        return TaskPriority.HIGH
+    if priority < 0:
+        return TaskPriority.LOW
+    return TaskPriority.NORMAL
+
+
+def _sync_journal(task: BackgroundTask) -> None:
+    """Project a legacy background task into the canonical journal."""
+    status = normalize_task_status(task.status)
+    try:
+        current = _journal.get(task.id)
+    except KeyError:
+        _journal.create_task(
+            task.text,
+            task_id=task.id,
+            origin=TaskOrigin.BACKGROUND,
+            priority=_priority_name(task.priority),
+            status=status,
+            session_id=task.session_id or None,
+            capability_requirements=("desktop",),
+            current_step=task.current_step,
+            total_steps=len(task.steps),
+        )
+        return
+
+    if current.status is not status:
+        try:
+            if status is CanonicalTaskStatus.COMPLETED and current.status not in (
+                CanonicalTaskStatus.VERIFYING,
+                CanonicalTaskStatus.COMPLETED,
+            ):
+                _journal.transition(task.id, CanonicalTaskStatus.VERIFYING)
+            _journal.transition(task.id, status)
+        except TaskTransitionError:
+            logger.debug("Ignoring legacy task transition %s -> %s for %s", current.status, status, task.id)
+    _journal.update_progress(
+        task.id,
+        progress=(task.current_step / len(task.steps)) if task.steps else None,
+        current_action=task.steps[task.current_step] if task.current_step < len(task.steps) else None,
+        current_step=task.current_step,
+        total_steps=len(task.steps),
+        waiting_reason="user_input" if status is CanonicalTaskStatus.PAUSED else None,
+    )
 
 
 def _on_manager_status_change(task: "BackgroundTask") -> None:
@@ -140,8 +223,9 @@ def _save_state(task: BackgroundTask) -> None:
 
 async def _emit_task_event(event_bus, task: BackgroundTask) -> None:
     """WS event plus on-disk persist -- single choke point, see check_interrupted_task()."""
+    _sync_journal(task)
     await event_bus.emit(
-        "background_task", task.to_public_event(),
+        "background_task", task.to_public_event(include_metadata=True),
         meta=EventMeta(source=EventSource.TASK, task_id=task.id),
     )
     _save_state(task)
@@ -268,6 +352,15 @@ async def start(
         on_result_stored=on_result_stored,
     )
 
+    _journal.create_task(
+        task.text,
+        task_id=task.id,
+        origin=TaskOrigin.BACKGROUND,
+        priority=_priority_name(task.priority),
+        status=CanonicalTaskStatus.PLANNING,
+        session_id=task.session_id,
+        capability_requirements=("desktop",),
+    )
     await _emit_task_event(event_bus, task)
 
     plan_prompt = (
@@ -325,15 +418,24 @@ async def _wait_until_clear(task: BackgroundTask, config: Config, event_bus) -> 
 
 
 async def _wait_for_desktop(task: BackgroundTask) -> bool:
-    """Poll until this task owns the desktop capability, keyed by task.id so two concurrent
-    background tasks genuinely serialize instead of racing under one shared owner id."""
+    """Acquire the canonical desktop lease, retaining the old fake-session seam for tests."""
     if not _DESKTOP_AVAILABLE:
         return True
-    while not desktop_session.acquire_desktop(task.id):
-        if task.cancel_requested:
-            return False
-        await asyncio.sleep(_POLL_INTERVAL_SEC)
-    return True
+    if desktop_session is not _REAL_DESKTOP_SESSION:
+        while not desktop_session.acquire_desktop(task.id):
+            if task.cancel_requested:
+                return False
+            await asyncio.sleep(_POLL_INTERVAL_SEC)
+        return True
+    while not task.cancel_requested:
+        try:
+            task.desktop_lease = await _capability_leases.acquire(
+                "desktop", task.id, timeout=_POLL_INTERVAL_SEC
+            )
+            return True
+        except asyncio.TimeoutError:
+            continue
+    return False
 
 
 async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
@@ -369,7 +471,10 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
                     step_output += chunk
                 step_outputs.append(step_output)
             finally:
-                if _DESKTOP_AVAILABLE:
+                if task.desktop_lease is not None:
+                    await task.desktop_lease.release()
+                    task.desktop_lease = None
+                elif _DESKTOP_AVAILABLE and desktop_session is not _REAL_DESKTOP_SESSION:
                     desktop_session.release_desktop(task.id)
 
             task.current_step += 1

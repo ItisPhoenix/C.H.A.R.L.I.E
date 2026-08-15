@@ -5,7 +5,7 @@ import { Panel } from "./Panel";
 type TaskTab = "active" | "completed";
 
 function isTerminal(status: string): boolean {
-  return status === "done" || status === "failed" || status === "cancelled";
+  return status === "completed" || status === "failed" || status === "cancelled";
 }
 
 function taskPercent(task: RuntimeTask): number | null {

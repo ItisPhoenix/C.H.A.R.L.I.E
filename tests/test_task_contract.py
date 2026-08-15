@@ -22,6 +22,14 @@ def test_background_task_public_event_omits_raw_failure_text() -> None:
     }
 
 
+def test_background_task_public_event_uses_canonical_lifecycle_names() -> None:
+    completed = BackgroundTask(id="task-1", text="Check deployment", status="done")
+    approval = BackgroundTask(id="task-2", text="Publish report", status="awaiting_approval")
+
+    assert completed.to_public_event()["status"] == "completed"
+    assert approval.to_public_event()["status"] == "approval_required"
+
+
 def test_web_server_replays_cached_tasks_and_runtime_activity() -> None:
     from charlie import web_server
 

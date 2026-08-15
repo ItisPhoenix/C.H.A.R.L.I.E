@@ -896,13 +896,29 @@ def _apply_background_task_event(cache: dict, event: dict) -> None:
     payload = event.get("payload", {})
     task_id = payload.get("id")
     if task_id:
-        cache[task_id] = {
+        status = str(payload.get("status", ""))
+        if event.get("schema_version"):
+            from charlie.task_journal import normalize_task_status
+
+            try:
+                status = normalize_task_status(status).value
+            except ValueError:
+                pass
+        safe = {
             "id": str(task_id),
             "title": str(payload.get("title", "")),
-            "status": str(payload.get("status", "")),
+            "status": status,
             "current_step": int(payload.get("current_step", 0)),
             "total_steps": int(payload.get("total_steps", 0)),
         }
+        for key in (
+            "origin", "priority", "session_id", "parent_task_id", "progress",
+            "current_action", "waiting_reason", "result_reference", "approval_reference",
+            "capability_requirements",
+        ):
+            if key in payload:
+                safe[key] = payload[key]
+        cache[task_id] = safe
 
 
 def _apply_surface_event(cache: dict, event: dict) -> None:
