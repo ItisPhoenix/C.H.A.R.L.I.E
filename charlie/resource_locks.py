@@ -240,3 +240,6 @@ class CapabilityLeaseManager:
                     waiters.discard(wake_event)
                     if not waiters:
                         _waiters.pop(capability, None)
+
+
+default_lease_manager = CapabilityLeaseManager()

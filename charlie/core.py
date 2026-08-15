@@ -1986,11 +1986,15 @@ class Brain:
             if tool_name not in _DESKTOP_COM_TOOLS and ck in _seen_tool_calls:
                 logger.info("Tool %s already executed, reusing result", call["name"])
                 return _seen_tool_calls[ck]
-            timeout = _TOOL_TIMEOUTS.get(tool_name, _TOOL_TIMEOUT_SEC)
+            from charlie.capabilities import capability_index
+            op = capability_index.get_operation(tool_name)
+            timeout = (op.timeout_sec if (op and op.timeout_sec) else _TOOL_TIMEOUTS.get(tool_name, _TOOL_TIMEOUT_SEC))
+            is_com = ((op and op.executor_type == "com_thread") or tool_name in _DESKTOP_COM_TOOLS)
+            required_leases = op.required_leases if (op and op.required_leases) else ()
             lock = self._tool_locks.setdefault(tool_name, asyncio.Lock())
 
             async def _run() -> str:
-                executor = _UIA_EXECUTOR if tool_name in _DESKTOP_COM_TOOLS else None
+                executor = _UIA_EXECUTOR if is_com else None
                 return await asyncio.get_running_loop().run_in_executor(
                     executor, tool_registry.execute_tool, call["name"], call["arguments"]
                 )
@@ -2035,11 +2039,18 @@ class Brain:
                 if tool_name in _DESKTOP_CONTROL_TOOLS:
                     _desktop_action_count[0] += 1
                 try:
-                    if tool_registry.is_interactive(tool_name):
-                        async with lock:
-                            r = await asyncio.wait_for(_run(), timeout=timeout)
-                    else:
-                        r = await asyncio.wait_for(_run(), timeout=timeout)
+                    async def _run_with_leases() -> str:
+                        if required_leases:
+                            from charlie.resource_locks import default_lease_manager
+                            async with await default_lease_manager.acquire_many(required_leases, f"turn:{turn_id}"):
+                                return await _run()
+                        elif tool_registry.is_interactive(tool_name):
+                            async with lock:
+                                return await _run()
+                        else:
+                            return await _run()
+
+                    r = await asyncio.wait_for(_run_with_leases(), timeout=timeout)
 
                     # Check for standard returned shell/file failures to attempt recovery
                     if tool_name == "shell_execute" and r.startswith("Error"):

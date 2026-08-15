@@ -165,17 +165,29 @@ class ToolRegistry:
         never has to import autonomy.py, which already imports from here. A caller who omits
         both falls back to _DEFAULT_TOOL_METADATA's per-name entry, if one exists."""
         default_owner, default_risk = _DEFAULT_TOOL_METADATA.get(name, ("", None))
+        effective_owner = owner or default_owner
+        effective_risk = risk_class or default_risk
         self._tools[name] = {
             "func": None,
             "description": description,
             "schema": schema,
             "is_interactive": is_interactive,
-            "owner": owner or default_owner,
-            "risk_class": risk_class or default_risk,
+            "owner": effective_owner,
+            "risk_class": effective_risk,
         }
 
         def decorator(func: Callable[..., Any]):
             self._tools[name]["func"] = func
+            from charlie.capabilities import register_tool_in_index
+            register_tool_in_index(
+                name=name,
+                description=description,
+                schema=schema,
+                func=func,
+                owner=effective_owner,
+                risk_class=effective_risk,
+                is_interactive=is_interactive,
+            )
             return func
 
         return decorator
@@ -201,7 +213,11 @@ class ToolRegistry:
     def unregister_tool(self, name: str) -> bool:
         """Remove a tool so it no longer appears in get_tool_definitions()
         or is callable via execute_tool(). Returns whether it existed."""
-        return self._tools.pop(name, None) is not None
+        existed = self._tools.pop(name, None) is not None
+        if existed:
+            from charlie.capabilities import unregister_tool_from_index
+            unregister_tool_from_index(name)
+        return existed
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         return [

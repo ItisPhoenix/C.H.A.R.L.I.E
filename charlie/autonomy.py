@@ -90,6 +90,11 @@ def classify_action(
     if policy_result.needs_approval:
         return RiskClass.SECURITY_SENSITIVE, policy_result.reason or ""
 
+    from charlie.capabilities import capability_index
+    op = capability_index.get_operation(tool_name)
+    if op is not None and op.risk_class:
+        return RiskClass(op.risk_class), ""
+
     default_risk = _tool_registry.get_risk_class(tool_name)
     if default_risk is not None:
         return RiskClass(default_risk), ""
