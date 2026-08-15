@@ -8,7 +8,6 @@ Default ports: 5555 (events), 5556 (commands).
 """
 
 import asyncio
-import dataclasses
 import json
 import logging
 import sys
@@ -26,7 +25,7 @@ if sys.platform == "win32":
 import zmq
 import zmq.asyncio
 
-from charlie.events import EventMeta
+from charlie.events import EventMeta, build_event, normalize_event
 
 logger = logging.getLogger("charlie.ipc")
 
@@ -103,9 +102,7 @@ class EventBus:
         """
         if not self.is_producer or not self._pub_socket:
             return
-        envelope = {"type": event_type, "payload": payload}
-        if meta is not None:
-            envelope.update(dataclasses.asdict(meta))
+        envelope = build_event(event_type, payload, meta=meta)
         data = json.dumps(envelope)
         try:
             await self._pub_socket.send_string(data)
@@ -113,10 +110,12 @@ class EventBus:
             logger.debug("emit_dropped_socket_closed | type=%s", event_type)
             return
         if self._state_listener is not None:
-            derived = self._state_listener(envelope)
+            # Existing state listeners consume the original two-field shape;
+            # only the wire event uses the new contract during migration.
+            derived = self._state_listener({"type": event_type, "payload": payload})
             if derived is not None:
                 try:
-                    await self._pub_socket.send_string(json.dumps(derived))
+                    await self._pub_socket.send_string(json.dumps(normalize_event(derived, allow_unknown=True)))
                 except zmq.ZMQError:
                     logger.debug("emit_dropped_socket_closed | type=%s", derived.get("type"))
 

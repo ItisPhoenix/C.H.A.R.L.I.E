@@ -71,4 +71,6 @@ def test_dashboard_panel_event_replays_to_late_clients(monkeypatch):
 
     events = web_server._initial_state_events()
 
-    assert {"type": "dashboard_panel", "payload": {"action": "show", "panel_id": "terminal"}} in events
+    event = next(event for event in events if event["type"] == "dashboard_panel")
+    assert event["payload"] == {"action": "show", "panel_id": "terminal"}
+    assert event["replay"] is True

@@ -38,10 +38,12 @@ def test_web_server_replays_cached_tasks_and_runtime_activity() -> None:
     }
     web_server._charlie_state = {"state": "working", "activities": ["background_task"]}
     try:
-        assert {"type": "task_snapshot", "payload": {"tasks": list(web_server._background_tasks.values())}} in (
-            web_server._initial_state_events()
-        )
-        assert {"type": "charlie_state", "payload": web_server._charlie_state} in web_server._initial_state_events()
+        event = next(event for event in web_server._initial_state_events() if event["type"] == "task_snapshot")
+        assert event["payload"] == {"tasks": list(web_server._background_tasks.values())}
+        assert event["replay"] is True
+        state_event = next(event for event in web_server._initial_state_events() if event["type"] == "charlie_state")
+        assert state_event["payload"] == web_server._charlie_state
+        assert state_event["replay"] is True
     finally:
         web_server._background_tasks = old_tasks
         web_server._charlie_state = old_state

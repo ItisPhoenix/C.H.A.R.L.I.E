@@ -38,6 +38,7 @@ from charlie.media_adapter import WindowsMediaAdapter
 from charlie.audit_store import AuditStore
 from charlie.backup_service import export_snapshot
 from charlie.capabilities import build_capability_snapshot
+from charlie.events import EventValidationError, build_event, normalize_event, replay_event
 
 logger = logging.getLogger("charlie.web_server")
 logger.addFilter(SensitiveDataFilter())
@@ -335,6 +336,11 @@ async def broadcast(data: dict):
     subscribed to that session_id, preventing one browser from seeing another
     session's live stream. All other events go to every client.
     """
+    try:
+        data = normalize_event(data, allow_unknown=True)
+    except EventValidationError as exc:
+        logger.warning("Dropping invalid event before WebSocket broadcast: %s", exc)
+        return
     message = json.dumps(data)
     etype = data.get("type", "")
     event_session = data.get("session_id") or (data.get("payload") or {}).get("session_id")
@@ -359,6 +365,11 @@ async def _event_bridge():
         return
 
     async def on_event(event: dict):
+        try:
+            event = normalize_event(event, allow_unknown=True)
+        except EventValidationError as exc:
+            logger.warning("Dropping invalid event from EventBus: %s", exc)
+            return
         logger.debug(f"Event received: {event}")
         global pipeline_state
         etype = event.get("type", "")
@@ -845,21 +856,21 @@ async def get_active_session():
 def _initial_state_events() -> List[dict]:
     """Return cached events needed by a newly connected client."""
     events = [
-        {"type": "charlie_state", "payload": _charlie_state},
-        {"type": "system_status", "payload": _system_status},
-        {"type": "subsystem_health", "payload": _subsystem_health},
-        {"type": "task_snapshot", "payload": {"tasks": list(_background_tasks.values())}},
-        {"type": "audio_state", "payload": _audio_state},
-        {"type": "mic_state", "payload": _mic_state},
-        {"type": "dashboard_visibility", "payload": {"visible": _dashboard_visible}},
+        build_event("charlie_state", _charlie_state),
+        build_event("system_status", _system_status),
+        build_event("subsystem_health", _subsystem_health),
+        build_event("task_snapshot", {"tasks": list(_background_tasks.values())}),
+        build_event("audio_state", _audio_state),
+        build_event("mic_state", _mic_state),
+        build_event("dashboard_visibility", {"visible": _dashboard_visible}),
     ]
     events.extend(
-        {"type": "dashboard_panel", "payload": {"action": action, "panel_id": panel_id}}
+        build_event("dashboard_panel", {"action": action, "panel_id": panel_id})
         for panel_id, action in _dashboard_panels.items()
     )
     events.extend(_active_surfaces.values())
     events.extend(_pending_approvals.values())
-    return events
+    return [replay_event(event, allow_unknown=True) for event in events]
 
 
 async def _expire_surface(surface_id: str, spawned_as: dict, ttl_seconds: float) -> None:

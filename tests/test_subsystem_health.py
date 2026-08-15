@@ -52,8 +52,9 @@ def test_web_server_replays_current_subsystem_health() -> None:
         "voice": {"status": "degraded", "detail": "Unavailable"},
     }
     try:
-        expected = {"type": "subsystem_health", "payload": web_server._subsystem_health}
-        assert expected in web_server._initial_state_events()
+        event = next(event for event in web_server._initial_state_events() if event["type"] == "subsystem_health")
+        assert event["payload"] == web_server._subsystem_health
+        assert event["replay"] is True
     finally:
         web_server._subsystem_health = old
 

@@ -45,7 +45,11 @@ async def test_listener_derived_envelope_also_published():
     await bus.emit("vad_start", {})
     assert len(bus._pub_socket.sent) == 2
     assert json.loads(bus._pub_socket.sent[0])["type"] == "vad_start"
-    assert json.loads(bus._pub_socket.sent[1]) == derived
+    derived_wire = json.loads(bus._pub_socket.sent[1])
+    assert derived_wire["type"] == derived["type"]
+    assert derived_wire["payload"] == derived["payload"]
+    assert derived_wire["version"] == 1
+    assert derived_wire["id"]
 
 
 @pytest.mark.asyncio
