@@ -542,3 +542,10 @@ function applyPresentationIntentDismiss(
     return { presentationIntents: rest };
   });
 }
+
+if (typeof window !== "undefined") {
+  (window as unknown as Record<string, unknown>).__CHARLIE_STORE__ = useCharlieStore;
+  (window as unknown as Record<string, unknown>).__WORKSPACE_STORE__ = useWorkspaceStore;
+  (window as unknown as Record<string, unknown>).__WIDGET_STORE__ = useWidgetStore;
+}
+

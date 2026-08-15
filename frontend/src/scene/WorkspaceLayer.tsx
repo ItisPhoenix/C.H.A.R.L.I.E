@@ -1,12 +1,16 @@
 import type { ReactElement } from "react";
 import { ContentMaskLayer } from "./ContentMaskLayer";
 import { useWorkspaceStore, type WorkspaceInstance } from "../layout/workspaceStore";
-import { Tasks } from "../dashboard/Tasks";
-import { SystemMonitor } from "../dashboard/SystemMonitor";
-import { Terminal } from "../dashboard/Terminal";
-import { Chat } from "../dashboard/Chat";
-
 import { SurfaceComposer } from "../composer/SurfaceComposer";
+import { ResearchWorkspace } from "./workspaces/ResearchWorkspace";
+import { BriefingWorkspace } from "./workspaces/BriefingWorkspace";
+import { SystemWorkspace } from "./workspaces/SystemWorkspace";
+import { TasksWorkspace } from "./workspaces/TasksWorkspace";
+import { MapWorkspace } from "./workspaces/MapWorkspace";
+import { VisionWorkspace } from "./workspaces/VisionWorkspace";
+import { DocumentWorkspace } from "./workspaces/DocumentWorkspace";
+import { TerminalWorkspace } from "./workspaces/TerminalWorkspace";
+import { ConversationWorkspace } from "./workspaces/ConversationWorkspace";
 
 interface WorkspaceLayerProps {
   activeWorkspace?: WorkspaceInstance | null;
@@ -62,21 +66,32 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
     }
 
     switch (wsType) {
-      case "tasks":
-        return <Tasks />;
+      case "research":
+        return <ResearchWorkspace workspace={active} />;
+      case "briefing":
+      case "news":
+        return <BriefingWorkspace workspace={active} />;
       case "system":
-        return <SystemMonitor />;
+      case "diagnostics":
+      case "system_monitor":
+        return <SystemWorkspace workspace={active} />;
+      case "tasks":
+        return <TasksWorkspace workspace={active} />;
+      case "map":
+      case "spatial":
+        return <MapWorkspace workspace={active} />;
+      case "vision":
+      case "camera":
+        return <VisionWorkspace workspace={active} />;
+      case "document":
+      case "report":
+      case "file":
+        return <DocumentWorkspace workspace={active} />;
       case "terminal":
-        return <Terminal />;
+        return <TerminalWorkspace workspace={active} />;
       case "conversation":
       case "chat":
-        return <Chat />;
-      case "research":
-      case "briefing":
-      case "camera":
-      case "map":
-      case "settings":
-      case "diagnostics":
+        return <ConversationWorkspace workspace={active} />;
       default:
         return (
           <div className="my-auto py-6 text-sm text-cyan-100/90 max-w-2xl leading-relaxed">
@@ -91,23 +106,23 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
     <div className="charlie-workspace-layer" role="region" aria-label="Primary Workspace">
       <div className="charlie-workspace-host">
         <ContentMaskLayer>
-          <div className="p-6 h-full flex flex-col justify-between">
-            {/* Header */}
-            <div className="flex items-center justify-between border-b border-cyan-500/20 pb-4">
+          <div className="p-4 sm:p-6 h-full flex flex-col justify-between">
+            {/* Subtle Floating HUD Header */}
+            <div className="flex items-center justify-between pb-3 mb-2 border-b border-cyan-500/15">
               <div className="flex items-center gap-3">
-                <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
-                <h2 className="text-base font-semibold tracking-wide text-cyan-200 uppercase">
+                <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                <h2 className="text-sm sm:text-base font-bold tracking-wider text-slate-100 uppercase font-sans">
                   {wsTitle}
                 </h2>
               </div>
 
-              {/* Window-agnostic Minimal Controls */}
+              {/* Minimal HUD Controls (Less desktop-window like) */}
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={handleMinimize}
-                  className="px-2.5 py-1 text-xs rounded bg-cyan-950/60 border border-cyan-500/30 text-cyan-300 hover:bg-cyan-900/60 transition cursor-pointer"
-                  title="Minimize to Recent [_]"
+                  className="px-2 py-0.5 text-xs rounded bg-slate-950/60 border border-cyan-500/20 text-slate-400 hover:text-cyan-300 hover:border-cyan-400/50 transition cursor-pointer font-mono"
+                  title="Minimize [_]"
                   aria-label="Minimize workspace"
                 >
                   _
@@ -115,7 +130,7 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
                 <button
                   type="button"
                   onClick={handleClose}
-                  className="px-2.5 py-1 text-xs rounded bg-cyan-950/60 border border-cyan-500/30 text-cyan-300 hover:bg-cyan-900/60 transition cursor-pointer"
+                  className="px-2 py-0.5 text-xs rounded bg-slate-950/60 border border-cyan-500/20 text-slate-400 hover:text-cyan-300 hover:border-cyan-400/50 transition cursor-pointer font-mono"
                   title="Close workspace [Esc]"
                   aria-label="Close workspace"
                 >
@@ -125,14 +140,8 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
             </div>
 
             {/* Body */}
-            <div className="flex-1 overflow-auto my-3">
+            <div className="flex-1 overflow-auto">
               {renderWorkspaceContent()}
-            </div>
-
-            {/* Footer telemetry */}
-            <div className="text-[11px] font-mono text-cyan-400/50 flex justify-between border-t border-cyan-500/10 pt-3">
-              <span>TYPE: {wsType.toUpperCase()}</span>
-              <span>STATUS: {(active.status || "ACTIVE").toUpperCase()}</span>
             </div>
           </div>
         </ContentMaskLayer>

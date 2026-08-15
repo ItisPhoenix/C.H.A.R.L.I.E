@@ -11,7 +11,10 @@ import { ImagePrimitive } from "./ImagePrimitive";
 import { SourceEvidencePrimitive } from "./SourceEvidencePrimitive";
 import { StatusPrimitive, BadgePrimitive, DividerPrimitive } from "./StatusPrimitive";
 import { ActionPrimitive } from "./ActionPrimitive";
-import { MapPlaceholderPrimitive } from "./MapPlaceholderPrimitive";
+import { SpatialMapPrimitive } from "./SpatialMapPrimitive";
+import { DensityHeatmapPrimitive } from "./DensityHeatmapPrimitive";
+import { TelemetryGaugesPrimitive } from "./TelemetryGaugesPrimitive";
+import { ProcessTelemetryPrimitive } from "./ProcessTelemetryPrimitive";
 import { LayoutContainer } from "./LayoutContainer";
 
 export function UnknownPrimitive({ primitive }: { primitive: PrimitiveSpec }): ReactElement {
@@ -73,9 +76,22 @@ export function PrimitiveNode({
     case "action":
       return <ActionPrimitive primitive={primitive} onAction={onAction} />;
 
-    case "map_placeholder":
+    case "spatial_map":
     case "map":
-      return <MapPlaceholderPrimitive primitive={primitive} />;
+    case "map_placeholder":
+      return <SpatialMapPrimitive primitive={primitive} />;
+
+    case "density_heatmap":
+    case "heatmap":
+      return <DensityHeatmapPrimitive primitive={primitive} />;
+
+    case "telemetry_gauges":
+    case "gauges":
+      return <TelemetryGaugesPrimitive primitive={primitive} />;
+
+    case "process_telemetry":
+    case "processes":
+      return <ProcessTelemetryPrimitive primitive={primitive} />;
 
     case "layout": {
       const layoutData = (primitive.data?.layout as unknown) ?? { type: "stack", gap: 8 };

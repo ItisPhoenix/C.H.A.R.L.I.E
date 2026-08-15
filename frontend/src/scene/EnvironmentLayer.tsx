@@ -7,7 +7,6 @@ interface EnvironmentLayerProps {
 }
 
 export function EnvironmentLayer({ corePosition, hasWorkspace }: EnvironmentLayerProps): ReactElement {
-  // Biasing illumination toward core or workspace
   const lightX = hasWorkspace ? "60%" : corePosition === "dock_bottom_right" ? "85%" : "50%";
   const lightY = hasWorkspace ? "45%" : corePosition === "dock_bottom_right" ? "85%" : "50%";
 
@@ -34,7 +33,20 @@ export function EnvironmentLayer({ corePosition, hasWorkspace }: EnvironmentLaye
         <div className="charlie-frame-corner charlie-frame-tr" />
         <div className="charlie-frame-corner charlie-frame-bl" />
         <div className="charlie-frame-corner charlie-frame-br" />
-        <div className="charlie-frame-tick-top">SYS // 01.SPATIAL.HUD</div>
+        
+        {/* Top & Bottom central sci-fi brackets */}
+        <svg className="charlie-frame-bracket-top" viewBox="0 0 140 12" fill="none">
+          <path d="M 0 0 L 25 0 L 35 8 L 105 8 L 115 0 L 140 0" stroke="rgba(0, 240, 255, 0.45)" strokeWidth="1.2" />
+        </svg>
+        <svg className="charlie-frame-bracket-bottom" viewBox="0 0 140 12" fill="none">
+          <path d="M 0 12 L 25 12 L 35 4 L 105 4 L 115 12 L 140 12" stroke="rgba(0, 240, 255, 0.45)" strokeWidth="1.2" />
+        </svg>
+
+        {/* Perimeter edge tick marks */}
+        <div className="charlie-frame-ticks-x-top" />
+        <div className="charlie-frame-ticks-x-bottom" />
+        <div className="charlie-frame-ticks-y-left" />
+        <div className="charlie-frame-ticks-y-right" />
       </div>
 
       {/* 4. Deep 4-edge & corner vignette */}

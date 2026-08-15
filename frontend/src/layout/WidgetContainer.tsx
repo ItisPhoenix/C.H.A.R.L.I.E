@@ -1,6 +1,7 @@
 import { useRef, useState, type PointerEvent, type ReactElement } from "react";
 import type { WidgetInstance } from "./widgetStore";
 import { SurfaceComposer } from "../composer/SurfaceComposer";
+import { SystemWidget } from "../scene/widgets/SystemWidget";
 
 interface WidgetContainerProps {
   widget: WidgetInstance;
@@ -140,6 +141,11 @@ export function WidgetContainer({
       role="region"
       aria-label={`${widget.title} widget`}
     >
+      {/* Corner Bracket Accents */}
+      <span className="absolute -top-[1px] -left-[1px] w-2.5 h-2.5 border-t border-l border-cyan-400/70 pointer-events-none" />
+      <span className="absolute -top-[1px] -right-[1px] w-2.5 h-2.5 border-t border-r border-cyan-400/70 pointer-events-none" />
+      <span className="absolute -bottom-[1px] -left-[1px] w-2.5 h-2.5 border-b border-l border-cyan-400/70 pointer-events-none" />
+      <span className="absolute -bottom-[1px] -right-[1px] w-2.5 h-2.5 border-b border-r border-cyan-400/70 pointer-events-none" />
       {/* Header bar (Drag Handle) */}
       <div
         className="flex items-center justify-between px-3 py-2 cursor-grab active:cursor-grabbing border-b border-cyan-500/15"
@@ -195,7 +201,9 @@ export function WidgetContainer({
 
       {/* Body content */}
       <div className="p-3.5 overflow-auto text-left h-[calc(100%-42px)]">
-        {widget.content?.surface_spec || widget.content?.schema_version || widget.widgetType === "composed_surface" ? (
+        {widget.widgetType === "system_metric" || widget.widgetType === "system" ? (
+          <SystemWidget widget={widget} />
+        ) : widget.content?.surface_spec || widget.content?.schema_version || widget.widgetType === "composed_surface" ? (
           <SurfaceComposer
             spec={
               (widget.content.surface_spec as Record<string, unknown>) ||

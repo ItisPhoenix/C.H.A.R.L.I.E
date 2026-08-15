@@ -513,32 +513,32 @@
 
 .hud-vector-structure circle {
   fill: none;
-  stroke: rgba(255, 133, 26, .23);
+  stroke: rgba(34, 211, 238, .23);
   stroke-width: 1.1;
 }
 
-.hud-vector-structure circle:nth-child(1) { stroke: rgba(255, 160, 61, .34); stroke-width: 1.4; }
-.hud-vector-structure circle:nth-child(2) { stroke: rgba(255, 116, 14, .18); }
-.hud-vector-structure circle:nth-child(4) { stroke: rgba(153, 56, 0, .35); }
-.hud-vector-structure .hud-vector-structure-cool { stroke: rgba(103, 213, 240, .18); stroke-width: .9; }
+.hud-vector-structure circle:nth-child(1) { stroke: rgba(34, 211, 238, .38); stroke-width: 1.4; }
+.hud-vector-structure circle:nth-child(2) { stroke: rgba(34, 211, 238, .2); }
+.hud-vector-structure circle:nth-child(4) { stroke: rgba(8, 51, 68, .45); }
+.hud-vector-structure .hud-vector-structure-cool { stroke: rgba(115, 230, 255, .25); stroke-width: .9; }
 
 .hud-vector-core-shell circle,
 .hud-vector-core-shell ellipse {
   fill: none;
-  stroke: rgba(255, 144, 29, .34);
+  stroke: rgba(34, 211, 238, .36);
   stroke-width: 1.25;
 }
 
 .hud-vector-core-shell .hud-vector-core-boundary {
-  stroke: rgba(255, 222, 153, .78);
+  stroke: rgba(224, 247, 254, .85);
   stroke-width: 1.65;
   stroke-dasharray: 2.5 5.2;
   filter: url(#hud-vector-soft-glow);
 }
 
-.hud-vector-core-shell .hud-vector-core-inner { stroke: rgba(255, 127, 16, .36); stroke-width: 1; }
-.hud-vector-core-shell .hud-vector-core-hot { stroke: rgba(255, 226, 164, .54); }
-.hud-vector-core-shell .hud-vector-core-latitude { stroke: rgba(255, 152, 38, .28); stroke-width: .9; }
+.hud-vector-core-shell .hud-vector-core-inner { stroke: rgba(34, 211, 238, .4); stroke-width: 1; }
+.hud-vector-core-shell .hud-vector-core-hot { stroke: rgba(224, 247, 254, .6); }
+.hud-vector-core-shell .hud-vector-core-latitude { stroke: rgba(56, 189, 248, .3); stroke-width: .9; }
 
 .hud-vector-core-drift {
   transform-box: view-box;
@@ -554,53 +554,53 @@
 }
 
 .hud-arc-primary {
-  stroke: #ff8d12;
+  stroke: #22d3ee;
   stroke-width: 3.2;
   filter: url(#hud-vector-glow);
 }
 
-.hud-arc-primary.hud-arc-hot { stroke: #ffb12f; stroke-width: 3.8; }
-.hud-arc-secondary { stroke: rgba(255, 139, 22, .88); stroke-width: 2.15; filter: url(#hud-vector-soft-glow); }
-.hud-arc-secondary.hud-arc-hot { stroke: #ffd071; stroke-width: 2.7; }
-.hud-arc-fine { stroke: rgba(255, 127, 12, .66); stroke-width: 1.25; }
-.hud-arc-fine.hud-arc-hot { stroke: rgba(255, 216, 141, .88); }
-.hud-arc-inner { stroke: rgba(255, 139, 23, .62); stroke-width: 1.15; }
+.hud-arc-primary.hud-arc-hot { stroke: #67e8f9; stroke-width: 3.8; }
+.hud-arc-secondary { stroke: rgba(34, 211, 238, .88); stroke-width: 2.15; filter: url(#hud-vector-soft-glow); }
+.hud-arc-secondary.hud-arc-hot { stroke: #a5f3fc; stroke-width: 2.7; }
+.hud-arc-fine { stroke: rgba(34, 211, 238, .66); stroke-width: 1.25; }
+.hud-arc-fine.hud-arc-hot { stroke: rgba(224, 247, 254, .88); }
+.hud-arc-inner { stroke: rgba(34, 211, 238, .62); stroke-width: 1.15; }
 
 .hud-vector-blocks rect {
-  fill: rgba(255, 139, 25, .76);
+  fill: rgba(34, 211, 238, .76);
 }
 
 .hud-vector-blocks .hud-vector-block-hot {
-  fill: #ffd68a;
+  fill: #e0f7fe;
   filter: url(#hud-vector-glow);
 }
 
 .hud-vector-blocks .hud-vector-block-cool {
-  fill: #94e9ff;
+  fill: #38bdf8;
   filter: url(#hud-vector-soft-glow);
 }
 
 .hud-vector-ticks line {
-  stroke: rgba(255, 136, 24, .47);
+  stroke: rgba(34, 211, 238, .47);
   stroke-width: 1.05;
 }
 
-.hud-vector-ticks .hud-vector-tick-medium { stroke: rgba(255, 176, 75, .66); stroke-width: 1.45; }
-.hud-vector-ticks .hud-vector-tick-major { stroke: rgba(255, 218, 147, .88); stroke-width: 2.25; }
+.hud-vector-ticks .hud-vector-tick-medium { stroke: rgba(56, 189, 248, .66); stroke-width: 1.45; }
+.hud-vector-ticks .hud-vector-tick-major { stroke: rgba(224, 247, 254, .88); stroke-width: 2.25; }
 
 .hud-vector-dots circle {
-  fill: rgba(255, 232, 181, .78);
+  fill: rgba(224, 247, 254, .78);
 }
 
-.hud-vector-dots .hud-vector-dot-hot { fill: #fff2c6; filter: url(#hud-vector-soft-glow); }
-.hud-vector-dots .hud-vector-dot-cool { fill: #89e6ff; filter: url(#hud-vector-soft-glow); }
+.hud-vector-dots .hud-vector-dot-hot { fill: #e0f7fe; filter: url(#hud-vector-soft-glow); }
+.hud-vector-dots .hud-vector-dot-cool { fill: #38bdf8; filter: url(#hud-vector-soft-glow); }
 
 .hud-vector-nodes circle {
-  fill: #ff9c25;
+  fill: #22d3ee;
   filter: url(#hud-vector-glow);
 }
 
-.hud-vector-nodes .hud-vector-node-cool { fill: #8ce8ff; }
+.hud-vector-nodes .hud-vector-node-cool { fill: #73e6ff; }
 
 .hud-vector-drift,
 .hud-vector-drift-reverse {
@@ -626,10 +626,10 @@
   content: "";
   position: absolute;
   z-index: 0;
-  inset: 19%;
+  inset: 15%;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(255, 112, 24, 0.085), transparent 54%);
-  box-shadow: 0 0 72px rgba(255, 112, 24, 0.085);
+  background: radial-gradient(circle, rgba(0, 240, 255, 0.12), transparent 60%);
+  box-shadow: 0 0 80px rgba(0, 240, 255, 0.15);
 }
 
 .hud-voice {

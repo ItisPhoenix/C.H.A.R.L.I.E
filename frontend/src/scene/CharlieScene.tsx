@@ -10,6 +10,8 @@ import { WidgetLayer } from "./WidgetLayer";
 import { ContextLayer } from "./ContextLayer";
 import { CharlieCore } from "./CharlieCore";
 import { RecentWorkspacesModal } from "../layout/RecentWorkspacesModal";
+import { SettingsModal } from "./SettingsModal";
+import { TaskSwitcher } from "./TaskSwitcher";
 import type { ZoneContext } from "../layout/zones";
 import "./scene.css";
 
@@ -31,6 +33,12 @@ export function CharlieScene(): ReactElement {
 
   const [debugMode, setDebugMode] = useState(false);
   const [recentModalOpen, setRecentModalOpen] = useState(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+
+  useEffect(() => {
+    (window as unknown as { __OPEN_SETTINGS__?: () => void; __CLOSE_SETTINGS__?: () => void }).__OPEN_SETTINGS__ = () => setSettingsModalOpen(true);
+    (window as unknown as { __OPEN_SETTINGS__?: () => void; __CLOSE_SETTINGS__?: () => void }).__CLOSE_SETTINGS__ = () => setSettingsModalOpen(false);
+  }, []);
 
   // Sync incoming PresentationIntents to WorkspaceManager and WidgetManager
   useEffect(() => {
@@ -78,6 +86,8 @@ export function CharlieScene(): ReactElement {
         }
       } else if (e.ctrlKey && e.shiftKey && (e.key === "D" || e.key === "d")) {
         setDebugMode((prev) => !prev);
+      } else if ((e.ctrlKey || e.metaKey) && e.key === ",") {
+        setSettingsModalOpen((prev) => !prev);
       }
     };
 
@@ -133,19 +143,30 @@ export function CharlieScene(): ReactElement {
         onDismissIntent={dismissIntent}
       />
 
-      {/* 5. Charlie Core (Center <-> Dock_Bottom_Right spatial transition, animation hooks) */}
+      {/* 5. Contextual Task Switcher (Only visible when >1 tasks or active) */}
+      <TaskSwitcher />
+
+      {/* 6. Charlie Core (Center <-> Dock_Bottom_Right spatial transition, animation hooks) */}
       <CharlieCore
         position={projection.corePosition}
         coreState={projection.coreState}
+        activeWorkspaceType={projection.activeWorkspace?.type}
         onClearScreen={handleClearScreen}
         onOpenRecent={() => setRecentModalOpen(true)}
+        onOpenSettings={() => setSettingsModalOpen(true)}
         onOpenLegacyDashboard={() => navigate("/dashboard")}
       />
 
-      {/* 6. Recent Workspaces Modal */}
+      {/* 7. Recent Workspaces Modal */}
       <RecentWorkspacesModal
         isOpen={recentModalOpen}
         onClose={() => setRecentModalOpen(false)}
+      />
+
+      {/* 8. Settings Modal Overlay */}
+      <SettingsModal
+        isOpen={settingsModalOpen}
+        onClose={() => setSettingsModalOpen(false)}
       />
 
       {/* 7. Developer Debug Mode Overlays */}

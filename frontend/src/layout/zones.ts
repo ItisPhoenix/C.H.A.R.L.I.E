@@ -17,8 +17,8 @@ export interface ZoneContext {
 }
 
 export const DEFAULT_WIDGET_SIZE: Size = {
-  width: 320,
-  height: 180,
+  width: 330,
+  height: 210,
 };
 
 export const MIN_WIDGET_SIZE: Size = {
