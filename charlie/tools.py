@@ -1618,15 +1618,13 @@ def emit_memory_updated(store: str, summary: str) -> None:
         logger.warning("memory_updated emit failed", exc_info=True)
 
 
-def _ocr_fallback_marks(uia_elements: List[Any]) -> List[Any]:
-    """Merge an OCR pass into uia_elements.
+# UIA tree element threshold above which OCR is skipped as unnecessary
+_UIA_RICH_THRESHOLD = 5
 
-    Always runs, not just when the UIA tree looks sparse -- a browser's
-    toolbar can hand back a couple of real UIA elements while the entire
-    page content underneath is invisible to UIA, so an element-count
-    threshold can't reliably tell "UIA-blind" from "just a toolbar."
-    """
-    if not config.desktop_ocr_enabled:
+
+def _ocr_fallback_marks(uia_elements: List[Any]) -> List[Any]:
+    """Progressive OCR: only run OCR pass when UIA accessibility tree is sparse or missing."""
+    if len(uia_elements) >= _UIA_RICH_THRESHOLD or not config.desktop_ocr_enabled:
         return uia_elements
     from charlie.desktop import ocr as desktop_ocr
     if not desktop_ocr.OCR_AVAILABLE:

@@ -611,7 +611,22 @@ async def delete_calendar_event(event_id: str):
 
 @app.get("/api/media")
 async def media_snapshot():
-    return await _media_adapter.snapshot()
+    try:
+        return await asyncio.wait_for(_media_adapter.snapshot(), timeout=2.0)
+    except asyncio.TimeoutError:
+        return {
+            "available": False,
+            "title": "",
+            "artist": "",
+            "album": "",
+            "app": "",
+            "status": "unavailable",
+            "position_seconds": 0.0,
+            "duration_seconds": 0.0,
+            "art_uri": None,
+            "volume_percent": None,
+            "muted": None,
+        }
 
 
 @app.post("/api/media/control")

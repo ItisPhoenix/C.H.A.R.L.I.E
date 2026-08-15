@@ -92,7 +92,9 @@ def is_halted() -> bool:
 
 
 def _check_halt() -> None:
-    if _HALT.is_set():
+    from charlie.desktop.takeover import user_takeover_detector
+
+    if user_takeover_detector.check_takeover() or _HALT.is_set():
         raise DesktopHalted("Desktop control halted.")
     _record_action_tick()
 

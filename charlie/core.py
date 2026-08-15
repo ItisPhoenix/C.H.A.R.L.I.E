@@ -18,7 +18,7 @@ from charlie import prompt_builder, router, telemetry
 from charlie.autonomy import Requirement
 from charlie.autonomy import evaluate as autonomy_evaluate
 from charlie.budget import IterationBudget
-from charlie.capabilities import build_capability_roster
+from charlie.capabilities import build_capability_roster, capability_index
 from charlie.events import EventMeta, EventSource
 from charlie.research.citations import strip_invalid_citations
 from charlie.research.engine import ResearchEngine
@@ -1453,6 +1453,7 @@ class Brain:
         self,
         messages: List[Dict[str, Any]],
         skip_tools: bool = False,
+        domain_hints: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Build the API payload for chat completions."""
         payload: Dict[str, Any] = {
@@ -1462,7 +1463,9 @@ class Brain:
             "stream": True,
         }
         if self._use_native_tools and not skip_tools:
-            payload["tools"] = tool_registry.get_tool_definitions()
+            payload["tools"] = capability_index.filter_schemas(
+                domains=domain_hints, available_only=True
+            )
             payload["tool_choice"] = "auto"
         if getattr(self.config, "llm_disable_reasoning", False):
             payload["reasoning"] = {"effort": "none"}
@@ -1731,6 +1734,76 @@ class Brain:
             desktop_actions.clear_halt()
             logger.info("Desktop control resumed by user command: %s", user_input)
             yield "Desktop control resumed."
+            return
+
+        # --- Authoritative Deterministic Fast-Paths (Telemetry, Volume, Settings, Focus, Filesystem, Browser) ---
+        from charlie.fastpaths import execute_fast_path, match_fast_path
+
+        fp_match = match_fast_path(user_input)
+        if fp_match is not None:
+            logger.info(
+                "Deterministic fast-path matched: %s -> %s (domain=%s)",
+                user_input,
+                fp_match.intent,
+                fp_match.target_domain,
+            )
+            requirement, risk_class, requirement_reason = autonomy_evaluate(
+                fp_match.tool_name, fp_match.arguments
+            )
+            if requirement == Requirement.BLOCK:
+                msg = f"Operation '{fp_match.intent}' is blocked by security policy: {requirement_reason}"
+                yield msg
+                return
+            if requirement == Requirement.APPROVE:
+                approved = await self.request_tool_approval(
+                    fp_match.tool_name,
+                    fp_match.arguments,
+                    reason=requirement_reason or f"Fast-path action '{fp_match.intent}' requires confirmation",
+                    platform=platform,
+                    risk_class=risk_class.value if hasattr(risk_class, "value") else str(risk_class),
+                )
+                if not approved:
+                    msg = f"Operation '{fp_match.intent}' was declined."
+                    yield msg
+                    return
+
+            op = capability_index.get_operation(fp_match.tool_name)
+            leases = op.required_leases if op else ()
+
+            async def _run_fast_path() -> str:
+                res = await asyncio.to_thread(execute_fast_path, fp_match)
+                if fp_match.verifier_name:
+                    try:
+                        from charlie.verifiers import run_verifier_for_match
+
+                        v_res = await asyncio.to_thread(
+                            run_verifier_for_match,
+                            fp_match.verifier_name,
+                            fp_match.tool_name,
+                            fp_match.arguments,
+                            res,
+                        )
+                        logger.info(
+                            "Fast-path verification [%s]: status=%s, verified=%s (%s)",
+                            fp_match.verifier_name,
+                            v_res.status,
+                            v_res.verified,
+                            v_res.message,
+                        )
+                    except Exception as ve:
+                        logger.debug("Fast-path verifier %s exception: %s", fp_match.verifier_name, ve)
+                return res
+
+            if leases:
+                from charlie.resource_locks import default_lease_manager
+
+                async with await default_lease_manager.acquire_many(leases, f"fastpath.{fp_match.intent}"):
+                    fp_res = await _run_fast_path()
+            else:
+                fp_res = await _run_fast_path()
+
+            self.world_model.record_event(f"fastpath_{fp_match.intent}", fp_res)
+            yield fp_res
             return
 
         # --- Fast-path: close app (matcher pure, taskkill runs only after a confirmed match) ---

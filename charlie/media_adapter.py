@@ -66,12 +66,26 @@ def _volume_snapshot() -> dict:
         return {"volume_percent": None, "muted": None}
 
 
+def _set_volume_percent(percent: float) -> dict:
+    if _audio_endpoint is None:
+        return {"ok": False, "available": False, "reason": "Windows volume controls unavailable"}
+    try:
+        scalar = max(0.0, min(1.0, float(percent) / 100.0))
+        _audio_endpoint.SetMasterVolumeLevelScalar(scalar, None)
+        return {"ok": True, "available": True, **_volume_snapshot()}
+    except Exception:
+        logger.warning("Windows set volume percent failed", exc_info=True)
+        return {"ok": False, "available": True, "reason": "Set volume failed"}
+
+
 def _volume_control(action: str) -> dict:
     if _audio_endpoint is None:
         return {"ok": False, "available": False, "reason": "Windows volume controls unavailable"}
     try:
         if action == "mute":
             _audio_endpoint.SetMute(not bool(_audio_endpoint.GetMute()), None)
+        elif action == "unmute":
+            _audio_endpoint.SetMute(False, None)
         elif action in ("volume_up", "volume_down"):
             current = float(_audio_endpoint.GetMasterVolumeLevelScalar())
             delta = 0.05 if action == "volume_up" else -0.05
