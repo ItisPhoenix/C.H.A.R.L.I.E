@@ -74,7 +74,7 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 | | |
 |---|---|
 | **Local-first** | All speech processing runs locally -- only the LLM call goes to the network. |
-| **Self-hosted search** | SearXNG integration for private web search, no API key required. |
+| **Web research engine** | Structured SearXNG search, HTTPX fetching, Trafilatura extraction, bounded evidence/citations, and optional Crawl4AI escalation. |
 | **Model Context Protocol (MCP)** | Register tools from external MCP servers at runtime, callable alongside the built-ins. |
 | **Plugin system** | A hybrid plugin loader adds external integration tools (filesystem, browser fetch, calendar, sandboxed Python) when `PLUGINS_ENABLED=true`. |
 | **Extension install gate** | Content-hash + prompt-injection heuristic scan gates any new extension (OpenAPI import, `SKILL.md`) before it's registered. |
@@ -87,7 +87,8 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 Every tool the Brain can call lives in `charlie/tools.py`, grouped by area:
 
 **Web & knowledge**
-- `web_search` -- self-hosted SearXNG plus Exa / Tavily / DuckDuckGo fallbacks
+- `web_search` -- compatibility wrapper for quick structured research
+- `web_research` -- bounded QUICK/STANDARD/DEEP research with source IDs, citations, products, and media results
 - `session_search` -- full-text (FTS5) search over past conversation history
 - `memory` -- add/replace/remove/consolidate entries in `MEMORY.md`/`USER.md`/`OPINIONS.md`
 - `vector_memory` -- semantic remember/recall across sessions (ChromaDB)
@@ -152,6 +153,13 @@ For agentic desktop control (optional, Windows only):
 
 ```bash
 uv sync --locked --extra desktop
+```
+
+For optional JavaScript-heavy research escalation:
+
+```bash
+uv sync --extra research --extra browser
+playwright install chromium
 ```
 
 Install [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) too if you want the OCR fallback tier
@@ -330,16 +338,23 @@ Charlie also understands a couple of typed directives:
 
 ---
 
-## Search Providers
+## Web Research
 
-Charlie tries search providers in this order:
+Fresh, news, trend, shopping, media, and broad research requests are routed through the
+`ResearchEngine`. Stable explanatory questions stay on the normal LLM path. The engine uses
+bounded asynchronous work and these modes:
 
-1. **SearXNG** (self-hosted, no API key) -- recommended
-2. **Exa** (requires `EXA_API_KEY`)
-3. **Tavily** (requires `TAVILY_API_KEY`)
-4. **DuckDuckGo** (free, no key needed, rate-limited)
+- `quick`: SearXNG snippets only; never starts the interactive browser.
+- `standard`: fetches and extracts selected public pages, then may escalate to Crawl4AI and finally
+  the existing Playwright Browser Executor when HTTP extraction is insufficient.
+- `deep`: standard research plus one bounded evidence-thin follow-up iteration.
 
-Set `SEARXNG_URL` in `.env` for the best experience.
+SearXNG is the default provider. Exa and Tavily are optional fallbacks when their keys are configured;
+DuckDuckGo is used only as a graceful free fallback and can be disabled with
+`RESEARCH_DDG_ENABLED=false`. Set `SEARXNG_URL` in `.env` for the best experience. Public URLs are
+validated against local/private network targets before fetching, and fetched pages are treated as
+untrusted evidence rather than instructions. `RESEARCH_JINA_ENABLED` remains disabled and is not part
+of the required path.
 
 ---
 
