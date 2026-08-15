@@ -66,6 +66,9 @@ class EventType(StrEnum):
     DASHBOARD_VISIBILITY = "dashboard_visibility"
     TERMINAL_COMMAND_RESULT = "terminal_command_result"
     CHAT = "chat"
+    PRESENTATION_INTENT = "presentation_intent"
+    PRESENTATION_UPDATE = "presentation_update"
+    PRESENTATION_DISMISS = "presentation_dismiss"
 
 
 class EventSource(StrEnum):

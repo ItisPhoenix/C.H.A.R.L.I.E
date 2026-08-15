@@ -51,4 +51,28 @@ describe("typed event contract adapter", () => {
     resetEventDedupe();
     expect(adaptEvent({ type: "alert", id: "evt-1", version: 1, timestamp: "now", payload: {} })).not.toBeNull();
   });
+
+  test("accepts valid presentation_intent and enforces required fields", () => {
+    const valid = adaptEvent({
+      type: "presentation_intent",
+      version: 1,
+      id: "pi-evt-1",
+      timestamp: "2026-08-16T00:00:00Z",
+      source: "brain",
+      payload: { id: "intent-1", kind: "widget", widget_type: "system_metric" },
+    });
+    expect(valid).not.toBeNull();
+    expect(valid?.type).toBe("presentation_intent");
+    expect(valid?.payload.kind).toBe("widget");
+
+    const missingRequired = adaptEvent({
+      type: "presentation_intent",
+      version: 1,
+      id: "pi-evt-2",
+      timestamp: "2026-08-16T00:00:00Z",
+      source: "brain",
+      payload: { title: "No ID or kind" },
+    });
+    expect(missingRequired).toBeNull();
+  });
 });

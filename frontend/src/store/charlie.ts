@@ -94,6 +94,35 @@ export interface RuntimeTask {
   capabilityRequirements?: string[];
 }
 
+export interface PresentationIntent {
+  id: string;
+  kind: "silent" | "caption" | "notification" | "widget" | "composed_surface" | "workspace" | "attention";
+  sourceEventId?: string;
+  taskId?: string | null;
+  sessionId?: string | null;
+  capability?: string | null;
+  operation?: string | null;
+  title: string;
+  summary: string;
+  content: Record<string, unknown>;
+  priority: number;
+  attentionLevel: "none" | "low" | "normal" | "high" | "critical";
+  dismissPolicy: "immediate" | "timed" | "manual" | "persistent" | "task_lifetime";
+  autoDismissMs?: number | null;
+  workspaceType?: string | null;
+  widgetType?: string | null;
+  surfaceSpec?: Record<string, unknown> | null;
+  preferredZone: "contextual" | "top_right" | "bottom_right" | "top_left" | "bottom_left" | "center";
+  anchor: "core" | "workspace" | "screen" | "widget";
+  spokenText?: string | null;
+  captionText?: string | null;
+  createdAt: string;
+  expiresAt?: string | null;
+  replaceKey?: string | null;
+  correlationId?: string | null;
+  replayable: boolean;
+}
+
 export interface AudioState {
   muted: boolean;
   volume: number;
@@ -117,6 +146,8 @@ interface CharlieState {
   modals: SurfaceMap;
   workspaces: SurfaceMap;
   notifications: SurfaceMap;
+  presentationIntents: Record<string, PresentationIntent>;
+  activeCaption: string | null;
   activeToolApproval: ToolApprovalRequest | null;
   systemStatus: SystemStatus | null;
   netHistory: number[];
@@ -137,6 +168,7 @@ interface CharlieState {
   addUserMessage: (text: string) => void;
   setChatMessages: (messages: ChatMessage[]) => void;
   dismissAlert: () => void;
+  dismissPresentationIntent: (id: string) => void;
   applyEvent: (event: WSEvent) => void;
 }
 
@@ -183,6 +215,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   modals: {},
   workspaces: {},
   notifications: {},
+  presentationIntents: {},
+  activeCaption: null,
   activeToolApproval: null,
   systemStatus: null,
   netHistory: [],
@@ -200,6 +234,12 @@ export const useCharlieStore = create<CharlieState>((set) => ({
 
   setConnected: (connected) => set({ connected }),
   dismissAlert: () => set({ activeAlert: null }),
+  dismissPresentationIntent: (id: string) =>
+    set((s) => {
+      if (!(id in s.presentationIntents)) return {};
+      const { [id]: _removed, ...rest } = s.presentationIntents;
+      return { presentationIntents: rest };
+    }),
   setActiveToolApproval: (activeToolApproval) => set({ activeToolApproval }),
   seedMcpStatus: (servers) =>
     set((s) => {
@@ -336,6 +376,13 @@ export const useCharlieStore = create<CharlieState>((set) => ({
       case "surface_dismiss":
         applySurfaceDismiss(set, payload);
         return;
+      case "presentation_intent":
+      case "presentation_update":
+        applyPresentationIntentUpsert(set, payload);
+        return;
+      case "presentation_dismiss":
+        applyPresentationIntentDismiss(set, payload);
+        return;
       default:
         return;
     }
@@ -421,5 +468,70 @@ function applySurfaceDismiss(set: (fn: (s: CharlieState) => Partial<CharlieState
       }
     }
     return next;
+  });
+}
+
+function presentationIntentFromPayload(payload: Record<string, unknown>): PresentationIntent {
+  return {
+    id: String(payload.id ?? ""),
+    kind: (payload.kind as PresentationIntent["kind"]) ?? "silent",
+    sourceEventId: typeof payload.source_event_id === "string" ? payload.source_event_id : undefined,
+    taskId: (payload.task_id as string) ?? null,
+    sessionId: (payload.session_id as string) ?? null,
+    capability: (payload.capability as string) ?? null,
+    operation: (payload.operation as string) ?? null,
+    title: String(payload.title ?? ""),
+    summary: String(payload.summary ?? ""),
+    content: (payload.content as Record<string, unknown>) ?? {},
+    priority: Number(payload.priority ?? 50),
+    attentionLevel: (payload.attention_level as PresentationIntent["attentionLevel"]) ?? "normal",
+    dismissPolicy: (payload.dismiss_policy as PresentationIntent["dismissPolicy"]) ?? "timed",
+    autoDismissMs: typeof payload.auto_dismiss_ms === "number" ? payload.auto_dismiss_ms : null,
+    workspaceType: (payload.workspace_type as string) ?? null,
+    widgetType: (payload.widget_type as string) ?? null,
+    surfaceSpec: (payload.surface_spec as Record<string, unknown>) ?? null,
+    preferredZone: (payload.preferred_zone as PresentationIntent["preferredZone"]) ?? "contextual",
+    anchor: (payload.anchor as PresentationIntent["anchor"]) ?? "core",
+    spokenText: (payload.spoken_text as string) ?? null,
+    captionText: (payload.caption_text as string) ?? null,
+    createdAt: String(payload.created_at ?? new Date().toISOString()),
+    expiresAt: (payload.expires_at as string) ?? null,
+    replaceKey: (payload.replace_key as string) ?? null,
+    correlationId: (payload.correlation_id as string) ?? null,
+    replayable: Boolean(payload.replayable ?? false),
+  };
+}
+
+function applyPresentationIntentUpsert(
+  set: (fn: (s: CharlieState) => Partial<CharlieState>) => void,
+  payload: Record<string, unknown>
+): void {
+  const intent = presentationIntentFromPayload(payload);
+  if (!intent.id) return;
+  set((s) => {
+    const nextIntents = { ...s.presentationIntents };
+    if (intent.replaceKey) {
+      for (const [id, item] of Object.entries(nextIntents)) {
+        if (item.replaceKey === intent.replaceKey && id !== intent.id) {
+          delete nextIntents[id];
+        }
+      }
+    }
+    nextIntents[intent.id] = intent;
+    const caption = intent.kind === "caption" ? intent.captionText || intent.summary : s.activeCaption;
+    return { presentationIntents: nextIntents, activeCaption: caption };
+  });
+}
+
+function applyPresentationIntentDismiss(
+  set: (fn: (s: CharlieState) => Partial<CharlieState>) => void,
+  payload: Record<string, unknown>
+): void {
+  const id = String(payload.id ?? "");
+  if (!id) return;
+  set((s) => {
+    if (!(id in s.presentationIntents)) return {};
+    const { [id]: _removed, ...rest } = s.presentationIntents;
+    return { presentationIntents: rest };
   });
 }

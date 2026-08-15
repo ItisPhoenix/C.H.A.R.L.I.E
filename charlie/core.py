@@ -1769,8 +1769,10 @@ class Brain:
 
             op = capability_index.get_operation(fp_match.tool_name)
             leases = op.required_leases if op else ()
+            v_res = None
 
-            async def _run_fast_path() -> str:
+            async def _run_fast_path() -> tuple[str, Any]:
+                nonlocal v_res
                 res = await asyncio.to_thread(execute_fast_path, fp_match)
                 if fp_match.verifier_name:
                     try:
@@ -1792,18 +1794,45 @@ class Brain:
                         )
                     except Exception as ve:
                         logger.debug("Fast-path verifier %s exception: %s", fp_match.verifier_name, ve)
-                return res
+                return res, v_res
 
             if leases:
                 from charlie.resource_locks import default_lease_manager
 
                 async with await default_lease_manager.acquire_many(leases, f"fastpath.{fp_match.intent}"):
-                    fp_res = await _run_fast_path()
+                    fp_res, v_res = await _run_fast_path()
             else:
-                fp_res = await _run_fast_path()
+                fp_res, v_res = await _run_fast_path()
 
-            self.world_model.record_event(f"fastpath_{fp_match.intent}", fp_res)
-            yield fp_res
+            from charlie.presentation import (
+                ExecutionOutcome,
+                PresentationContext,
+                default_presentation_resolver,
+            )
+
+            v_dict = (
+                {
+                    "verified": v_res.verified,
+                    "status": v_res.status,
+                    "message": v_res.message,
+                }
+                if v_res is not None
+                else None
+            )
+            outcome = ExecutionOutcome(
+                request=user_input,
+                capability=fp_match.target_domain,
+                operation=fp_match.semantic_op_id,
+                result=fp_res,
+                verification=v_dict,
+                source="deterministic_fastpath",
+            )
+            p_ctx = PresentationContext(platform=platform)
+            intent = default_presentation_resolver.resolve(outcome, p_ctx)
+            logger.info("Resolved presentation intent: %s (kind=%s)", intent.id, intent.kind)
+            self.world_model.record_event(f"presentation_{intent.kind}", intent.to_dict())
+
+            yield intent.spoken_text or fp_res
             return
 
         # --- Fast-path: close app (matcher pure, taskkill runs only after a confirmed match) ---

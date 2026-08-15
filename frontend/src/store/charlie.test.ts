@@ -200,4 +200,54 @@ describe("applyEvent", () => {
       batteryPercent: null,
     });
   });
+
+  test("presentation_intent upserts intent and updates active caption", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_intent",
+      payload: {
+        id: "pi_1",
+        kind: "widget",
+        title: "CPU Metric",
+        summary: "CPU is at 15%",
+        widget_type: "system_metric",
+        auto_dismiss_ms: 5000,
+        replace_key: "widget:system_metric",
+      },
+    });
+
+    const stored = useCharlieStore.getState().presentationIntents["pi_1"];
+    expect(stored).toBeDefined();
+    expect(stored?.kind).toBe("widget");
+    expect(stored?.widgetType).toBe("system_metric");
+    expect(stored?.autoDismissMs).toBe(5000);
+  });
+
+  test("presentation_intent with replace_key replaces old intent with same key", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_intent",
+      payload: { id: "pi_cpu_1", kind: "widget", replace_key: "widget:system_metric", summary: "CPU 10%" },
+    });
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_intent",
+      payload: { id: "pi_cpu_2", kind: "widget", replace_key: "widget:system_metric", summary: "CPU 15%" },
+    });
+
+    const intents = useCharlieStore.getState().presentationIntents;
+    expect(intents["pi_cpu_1"]).toBeUndefined();
+    expect(intents["pi_cpu_2"]?.summary).toBe("CPU 15%");
+  });
+
+  test("presentation_dismiss removes intent from state", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_intent",
+      payload: { id: "pi_dismiss", kind: "workspace", workspace_type: "research" },
+    });
+    expect(useCharlieStore.getState().presentationIntents["pi_dismiss"]).toBeDefined();
+
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_dismiss",
+      payload: { id: "pi_dismiss" },
+    });
+    expect(useCharlieStore.getState().presentationIntents["pi_dismiss"]).toBeUndefined();
+  });
 });

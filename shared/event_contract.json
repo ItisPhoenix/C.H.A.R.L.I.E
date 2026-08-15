@@ -47,6 +47,9 @@
     "dashboard_panel": {"category": "snapshot", "replay": true, "required": []},
     "dashboard_visibility": {"category": "snapshot", "replay": true, "required": []},
     "terminal_command_result": {"category": "acknowledgement", "replay": false, "required": []},
-    "chat": {"category": "transient", "replay": false, "required": []}
+    "chat": {"category": "transient", "replay": false, "required": []},
+    "presentation_intent": {"category": "snapshot", "replay": true, "required": ["id", "kind"]},
+    "presentation_update": {"category": "snapshot", "replay": true, "required": ["id", "kind"]},
+    "presentation_dismiss": {"category": "acknowledgement", "replay": false, "required": ["id"]}
   }
 }

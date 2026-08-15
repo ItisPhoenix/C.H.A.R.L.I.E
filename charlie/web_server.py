@@ -420,6 +420,13 @@ async def _event_bridge():
                 ttl = event.get("payload", {}).get("ttl_seconds")
                 if sid and ttl:
                     asyncio.create_task(_expire_surface(sid, event, ttl))
+        elif etype in ("presentation_intent", "presentation_update", "presentation_dismiss"):
+            _apply_presentation_event(_active_presentation_intents, event)
+            if etype in ("presentation_intent", "presentation_update"):
+                pid = event.get("payload", {}).get("id")
+                auto_ms = event.get("payload", {}).get("auto_dismiss_ms")
+                if pid and auto_ms:
+                    asyncio.create_task(_expire_presentation_intent(pid, event, float(auto_ms) / 1000.0))
         elif etype in ("tool_approval_request", "tool_approval_resolved"):
             _apply_approval_event(_pending_approvals, event)
 
@@ -852,6 +859,8 @@ _dashboard_visible = True
 _active_surfaces: dict = {}
 # request_id -> tool_approval_request event, replayed like _active_surfaces so a late-connecting window's store gets it
 _pending_approvals: dict = {}
+# presentation_intent_id -> canonical presentation intent event, replayed for persistent workspaces/modals
+_active_presentation_intents: dict = {}
 
 
 def _primary_session_id() -> str:
@@ -885,6 +894,7 @@ def _initial_state_events() -> List[dict]:
     )
     events.extend(_active_surfaces.values())
     events.extend(_pending_approvals.values())
+    events.extend(_active_presentation_intents.values())
     return [replay_event(event, allow_unknown=True) for event in events]
 
 
@@ -892,6 +902,28 @@ async def _expire_surface(surface_id: str, spawned_as: dict, ttl_seconds: float)
     await asyncio.sleep(ttl_seconds)
     if _active_surfaces.get(surface_id) is spawned_as:
         _active_surfaces.pop(surface_id, None)
+
+
+def _apply_presentation_event(cache: dict, event: dict) -> None:
+    """Cache active presentation intents for reconnection replay."""
+    etype = event.get("type", "")
+    payload = event.get("payload", {})
+    pid = payload.get("id")
+    if not pid:
+        return
+    if etype == "presentation_dismiss":
+        cache.pop(pid, None)
+    elif etype in ("presentation_intent", "presentation_update"):
+        if payload.get("replayable") or payload.get("kind") in ("workspace", "attention", "composed_surface"):
+            cache[pid] = event
+        else:
+            cache.pop(pid, None)
+
+
+async def _expire_presentation_intent(intent_id: str, spawned_as: dict, ttl_seconds: float) -> None:
+    await asyncio.sleep(ttl_seconds)
+    if _active_presentation_intents.get(intent_id) is spawned_as:
+        _active_presentation_intents.pop(intent_id, None)
 
 
 def _apply_approval_event(cache: dict, event: dict) -> None:
