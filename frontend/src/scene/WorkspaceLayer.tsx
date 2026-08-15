@@ -6,6 +6,8 @@ import { SystemMonitor } from "../dashboard/SystemMonitor";
 import { Terminal } from "../dashboard/Terminal";
 import { Chat } from "../dashboard/Chat";
 
+import { SurfaceComposer } from "../composer/SurfaceComposer";
+
 interface WorkspaceLayerProps {
   activeWorkspace?: WorkspaceInstance | null;
   onDismiss?: (id: string) => void;
@@ -38,6 +40,27 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
   const wsTitle = active.title || `WORKSPACE // ${wsType.toUpperCase()}`;
 
   const renderWorkspaceContent = () => {
+    // Check if composed surface payload is present
+    const surfacePayload = (active.contentState?.surface_spec ||
+      (active.contentState?.schema_version ? active.contentState : null)) as Record<string, unknown> | null;
+
+    if (surfacePayload || wsType === "composed_surface") {
+      return (
+        <SurfaceComposer
+          spec={
+            surfacePayload || {
+              schema_version: 1,
+              surface_id: active.id,
+              title: wsTitle,
+              target: "workspace",
+              revision: 1,
+              primitives: [{ type: "text", data: { text: active.summary || "Composed surface" } }],
+            }
+          }
+        />
+      );
+    }
+
     switch (wsType) {
       case "tasks":
         return <Tasks />;

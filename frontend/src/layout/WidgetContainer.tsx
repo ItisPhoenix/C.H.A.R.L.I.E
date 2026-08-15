@@ -1,5 +1,6 @@
 import { useRef, useState, type PointerEvent, type ReactElement } from "react";
 import type { WidgetInstance } from "./widgetStore";
+import { SurfaceComposer } from "../composer/SurfaceComposer";
 
 interface WidgetContainerProps {
   widget: WidgetInstance;
@@ -194,8 +195,26 @@ export function WidgetContainer({
 
       {/* Body content */}
       <div className="p-3.5 overflow-auto text-left h-[calc(100%-42px)]">
-        <h4 className="text-xs font-semibold text-slate-200 mb-1">{widget.title}</h4>
-        <p className="text-xs text-cyan-100/85 leading-relaxed">{widget.summary}</p>
+        {widget.content?.surface_spec || widget.content?.schema_version || widget.widgetType === "composed_surface" ? (
+          <SurfaceComposer
+            spec={
+              (widget.content.surface_spec as Record<string, unknown>) ||
+              (widget.content.schema_version ? widget.content : {
+                schema_version: 1,
+                surface_id: widget.id,
+                title: widget.title,
+                target: "widget",
+                revision: 1,
+                primitives: [{ type: "text", data: { text: widget.summary } }],
+              })
+            }
+          />
+        ) : (
+          <>
+            <h4 className="text-xs font-semibold text-slate-200 mb-1">{widget.title}</h4>
+            <p className="text-xs text-cyan-100/85 leading-relaxed">{widget.summary}</p>
+          </>
+        )}
       </div>
 
       {/* Resize Handle (Bottom-Right Corner) */}

@@ -50,6 +50,7 @@
     "chat": {"category": "transient", "replay": false, "required": []},
     "presentation_intent": {"category": "snapshot", "replay": true, "required": ["id", "kind"]},
     "presentation_update": {"category": "snapshot", "replay": true, "required": ["id", "kind"]},
-    "presentation_dismiss": {"category": "acknowledgement", "replay": false, "required": ["id"]}
+    "presentation_dismiss": {"category": "acknowledgement", "replay": false, "required": ["id"]},
+    "surface_action": {"category": "request", "replay": false, "required": ["surface_id", "action_id"]}
   }
 }

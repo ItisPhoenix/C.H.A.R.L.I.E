@@ -69,6 +69,8 @@ class EventType(StrEnum):
     PRESENTATION_INTENT = "presentation_intent"
     PRESENTATION_UPDATE = "presentation_update"
     PRESENTATION_DISMISS = "presentation_dismiss"
+    SURFACE_ACTION = "surface_action"
+
 
 
 class EventSource(StrEnum):

@@ -887,6 +887,9 @@ class PresentationResolver:
     ) -> PresentationIntent:
         data = outcome.result if isinstance(outcome.result, dict) else {}
         surface_type = data.get("surface_type", "comparison")
+        target = data.get("target", "workspace")
+        is_workspace = target == "workspace"
+
         return PresentationIntent(
             kind=PresentationKind.COMPOSED_SURFACE,
             task_id=outcome.task_id,
@@ -895,16 +898,19 @@ class PresentationResolver:
             operation=outcome.operation,
             title=data.get("title", "Composed Surface"),
             summary=data.get("summary", ""),
-            content=data.get("data", {}),
+            content=data.get("data", data),
             surface_spec=data,
             priority=55,
             attention_level=AttentionLevel.NORMAL,
-            dismiss_policy=DismissPolicy.PERSISTENT,
-            preferred_zone=PreferredZone.CENTER,
-            anchor=AnchorTarget.CORE,
+            dismiss_policy=DismissPolicy.PERSISTENT if is_workspace else DismissPolicy.TIMED,
+            auto_dismiss_ms=None if is_workspace else 8000,
+            workspace_type="composed_surface" if is_workspace else None,
+            widget_type="composed_surface" if not is_workspace else None,
+            preferred_zone=PreferredZone.CENTER if is_workspace else PreferredZone.TOP_RIGHT,
+            anchor=AnchorTarget.SCREEN if is_workspace else AnchorTarget.CORE,
             spoken_text=data.get("spoken_summary"),
             caption_text=data.get("caption_summary"),
-            replace_key=f"surface:{surface_type}:{outcome.task_id or 'main'}",
+            replace_key=f"surface:{data.get('surface_id', surface_type)}",
             replayable=True,
         )
 
