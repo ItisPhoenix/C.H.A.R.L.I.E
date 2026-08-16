@@ -141,37 +141,85 @@ def run_qa_captures():
                     const map = window.__CHARLIE_MAP_INSTANCE__;
                     if (!map) return { ready: false };
                     const canvas = document.querySelector('.maplibregl-canvas');
+                    if (!canvas || canvas.width <= 0 || canvas.height <= 0) return { ready: false };
+
+                    const isStyleLoaded = typeof map.isStyleLoaded === 'function' ? map.isStyleLoaded() : true;
+                    const isMapLoaded = typeof map.loaded === 'function' ? map.loaded() : true;
+                    const areTilesLoaded = typeof map.areTilesLoaded === 'function' ? map.areTilesLoaded() : true;
+                    const isMoving = typeof map.isMoving === 'function' ? map.isMoving() : false;
+                    const hasLayers = Boolean(map.getStyle() && map.getStyle().layers && map.getStyle().layers.length > 0);
+
+                    // Check WebGL Context validity
+                    let isContextValid = false;
+                    try {
+                        const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+                        isContextValid = Boolean(gl && !gl.isContextLost());
+                    } catch {
+                        isContextValid = false;
+                    }
+
+                    // Basemap is genuinely renderable when map loaded, style loaded, tiles loaded, layers exist, and WebGL active
+                    const basemapVisible = isStyleLoaded && isMapLoaded && areTilesLoaded && hasLayers && isContextValid;
+
+                    // Verify route presence from actual active renderer (Deck.gl Tier A/B or MapLibre native Tier C)
                     const stores = window.__CHARLIE_STORES__;
                     const mapStore = stores?.map?.getState?.();
                     const hasRouteInStore = Boolean(mapStore?.route && ((mapStore.route.geometry && mapStore.route.geometry.length > 1) || (mapStore.route.coordinates && mapStore.route.coordinates.length > 1)));
-                    const hasNativeRouteSource = Boolean(map.getSource && map.getSource('charlie-route-source'));
-                    const isDeckActive = Boolean(map._controls?.some(c => c && (c.deck || c._deck || c.props)));
-                    const hasCanvas = Boolean(canvas && canvas.width > 0 && canvas.height > 0);
+
+                    let hasDeckRoute = false;
+                    if (map._controls) {
+                        for (const ctrl of map._controls) {
+                            const layers = ctrl?._props?.layers || ctrl?.props?.layers || ctrl?._deck?.props?.layers || ctrl?._deck?.layerManager?.layers || ctrl?._layers || [];
+                            if (Array.isArray(layers) && layers.some(l => l && (l.id === 'charlie-route-corridor' || l.id === 'charlie-route-endpoints' || (typeof l.id === 'string' && l.id.includes('route'))))) {
+                                hasDeckRoute = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Check custom interleaved layers in map style if present
+                    if (!hasDeckRoute && map.getStyle && map.getStyle()) {
+                        const styleLayers = map.getStyle().layers || [];
+                        if (styleLayers.some(l => l && (l.id === 'charlie-route-corridor' || l.id === 'charlie-route-endpoints' || (typeof l.id === 'string' && l.id.includes('charlie-route'))))) {
+                            hasDeckRoute = true;
+                        }
+                    }
+
+                    const nativeSource = typeof map.getSource === 'function' ? map.getSource('charlie-route-source') : null;
+                    const hasNativeRoute = Boolean(
+                        nativeSource &&
+                        nativeSource._data &&
+                        ((nativeSource._data.type === 'FeatureCollection' && Array.isArray(nativeSource._data.features) && nativeSource._data.features.length > 0) ||
+                         (nativeSource._data.type === 'Feature' && nativeSource._data.geometry))
+                    );
+
+                    const routeVisibleInRenderer = hasRouteInStore && (hasDeckRoute || hasNativeRoute);
 
                     return {
                         ready: true,
-                        styleLoaded: typeof map.isStyleLoaded === 'function' ? map.isStyleLoaded() : true,
-                        loaded: typeof map.loaded === 'function' ? map.loaded() : true,
-                        isMoving: typeof map.isMoving === 'function' ? map.isMoving() : false,
-                        hasCanvas: hasCanvas,
-                        hasRoute: hasRouteInStore && (hasNativeRouteSource || isDeckActive || true),
-                        basemapLoaded: Boolean(map.getStyle() && map.getStyle().layers && map.getStyle().layers.length > 0),
+                        styleLoaded: isStyleLoaded,
+                        sourceLoaded: areTilesLoaded,
+                        mapIdle: !isMoving,
+                        basemapVisible: basemapVisible,
+                        routeVisible: routeVisibleInRenderer,
                     };
                 }""")
-                
-                style_loaded = status.get("styleLoaded", False)
-                idle = not status.get("isMoving", True)
-                has_canvas = status.get("hasCanvas", False)
-                basemap_loaded = status.get("basemapLoaded", False)
-                route_ok = (not require_route) or status.get("hasRoute", False)
-                
-                if status.get("ready") and style_loaded and idle and has_canvas and basemap_loaded and route_ok:
-                    time.sleep(1.0)
-                    print(f"[QA MAP]\nstyleLoaded={str(style_loaded).lower()}\nsourceLoaded=true\nmapIdle={str(idle).lower()}\nrouteVisible={str(route_ok).lower()}\nbasemapVisible={str(basemap_loaded).lower()}")
-                    return True
+
+                if status.get("ready"):
+                    style_loaded = status.get("styleLoaded", False)
+                    source_loaded = status.get("sourceLoaded", False)
+                    idle = status.get("mapIdle", False)
+                    basemap_visible = status.get("basemapVisible", False)
+                    route_visible = status.get("routeVisible", False)
+                    route_ok = (not require_route) or route_visible
+
+                    if style_loaded and idle and basemap_visible and route_ok:
+                        time.sleep(0.8)
+                        print(f"[QA MAP]\nstyleLoaded={str(style_loaded).lower()}\nsourceLoaded={str(source_loaded).lower()}\nmapIdle={str(idle).lower()}\nrouteVisible={str(route_visible).lower()}\nbasemapVisible={str(basemap_visible).lower()}")
+                        return True
                 time.sleep(0.3)
-            
-            raise TimeoutError(f"HARD QA FAIL: MapLibre did not achieve verified readiness within {timeout_sec}s")
+
+            raise TimeoutError(f"HARD QA FAIL: MapLibre/Deck.gl did not achieve verified readiness within {timeout_sec}s")
 
         # Reset core to idle
         setup_state("""
