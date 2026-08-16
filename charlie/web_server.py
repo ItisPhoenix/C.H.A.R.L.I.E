@@ -72,6 +72,28 @@ def validate_bind_host(host: str) -> Optional[str]:
     return "Charlie has no remote authentication; CHARLIE_HOST must be a loopback address"
 
 
+def validate_ws_origin(origin: Optional[str]) -> bool:
+    """Validate that the WebSocket Origin header is from an authorized local source."""
+    if not origin:
+        return True
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(origin)
+        scheme = (parsed.scheme or "").lower()
+        hostname = (parsed.hostname or "").lower()
+
+        if scheme == "tauri" or origin.startswith("tauri://") or hostname == "tauri.localhost":
+            return True
+
+        if scheme in ("http", "https"):
+            if hostname in ("localhost", "127.0.0.1", "::1", "tauri.localhost"):
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _ensure_mcp_client():
     """Lazily start this process's own MCP client on first need, not a redundant second one at every launch."""
     global mcp_client
@@ -407,7 +429,7 @@ async def _event_bridge():
             payload = event.get("payload", {})
             if payload.get("approved") is True:
                 try:
-                    await _terminal_manager.write(payload["terminal_session_id"], payload["command"])
+                    await _terminal_manager.write(payload["terminal_session_id"], payload["command"], source="charlie")
                 except (KeyError, RuntimeError):
                     logger.warning("Terminal command could not be delivered", exc_info=True)
         elif etype == "extension_proposed":
@@ -447,16 +469,9 @@ async def _event_bridge():
 async def websocket_endpoint(ws: WebSocket):
     global _active_frontend_session
     origin = ws.headers.get("origin")
-    if origin:
-        allowed_origins = (
-            "http://localhost:",
-            "http://127.0.0.1:",
-            "tauri://",
-            "http://tauri.localhost",
-        )
-        if not any(origin.startswith(allowed) for allowed in allowed_origins):
-            logger.warning("Blocked WebSocket connection from unauthorized origin: %s", origin)
-            raise WebSocketException(code=1008)
+    if origin and not validate_ws_origin(origin):
+        logger.warning("Blocked WebSocket connection from unauthorized origin: %s", origin)
+        raise WebSocketException(code=1008)
 
     await ws.accept()
     active_connections.add(ws)
@@ -504,6 +519,77 @@ async def websocket_endpoint(ws: WebSocket):
             await event_bus.send_command({"type": "ws_connection_count", "count": len(active_connections)})
 
 
+@app.websocket("/ws/terminal/{session_id}")
+async def terminal_ws_endpoint(ws: WebSocket, session_id: str = "primary"):
+    """Realtime bidirectional PTY stream for interactive terminal UI."""
+    origin = ws.headers.get("origin")
+    if origin and not validate_ws_origin(origin):
+        logger.warning("Blocked Terminal WebSocket connection from unauthorized origin: %s", origin)
+        raise WebSocketException(code=1008)
+
+    await ws.accept()
+
+    if session_id == "primary" or not session_id:
+        session = await _terminal_manager.get_or_create_primary()
+    else:
+        session = _terminal_manager.get_session(session_id)
+        if session is None or session.status != "running":
+            session = await _terminal_manager.create(session_id=session_id)
+
+    # Initial session snapshot for instant hydration
+    init_payload = {
+        "type": "terminal_init",
+        "session_id": session.session_id,
+        "pid": session.pid,
+        "shell": session.shell_name,
+        "status": session.status,
+        "cols": session.cols,
+        "rows": session.rows,
+        "scrollback": session.get_scrollback(),
+    }
+    await ws.send_text(json.dumps(init_payload))
+
+    queue = session.subscribe()
+
+    async def output_sender():
+        try:
+            while True:
+                msg = await queue.get()
+                await ws.send_text(json.dumps(msg))
+        except (asyncio.CancelledError, WebSocketDisconnect):
+            pass
+        except Exception:
+            logger.debug("Terminal WS output sender finished", exc_info=True)
+
+    sender_task = asyncio.create_task(output_sender())
+
+    try:
+        while True:
+            raw_text = await ws.receive_text()
+            try:
+                data = json.loads(raw_text)
+                msg_type = data.get("type", "")
+                if msg_type == "input":
+                    input_data = data.get("data", "")
+                    await _terminal_manager.write_bytes(session.session_id, input_data, source="user")
+                elif msg_type == "resize":
+                    cols = int(data.get("cols", 80))
+                    rows = int(data.get("rows", 24))
+                    await _terminal_manager.resize(session.session_id, cols, rows)
+                elif msg_type == "interrupt":
+                    await _terminal_manager.interrupt(session.session_id)
+            except json.JSONDecodeError:
+                # Raw keystroke string forwarded directly
+                await _terminal_manager.write_bytes(session.session_id, raw_text, source="user")
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    except Exception as e:
+        logger.warning(f"Terminal WS error: {e}")
+    finally:
+        sender_task.cancel()
+        session.unsubscribe(queue)
+
+
 @app.get("/api/history")
 async def history(limit: int = 50):
     store = _get_store()
@@ -526,13 +612,16 @@ async def status():
 
 @app.post("/api/terminal/sessions")
 async def create_terminal_session():
-    """Start a real local shell; individual commands still require explicit confirmation."""
-    session = await _terminal_manager.create()
+    """Start or retrieve the primary local shell."""
+    session = await _terminal_manager.get_or_create_primary()
     return _terminal_manager.snapshot(session.session_id)
 
 
 @app.get("/api/terminal/sessions/{session_id}")
 async def terminal_session(session_id: str):
+    if session_id == "primary":
+        session = await _terminal_manager.get_or_create_primary()
+        return _terminal_manager.snapshot(session.session_id)
     try:
         return _terminal_manager.snapshot(session_id)
     except KeyError as exc:
@@ -556,7 +645,12 @@ async def terminal_input(session_id: str, data: dict):
     if event_bus is None:
         raise HTTPException(status_code=503, detail="approval channel unavailable")
     try:
-        _terminal_manager.snapshot(session_id)
+        if session_id == "primary":
+            session = await _terminal_manager.get_or_create_primary()
+            target_sid = session.session_id
+        else:
+            _terminal_manager.snapshot(session_id)
+            target_sid = session_id
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="terminal session not found") from exc
     request_id = uuid.uuid4().hex
@@ -565,12 +659,12 @@ async def terminal_input(session_id: str, data: dict):
             "type": "terminal_command_request",
             "payload": {
                 "request_id": request_id,
-                "terminal_session_id": session_id,
+                "terminal_session_id": target_sid,
                 "command": line,
             },
         }
     )
-    return {"status": "approval_pending", "request_id": request_id, "session_id": session_id}
+    return {"status": "approval_pending", "request_id": request_id, "session_id": target_sid}
 
 
 @app.delete("/api/terminal/sessions/{session_id}")

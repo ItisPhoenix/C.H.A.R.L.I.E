@@ -55,6 +55,46 @@ const CATEGORIES = [
   "Audit & Diagnostics",
 ];
 
+const CATEGORY_MAP: Record<string, string> = {
+  "General": "General",
+  "Voice & Speech": "Voice",
+  "VAD & ASR Tuning": "Voice",
+  "Voice": "Voice",
+  "Appearance": "Appearance",
+  "HUD": "HUD",
+  "Map": "Map",
+  "Companion": "Pet",
+  "Pet": "Pet",
+  "LLM": "Models",
+  "Models": "Models",
+  "Vision": "Models",
+  "Memory Files": "Memory",
+  "Memory": "Memory",
+  "Chat Behavior": "Automation",
+  "Autonomy": "Automation",
+  "Automation": "Automation",
+  "Privacy": "Privacy",
+  "Logging & Redaction": "Privacy",
+  "Search Providers": "Tools / MCP",
+  "Web Research": "Tools / MCP",
+  "Research Advanced": "Tools / MCP",
+  "MCP": "Tools / MCP",
+  "Tools / MCP": "Tools / MCP",
+  "Plugins": "Tools / MCP",
+  "Telegram": "Integrations",
+  "Calendar": "Integrations",
+  "Media": "Integrations",
+  "Integrations": "Integrations",
+  "Server": "System",
+  "System": "System",
+  "Developer": "Developer",
+  "Debug": "Developer",
+};
+
+function getCategoryForGroup(group: string): string {
+  return CATEGORY_MAP[group] || group;
+}
+
 export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElement {
   const [fields, setFields] = useState<ConfigField[]>([
     { key: "ASSISTANT_NAME", label: "Assistant Identity Name", value: "C.H.A.R.L.I.E.", group: "General", type: "str", secret: false, restart: null, is_set: true },
@@ -202,9 +242,18 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
   const visibleGroups = useMemo(() => {
     if (activeCategory === "All") return groups;
     if (activeCategory === "Audit & Diagnostics") return {};
+    if (activeCategory === "Map") {
+      return Object.fromEntries(
+        Object.entries(groups).filter(
+          ([group]) => getCategoryForGroup(group).toLowerCase() === "map"
+        )
+      );
+    }
     return Object.fromEntries(
       Object.entries(groups).filter(
-        ([group]) => group.toLowerCase() === activeCategory.toLowerCase()
+        ([group]) =>
+          getCategoryForGroup(group).toLowerCase() === activeCategory.toLowerCase() ||
+          group.toLowerCase() === activeCategory.toLowerCase()
       )
     );
   }, [groups, activeCategory]);
@@ -242,7 +291,12 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
             const hasData =
               cat === "All" ||
               cat === "Audit & Diagnostics" ||
-              Object.keys(groups).some((g) => g.toLowerCase() === cat.toLowerCase());
+              cat === "Map" ||
+              Object.keys(groups).some(
+                (g) =>
+                  getCategoryForGroup(g).toLowerCase() === cat.toLowerCase() ||
+                  g.toLowerCase() === cat.toLowerCase()
+              );
 
             return (
               <button
@@ -253,7 +307,7 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
                   activeCategory === cat
                     ? "bg-cyan-950/90 border border-cyan-400/50 text-cyan-200 shadow-sm shadow-cyan-500/20"
                     : "text-slate-400 hover:text-cyan-200 hover:bg-cyan-950/30"
-                } ${!hasData && cat !== "All" && cat !== "Audit & Diagnostics" ? "opacity-40" : ""}`}
+                } ${!hasData && cat !== "All" ? "opacity-40" : ""}`}
               >
                 <span>{cat}</span>
                 {activeCategory === cat && <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />}

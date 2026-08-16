@@ -113,7 +113,7 @@ describe("Phase 9 Workspaces Suite", () => {
 
   test("TerminalWorkspace renders terminal header and command runner", () => {
     render(<TerminalWorkspace workspace={{ ...mockWorkspace, type: "terminal" }} />);
-    expect(screen.getByText(/CHARLIE TERMINAL/i)).toBeDefined();
+    expect(screen.getByText(/CHARLIE HOST TERMINAL/i)).toBeDefined();
   });
 
   test("ConversationWorkspace renders thread messages", () => {

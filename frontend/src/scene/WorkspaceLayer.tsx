@@ -10,6 +10,7 @@ import { VisionWorkspace } from "./workspaces/VisionWorkspace";
 import { DocumentWorkspace } from "./workspaces/DocumentWorkspace";
 import { TerminalWorkspace } from "./workspaces/TerminalWorkspace";
 import { ConversationWorkspace } from "./workspaces/ConversationWorkspace";
+import { Settings } from "../dashboard/Settings";
 
 // Lazy-load MapWorkspace to avoid eagerly loading MapLibre/Deck.gl on idle Charlie
 const MapWorkspace = lazy(() =>
@@ -109,6 +110,9 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
       case "conversation":
       case "chat":
         return <ConversationWorkspace workspace={active} />;
+      case "settings":
+      case "config":
+        return <Settings embed={true} />;
       default:
         return (
           <div className="my-auto py-6 text-sm text-cyan-100/90 max-w-2xl leading-relaxed">

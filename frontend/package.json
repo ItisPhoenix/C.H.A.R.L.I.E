@@ -16,6 +16,8 @@
     "@deck.gl/layers": "^9.3.10",
     "@deck.gl/mapbox": "^9.3.10",
     "@phosphor-icons/react": "^2.1.10",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "maplibre-gl": "^6.4.0",
     "motion": "^13.1.0",
     "pmtiles": "^4.5.0",
