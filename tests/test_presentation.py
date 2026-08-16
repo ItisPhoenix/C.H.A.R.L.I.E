@@ -360,3 +360,20 @@ class TestEventContractDrift:
         assert evt["payload"]["id"] == "intent_abc"
         assert evt["payload"]["kind"] == "widget"
         assert evt["payload"]["auto_dismiss_ms"] == 5000
+
+    def test_map_query_resolves_to_map_workspace(self):
+        resolver = PresentationResolver()
+        outcome = ExecutionOutcome(
+            request="where is tokyo?",
+            capability="map",
+            operation="map.navigate",
+            result="Tokyo is the capital of Japan located at 35.6895° N, 139.6917° E.",
+            data={"center": [139.6917, 35.6895], "zoom": 11, "name": "Tokyo"},
+            status="completed",
+        )
+        intent = resolver.resolve(outcome)
+        assert intent.kind == PresentationKind.WORKSPACE
+        assert intent.workspace_type == "map"
+        assert intent.content["center"] == [139.6917, 35.6895]
+        assert intent.dismiss_policy == DismissPolicy.PERSISTENT
+        assert intent.preferred_zone == PreferredZone.CENTER

@@ -11,8 +11,14 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@deck.gl/aggregation-layers": "^9.3.10",
+    "@deck.gl/core": "^9.3.10",
+    "@deck.gl/layers": "^9.3.10",
+    "@deck.gl/mapbox": "^9.3.10",
     "@phosphor-icons/react": "^2.1.10",
+    "maplibre-gl": "^6.4.0",
     "motion": "^13.1.0",
+    "pmtiles": "^4.5.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.2",

@@ -29,6 +29,10 @@ export type PrimitiveType =
   | "divider"
   | "action"
   | "layout"
+  | "spatial_map"
+  | "density_heatmap"
+  | "telemetry_gauges"
+  | "process_telemetry"
   | "map_placeholder";
 
 export type LayoutType = "stack" | "row" | "grid" | "columns" | "section";

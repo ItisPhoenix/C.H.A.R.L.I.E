@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactElement } from "react";
 import { Panel } from "./Panel";
+import { useMapStore } from "../map/mapStore";
 
 interface ConfigField {
   key: string;
@@ -41,6 +42,7 @@ const CATEGORIES = [
   "Voice",
   "Appearance",
   "HUD",
+  "Map",
   "Pet",
   "Models",
   "Memory",
@@ -337,11 +339,85 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
                 </div>
               </section>
             ))
-          ) : activeCategory !== "Audit & Diagnostics" ? (
+          ) : activeCategory !== "Audit & Diagnostics" && activeCategory !== "Map" ? (
             <div className="p-6 rounded-xl border border-cyan-500/10 bg-slate-950/40 text-center text-slate-400 text-xs">
               No configuration properties in category &ldquo;{activeCategory}&rdquo;.
             </div>
           ) : null}
+
+          {/* Map & Spatial Intelligence Section */}
+          {(activeCategory === "All" || activeCategory === "Map") && (
+            <section className="settings-group settings-map p-3.5 rounded-xl border border-cyan-500/15 bg-slate-950/60 space-y-3">
+              <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider mb-2.5 border-b border-cyan-500/10 pb-1 flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                Spatial Intelligence Map
+              </h3>
+              <div className="space-y-3 font-sans text-xs">
+                <label className="flex items-center justify-between gap-4 text-slate-300">
+                  <span className="max-w-[240px]">
+                    <strong className="text-slate-200 font-mono text-[11px] block">
+                      Provider Mode
+                    </strong>
+                    <small className="text-[10px] text-slate-400">
+                      Hybrid falls back to online tiles when offline PMTiles are unavailable
+                    </small>
+                  </span>
+                  <select
+                    className="px-2.5 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono w-44"
+                    value={useMapStore.getState().providerMode}
+                    onChange={(e) =>
+                      useMapStore.getState().setProviderMode(e.target.value as "hybrid" | "online" | "offline")
+                    }
+                  >
+                    <option value="hybrid">Hybrid (Auto)</option>
+                    <option value="online">Online Only</option>
+                    <option value="offline">Offline / PMTiles</option>
+                  </select>
+                </label>
+
+                <label className="flex items-center justify-between gap-4 text-slate-300">
+                  <span className="max-w-[240px]">
+                    <strong className="text-slate-200 font-mono text-[11px] block">
+                      Rendering Quality
+                    </strong>
+                    <small className="text-[10px] text-slate-400">
+                      Adaptive visual effects and particle density
+                    </small>
+                  </span>
+                  <select
+                    className="px-2.5 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono w-44"
+                    value={useMapStore.getState().quality}
+                    onChange={(e) =>
+                      useMapStore.getState().setQuality(e.target.value as "auto" | "high" | "medium" | "low")
+                    }
+                  >
+                    <option value="auto">Auto (Hardware)</option>
+                    <option value="high">High Fidelity</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low / Fast</option>
+                  </select>
+                </label>
+
+                <label className="flex items-center justify-between gap-4 text-slate-300">
+                  <span className="max-w-[240px]">
+                    <strong className="text-slate-200 font-mono text-[11px] block">
+                      Local PMTiles Source
+                    </strong>
+                    <small className="text-[10px] text-slate-400">
+                      Optional local PMTiles file path or URL for air-gapped mapping
+                    </small>
+                  </span>
+                  <input
+                    type="text"
+                    placeholder="/tiles/planet.pmtiles"
+                    className="px-2.5 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono w-52 text-right placeholder-slate-600"
+                    defaultValue={useMapStore.getState().pmtilesUrl || ""}
+                    onBlur={(e) => useMapStore.getState().setPmtilesUrl(e.target.value || null)}
+                  />
+                </label>
+              </div>
+            </section>
+          )}
 
           {/* Audit & Diagnostics Section */}
           {(activeCategory === "All" || activeCategory === "Audit & Diagnostics") && (

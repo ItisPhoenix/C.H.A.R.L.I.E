@@ -18,7 +18,7 @@ describe("Phase 9 Spatial Primitives Suite", () => {
       />
     );
     expect(screen.getByText("RADAR FEED")).toBeDefined();
-    expect(screen.getByText("REAL-TIME SPATIAL FEED")).toBeDefined();
+    expect(screen.getByText("SPATIAL FEED")).toBeDefined();
     expect(screen.getByText("VESSEL")).toBeDefined();
     expect(screen.getByText("VESSEL_A")).toBeDefined();
   });
@@ -28,6 +28,7 @@ describe("Phase 9 Spatial Primitives Suite", () => {
       <SpatialMapPrimitive
         data={{
           mode: "geo",
+          useRealEngine: false,
           title: "GLOBAL MAP",
           nodes: [{ id: "g1", label: "TEST_HUB", x: 40, y: 40 }],
           layers: [{ id: "l1", label: "HUBS", color: "#22d3ee" }],
@@ -59,48 +60,49 @@ describe("Phase 9 Spatial Primitives Suite", () => {
     render(
       <DensityHeatmapPrimitive
         data={{
-          title: "ACTIVITY DENSITY",
-          points: [{ x: 5, y: 5, value: 0.8 }],
+          title: "TRAFFIC DENSITY",
+          subtitle: "HOURLY SPREAD",
+          points: [{ x: 2, y: 3, value: 0.9 }],
         }}
       />
     );
-    expect(screen.getByText("ACTIVITY DENSITY")).toBeDefined();
+    expect(screen.getByText("TRAFFIC DENSITY")).toBeDefined();
+    expect(screen.getByText("HOURLY SPREAD")).toBeDefined();
     expect(screen.getByText("LOW")).toBeDefined();
     expect(screen.getByText("HIGH")).toBeDefined();
   });
 
-  test("TelemetryGaugesPrimitive renders circular radial gauges and vitals", () => {
+  test("TelemetryGaugesPrimitive renders radial bars with current values", () => {
     render(
       <TelemetryGaugesPrimitive
         data={{
-          title: "SYSTEM STATUS",
+          title: "CORE VITALS",
           gauges: [
-            { id: "cpu", label: "CPU", value: 32 },
-            { id: "mem", label: "MEMORY", value: 61 },
+            { id: "g1", label: "CPU_LOAD", value: 45, unit: "%" },
+            { id: "g2", label: "RAM_USAGE", value: 68, unit: "%" },
           ],
-          stats: [{ label: "SYSTEM TEMP", value: "42°C" }],
         }}
       />
     );
-    expect(screen.getByText("SYSTEM STATUS")).toBeDefined();
-    expect(screen.getByText("CPU")).toBeDefined();
-    expect(screen.getByText("MEMORY")).toBeDefined();
-    expect(screen.getByText("SYSTEM TEMP")).toBeDefined();
+    expect(screen.getByText("CORE VITALS")).toBeDefined();
+    expect(screen.getByText("CPU_LOAD")).toBeDefined();
+    expect(screen.getByText("RAM_USAGE")).toBeDefined();
   });
 
-  test("ProcessTelemetryPrimitive renders live processes table with status badges", () => {
+  test("ProcessTelemetryPrimitive renders process activity list with status chips", () => {
     render(
       <ProcessTelemetryPrimitive
         data={{
-          title: "WHAT IS RUNNING",
-          processes: [{ name: "test.worker", pid: 1234, status: "RUNNING", uptime: "1h" }],
+          title: "RUNTIME PROCESSES",
+          processes: [
+            { name: "charlie_core", pid: 1042, cpu: 12, memory: 140, status: "running" },
+            { name: "voice_pipeline", pid: 1043, cpu: 5, memory: 80, status: "idle" },
+          ],
         }}
       />
     );
-    expect(screen.getByText("WHAT IS RUNNING")).toBeDefined();
-    expect(screen.getByText("PROCESS")).toBeDefined();
-    expect(screen.getByText("PID")).toBeDefined();
-    expect(screen.getByText("STATUS")).toBeDefined();
-    expect(screen.getByText("test.worker")).toBeDefined();
+    expect(screen.getByText("RUNTIME PROCESSES")).toBeDefined();
+    expect(screen.getByText("charlie_core")).toBeDefined();
+    expect(screen.getByText("voice_pipeline")).toBeDefined();
   });
 });

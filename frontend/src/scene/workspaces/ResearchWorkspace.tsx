@@ -5,6 +5,7 @@ import { DensityHeatmapPrimitive, type DensityHeatmapData } from "../../composer
 import { SourceEvidencePrimitive, type SourceCardItem } from "../../composer/primitives/SourceEvidencePrimitive";
 import { TimelinePrimitive, type TimelineItem } from "../../composer/primitives/TimelinePrimitive";
 import { ChartPrimitive } from "../../composer/primitives/ChartPrimitive";
+import { ContextCard, ContextCardHeader, ContextCardBody, ContextCardMetadata } from "../../ui/context";
 
 export interface FindingItem {
   id?: string;
@@ -18,7 +19,12 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
   const [disclosureLevel, setDisclosureLevel] = useState<1 | 2 | 3>(2);
 
   const subtitle = String(content.subtitle || content.category || "");
-  const objective = String(content.objective || content.summary || workspace.summary || "Evaluate operational readiness and intelligence correlation vectors.");
+  const objective = String(
+    content.objective ||
+    content.summary ||
+    workspace.summary ||
+    "Evaluate operational readiness and intelligence correlation vectors."
+  );
 
   // Dynamic Findings data strictly from payload
   const findings: FindingItem[] = Array.isArray(content.findings) ? (content.findings as FindingItem[]) : [];
@@ -26,33 +32,17 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
   const renderFindingIcon = (type?: string) => {
     switch (type) {
       case "trend":
-        return (
-          <div className="w-8 h-8 rounded-lg bg-cyan-950/70 border border-cyan-500/30 flex items-center justify-center text-cyan-300 text-xs shadow-sm shadow-cyan-500/20">
-            ↗
-          </div>
-        );
+        return "↗";
       case "radar":
       case "intercept":
-        return (
-          <div className="w-8 h-8 rounded-lg bg-cyan-950/70 border border-cyan-500/30 flex items-center justify-center text-cyan-300 text-xs shadow-sm shadow-cyan-500/20">
-            ◎
-          </div>
-        );
+        return "◎";
       case "signal":
-        return (
-          <div className="w-8 h-8 rounded-lg bg-cyan-950/70 border border-cyan-500/30 flex items-center justify-center text-cyan-300 text-xs shadow-sm shadow-cyan-500/20">
-            ((•))
-          </div>
-        );
+        return "((•))";
       case "anomaly":
       case "shield":
       case "alert":
       default:
-        return (
-          <div className="w-8 h-8 rounded-lg bg-cyan-950/70 border border-cyan-500/30 flex items-center justify-center text-cyan-300 text-xs shadow-sm shadow-cyan-500/20">
-            ⚠
-          </div>
-        );
+        return "⚠";
     }
   };
 
@@ -134,14 +124,10 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Left Column: Objective & Density Spectrum */}
           <div className="lg:col-span-4 flex flex-col gap-4">
-            <div className="space-y-2 p-4 rounded-xl border border-cyan-500/15 bg-slate-950/50 backdrop-blur-md">
-              <div className="text-[10px] text-cyan-400 font-bold uppercase tracking-wider">
-                RESEARCH OBJECTIVE
-              </div>
-              <p className="text-[13px] text-slate-200 font-sans leading-relaxed">
-                {objective}
-              </p>
-            </div>
+            <ContextCard variant="standard">
+              <ContextCardHeader title="Research Objective" category="OBJECTIVE" />
+              <ContextCardBody text={objective} />
+            </ContextCard>
 
             {hasHeatmapData && disclosureLevel >= 2 && (
               <DensityHeatmapPrimitive data={heatmapData!} />
@@ -170,7 +156,7 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
                   </span>
                   <span className="text-emerald-400 font-bold">↑ 78%</span>
                 </div>
-                <div className="h-28 rounded-xl border border-cyan-500/15 bg-slate-950/50 backdrop-blur-md p-2">
+                <ContextCard variant="compact" className="h-28">
                   <ChartPrimitive
                     primitive={{
                       id: "chart_activity",
@@ -178,7 +164,7 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
                       data: chartData,
                     }}
                   />
-                </div>
+                </ContextCard>
               </div>
             )}
 
@@ -188,20 +174,14 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
               </div>
               <div className="flex flex-col gap-2">
                 {findings.map((f, idx) => (
-                  <div
-                    key={f.id || idx}
-                    className="flex items-start gap-3 p-3 rounded-xl bg-slate-950/50 border border-cyan-500/15 hover:border-cyan-500/35 transition shadow-sm"
-                  >
-                    {renderFindingIcon(f.iconType)}
-                    <div className="flex-1 text-left">
-                      <div className="text-xs font-bold text-slate-100 uppercase tracking-tight">
-                        {f.title}
-                      </div>
-                      <div className="text-[12px] text-slate-300 mt-1 leading-relaxed font-sans">
-                        {f.detail}
-                      </div>
-                    </div>
-                  </div>
+                  <ContextCard key={f.id || idx} variant="standard" interactive>
+                    <ContextCardHeader
+                      title={f.title}
+                      icon={renderFindingIcon(f.iconType)}
+                      category={`FINDING #${idx + 1}`}
+                    />
+                    <ContextCardBody text={f.detail} />
+                  </ContextCard>
                 ))}
               </div>
             </div>
@@ -212,21 +192,21 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Left 5 Cols: Objective Narrative & Reliability */}
           <div className="lg:col-span-5 flex flex-col gap-4">
-            <div className="space-y-4 p-6 rounded-2xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md min-h-[220px] shadow-xl shadow-cyan-950/20 flex flex-col justify-between">
+            <ContextCard variant="standard" elevation="elevated" className="min-h-[220px] flex flex-col justify-between">
               <div>
-                <div className="text-[10px] text-cyan-400 font-bold uppercase tracking-widest flex items-center justify-between mb-2">
-                  <span>RESEARCH OBJECTIVE</span>
-                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-                </div>
-                <p className="text-[13.5px] text-slate-100 font-sans leading-relaxed">
-                  {objective}
-                </p>
+                <ContextCardHeader
+                  title="Research Objective"
+                  category="PRIMARY OBJECTIVE"
+                  badge="ACTIVE"
+                  badgeVariant="cyan"
+                />
+                <ContextCardBody text={objective} />
               </div>
-              <div className="pt-3 border-t border-cyan-500/15 flex items-center justify-between text-[10px] text-cyan-400/80">
-                <span>CONFIDENCE: 99.2%</span>
-                <span className="text-emerald-400 font-bold">STATUS: VERIFIED</span>
-              </div>
-            </div>
+              <ContextCardMetadata
+                confidence={0.992}
+                items={[{ label: "STATUS", value: "VERIFIED", highlight: true }]}
+              />
+            </ContextCard>
 
             {hasHeatmapData && disclosureLevel >= 2 && (
               <DensityHeatmapPrimitive data={heatmapData!} />
@@ -240,26 +220,24 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
               {findings.map((f, idx) => (
-                <div
+                <ContextCard
                   key={f.id || idx}
-                  className="flex flex-col justify-between p-4 rounded-xl bg-slate-950/60 border border-cyan-500/20 hover:border-cyan-400/40 transition shadow-md min-h-[160px]"
+                  variant="standard"
+                  interactive
+                  className="min-h-[160px] flex flex-col justify-between"
                 >
-                  <div className="flex items-start gap-3">
-                    {renderFindingIcon(f.iconType)}
-                    <div className="flex-1 text-left">
-                      <div className="text-xs font-bold text-cyan-200 uppercase tracking-tight">
-                        {f.title}
-                      </div>
-                      <div className="text-[12.5px] text-slate-300 mt-1.5 leading-relaxed font-sans">
-                        {f.detail}
-                      </div>
-                    </div>
+                  <div>
+                    <ContextCardHeader
+                      title={f.title}
+                      icon={renderFindingIcon(f.iconType)}
+                      category={`FINDING #${idx + 1}`}
+                    />
+                    <ContextCardBody text={f.detail} />
                   </div>
-                  <div className="w-full pt-2 border-t border-cyan-500/10 flex justify-between items-center text-[9px] text-cyan-400/60 font-mono mt-2">
-                    <span>FINDING #{idx + 1}</span>
-                    <span className="text-cyan-300">CONFIRMED ↗</span>
-                  </div>
-                </div>
+                  <ContextCardMetadata
+                    items={[{ label: "VERIFICATION", value: "CONFIRMED ↗", highlight: true }]}
+                  />
+                </ContextCard>
               ))}
             </div>
           </div>

@@ -1512,6 +1512,63 @@ async def get_services_status():
     return {"services": services}
 
 
+# ---------------------------------------------------------------------------
+# Geospatial Subsystem Endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/geo/geocode")
+async def geo_geocode(q: str, limit: int = 5):
+    """Geocode a place name or address via normalized backend provider."""
+    from charlie.geo import geo_service
+
+    results = await geo_service.geocode(q, limit=limit)
+    return {"query": q, "results": [r.to_dict() for r in results]}
+
+
+@app.get("/api/geo/route")
+async def geo_route(
+    start_lon: float,
+    start_lat: float,
+    dest_lon: float,
+    dest_lat: float,
+    start_label: str = "Origin",
+    dest_label: str = "Destination",
+    mode: str = "driving",
+):
+    """Calculate vehicular/corridor route between two points."""
+    from charlie.geo import geo_service
+
+    route_res = await geo_service.get_route(
+        start=[start_lon, start_lat],
+        destination=[dest_lon, dest_lat],
+        start_label=start_label,
+        destination_label=dest_label,
+        mode=mode,
+    )
+    if not route_res:
+        raise HTTPException(status_code=404, detail="Route could not be calculated")
+    return route_res.to_dict()
+
+
+@app.get("/api/geo/layer/{layer_id}")
+async def geo_layer(layer_id: str):
+    """Fetch real-time spatial intelligence features for a specific layer."""
+    from charlie.geo import geo_service
+
+    layer_res = await geo_service.get_layer_data(layer_id)
+    return layer_res.to_dict()
+
+
+@app.get("/api/geo/layers")
+async def geo_layers():
+    """List operational spatial intelligence layers."""
+    from charlie.geo import geo_service
+
+    return {"layers": geo_service.get_registered_layers()}
+
+
+
 def start_server(
     pub_port: int = DEFAULT_EVENT_PORT, pull_port: int = DEFAULT_COMMAND_PORT
 ):

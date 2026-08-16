@@ -304,6 +304,7 @@ DEFAULT_NOTIFICATION_MS = 5000
 
 _EXPLICIT_SHOW_RE = re.compile(r"\b(show|open|display|bring up|view|inspect)\b", re.IGNORECASE)
 _EXPLICIT_TELL_RE = re.compile(r"\b(tell|say|read|speak|just tell|only tell)\b", re.IGNORECASE)
+_MAP_QUERY_RE = re.compile(r"\b(where is|where's|route from|take me to|fly to|show earthquakes|show conflicts|show map|open map|spatial map)\b", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +439,25 @@ class PresentationResolver:
             outcome.operation and outcome.operation in ("research.web.execute", "research_task", "deep_research")
         ):
             return self._resolve_research_workspace(outcome, ctx, result_text)
+
+        # Geospatial Map & Intelligence -> WORKSPACE (map)
+        if (
+            outcome.capability in ("map", "spatial", "geospatial", "charlie.map")
+            or (
+                outcome.operation
+                and outcome.operation
+                in (
+                    "map.view",
+                    "map.navigate",
+                    "map.route",
+                    "map.layer",
+                    "open_map",
+                    "geocoding",
+                )
+            )
+            or (outcome.request and _MAP_QUERY_RE.search(outcome.request))
+        ):
+            return self._resolve_map_workspace(outcome, ctx, result_text)
 
         # Daily Briefing / News -> WORKSPACE (briefing)
         if outcome.operation in ("news_briefing", "daily_summary") or (
@@ -740,6 +760,46 @@ class PresentationResolver:
             anchor=AnchorTarget.SCREEN,
             caption_text="Terminal Workspace active",
             replace_key="workspace:terminal",
+            replayable=True,
+        )
+
+    def _resolve_map_workspace(
+        self,
+        outcome: ExecutionOutcome,
+        ctx: PresentationContext,
+        result_text: str,
+    ) -> PresentationIntent:
+        content_dict: Dict[str, Any] = {"mode": "geo"}
+        if isinstance(outcome.result, dict):
+            content_dict.update(outcome.result)
+        if outcome.data:
+            content_dict.update(outcome.data)
+
+        title = content_dict.get("title") or outcome.request or "Spatial Intelligence Map"
+        spoken = (
+            content_dict.get("spoken_summary")
+            or result_text
+            or f"Navigating to {title} on the spatial map."
+        )
+
+        return PresentationIntent(
+            kind=PresentationKind.WORKSPACE,
+            task_id=outcome.task_id,
+            session_id=outcome.session_id,
+            capability=outcome.capability or "map",
+            operation=outcome.operation or "map.view",
+            title=title,
+            summary=result_text[:120] if result_text else "Spatial map navigation active.",
+            content=content_dict,
+            priority=65,
+            attention_level=AttentionLevel.NORMAL,
+            dismiss_policy=DismissPolicy.PERSISTENT,
+            workspace_type="map",
+            preferred_zone=PreferredZone.CENTER,
+            anchor=AnchorTarget.SCREEN,
+            spoken_text=spoken,
+            caption_text=f"Map: {title}",
+            replace_key=f"workspace:map:{outcome.task_id or 'main'}",
             replayable=True,
         )
 

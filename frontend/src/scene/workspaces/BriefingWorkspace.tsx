@@ -3,6 +3,7 @@ import type { WorkspaceInstance } from "../../layout/workspaceStore";
 import { SpatialMapPrimitive, type SpatialMapData } from "../../composer/primitives/SpatialMapPrimitive";
 import { TimelinePrimitive, type TimelineItem } from "../../composer/primitives/TimelinePrimitive";
 import { SourceEvidencePrimitive, type SourceCardItem } from "../../composer/primitives/SourceEvidencePrimitive";
+import { ContextCard, ContextCardHeader, ContextCardBody } from "../../ui/context";
 
 export function BriefingWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
   const content = workspace.contentState || {};
@@ -62,19 +63,16 @@ export function BriefingWorkspace({ workspace }: { workspace: WorkspaceInstance 
 
           {/* Right: Floating Headline, Synthesis, and Timeline (~40%) */}
           <div className="lg:col-span-5 flex flex-col gap-4">
-            {/* Top Headline Block */}
-            <div className="space-y-2.5 p-4 rounded-xl border border-cyan-500/15 bg-slate-950/50 backdrop-blur-md">
-              <div className="text-[10px] text-cyan-400 font-bold uppercase tracking-widest flex items-center justify-between">
-                <span>BRIEFING / NEWS</span>
-                <span className="text-cyan-400/60">TOP HEADLINE</span>
-              </div>
-
-              <h2 className="text-base font-bold text-slate-100 uppercase tracking-tight leading-snug font-sans">
-                {headline}
-              </h2>
-
-              <div className="pt-2 border-t border-cyan-500/10">
-                <div className="text-[10px] text-cyan-400/70 font-semibold uppercase tracking-wider mb-1">
+            {/* Top Headline Block using ContextCard */}
+            <ContextCard variant="standard">
+              <ContextCardHeader
+                title={headline}
+                category="BRIEFING / NEWS"
+                badge="TOP HEADLINE"
+                badgeVariant="cyan"
+              />
+              <ContextCardBody>
+                <div className="text-[10px] text-cyan-400/80 font-bold uppercase tracking-wider mb-1">
                   SUMMARY
                 </div>
                 <p className="text-[13px] text-slate-200 font-sans leading-relaxed">
@@ -83,7 +81,7 @@ export function BriefingWorkspace({ workspace }: { workspace: WorkspaceInstance 
 
                 {/* Story Pagination Dots */}
                 {summaries.length > 1 && (
-                  <div className="flex items-center gap-1.5 mt-2.5">
+                  <div className="flex items-center gap-1.5 mt-3 pt-2 border-t border-cyan-500/10">
                     {summaries.map((_, idx) => (
                       <button
                         key={idx}
@@ -99,12 +97,12 @@ export function BriefingWorkspace({ workspace }: { workspace: WorkspaceInstance 
                     ))}
                   </div>
                 )}
-              </div>
-            </div>
+              </ContextCardBody>
+            </ContextCard>
 
             {/* Key Timeline */}
             {hasTimeline && (
-              <div className="p-3 rounded-xl border border-cyan-500/15 bg-slate-950/50 backdrop-blur-md">
+              <ContextCard variant="compact">
                 <TimelinePrimitive
                   data={{
                     title: "KEY TIMELINE",
@@ -112,7 +110,7 @@ export function BriefingWorkspace({ workspace }: { workspace: WorkspaceInstance 
                     items: timelineItems,
                   }}
                 />
-              </div>
+              </ContextCard>
             )}
           </div>
         </div>
@@ -121,42 +119,43 @@ export function BriefingWorkspace({ workspace }: { workspace: WorkspaceInstance 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Left 7 Cols: Dominant Headline & All Story Bullet Highlights */}
           <div className="lg:col-span-7 flex flex-col gap-4">
-            <div className="space-y-4 p-6 rounded-2xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md shadow-xl shadow-cyan-950/20 min-h-[240px] flex flex-col justify-between">
+            <ContextCard variant="standard" elevation="elevated" className="min-h-[240px] flex flex-col justify-between">
               <div>
-                <div className="text-[10px] text-cyan-400 font-bold uppercase tracking-widest flex items-center justify-between mb-2">
-                  <span>BRIEFING / NEWS</span>
-                  <span className="text-cyan-400/60">INTELLIGENCE SYNTHESIS</span>
-                </div>
-
-                <h2 className="text-lg sm:text-xl font-bold text-slate-100 uppercase tracking-tight leading-snug font-sans">
-                  {headline}
-                </h2>
-              </div>
-
-              <div className="pt-3 border-t border-cyan-500/15 space-y-2.5">
-                <div className="text-[10px] text-cyan-400/80 font-bold uppercase tracking-wider">
-                  KEY INSIGHTS
-                </div>
-                {summaries.map((summary, idx) => (
-                  <div key={idx} className="flex items-start gap-2.5 text-[13.5px] text-slate-200 font-sans leading-relaxed">
-                    <span className="text-cyan-400 font-mono mt-0.5">▪</span>
-                    <span>{summary}</span>
+                <ContextCardHeader
+                  title={headline}
+                  category="BRIEFING / NEWS"
+                  badge="SYNTHESIS"
+                  badgeVariant="cyan"
+                />
+                <ContextCardBody>
+                  <div className="space-y-2 pt-1">
+                    <div className="text-[10px] text-cyan-400/80 font-bold uppercase tracking-wider">
+                      KEY INSIGHTS
+                    </div>
+                    {summaries.map((summary, idx) => (
+                      <div key={idx} className="flex items-start gap-2.5 text-[13px] text-slate-200 font-sans leading-relaxed">
+                        <span className="text-cyan-400 font-mono mt-0.5">▪</span>
+                        <span>{summary}</span>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                </ContextCardBody>
               </div>
-            </div>
+            </ContextCard>
           </div>
 
           {/* Right 5 Cols: Key Timeline */}
           {hasTimeline && (
-            <div className="lg:col-span-5 p-4 rounded-xl border border-cyan-500/15 bg-slate-950/50 backdrop-blur-md">
-              <TimelinePrimitive
-                data={{
-                  title: "KEY TIMELINE",
-                  layout: "vertical",
-                  items: timelineItems,
-                }}
-              />
+            <div className="lg:col-span-5">
+              <ContextCard variant="standard">
+                <TimelinePrimitive
+                  data={{
+                    title: "KEY TIMELINE",
+                    layout: "vertical",
+                    items: timelineItems,
+                  }}
+                />
+              </ContextCard>
             </div>
           )}
         </div>

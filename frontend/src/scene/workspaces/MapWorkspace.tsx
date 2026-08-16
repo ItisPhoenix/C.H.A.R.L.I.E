@@ -1,43 +1,83 @@
-import type { ReactElement } from "react";
+import { useEffect, useRef, type ReactElement } from "react";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
-import { SpatialMapPrimitive, type SpatialMapData } from "../../composer/primitives/SpatialMapPrimitive";
+import { MapEngine, useMapStore } from "../../map";
+import type { MapCommand, MapFeature, MapRoute } from "../../map/types";
 
 export function MapWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
-  const content = workspace.contentState || {};
-  const title = String(content.title || workspace.title || "SPATIAL MAP WORKSPACE").replace(/^WORKSPACE\s*\/\/\s*/i, "");
-  const subtitle = String(content.subtitle || "GEOSPATIAL & TACTICAL NAVIGATION");
+  const contentStr = JSON.stringify(workspace.contentState || {});
+  const lastDispatchedPayloadRef = useRef<string>("");
 
-  const mode = (typeof content.mode === "string" ? content.mode : "geo") as SpatialMapData["mode"];
-  const mapTitle = String(content.map_title || "INTERACTIVE SPATIAL ENVIRONMENT");
-  const mapSubtitle = String(content.map_subtitle || "LAYER ACCELERATED VECTOR ENGINE");
+  const dispatchCommand = useMapStore((s) => s.dispatchCommand);
+  const setLayerEnabled = useMapStore((s) => s.setLayerEnabled);
+  const setSelectedFeature = useMapStore((s) => s.setSelectedFeature);
+  const setRoute = useMapStore((s) => s.setRoute);
+
+  // Synchronize incoming presentation intent payload to MapStore
+  useEffect(() => {
+    if (contentStr === lastDispatchedPayloadRef.current) return;
+    lastDispatchedPayloadRef.current = contentStr;
+
+    let content: Record<string, unknown> = {};
+    try {
+      content = JSON.parse(contentStr);
+    } catch {
+      return;
+    }
+
+    // 1. Direct command payload
+    if (content.command && typeof content.command === "object") {
+      dispatchCommand(content.command as MapCommand);
+      return;
+    }
+
+    // 2. Direct route payload
+    if (content.route && typeof content.route === "object") {
+      const routeData = content.route as MapRoute;
+      setRoute(routeData);
+      dispatchCommand({
+        type: "set_route",
+        route: routeData,
+        fit: true,
+      });
+      return;
+    }
+
+    // 3. Location / FlyTo coordinates payload
+    const coords = (content.center || content.coordinates || content.location) as [number, number] | undefined;
+    if (Array.isArray(coords) && coords.length >= 2) {
+      const zoom = typeof content.zoom === "number" ? content.zoom : 11;
+      dispatchCommand({
+        type: "fly_to",
+        longitude: coords[0],
+        latitude: coords[1],
+        zoom,
+      });
+
+      if (content.name || content.title) {
+        const feat: MapFeature = {
+          id: `loc_${Date.now()}`,
+          label: String(content.name || content.title),
+          description: content.description ? String(content.description) : undefined,
+          coordinates: [coords[0], coords[1]],
+          category: content.category ? String(content.category) : "Location",
+          severity: "normal",
+          color: "#00f0ff",
+        };
+        setSelectedFeature(feat);
+      }
+      return;
+    }
+
+    // 4. Intelligence layer activation payload
+    if (content.layer || content.enable_layer) {
+      const layerId = String(content.layer || content.enable_layer);
+      setLayerEnabled(layerId, true);
+    }
+  }, [contentStr, dispatchCommand, setLayerEnabled, setSelectedFeature, setRoute]);
 
   return (
-    <div className="w-full h-full flex flex-col justify-between font-mono select-none text-left p-2 overflow-y-auto space-y-4">
-      <div className="flex items-start justify-between border-b border-cyan-500/20 pb-3">
-        <div>
-          <div className="text-[10px] text-cyan-400 font-bold tracking-widest uppercase mb-0.5 flex items-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-            MAP / SPATIAL NAVIGATION
-          </div>
-          <h1 className="text-xl font-bold text-slate-100 uppercase tracking-tight font-sans">
-            {title}
-          </h1>
-          <div className="text-xs text-cyan-400/70 tracking-widest uppercase">
-            {subtitle}
-          </div>
-        </div>
-      </div>
-
-      <div className="flex-1 w-full min-h-[440px] flex flex-col">
-        <SpatialMapPrimitive
-          data={{
-            mode,
-            title: mapTitle,
-            subtitle: mapSubtitle,
-            ...((content.spatial_map as SpatialMapData) || {}),
-          }}
-        />
-      </div>
+    <div className="w-full h-full relative">
+      <MapEngine />
     </div>
   );
 }

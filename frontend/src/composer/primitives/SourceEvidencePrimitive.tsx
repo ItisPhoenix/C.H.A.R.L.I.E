@@ -1,5 +1,12 @@
 import { useState, type ReactElement } from "react";
 import type { PrimitiveSpec } from "../surfaceSchema";
+import {
+  ContextCard,
+  ContextCardHeader,
+  ContextCardBody,
+  ContextCardMetadata,
+  ContextCardActions,
+} from "../../ui/context";
 
 export interface SourceCardItem {
   id?: string;
@@ -76,7 +83,7 @@ export function SourceEvidencePrimitive({
         </div>
       )}
 
-      {/* Card Deck Grid (Pure clean typography and telemetry, NO fake skeleton lines) */}
+      {/* Card Deck Grid using canonical ContextCard */}
       {items.length === 0 ? (
         <div className="text-xs text-slate-500 italic py-2">No evidence sources available.</div>
       ) : (
@@ -86,76 +93,91 @@ export function SourceEvidencePrimitive({
             const timeTag = item.time || item.timestamp || "RECENT";
 
             return (
-              <div
+              <ContextCard
                 key={item.id || idx}
+                variant="source"
+                interactive
                 onClick={() => setActiveModalItem(item)}
-                className="p-3.5 rounded-xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md hover:border-cyan-400/50 hover:bg-slate-950/85 transition cursor-pointer flex flex-col justify-between group shadow-sm"
+                className="flex flex-col justify-between group"
               >
-                {/* Top Badge & Glyphs */}
-                <div className="flex items-center justify-between text-[10px] text-cyan-400/80 mb-2">
-                  <div className="flex items-center gap-1.5 font-bold uppercase truncate max-w-[140px]">
-                    <span className="text-xs text-cyan-300">{renderSourceGlyph(item.type)}</span>
-                    <span className="truncate">{pub}</span>
-                  </div>
-                  <span className="text-slate-400 font-mono text-[9px]">{timeTag}</span>
+                <div>
+                  <ContextCardHeader
+                    title={item.title}
+                    category={pub}
+                    icon={renderSourceGlyph(item.type)}
+                    timestamp={timeTag}
+                    className="charlie-card-header-compact"
+                  />
+                  {item.snippet && (
+                    <ContextCardBody>
+                      <p className="text-[11.5px] text-slate-300 line-clamp-2 mt-1">
+                        {item.snippet}
+                      </p>
+                    </ContextCardBody>
+                  )}
                 </div>
 
-                {/* Main Headline / Title */}
-                <div className="text-xs font-bold text-slate-100 group-hover:text-cyan-200 line-clamp-2 uppercase leading-snug font-sans my-1">
-                  {item.title}
-                </div>
-
-                {/* Bottom Footer Metadata */}
-                <div className="pt-2 border-t border-cyan-500/10 flex justify-between items-center text-[9px] text-slate-400 font-mono mt-1">
-                  <span>{item.type ? item.type.toUpperCase() : "VERIFIED_DOC"}</span>
-                  <span className="text-cyan-400 group-hover:translate-x-0.5 transition-transform">→</span>
-                </div>
-              </div>
+                <ContextCardMetadata
+                  confidence={item.confidence}
+                  items={[
+                    {
+                      label: "TYPE",
+                      value: item.type ? item.type.toUpperCase() : "VERIFIED_DOC",
+                      highlight: true,
+                    },
+                  ]}
+                />
+              </ContextCard>
             );
           })}
         </div>
       )}
 
-      {/* Expanded Modal Viewer */}
+      {/* Expanded Modal Viewer using canonical ContextCard floating */}
       {activeModalItem && (
         <div
           className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4"
           onClick={() => setActiveModalItem(null)}
         >
-          <div
-            className="p-6 rounded-2xl bg-slate-950 border border-cyan-400/60 shadow-2xl max-w-lg w-full text-left font-mono"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-cyan-500/20 pb-3 mb-4">
-              <div>
-                <div className="text-xs text-cyan-400 font-bold uppercase">{activeModalItem.title}</div>
-                <div className="text-[10px] text-slate-400 mt-0.5">{activeModalItem.publisher || activeModalItem.domain}</div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveModalItem(null)}
-                className="text-slate-400 hover:text-cyan-200 text-sm cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
+          <div className="max-w-lg w-full" onClick={(e) => e.stopPropagation()}>
+            <ContextCard variant="standard" elevation="floating">
+              <ContextCardHeader
+                title={activeModalItem.title}
+                category={activeModalItem.publisher || activeModalItem.domain || "INTELLIGENCE_SOURCE"}
+                icon={renderSourceGlyph(activeModalItem.type)}
+                onClose={() => setActiveModalItem(null)}
+              />
+              <ContextCardBody>
+                <p className="text-xs text-slate-300 leading-relaxed font-sans mt-2">
+                  {activeModalItem.snippet || "Evidence telemetry snapshot verified during task execution."}
+                </p>
+              </ContextCardBody>
 
-            <div className="text-xs text-slate-300 leading-relaxed font-sans">
-              {activeModalItem.snippet || "Evidence telemetry snapshot verified during task execution."}
-            </div>
+              <ContextCardMetadata
+                confidence={activeModalItem.confidence}
+                items={[
+                  {
+                    label: "CATEGORY",
+                    value: activeModalItem.type?.toUpperCase() || "DOCUMENT",
+                  },
+                ]}
+              />
 
-            {activeModalItem.url && (
-              <div className="mt-4 pt-3 border-t border-cyan-500/15 flex justify-end">
-                <a
-                  href={activeModalItem.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-cyan-400 hover:underline"
-                >
-                  Open External Source ↗
-                </a>
-              </div>
-            )}
+              {activeModalItem.url && (
+                <ContextCardActions
+                  actions={[
+                    {
+                      id: "open-source",
+                      label: "Open External Source ↗",
+                      variant: "primary",
+                      onClick: () => {
+                        window.open(activeModalItem.url, "_blank", "noopener,noreferrer");
+                      },
+                    },
+                  ]}
+                />
+              )}
+            </ContextCard>
           </div>
         </div>
       )}

@@ -39,8 +39,8 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
     minimizeWorkspace(active.id);
   };
 
-  // Render workspace body based on semantic type
   const wsType = (active.type || "custom").toLowerCase();
+  const isSpatialMap = wsType === "map" || wsType === "spatial";
   const wsTitle = active.title || `WORKSPACE // ${wsType.toUpperCase()}`;
 
   const renderWorkspaceContent = () => {
@@ -102,6 +102,44 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
     }
   };
 
+  // Edge-to-Edge Spatial Mode for Map & Spatial Workspaces
+  // ("The map IS the workspace" — no outer rounded card, no generic header box)
+  if (isSpatialMap) {
+    return (
+      <div className="charlie-workspace-layer !p-0 !inset-0" role="region" aria-label="Spatial Map Workspace">
+        <div className="w-full h-full relative pointer-events-auto overflow-hidden">
+          {/* Floating Minimal HUD Controls in Top-Right Safe Zone */}
+          <div className="absolute top-4 right-4 z-40 flex items-center gap-1.5 pointer-events-auto font-mono">
+            <button
+              type="button"
+              onClick={handleMinimize}
+              className="px-2 py-0.5 text-xs rounded bg-slate-950/80 border border-cyan-500/25 text-slate-400 hover:text-cyan-300 hover:border-cyan-400/60 transition cursor-pointer backdrop-blur-md shadow-lg"
+              title="Minimize [_]"
+              aria-label="Minimize workspace"
+            >
+              _
+            </button>
+            <button
+              type="button"
+              onClick={handleClose}
+              className="px-2 py-0.5 text-xs rounded bg-slate-950/80 border border-cyan-500/25 text-slate-400 hover:text-cyan-300 hover:border-cyan-400/60 transition cursor-pointer backdrop-blur-md shadow-lg"
+              title="Close workspace [Esc]"
+              aria-label="Close workspace"
+            >
+              ✕
+            </button>
+          </div>
+
+          {/* Master Map Workspace Canvas */}
+          <div className="w-full h-full">
+            {renderWorkspaceContent()}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Standard Framed Workspace Mode for non-map workspaces
   return (
     <div className="charlie-workspace-layer" role="region" aria-label="Primary Workspace">
       <div className="charlie-workspace-host">
@@ -116,7 +154,7 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
                 </h2>
               </div>
 
-              {/* Minimal HUD Controls (Less desktop-window like) */}
+              {/* Minimal HUD Controls */}
               <div className="flex items-center gap-2">
                 <button
                   type="button"

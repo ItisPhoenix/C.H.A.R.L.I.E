@@ -1,0 +1,111 @@
+/* Canonical Charlie ContextCard Design Tokens & Styles */
+
+.charlie-context-card {
+  position: relative;
+  background: rgba(6, 18, 28, 0.78);
+  border: 1px solid rgba(34, 211, 238, 0.18);
+  border-radius: 14px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.45), 0 0 1px rgba(34, 211, 238, 0.2);
+  color: var(--scene-text-primary, #eaf6ff);
+  font-family: "JetBrains Mono", monospace;
+  overflow: hidden;
+  transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease, background 180ms ease;
+}
+
+.charlie-context-card.interactive {
+  cursor: pointer;
+}
+
+.charlie-context-card.interactive:hover {
+  background: rgba(8, 24, 38, 0.88);
+  border-color: rgba(34, 211, 238, 0.45);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 16px rgba(34, 211, 238, 0.18);
+}
+
+/* Elevation Levels */
+.charlie-context-card.elevation-floating {
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7), 0 0 20px rgba(34, 211, 238, 0.25);
+  border-color: rgba(34, 211, 238, 0.35);
+}
+
+.charlie-context-card.elevation-flat {
+  box-shadow: none;
+  background: rgba(6, 18, 28, 0.5);
+}
+
+/* Density Variants */
+.charlie-context-card.variant-compact {
+  padding: 10px 12px;
+  border-radius: 10px;
+  gap: 8px;
+}
+
+.charlie-context-card.variant-standard,
+.charlie-context-card.variant-location,
+.charlie-context-card.variant-event,
+.charlie-context-card.variant-source,
+.charlie-context-card.variant-warning {
+  padding: 14px 16px;
+  border-radius: 14px;
+}
+
+/* Semantic Variant Accents */
+.charlie-context-card.variant-warning {
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(26, 18, 7, 0.85);
+}
+
+.charlie-context-card.variant-warning:hover {
+  border-color: rgba(245, 158, 11, 0.65);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 16px rgba(245, 158, 11, 0.2);
+}
+
+/* Header */
+.charlie-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(34, 211, 238, 0.12);
+  margin-bottom: 8px;
+}
+
+.charlie-card-header-compact {
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+}
+
+/* Body */
+.charlie-card-body {
+  font-family: Geist, system-ui, -apple-system, sans-serif;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: #cbd5e1;
+}
+
+/* Metadata */
+.charlie-card-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding-top: 8px;
+  margin-top: 8px;
+  border-top: 1px solid rgba(34, 211, 238, 0.1);
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.9);
+}
+
+/* Actions */
+.charlie-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  margin-top: 8px;
+  border-top: 1px solid rgba(34, 211, 238, 0.12);
+}

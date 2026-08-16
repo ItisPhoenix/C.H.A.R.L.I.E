@@ -41,6 +41,10 @@ class PrimitiveType(str, Enum):
     DIVIDER = "divider"
     ACTION = "action"
     LAYOUT = "layout"
+    SPATIAL_MAP = "spatial_map"
+    DENSITY_HEATMAP = "density_heatmap"
+    TELEMETRY_GAUGES = "telemetry_gauges"
+    PROCESS_TELEMETRY = "process_telemetry"
     MAP_PLACEHOLDER = "map_placeholder"
 
 
