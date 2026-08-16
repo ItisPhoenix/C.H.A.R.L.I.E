@@ -1568,6 +1568,75 @@ async def geo_layers():
     return {"layers": geo_service.get_registered_layers()}
 
 
+@app.get("/api/geo/pmtiles/list")
+async def geo_pmtiles_list():
+    """List available offline PMTiles dataset archives with capability metadata."""
+    from charlie.geo import geo_service
+
+    return {"archives": geo_service.pmtiles.list_archives()}
+
+
+@app.get("/api/geo/pmtiles/{archive_name}")
+@app.head("/api/geo/pmtiles/{archive_name}")
+async def geo_pmtiles_serve(archive_name: str, request: Request):
+    """Serve PMTiles archives supporting HTTP Range requests for pmtiles.js protocol."""
+    from fastapi.responses import Response
+    from charlie.geo import geo_service
+
+    safe_path = geo_service.pmtiles.resolve_safe_path(archive_name)
+    if not safe_path or not safe_path.is_file():
+        raise HTTPException(status_code=404, detail="PMTiles archive not found or access denied")
+
+    file_size = safe_path.stat().st_size
+    range_header = request.headers.get("range")
+
+    common_headers = {
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length",
+        "Content-Type": "application/octet-stream",
+    }
+
+    if request.method == "HEAD":
+        return Response(
+            status_code=200,
+            headers={**common_headers, "Content-Length": str(file_size)},
+        )
+
+    if range_header and range_header.startswith("bytes="):
+        try:
+            byte_range = range_header[6:].strip()
+            parts = byte_range.split("-")
+            start = int(parts[0]) if parts[0] else 0
+            end = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
+
+            if start >= file_size or end >= file_size or start > end:
+                return Response(
+                    status_code=416,
+                    headers={"Content-Range": f"bytes */{file_size}", **common_headers},
+                )
+
+            length = end - start + 1
+            with open(safe_path, "rb") as f:
+                f.seek(start)
+                data = f.read(length)
+
+            range_headers = {
+                **common_headers,
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Content-Length": str(len(data)),
+            }
+            return Response(content=data, status_code=206, headers=range_headers)
+        except Exception as e:
+            logger.warning(f"Error serving PMTiles range {range_header}: {e}")
+            raise HTTPException(status_code=500, detail="Error reading PMTiles byte range")
+
+    # Full file fallback
+    with open(safe_path, "rb") as f:
+        data = f.read()
+    return Response(content=data, status_code=200, headers={**common_headers, "Content-Length": str(file_size)})
+
+
 
 def start_server(
     pub_port: int = DEFAULT_EVENT_PORT, pull_port: int = DEFAULT_COMMAND_PORT

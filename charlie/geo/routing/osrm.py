@@ -14,7 +14,7 @@ from charlie.geo.routing.base import RoutingProvider
 logger = logging.getLogger("charlie.geo.routing.osrm")
 
 
-def _calculate_haversine_distance(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+def calculate_haversine_distance(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
     """Calculate the great-circle distance between two points on the Earth in kilometers."""
     r = 6371.0  # Earth's mean radius in km
     phi1 = math.radians(lat1)
@@ -27,24 +27,13 @@ def _calculate_haversine_distance(lon1: float, lat1: float, lon2: float, lat2: f
     return r * c
 
 
-def _generate_geodesic_arc(
-    start_lon: float, start_lat: float, dest_lon: float, dest_lat: float, num_points: int = 40
-) -> List[List[float]]:
-    """Generate intermediate great-circle arc points between two coordinates."""
-    points: List[List[float]] = []
-    for i in range(num_points + 1):
-        fraction = i / float(num_points)
-        # Linear interpolation with slight latitude curve for realistic navigation appearance
-        lon = start_lon + fraction * (dest_lon - start_lon)
-        lat = start_lat + fraction * (dest_lat - start_lat)
-        # Add slight elevation/curve displacement
-        offset = math.sin(fraction * math.pi) * 0.15 * math.copysign(1, dest_lon - start_lon or 1)
-        points.append([round(lon, 6), round(lat + offset, 6)])
-    return points
-
-
 class OSRMProvider(RoutingProvider):
-    """OSRM Routing provider supporting both public demo and self-hosted instances."""
+    """OSRM Routing provider supporting both public demo and self-hosted instances.
+    
+    Zero-fabrication invariant: If real routing fails or is unavailable, this provider
+    returns None (or an explicit geodesic measurement if requested). It NEVER generates
+    fake road geometry, fake driving duration, or fake turn-by-turn road instructions.
+    """
 
     def __init__(
         self,
@@ -76,7 +65,7 @@ class OSRMProvider(RoutingProvider):
                 "geometries": "geojson",
                 "steps": "true",
             }
-            headers = {"User-Agent": "Charlie-Spatial-Engine/1.0"}
+            headers = {"User-Agent": "Charlie-Spatial-Engine/1.0 (Autonomous-AI-OS)"}
 
             async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
                 resp = await client.get(url, params=params, headers=headers)
@@ -89,7 +78,7 @@ class OSRMProvider(RoutingProvider):
                         distance_meters = float(primary_route.get("distance", 0.0))
                         duration_sec = float(primary_route.get("duration", 0.0))
 
-                        # Parse turn steps
+                        # Parse genuine turn steps from OSRM
                         steps: List[RouteStep] = []
                         legs = primary_route.get("legs", [])
                         for leg in legs:
@@ -127,33 +116,38 @@ class OSRMProvider(RoutingProvider):
                                 provider="osrm",
                             )
         except Exception as e:
-            logger.warning(f"OSRM routing query failed: {e}. Falling back to geodesic arc.")
+            logger.warning(f"OSRM routing query failed: {e}. Route unavailable.")
 
-        # 2. Offline / Emergency Geodesic Vector Fallback
-        distance_km = _calculate_haversine_distance(start_lon, start_lat, dest_lon, dest_lat)
-        # Approximate driving speed ~75 km/h
-        est_duration_min = round((distance_km / 75.0) * 60.0, 1)
-        arc_points = _generate_geodesic_arc(start_lon, start_lat, dest_lon, dest_lat)
+        # Real route unavailable: Do NOT fabricate road geometry, driving times, or turn steps.
+        return None
 
-        fallback_steps = [
-            RouteStep(instruction=f"Depart from {start_label}", distance="0 km"),
-            RouteStep(
-                instruction=f"En route to {destination_label} via transit corridor",
-                distance=f"{distance_km:.1f} km",
-                duration=f"{est_duration_min:.0f} min",
-            ),
-            RouteStep(instruction=f"Arrive at {destination_label}", distance=f"{distance_km:.1f} km"),
-        ]
+    def get_geodesic_measurement(
+        self,
+        start: List[float],
+        destination: List[float],
+        start_label: str = "Point A",
+        destination_label: str = "Point B",
+    ) -> Optional[RouteResult]:
+        """Expose an explicit, clearly typed geodesic distance measurement.
+        
+        Never presents as driving navigation. No turn instructions or fake road curvature.
+        """
+        if len(start) < 2 or len(destination) < 2:
+            return None
+
+        start_lon, start_lat = start[0], start[1]
+        dest_lon, dest_lat = destination[0], destination[1]
+        distance_km = calculate_haversine_distance(start_lon, start_lat, dest_lon, dest_lat)
 
         return RouteResult(
             start=[start_lon, start_lat],
             start_label=start_label,
             destination=[dest_lon, dest_lat],
             destination_label=destination_label,
-            geometry=arc_points,
+            geometry=[[start_lon, start_lat], [dest_lon, dest_lat]],
             distance_km=round(distance_km, 1),
-            duration_min=est_duration_min,
-            steps=fallback_steps,
-            mode=mode,
-            provider="geodesic_corridor",
+            duration_min=None,
+            steps=[],
+            mode="geodesic_measurement",
+            provider="geodesic_measurement",
         )

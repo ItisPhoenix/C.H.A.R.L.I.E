@@ -1,65 +1,85 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
 import * as maplibregl from "maplibre-gl";
-import "maplibre-gl/dist/maplibre-gl.css";
 import { MapboxOverlay } from "@deck.gl/mapbox";
+import "maplibre-gl/dist/maplibre-gl.css";
 
 import { useMapStore } from "./mapStore";
 import { resolveBasemapStyle } from "./providers/basemapProvider";
-import { calculateBounds, calculateFlyDuration, CHARLIE_SAFE_PADDING } from "./camera";
-import { LAYER_BY_ID } from "./layers/registry";
+import { fetchBackendIntelligenceLayer } from "./providers/intelligenceProvider";
 import {
   createIntelligencePointLayer,
   createRouteLayer,
   createSelectionPulseLayer,
 } from "./layers/renderers";
-import type { MapCommand, MapFeature } from "./types";
-import { MapContextCard } from "./overlays/MapContextCard";
-import { LayerControls } from "./overlays/LayerControls";
+import { LAYER_BY_ID } from "./layers/registry";
+import { calculateBounds, calculateFlyDuration, CHARLIE_SAFE_PADDING } from "./camera";
+import type { MapCommand, MapFeature, RenderMode } from "./types";
 import { MapToolbar } from "./overlays/MapToolbar";
+import { LayerControls } from "./overlays/LayerControls";
 import { MapAttribution } from "./overlays/MapAttribution";
+import { MapContextCard } from "./overlays/MapContextCard";
+import { SpatialMapPrimitive } from "../composer/primitives/SpatialMapPrimitive";
 
-type RenderMode = "interleaved" | "overlay" | "maplibre_only" | "svg_fallback";
+function detectWebGLSupport(): { webgl2: boolean; webgl1: boolean } {
+  try {
+    const canvas = document.createElement("canvas");
+    const gl2 = typeof window !== "undefined" && !!window.WebGL2RenderingContext && !!canvas.getContext("webgl2");
+    const gl1 =
+      typeof window !== "undefined" &&
+      !!window.WebGLRenderingContext &&
+      !!(canvas.getContext("webgl") || canvas.getContext("experimental-webgl"));
+    return { webgl2: gl2, webgl1: gl1 };
+  } catch {
+    return { webgl2: false, webgl1: false };
+  }
+}
 
 export function MapEngine(): ReactElement {
-  const containerRef = useRef<HTMLDivElement>(null);
+  const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const overlayRef = useRef<MapboxOverlay | null>(null);
-  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const abortControllersRef = useRef<Record<string, AbortController>>({});
 
   const [renderMode, setRenderMode] = useState<RenderMode>("interleaved");
   const [initError, setInitError] = useState<string | null>(null);
 
+  // Store State
   const providerMode = useMapStore((s) => s.providerMode);
+  const quality = useMapStore((s) => s.quality);
   const pmtilesUrl = useMapStore((s) => s.pmtilesUrl);
   const onlineSourceUrl = useMapStore((s) => s.onlineSourceUrl);
   const activeLayers = useMapStore((s) => s.activeLayers);
   const layerData = useMapStore((s) => s.layerData);
+  const layerMetadata = useMapStore((s) => s.layerMetadata);
   const selectedFeature = useMapStore((s) => s.selectedFeature);
   const route = useMapStore((s) => s.route);
   const pendingCommand = useMapStore((s) => s.pendingCommand);
 
-  const setReady = useMapStore((s) => s.setReady);
+  // Store Actions
   const setCamera = useMapStore((s) => s.setCamera);
-  const setSelectedFeature = useMapStore((s) => s.setSelectedFeature);
+  const setReady = useMapStore((s) => s.setReady);
   const setLayerData = useMapStore((s) => s.setLayerData);
   const setLayerStatus = useMapStore((s) => s.setLayerStatus);
+  const setLayerEnabled = useMapStore((s) => s.setLayerEnabled);
+  const toggleLayer = useMapStore((s) => s.toggleLayer);
+  const setSelectedFeature = useMapStore((s) => s.setSelectedFeature);
+  const setRoute = useMapStore((s) => s.setRoute);
+  const clearRoute = useMapStore((s) => s.clearRoute);
+  const clearSelection = useMapStore((s) => s.clearSelection);
+  const resetMapStore = useMapStore((s) => s.resetMap);
   const consumeCommand = useMapStore((s) => s.consumeCommand);
-  const recordUserInteraction = useMapStore((s) => s.recordUserInteraction);
+  const setUserInteracting = useMapStore((s) => s.setUserInteracting);
 
-  // 1. Initialize MapLibre GL instance with 4-Tier Fallback Hierarchy
+  // 1. Initialize MapLibre & Deck.gl Instance with 4-Tier Fallback Hierarchy
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!mapContainerRef.current) return;
 
-    // Check WebGL availability
-    if (typeof window !== "undefined") {
-      const canvas = document.createElement("canvas");
-      const gl2 = canvas.getContext("webgl2");
-      const gl1 = canvas.getContext("webgl");
-      if (!gl2 && !gl1) {
-        setRenderMode("svg_fallback");
-        setInitError("WebGL hardware acceleration unavailable");
-        return;
-      }
+    const { webgl2, webgl1 } = detectWebGLSupport();
+    if (!webgl2 && !webgl1) {
+      console.warn("[MapEngine] No WebGL support detected. Falling back to Tier-4 SVG Spatial Vector.");
+      setRenderMode("svg_fallback");
+      setReady(true);
+      return;
     }
 
     try {
@@ -69,34 +89,46 @@ export function MapEngine(): ReactElement {
         onlineSourceUrl,
       });
 
-      const storeState = useMapStore.getState();
-
       const map = new maplibregl.Map({
-        container: containerRef.current,
-        style: style as maplibregl.StyleSpecification,
-        center: [storeState.longitude, storeState.latitude],
-        zoom: storeState.zoom,
-        pitch: storeState.pitch,
-        bearing: storeState.bearing,
-        maxPitch: 75,
+        container: mapContainerRef.current,
+        style,
+        center: [15.0, 25.0],
+        zoom: 1.8,
+        pitch: quality === "low" ? 0 : 0,
+        bearing: 0,
         attributionControl: false,
+        maxPitch: quality === "low" ? 0 : 60,
       });
-
       mapRef.current = map;
 
-      // Tier 1: Try Interleaved deck.gl overlay
-      try {
-        const overlay = new MapboxOverlay({
-          interleaved: true,
-          layers: [],
-        });
-        overlayRef.current = overlay;
-        map.addControl(overlay as unknown as maplibregl.IControl);
-        setRenderMode("interleaved");
-      } catch (deckInterleaveErr) {
-        console.warn("[MapEngine] Interleaved mode failed, falling back to overlay mode:", deckInterleaveErr);
+      // Tier 1 & 2: Deck.gl Overlay Setup
+      if (webgl2) {
         try {
-          // Tier 2: Try standard non-interleaved deck.gl overlay
+          const overlay = new MapboxOverlay({
+            interleaved: true,
+            layers: [],
+          });
+          overlayRef.current = overlay;
+          map.addControl(overlay as unknown as maplibregl.IControl);
+          setRenderMode("interleaved");
+        } catch (deckInterleaveErr) {
+          console.warn("[MapEngine] Interleaved mode failed, trying non-interleaved overlay:", deckInterleaveErr);
+          try {
+            const overlay = new MapboxOverlay({
+              interleaved: false,
+              layers: [],
+            });
+            overlayRef.current = overlay;
+            map.addControl(overlay as unknown as maplibregl.IControl);
+            setRenderMode("overlay");
+          } catch (overlayErr) {
+            console.warn("[MapEngine] Deck.gl overlay failed, falling back to MapLibre-only:", overlayErr);
+            setRenderMode("maplibre_only");
+          }
+        }
+      } else {
+        // WebGL1: Non-interleaved overlay or maplibre-only
+        try {
           const overlay = new MapboxOverlay({
             interleaved: false,
             layers: [],
@@ -104,9 +136,7 @@ export function MapEngine(): ReactElement {
           overlayRef.current = overlay;
           map.addControl(overlay as unknown as maplibregl.IControl);
           setRenderMode("overlay");
-        } catch (deckOverlayErr) {
-          // Tier 3: MapLibre Only
-          console.warn("[MapEngine] Deck.gl overlay failed, falling back to MapLibre-only:", deckOverlayErr);
+        } catch {
           setRenderMode("maplibre_only");
         }
       }
@@ -115,9 +145,29 @@ export function MapEngine(): ReactElement {
         setReady(true);
       });
 
-      map.on("movestart", () => {
-        recordUserInteraction();
-      });
+      // Real Camera Interruption Listeners
+      const handleUserInteractionStart = () => {
+        if (mapRef.current) {
+          mapRef.current.stop(); // Immediately stop programmatic camera flyTo/easeTo
+        }
+        setUserInteracting(true);
+      };
+
+      const handleUserInteractionEnd = () => {
+        setUserInteracting(false);
+      };
+
+      map.on("dragstart", handleUserInteractionStart);
+      map.on("touchstart", handleUserInteractionStart);
+      map.on("rotatestart", handleUserInteractionStart);
+      map.on("pitchstart", handleUserInteractionStart);
+      map.on("boxzoomstart", handleUserInteractionStart);
+      map.on("wheel", handleUserInteractionStart);
+
+      map.on("dragend", handleUserInteractionEnd);
+      map.on("touchend", handleUserInteractionEnd);
+      map.on("rotateend", handleUserInteractionEnd);
+      map.on("pitchend", handleUserInteractionEnd);
 
       map.on("moveend", () => {
         const center = map.getCenter();
@@ -128,6 +178,9 @@ export function MapEngine(): ReactElement {
           pitch: map.getPitch(),
           bearing: map.getBearing(),
         });
+        if (!map.isMoving()) {
+          setUserInteracting(false);
+        }
       });
 
       return () => {
@@ -144,58 +197,70 @@ export function MapEngine(): ReactElement {
         }
       };
     } catch (err) {
-      console.warn("[MapEngine] MapLibre initialization failed:", err);
+      console.warn("[MapEngine] MapLibre initialization failed, falling back to SVG renderer:", err);
       setRenderMode("svg_fallback");
       setInitError(err instanceof Error ? err.message : "MapLibre GL initialization failed");
+      setReady(true);
     }
-  }, [providerMode, pmtilesUrl, onlineSourceUrl, setCamera, setReady, recordUserInteraction]);
+  }, [providerMode, pmtilesUrl, onlineSourceUrl, quality, setCamera, setReady, setUserInteracting]);
 
-  // 2. Fetcher Lifecycle for Active Intelligence Layers
+  // 2. Strict Intelligence Layer Lifecycle (TTL, Abort, Zero Polling on Disabled)
   useEffect(() => {
     for (const [layerId, isEnabled] of Object.entries(activeLayers)) {
       const def = LAYER_BY_ID.get(layerId);
       if (!def) continue;
 
       if (isEnabled) {
-        if (layerData[layerId] && layerData[layerId].length > 0) continue;
+        const meta = layerMetadata[layerId];
+        const ttlMs = (def.ttlSec ?? 60) * 1000;
+        const isFresh = meta?.lastUpdated && Date.now() - meta.lastUpdated < ttlMs;
 
-        if (def.fetcher) {
-          if (abortControllersRef.current.has(layerId)) {
-            abortControllersRef.current.get(layerId)!.abort();
-          }
-
-          const controller = new AbortController();
-          abortControllersRef.current.set(layerId, controller);
-
-          setLayerStatus(layerId, { status: "loading", error: undefined });
-
-          def
-            .fetcher(controller.signal)
-            .then((features) => {
-              setLayerData(layerId, features);
-            })
-            .catch((err) => {
-              if (controller.signal.aborted) return;
-              console.warn(`[MapEngine] Layer '${layerId}' fetch failed:`, err);
-              setLayerStatus(layerId, {
-                status: "error",
-                error: err instanceof Error ? err.message : "Fetch failed",
-              });
-            });
-        } else if (def.requiresCredential) {
-          setLayerStatus(layerId, {
-            status: "unconfigured",
-            error: "Provider credentials not configured",
-          });
+        // If fresh and has data, skip re-fetching
+        if (isFresh && layerData[layerId] && layerData[layerId].length > 0) {
+          continue;
         }
+
+        // Cancel previous pending request if any
+        if (abortControllersRef.current[layerId]) {
+          abortControllersRef.current[layerId].abort();
+        }
+
+        const controller = new AbortController();
+        abortControllersRef.current[layerId] = controller;
+
+        setLayerStatus(layerId, { status: "loading" });
+
+        fetchBackendIntelligenceLayer(layerId, controller.signal)
+          .then((res) => {
+            setLayerData(layerId, res.features, {
+              status: "ready",
+              attribution: res.attribution || def.attribution,
+              lastUpdated: Date.now(),
+              count: res.features.length,
+            });
+          })
+          .catch((err) => {
+            if (controller.signal.aborted) return;
+            setLayerStatus(layerId, {
+              status: "error",
+              error: err instanceof Error ? err.message : "Layer fetch failed",
+            });
+          });
       } else {
-        if (abortControllersRef.current.has(layerId)) {
-          abortControllersRef.current.get(layerId)!.abort();
-          abortControllersRef.current.delete(layerId);
+        // Disabled: Abort in-flight request and ensure no background polling occurs
+        if (abortControllersRef.current[layerId]) {
+          abortControllersRef.current[layerId].abort();
+          delete abortControllersRef.current[layerId];
         }
       }
     }
-  }, [activeLayers, layerData, setLayerData, setLayerStatus]);
+
+    return () => {
+      // Abort all in-flight requests on unmount
+      Object.values(abortControllersRef.current).forEach((ctrl) => ctrl.abort());
+      abortControllersRef.current = {};
+    };
+  }, [activeLayers, layerMetadata, layerData, setLayerData, setLayerStatus]);
 
   // 3. Update deck.gl Overlay Layers (Tiers 1 & 2)
   useEffect(() => {
@@ -203,7 +268,7 @@ export function MapEngine(): ReactElement {
 
     const layers: unknown[] = [];
 
-    const pulseLayer = createSelectionPulseLayer(selectedFeature);
+    const pulseLayer = createSelectionPulseLayer(selectedFeature, quality);
     if (pulseLayer) {
       layers.push(pulseLayer);
     }
@@ -217,78 +282,143 @@ export function MapEngine(): ReactElement {
           features,
           (f: MapFeature) => {
             setSelectedFeature(f);
-          }
+          },
+          quality
         );
         layers.push(pointLayer);
       }
     }
 
     if (route) {
-      const routeLayers = createRouteLayer(route, () => {
-        // Route clicked
-      });
+      const routeLayers = createRouteLayer(route, () => {}, quality);
       layers.push(...routeLayers);
     }
 
     overlayRef.current.setProps({
       layers: layers as never,
     });
-  }, [activeLayers, layerData, selectedFeature, route, setSelectedFeature]);
+  }, [activeLayers, layerData, selectedFeature, route, quality, setSelectedFeature]);
 
-  // 4. Command Execution Engine
+  // 4. Complete Command Execution Engine (All 16 Declared Commands)
   useEffect(() => {
-    if (!pendingCommand || !mapRef.current) return;
+    if (!pendingCommand) return;
 
-    const map = mapRef.current;
     const cmd: MapCommand = pendingCommand.command;
     const revision = pendingCommand.revision;
+    const map = mapRef.current;
 
     try {
       switch (cmd.type) {
         case "fly_to": {
-          const currentCenter = map.getCenter();
-          const duration =
-            cmd.durationMs ??
-            calculateFlyDuration(
-              currentCenter.lng,
-              currentCenter.lat,
-              cmd.longitude,
-              cmd.latitude
-            );
+          if (map) {
+            const currentCenter = map.getCenter();
+            const duration =
+              cmd.durationMs ??
+              calculateFlyDuration(currentCenter.lng, currentCenter.lat, cmd.longitude, cmd.latitude);
 
-          map.flyTo({
-            center: [cmd.longitude, cmd.latitude],
-            zoom: cmd.zoom ?? map.getZoom(),
-            pitch: cmd.pitch ?? map.getPitch(),
-            bearing: cmd.bearing ?? map.getBearing(),
-            duration,
-            essential: true,
-          });
+            map.flyTo({
+              center: [cmd.longitude, cmd.latitude],
+              zoom: cmd.zoom ?? map.getZoom(),
+              pitch: cmd.pitch ?? map.getPitch(),
+              bearing: cmd.bearing ?? map.getBearing(),
+              duration,
+              essential: true,
+            });
+          }
           break;
         }
 
         case "ease_to": {
-          map.easeTo({
-            center: [cmd.longitude, cmd.latitude],
-            zoom: cmd.zoom ?? map.getZoom(),
-            pitch: cmd.pitch ?? map.getPitch(),
-            bearing: cmd.bearing ?? map.getBearing(),
-            duration: cmd.durationMs ?? 600,
-            essential: true,
-          });
+          if (map) {
+            map.easeTo({
+              center: [cmd.longitude, cmd.latitude],
+              zoom: cmd.zoom ?? map.getZoom(),
+              pitch: cmd.pitch ?? map.getPitch(),
+              bearing: cmd.bearing ?? map.getBearing(),
+              duration: cmd.durationMs ?? 600,
+              essential: true,
+            });
+          }
           break;
         }
 
         case "fit_bounds": {
-          map.fitBounds(cmd.bounds, {
-            padding: { ...CHARLIE_SAFE_PADDING, ...(cmd.padding || {}) },
-            duration: cmd.durationMs ?? 900,
-          });
+          if (map) {
+            map.fitBounds(cmd.bounds, {
+              padding: { ...CHARLIE_SAFE_PADDING, ...(cmd.padding || {}) },
+              duration: cmd.durationMs ?? 900,
+            });
+          }
+          break;
+        }
+
+        case "focus_location": {
+          if (map) {
+            map.flyTo({
+              center: [cmd.coordinates[0], cmd.coordinates[1]],
+              zoom: cmd.zoom ?? 11,
+              duration: 800,
+              essential: true,
+            });
+          }
+          break;
+        }
+
+        case "zoom_in": {
+          if (map) map.zoomIn({ duration: 300 });
+          break;
+        }
+
+        case "zoom_out": {
+          if (map) map.zoomOut({ duration: 300 });
+          break;
+        }
+
+        case "reset_north": {
+          if (map) map.resetNorth({ duration: 500 });
+          break;
+        }
+
+        case "set_pitch": {
+          if (map) map.easeTo({ pitch: cmd.pitch, duration: 450 });
+          break;
+        }
+
+        case "set_bearing": {
+          if (map) map.easeTo({ bearing: cmd.bearing, duration: 450 });
+          break;
+        }
+
+        case "select_feature": {
+          setSelectedFeature(cmd.feature);
+          if (cmd.flyTo && cmd.feature && map) {
+            map.flyTo({
+              center: [cmd.feature.coordinates[0], cmd.feature.coordinates[1]],
+              zoom: Math.max(map.getZoom(), 8),
+              duration: 700,
+            });
+          }
+          break;
+        }
+
+        case "clear_selection": {
+          clearSelection();
+          break;
+        }
+
+        case "set_layer": {
+          setLayerEnabled(cmd.layerId, cmd.enabled);
+          break;
+        }
+
+        case "toggle_layer": {
+          toggleLayer(cmd.layerId);
           break;
         }
 
         case "set_route": {
-          if (cmd.fit && cmd.route.geometry && cmd.route.geometry.length > 0) {
+          setRoute(cmd.route);
+          if (cmd.fit && cmd.route.geometry && cmd.route.geometry.length > 0 && map) {
             const bounds = calculateBounds(cmd.route.geometry);
             if (bounds) {
               map.fitBounds(bounds, {
@@ -300,53 +430,20 @@ export function MapEngine(): ReactElement {
           break;
         }
 
-        case "focus_location": {
-          map.flyTo({
-            center: [cmd.coordinates[0], cmd.coordinates[1]],
-            zoom: cmd.zoom ?? 11,
-            duration: 800,
-            essential: true,
-          });
-          break;
-        }
-
-        case "zoom_in": {
-          map.zoomIn({ duration: 300 });
-          break;
-        }
-
-        case "zoom_out": {
-          map.zoomOut({ duration: 300 });
-          break;
-        }
-
-        case "reset_north": {
-          map.resetNorth({ duration: 500 });
-          break;
-        }
-
-        case "set_pitch": {
-          map.easeTo({ pitch: cmd.pitch, duration: 450 });
+        case "clear_route": {
+          clearRoute();
           break;
         }
 
         case "reset_map": {
-          map.flyTo({
-            center: [15.0, 25.0],
-            zoom: 1.8,
-            pitch: 0,
-            bearing: 0,
-            duration: 900,
-          });
-          break;
-        }
-
-        case "select_feature": {
-          if (cmd.flyTo && cmd.feature) {
+          resetMapStore();
+          if (map) {
             map.flyTo({
-              center: [cmd.feature.coordinates[0], cmd.feature.coordinates[1]],
-              zoom: Math.max(map.getZoom(), 8),
-              duration: 700,
+              center: [15.0, 25.0],
+              zoom: 1.8,
+              pitch: 0,
+              bearing: 0,
+              duration: 900,
             });
           }
           break;
@@ -357,50 +454,73 @@ export function MapEngine(): ReactElement {
     } finally {
       consumeCommand(revision);
     }
-  }, [pendingCommand, consumeCommand]);
+  }, [
+    pendingCommand,
+    consumeCommand,
+    setSelectedFeature,
+    clearSelection,
+    setLayerEnabled,
+    toggleLayer,
+    setRoute,
+    clearRoute,
+    resetMapStore,
+  ]);
 
-  // Tier 4: SVG Emergency Fallback UI
+  // Tier 4: Interactive SVG Spatial Renderer Fallback
   if (renderMode === "svg_fallback") {
+    // Transform intelligence layer points to spatial map nodes for vector visualizer
+    const vectorNodes: { id: string; x: number; y: number; label: string; severity?: string }[] = [];
+    Object.entries(activeLayers).forEach(([layerId, isEnabled]) => {
+      if (isEnabled && layerData[layerId]) {
+        layerData[layerId].forEach((feat) => {
+          vectorNodes.push({
+            id: feat.id,
+            x: ((feat.coordinates[0] + 180) / 360) * 1000,
+            y: ((90 - feat.coordinates[1]) / 180) * 500,
+            label: feat.label,
+            severity: feat.severity,
+          });
+        });
+      }
+    });
+
     return (
-      <div className="w-full h-full relative flex items-center justify-center bg-slate-950 p-6 text-center font-mono">
-        <div className="max-w-md p-6 rounded-2xl border border-cyan-500/30 bg-slate-900/80 shadow-2xl text-cyan-200 text-xs">
-          <div className="text-base font-bold mb-2">🌐 Spatial Engine Fallback Active</div>
-          <p className="text-slate-400 leading-relaxed mb-4">
-            WebGL2 acceleration is not active in this environment. The spatial subsystem is operating in lightweight mode.
-          </p>
-          {initError && (
-            <div className="text-[10px] text-amber-400 bg-slate-950/80 p-2 rounded border border-amber-500/20 mb-4">
-              {initError}
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={() => setRenderMode("interleaved")}
-            className="px-4 py-1.5 rounded-lg bg-cyan-950 border border-cyan-400/50 text-cyan-300 text-xs font-bold hover:bg-cyan-900 transition cursor-pointer"
-          >
-            Retry WebGL Engine
-          </button>
-        </div>
+      <div className="w-full h-full relative overflow-hidden bg-[#020710] font-mono">
+        <SpatialMapPrimitive
+          data={{
+            mode: "geo",
+            useRealEngine: false,
+            title: "SPATIAL VECTOR RADAR (TIER-4)",
+            subtitle: initError ? `Fallback active: ${initError}` : "Fallback 2D vector projection",
+            nodes: vectorNodes,
+            edges: route
+              ? [
+                  {
+                    from: "origin",
+                    to: "dest",
+                    type: "route",
+                    active: true,
+                  },
+                ]
+              : [],
+          }}
+        />
+        <MapToolbar />
+        <LayerControls />
+        <MapContextCard />
+        <MapAttribution renderMode="svg_fallback" />
       </div>
     );
   }
 
+  // Tiers 1, 2, 3: Full Spatial Canvas
   return (
-    <div className="w-full h-full relative overflow-hidden select-none">
-      {/* 1. MapLibre GL Canvas Container (Edge-to-Edge Spatial Canvas) */}
-      <div ref={containerRef} className="w-full h-full absolute inset-0 z-0 bg-[#020710]" />
-
-      {/* 2. Canonical Context Card Floating Overlay */}
-      <MapContextCard />
-
-      {/* 3. Layer Controls Drawer */}
-      <LayerControls />
-
-      {/* 4. Minimal HUD Toolbar */}
+    <div className="w-full h-full relative overflow-hidden bg-[#020710] select-none">
+      <div ref={mapContainerRef} className="w-full h-full" />
       <MapToolbar />
-
-      {/* 5. Restrained Legal Attribution */}
-      <MapAttribution />
+      <LayerControls />
+      <MapContextCard />
+      <MapAttribution renderMode={renderMode} />
     </div>
   );
 }

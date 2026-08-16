@@ -13,11 +13,11 @@ from charlie.geo.models import LayerDataResult, MapFeature
 
 logger = logging.getLogger("charlie.geo.intelligence.eonet")
 
-EONET_FEED_URL = "https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=40"
+EONET_FEED_URL = "https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=60"
 
 
 class NASAEONETProvider(IntelligenceProvider):
-    """Provider for global natural hazards and environmental events from NASA EONET."""
+    """Provider for global wildfire and thermal hotspot events from NASA EONET."""
 
     def __init__(self, cache_ttl_sec: float = 120.0) -> None:
         self.cache_ttl_sec = cache_ttl_sec
@@ -40,7 +40,7 @@ class NASAEONETProvider(IntelligenceProvider):
             async with httpx.AsyncClient(timeout=6.0) as client:
                 resp = await client.get(
                     EONET_FEED_URL,
-                    headers={"User-Agent": "Charlie-Spatial-Engine/1.0"},
+                    headers={"User-Agent": "Charlie-Spatial-Engine/1.0 (Autonomous-AI-OS)"},
                 )
 
                 if resp.status_code == 200:
@@ -49,6 +49,19 @@ class NASAEONETProvider(IntelligenceProvider):
                     features: List[MapFeature] = []
 
                     for ev in events:
+                        categories = ev.get("categories", [])
+                        cat_title = categories[0].get("title", "Hazard") if categories else "Hazard"
+                        cat_id = categories[0].get("id", "") if categories else ""
+
+                        # Strict filter: Wildfires layer must contain wildfires & thermal anomalies
+                        is_wildfire = (
+                            "fire" in cat_title.lower()
+                            or "wildfire" in cat_id.lower()
+                            or cat_id == "wildfires"
+                        )
+                        if not is_wildfire:
+                            continue
+
                         geometries = ev.get("geometry", [])
                         if not geometries:
                             continue
@@ -59,31 +72,21 @@ class NASAEONETProvider(IntelligenceProvider):
                             continue
 
                         lon, lat = float(coords[0]), float(coords[1])
-                        title = ev.get("title", "Natural Hazard Event")
-                        categories = ev.get("categories", [])
-                        cat_title = categories[0].get("title", "Hazard") if categories else "Hazard"
+                        title = ev.get("title", "Active Wildfire Complex")
                         ev_date = latest_geom.get("date", "")
-
-                        color = "#f97316"
-                        if "fire" in cat_title.lower():
-                            color = "#ef4444"
-                        elif "storm" in cat_title.lower():
-                            color = "#3b82f6"
-                        elif "volcano" in cat_title.lower():
-                            color = "#dc2626"
 
                         features.append(
                             MapFeature(
-                                id=f"eonet_{ev.get('id', int(now))}",
+                                id=f"wildfire_{ev.get('id', int(now))}",
                                 label=title,
-                                category=cat_title,
-                                description=f"Active {cat_title} event tracked by NASA. Date reported: {ev_date}.",
+                                category="Wildfire / Thermal Anomaly",
+                                description=f"Active wildfire complex tracked by NASA thermal sensors. Recorded: {ev_date}.",
                                 coordinates=[lon, lat],
                                 severity="high",
                                 source="NASA EONET",
                                 timestamp=ev_date,
                                 properties={"event_id": ev.get("id"), "link": ev.get("link")},
-                                color=color,
+                                color="#ef4444",
                             )
                         )
 
@@ -98,7 +101,7 @@ class NASAEONETProvider(IntelligenceProvider):
                     return result
 
         except Exception as e:
-            logger.warning(f"NASA EONET feed fetch failed: {e}")
+            logger.warning(f"NASA EONET wildfires feed fetch failed: {e}")
 
         if self._last_result:
             return self._last_result
@@ -109,5 +112,5 @@ class NASAEONETProvider(IntelligenceProvider):
             features=[],
             attribution=self.attribution,
             timestamp=now,
-            error="Upstream NASA EONET service unavailable",
+            error="Could not connect to NASA EONET feed",
         )

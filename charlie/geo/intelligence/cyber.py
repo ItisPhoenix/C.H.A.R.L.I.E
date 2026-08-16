@@ -1,10 +1,11 @@
-"""Cyber Threat Intelligence Layer with strict IP geolocation enrichment."""
+"""Cyber Threat Intelligence Layer with pluggable IP geolocation enrichment."""
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 
@@ -15,22 +16,64 @@ logger = logging.getLogger("charlie.geo.intelligence.cyber")
 
 URLHAUS_RECENT_FEED = "https://urlhaus.abuse.ch/downloads/json_recent/"
 
-# In-memory IP Geolocation Cache to prevent redundant lookups
-IP_GEO_CACHE: Dict[str, Optional[List[float]]] = {
-    # Known benchmark malicious infrastructure with verified geographic points
-    "185.220.101.5": [13.4050, 52.5200],  # Berlin node
-    "194.26.29.112": [37.6173, 55.7558],  # Moscow node
-    "45.142.214.12": [4.8952, 52.3702],   # Amsterdam node
-    "104.244.76.13": [-97.7431, 30.2672], # Austin node
-}
+
+class IPGeolocationEnricher:
+    """Enriches IP addresses with geographic coordinates without fabricating locations."""
+
+    def __init__(self, cache_ttl_sec: float = 86400.0) -> None:
+        self.cache_ttl_sec = cache_ttl_sec
+        self._cache: Dict[str, Tuple[float, Optional[List[float]]]] = {}
+
+    def is_public_ip(self, ip_str: str) -> bool:
+        """Check if string is a valid public IP."""
+        try:
+            ip_obj = ipaddress.ip_address(ip_str.strip())
+            return not (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_reserved or ip_obj.is_link_local)
+        except ValueError:
+            return False
+
+    async def resolve_ip(self, ip_str: str) -> Optional[List[float]]:
+        """Resolve a public IP to [longitude, latitude].
+        
+        Strict rule: Returns None if unresolvable. Never fabricates coordinates.
+        """
+        if not self.is_public_ip(ip_str):
+            return None
+
+        now = time.time()
+        if ip_str in self._cache:
+            ts, coords = self._cache[ip_str]
+            if now - ts < self.cache_ttl_sec:
+                return coords
+
+        # Query lightweight IP geolocation endpoint
+        try:
+            url = f"http://ip-api.com/json/{ip_str}?fields=status,lat,lon"
+            async with httpx.AsyncClient(timeout=2.5) as client:
+                resp = await client.get(url, headers={"User-Agent": "Charlie-Spatial-Engine/1.0"})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("status") == "success":
+                        lat = float(data.get("lat", 0.0))
+                        lon = float(data.get("lon", 0.0))
+                        coords = [lon, lat]
+                        self._cache[ip_str] = (now, coords)
+                        return coords
+        except Exception as e:
+            logger.debug(f"IP geolocation lookup failed for {ip_str}: {e}")
+
+        # Mark as None in cache to avoid repetitive failed lookups
+        self._cache[ip_str] = (now, None)
+        return None
 
 
 class CyberThreatProvider(IntelligenceProvider):
-    """Provider for verified cyber infrastructure and C2 indicators."""
+    """Provider for verified cyber infrastructure and C2 indicators with strict geolocation."""
 
     def __init__(self, cache_ttl_sec: float = 300.0) -> None:
         self.cache_ttl_sec = cache_ttl_sec
         self._last_result: LayerDataResult | None = None
+        self.enricher = IPGeolocationEnricher()
 
     @property
     def layer_id(self) -> str:
@@ -51,7 +94,7 @@ class CyberThreatProvider(IntelligenceProvider):
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(
                     URLHAUS_RECENT_FEED,
-                    headers={"User-Agent": "Charlie-Spatial-Engine/1.0"},
+                    headers={"User-Agent": "Charlie-Spatial-Engine/1.0 (Autonomous-AI-OS)"},
                 )
 
                 if resp.status_code == 200:
@@ -66,9 +109,9 @@ class CyberThreatProvider(IntelligenceProvider):
                         status = entry.get("url_status", "online")
                         date_added = entry.get("dateadded", "")
 
-                        # Attempt IP Geolocation only when valid IP / mapped host exists
-                        # Strict rule: NEVER invent or randomize coordinates
-                        coords = IP_GEO_CACHE.get(host)
+                        # Attempt IP Geolocation only when host is a public IP
+                        # Strict invariant: Unresolvable indicators remain strictly non-geographic
+                        coords = await self.enricher.resolve_ip(host)
                         if coords:
                             features.append(
                                 MapFeature(
@@ -107,5 +150,5 @@ class CyberThreatProvider(IntelligenceProvider):
             features=[],
             attribution=self.attribution,
             timestamp=now,
-            error="Upstream cyber intelligence feed unavailable",
+            error="Could not fetch URLhaus threat feed",
         )

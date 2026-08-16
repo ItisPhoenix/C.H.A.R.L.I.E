@@ -13,6 +13,16 @@ export interface MapCameraState {
 export type ProviderMode = "hybrid" | "online" | "offline";
 export type QualityTier = "auto" | "high" | "medium" | "low";
 export type LayerStatus = "idle" | "loading" | "ready" | "unconfigured" | "error";
+export type RenderMode = "interleaved" | "overlay" | "maplibre_only" | "svg_fallback";
+
+export interface LayerMetadata {
+  status: LayerStatus;
+  error?: string;
+  attribution?: string;
+  lastUpdated?: number;
+  ttlSec?: number;
+  count?: number;
+}
 
 export interface ProviderHealth {
   mode: ProviderMode;
@@ -55,7 +65,7 @@ export interface MapRoute {
   distanceKm?: number;
   durationMin?: number;
   steps?: RouteStep[];
-  mode?: "driving" | "walking" | "transit" | "vector";
+  mode?: "driving" | "walking" | "transit" | "vector" | "geodesic_measurement";
   provider?: string;
 }
 
@@ -83,6 +93,7 @@ export interface IntelligenceLayerDefinition {
   category: "Environment" | "Weather" | "Security" | "Infrastructure" | "Aviation" | "Maritime" | "Cyber" | "Strategic" | "Economic";
   defaultEnabled: false;
   attribution: string;
+  ttlSec?: number;
   requiresCredential?: boolean;
-  fetcher?: (signal?: AbortSignal) => Promise<MapFeature[]>;
+  fetcher?: (signal?: AbortSignal) => Promise<{ status?: string; features: MapFeature[]; attribution?: string; count?: number; timestamp?: number } | MapFeature[]>;
 }

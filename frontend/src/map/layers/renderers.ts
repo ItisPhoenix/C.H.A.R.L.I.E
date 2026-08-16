@@ -1,5 +1,5 @@
 import { ScatterplotLayer, PathLayer } from "@deck.gl/layers";
-import type { MapFeature, MapRoute } from "../types";
+import type { MapFeature, MapRoute, QualityTier } from "../types";
 
 /**
  * Creates a high-performance Deck.gl ScatterplotLayer for intelligence points.
@@ -7,18 +7,32 @@ import type { MapFeature, MapRoute } from "../types";
 export function createIntelligencePointLayer(
   layerId: string,
   data: MapFeature[],
-  onSelectFeature?: (feature: MapFeature) => void
+  onSelectFeature?: (feature: MapFeature) => void,
+  quality: QualityTier = "auto"
 ): ScatterplotLayer<MapFeature> {
+  // Quality tier adaptations: cap feature count and simplify stroke geometry
+  let displayData = data;
+  let stroked = true;
+  let radiusMin = 4.5;
+
+  if (quality === "low") {
+    displayData = data.slice(0, 100);
+    stroked = false;
+    radiusMin = 3.5;
+  } else if (quality === "medium") {
+    displayData = data.slice(0, 500);
+  }
+
   return new ScatterplotLayer<MapFeature>({
     id: `intel-points-${layerId}`,
-    data,
+    data: displayData,
     pickable: true,
     opacity: 0.85,
-    stroked: true,
+    stroked,
     filled: true,
     radiusScale: 6,
-    radiusMinPixels: 4.5,
-    radiusMaxPixels: 24,
+    radiusMinPixels: radiusMin,
+    radiusMaxPixels: quality === "low" ? 16 : 24,
     lineWidthMinPixels: 1.5,
     getPosition: (d: MapFeature) => [d.coordinates[0], d.coordinates[1]],
     getRadius: (d: MapFeature) => {
@@ -50,27 +64,18 @@ export function createIntelligencePointLayer(
  */
 export function createRouteLayer(
   route: MapRoute,
-  onSelectRoute?: () => void
+  onSelectRoute?: () => void,
+  quality: QualityTier = "auto"
 ): PathLayer<unknown>[] {
+  const isGeodesic = route.mode === "geodesic_measurement";
+  const lineColor: [number, number, number] = isGeodesic ? [56, 189, 248] : [0, 240, 255];
+
   const routeData = [
     {
       path: route.geometry,
-      color: [0, 240, 255],
+      color: lineColor,
     },
   ];
-
-  // Glow line (wide translucent path)
-  const glowLayer = new PathLayer({
-    id: "route-glow-layer",
-    data: routeData,
-    pickable: false,
-    widthScale: 1,
-    widthMinPixels: 8,
-    getPath: (d: { path: [number, number][] }) => d.path,
-    getColor: [0, 240, 255, 60],
-    capRounded: true,
-    jointRounded: true,
-  });
 
   // Core bright line
   const coreLayer = new PathLayer({
@@ -78,14 +83,32 @@ export function createRouteLayer(
     data: routeData,
     pickable: true,
     widthScale: 1,
-    widthMinPixels: 3,
+    widthMinPixels: isGeodesic ? 2 : 3,
     getPath: (d: { path: [number, number][] }) => d.path,
-    getColor: [255, 255, 255, 230],
+    getColor: isGeodesic ? [56, 189, 248, 220] : [255, 255, 255, 230],
     capRounded: true,
     jointRounded: true,
     onClick: () => {
       if (onSelectRoute) onSelectRoute();
     },
+  });
+
+  // In Low quality tier, omit the expensive outer glow layer
+  if (quality === "low") {
+    return [coreLayer];
+  }
+
+  // Glow line (wide translucent path)
+  const glowLayer = new PathLayer({
+    id: "route-glow-layer",
+    data: routeData,
+    pickable: false,
+    widthScale: 1,
+    widthMinPixels: isGeodesic ? 6 : 8,
+    getPath: (d: { path: [number, number][] }) => d.path,
+    getColor: [...lineColor, 60],
+    capRounded: true,
+    jointRounded: true,
   });
 
   return [glowLayer, coreLayer];
@@ -95,7 +118,8 @@ export function createRouteLayer(
  * Creates selection pulse radar ring around the selected feature.
  */
 export function createSelectionPulseLayer(
-  selectedFeature: MapFeature | null
+  selectedFeature: MapFeature | null,
+  quality: QualityTier = "auto"
 ): ScatterplotLayer<MapFeature> | null {
   if (!selectedFeature) return null;
 
@@ -105,19 +129,20 @@ export function createSelectionPulseLayer(
     pickable: false,
     stroked: true,
     filled: false,
-    radiusScale: 1,
-    radiusMinPixels: 14,
     lineWidthMinPixels: 2,
+    radiusMinPixels: quality === "low" ? 12 : 16,
+    radiusMaxPixels: quality === "low" ? 24 : 32,
     getPosition: (d: MapFeature) => [d.coordinates[0], d.coordinates[1]],
-    getLineColor: [0, 240, 255, 255],
+    getRadius: 3000,
+    getLineColor: [0, 240, 255, 240],
   });
 }
 
 function parseHexColor(hex: string, alpha: number = 255): [number, number, number, number] {
-  let c = hex.replace("#", "");
-  if (c.length === 3) {
-    c = c[0] + c[0] + c[1] + c[1] + c[2] + c[2];
+  const cleanHex = hex.replace("#", "");
+  if (cleanHex.length === 6) {
+    const num = parseInt(cleanHex, 16);
+    return [(num >> 16) & 255, (num >> 8) & 255, num & 255, alpha];
   }
-  const num = parseInt(c, 16);
-  return [(num >> 16) & 255, (num >> 8) & 255, num & 255, alpha];
+  return [0, 240, 255, alpha];
 }

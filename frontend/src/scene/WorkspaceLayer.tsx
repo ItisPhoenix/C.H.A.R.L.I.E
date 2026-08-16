@@ -1,4 +1,4 @@
-import type { ReactElement } from "react";
+import { lazy, Suspense, type ReactElement } from "react";
 import { ContentMaskLayer } from "./ContentMaskLayer";
 import { useWorkspaceStore, type WorkspaceInstance } from "../layout/workspaceStore";
 import { SurfaceComposer } from "../composer/SurfaceComposer";
@@ -6,11 +6,15 @@ import { ResearchWorkspace } from "./workspaces/ResearchWorkspace";
 import { BriefingWorkspace } from "./workspaces/BriefingWorkspace";
 import { SystemWorkspace } from "./workspaces/SystemWorkspace";
 import { TasksWorkspace } from "./workspaces/TasksWorkspace";
-import { MapWorkspace } from "./workspaces/MapWorkspace";
 import { VisionWorkspace } from "./workspaces/VisionWorkspace";
 import { DocumentWorkspace } from "./workspaces/DocumentWorkspace";
 import { TerminalWorkspace } from "./workspaces/TerminalWorkspace";
 import { ConversationWorkspace } from "./workspaces/ConversationWorkspace";
+
+// Lazy-load MapWorkspace to avoid eagerly loading MapLibre/Deck.gl on idle Charlie
+const MapWorkspace = lazy(() =>
+  import("./workspaces/MapWorkspace").then((m) => ({ default: m.MapWorkspace }))
+);
 
 interface WorkspaceLayerProps {
   activeWorkspace?: WorkspaceInstance | null;
@@ -58,7 +62,7 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
               title: wsTitle,
               target: "workspace",
               revision: 1,
-              primitives: [{ type: "text", data: { text: active.summary || "Composed surface" } }],
+              nodes: [],
             }
           }
         />
@@ -69,17 +73,30 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
       case "research":
         return <ResearchWorkspace workspace={active} />;
       case "briefing":
-      case "news":
         return <BriefingWorkspace workspace={active} />;
       case "system":
-      case "diagnostics":
-      case "system_monitor":
+      case "telemetry":
         return <SystemWorkspace workspace={active} />;
       case "tasks":
+      case "task":
+      case "plans":
         return <TasksWorkspace workspace={active} />;
       case "map":
       case "spatial":
-        return <MapWorkspace workspace={active} />;
+        return (
+          <Suspense
+            fallback={
+              <div className="w-full h-full flex items-center justify-center bg-[#020710] font-mono text-cyan-400 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+                  <span>INITIALIZING SPATIAL ENGINE...</span>
+                </div>
+              </div>
+            }
+          >
+            <MapWorkspace workspace={active} />
+          </Suspense>
+        );
       case "vision":
       case "camera":
         return <VisionWorkspace workspace={active} />;
@@ -122,68 +139,72 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
             <button
               type="button"
               onClick={handleClose}
-              className="px-2 py-0.5 text-xs rounded bg-slate-950/80 border border-cyan-500/25 text-slate-400 hover:text-cyan-300 hover:border-cyan-400/60 transition cursor-pointer backdrop-blur-md shadow-lg"
-              title="Close workspace [Esc]"
+              className="px-2 py-0.5 text-xs rounded bg-slate-950/80 border border-cyan-500/25 text-slate-400 hover:text-rose-400 hover:border-rose-500/50 transition cursor-pointer backdrop-blur-md shadow-lg"
+              title="Close [ESC]"
               aria-label="Close workspace"
             >
-              ✕
+              ×
             </button>
           </div>
 
-          {/* Master Map Workspace Canvas */}
-          <div className="w-full h-full">
-            {renderWorkspaceContent()}
-          </div>
+          <ContentMaskLayer>
+            <div className="w-full h-full relative">
+              <Suspense
+                fallback={
+                  <div className="w-full h-full flex items-center justify-center bg-[#020710] font-mono text-cyan-400 text-xs">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+                      <span>INITIALIZING SPATIAL ENGINE...</span>
+                    </div>
+                  </div>
+                }
+              >
+                <MapWorkspace workspace={active} />
+              </Suspense>
+            </div>
+          </ContentMaskLayer>
         </div>
       </div>
     );
   }
 
-  // Standard Framed Workspace Mode for non-map workspaces
+  // Standard Framed Workspace Card Mode
   return (
-    <div className="charlie-workspace-layer" role="region" aria-label="Primary Workspace">
-      <div className="charlie-workspace-host">
-        <ContentMaskLayer>
-          <div className="p-4 sm:p-6 h-full flex flex-col justify-between">
-            {/* Subtle Floating HUD Header */}
-            <div className="flex items-center justify-between pb-3 mb-2 border-b border-cyan-500/15">
-              <div className="flex items-center gap-3">
-                <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-                <h2 className="text-sm sm:text-base font-bold tracking-wider text-slate-100 uppercase font-sans">
-                  {wsTitle}
-                </h2>
-              </div>
-
-              {/* Minimal HUD Controls */}
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleMinimize}
-                  className="px-2 py-0.5 text-xs rounded bg-slate-950/60 border border-cyan-500/20 text-slate-400 hover:text-cyan-300 hover:border-cyan-400/50 transition cursor-pointer font-mono"
-                  title="Minimize [_]"
-                  aria-label="Minimize workspace"
-                >
-                  _
-                </button>
-                <button
-                  type="button"
-                  onClick={handleClose}
-                  className="px-2 py-0.5 text-xs rounded bg-slate-950/60 border border-cyan-500/20 text-slate-400 hover:text-cyan-300 hover:border-cyan-400/50 transition cursor-pointer font-mono"
-                  title="Close workspace [Esc]"
-                  aria-label="Close workspace"
-                >
-                  ✕
-                </button>
-              </div>
+    <div className="charlie-workspace-layer" role="region" aria-label={`Primary Workspace ${wsTitle}`}>
+      <ContentMaskLayer>
+        <div className="charlie-panel p-6 flex flex-col justify-between h-full pointer-events-auto relative">
+          <div className="flex items-center justify-between pb-3 border-b border-cyan-500/20 text-xs font-mono text-cyan-300 select-none">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+              <span className="tracking-wider uppercase font-semibold">{wsTitle}</span>
             </div>
-
-            {/* Body */}
-            <div className="flex-1 overflow-auto">
-              {renderWorkspaceContent()}
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={handleMinimize}
+                className="px-2 py-0.5 text-xs rounded bg-slate-900/60 border border-cyan-500/20 text-slate-400 hover:text-cyan-300 hover:border-cyan-400/40 transition cursor-pointer"
+                title="Minimize [_]"
+                aria-label="Minimize workspace"
+              >
+                _
+              </button>
+              <button
+                type="button"
+                onClick={handleClose}
+                className="px-2 py-0.5 text-xs rounded bg-slate-900/60 border border-cyan-500/20 text-slate-400 hover:text-rose-400 hover:border-rose-500/40 transition cursor-pointer"
+                title="Close [ESC]"
+                aria-label="Close workspace"
+              >
+                ×
+              </button>
             </div>
           </div>
-        </ContentMaskLayer>
-      </div>
+
+          <div className="flex-1 w-full min-h-0 pt-4 overflow-y-auto custom-scrollbar flex flex-col">
+            {renderWorkspaceContent()}
+          </div>
+        </div>
+      </ContentMaskLayer>
     </div>
   );
 }

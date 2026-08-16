@@ -77,6 +77,18 @@ class GeoService:
             logger.warning(f"Routing failed: {e}")
             return None
 
+    def get_measurement(
+        self,
+        start: List[float],
+        destination: List[float],
+        start_label: str = "Point A",
+        destination_label: str = "Point B",
+    ) -> Optional[RouteResult]:
+        """Calculate geodesic corridor distance measurement."""
+        if hasattr(self.router, "get_geodesic_measurement"):
+            return self.router.get_geodesic_measurement(start, destination, start_label, destination_label)
+        return None
+
     async def get_layer_data(self, layer_id: str) -> LayerDataResult:
         """Fetch normalized intelligence layer features."""
         provider = self._layers.get(layer_id)
@@ -104,16 +116,39 @@ class GeoService:
             )
 
     def get_registered_layers(self) -> List[Dict[str, Any]]:
-        """List active and operational backend layers."""
+        """List configured and available layer specifications."""
         return [
             {
-                "layer_id": lid,
-                "attribution": p.attribution,
-                "operational": True,
-            }
-            for lid, p in self._layers.items()
+                "id": "earthquakes",
+                "name": "USGS Global Earthquakes (M2.5+)",
+                "category": "Seismic / Geophysical",
+                "attribution": "US Geological Survey (USGS)",
+                "defaultEnabled": False,
+            },
+            {
+                "id": "wildfires",
+                "name": "Active Global Wildfires & Hotspots",
+                "category": "Environmental Hazards",
+                "attribution": "NASA Earth Observatory (EONET)",
+                "defaultEnabled": False,
+            },
+            {
+                "id": "weather",
+                "name": "Major Meteorological Stations",
+                "category": "Atmospheric",
+                "attribution": "Open-Meteo Weather API",
+                "defaultEnabled": False,
+            },
+            {
+                "id": "cyber_threats",
+                "name": "Verified Malicious Infrastructure & C2",
+                "category": "Cyber Threat Intelligence",
+                "attribution": "abuse.ch URLhaus / ThreatFox",
+                "defaultEnabled": False,
+            },
         ]
 
 
-# Global Singleton
+# Authoritative service singleton
 geo_service = GeoService()
+

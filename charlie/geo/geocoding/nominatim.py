@@ -1,4 +1,4 @@
-"""Nominatim Geocoding Provider with caching, throttling, and normalized fallbacks."""
+"""Nominatim Geocoding Provider with live upstream priority, caching, throttling, and offline fallback."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional
-import urllib.parse
 
 import httpx
 
@@ -15,8 +14,10 @@ from charlie.geo.models import GeocodingResult
 
 logger = logging.getLogger("charlie.geo.geocoding.nominatim")
 
-# Verified Deterministic Geocoding Hubs for offline/benchmark resilience
-KNOWN_LOCATIONS: Dict[str, Dict[str, Any]] = {
+# Minimal deterministic reference hubs for offline air-gapped emergency mode ONLY
+# Strict invariant: Never used before upstream provider query, never matched via substring,
+# and tagged with explicit 'offline_fallback' provenance.
+OFFLINE_EMERGENCY_HUBS: Dict[str, Dict[str, Any]] = {
     "tokyo": {
         "name": "Tokyo",
         "display_name": "Tokyo, Japan",
@@ -51,20 +52,6 @@ KNOWN_LOCATIONS: Dict[str, Dict[str, Any]] = {
         "coordinates": [75.7873, 26.9124],
         "category": "City",
         "place_type": "city",
-    },
-    "openai": {
-        "name": "OpenAI Headquarters",
-        "display_name": "3180 18th St, San Francisco, CA 94110, United States",
-        "coordinates": [-122.4148, 37.7618],
-        "category": "Organization",
-        "place_type": "office",
-    },
-    "openai headquarters": {
-        "name": "OpenAI Headquarters",
-        "display_name": "3180 18th St, San Francisco, CA 94110, United States",
-        "coordinates": [-122.4148, 37.7618],
-        "category": "Organization",
-        "place_type": "office",
     },
     "san francisco": {
         "name": "San Francisco",
@@ -112,7 +99,7 @@ KNOWN_LOCATIONS: Dict[str, Dict[str, Any]] = {
 
 
 class NominatimProvider(GeocodingProvider):
-    """Nominatim geocoding provider with caching and throttling."""
+    """Nominatim geocoding provider with live upstream priority, caching, and rate throttling."""
 
     def __init__(
         self,
@@ -120,11 +107,13 @@ class NominatimProvider(GeocodingProvider):
         user_agent: str = "Charlie-Spatial-Engine/1.0 (Autonomous-AI-OS)",
         min_request_interval_sec: float = 1.0,
         cache_ttl_sec: float = 3600.0,
+        allow_offline_fallback: bool = True,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.user_agent = user_agent
         self.min_request_interval_sec = min_request_interval_sec
         self.cache_ttl_sec = cache_ttl_sec
+        self.allow_offline_fallback = allow_offline_fallback
         self._last_request_time = 0.0
         self._cache: Dict[str, tuple[float, List[GeocodingResult]]] = {}
         self._lock = asyncio.Lock()
@@ -134,28 +123,14 @@ class NominatimProvider(GeocodingProvider):
         if not cleaned_query:
             return []
 
-        # Check Cache
+        # 1. Check Memory TTL Cache First (Exact query)
         now = time.time()
         if cleaned_query in self._cache:
             ts, results = self._cache[cleaned_query]
             if now - ts < self.cache_ttl_sec:
                 return results
 
-        # Check known fallback dictionary first
-        for key, loc in KNOWN_LOCATIONS.items():
-            if cleaned_query == key or key in cleaned_query:
-                res = GeocodingResult(
-                    name=loc["name"],
-                    display_name=loc["display_name"],
-                    coordinates=loc["coordinates"],
-                    category=loc["category"],
-                    place_type=loc["place_type"],
-                    provider="known_hubs",
-                )
-                self._cache[cleaned_query] = (now, [res])
-                return [res]
-
-        # Rate-limited upstream call
+        # 2. Priority: Real Upstream Geocoding Query (Nominatim)
         async with self._lock:
             elapsed = time.time() - self._last_request_time
             if elapsed < self.min_request_interval_sec:
@@ -169,9 +144,12 @@ class NominatimProvider(GeocodingProvider):
                     "limit": limit,
                     "addressdetails": "1",
                 }
-                headers = {"User-Agent": self.user_agent}
+                headers = {
+                    "User-Agent": self.user_agent,
+                    "Accept-Language": "en, *;q=0.5",
+                }
 
-                async with httpx.AsyncClient(timeout=4.0) as client:
+                async with httpx.AsyncClient(timeout=4.5) as client:
                     resp = await client.get(url, params=params, headers=headers)
                     self._last_request_time = time.time()
 
@@ -209,7 +187,20 @@ class NominatimProvider(GeocodingProvider):
             except Exception as e:
                 logger.warning(f"Nominatim upstream query failed for '{query}': {e}")
 
-        # Fallback if no network or error
+        # 3. Offline / Air-Gapped Fallback ONLY after provider failure AND on exact match
+        if self.allow_offline_fallback and cleaned_query in OFFLINE_EMERGENCY_HUBS:
+            loc = OFFLINE_EMERGENCY_HUBS[cleaned_query]
+            fallback_res = GeocodingResult(
+                name=loc["name"],
+                display_name=loc["display_name"],
+                coordinates=loc["coordinates"],
+                category=loc.get("category"),
+                place_type=loc.get("place_type"),
+                provider="offline_fallback",
+            )
+            logger.info(f"Using offline emergency fallback for '{cleaned_query}'")
+            return [fallback_res]
+
         return []
 
     async def reverse(self, lat: float, lon: float) -> Optional[GeocodingResult]:
@@ -233,9 +224,12 @@ class NominatimProvider(GeocodingProvider):
                     "format": "jsonv2",
                     "addressdetails": "1",
                 }
-                headers = {"User-Agent": self.user_agent}
+                headers = {
+                    "User-Agent": self.user_agent,
+                    "Accept-Language": "en, *;q=0.5",
+                }
 
-                async with httpx.AsyncClient(timeout=4.0) as client:
+                async with httpx.AsyncClient(timeout=4.5) as client:
                     resp = await client.get(url, params=params, headers=headers)
                     self._last_request_time = time.time()
 
@@ -254,6 +248,6 @@ class NominatimProvider(GeocodingProvider):
                         self._cache[cache_key] = (now, [res])
                         return res
             except Exception as e:
-                logger.warning(f"Nominatim reverse geocode failed for {lat},{lon}: {e}")
+                logger.warning(f"Nominatim reverse geocoding failed: {e}")
 
         return None

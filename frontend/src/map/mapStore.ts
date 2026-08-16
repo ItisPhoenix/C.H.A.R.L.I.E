@@ -7,6 +7,7 @@ import type {
   ProviderMode,
   QualityTier,
   LayerStatus,
+  LayerMetadata,
 } from "./types";
 
 export interface MapStoreState extends MapCameraState {
@@ -23,6 +24,7 @@ export interface MapStoreState extends MapCameraState {
   // Layer States (Mandatory: Every layer default is strictly false)
   activeLayers: Record<string, boolean>;
   layerStatus: Record<string, { status: LayerStatus; error?: string }>;
+  layerMetadata: Record<string, LayerMetadata>;
   layerData: Record<string, MapFeature[]>;
 
   // Selection & Route
@@ -49,16 +51,21 @@ export interface MapStoreState extends MapCameraState {
   setLayerEnabled: (layerId: string, enabled: boolean) => void;
   toggleLayer: (layerId: string) => void;
   setLayerStatus: (layerId: string, statusObj: { status: LayerStatus; error?: string }) => void;
-  setLayerData: (layerId: string, features: MapFeature[]) => void;
+  setLayerMetadata: (layerId: string, meta: Partial<LayerMetadata>) => void;
+  setLayerData: (layerId: string, features: MapFeature[], meta?: Partial<LayerMetadata>) => void;
 
   setSelectedFeature: (feature: MapFeature | null) => void;
   setRoute: (route: MapRoute | null) => void;
+  clearRoute: () => void;
+  clearSelection: () => void;
 
   dispatchCommand: (command: MapCommand) => void;
   consumeCommand: (revision: number) => void;
 
+  setUserInteracting: (interacting: boolean) => void;
   recordUserInteraction: () => void;
   clearMap: () => void;
+  resetMap: () => void;
 }
 
 export const useMapStore = create<MapStoreState>((set) => ({
@@ -75,11 +82,12 @@ export const useMapStore = create<MapStoreState>((set) => ({
   terrain3D: false,
 
   pmtilesUrl: null,
-  onlineSourceUrl: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+  onlineSourceUrl: "https://tiles.openfreemap.org/planet",
 
   // Zero-intelligence default invariant
   activeLayers: {},
   layerStatus: {},
+  layerMetadata: {},
   layerData: {},
 
   selectedFeature: null,
@@ -108,6 +116,13 @@ export const useMapStore = create<MapStoreState>((set) => ({
           ? s.layerStatus[layerId] || { status: "loading" }
           : { status: "idle" },
       },
+      layerMetadata: {
+        ...s.layerMetadata,
+        [layerId]: {
+          ...(s.layerMetadata[layerId] || { status: "idle" }),
+          status: enabled ? "loading" : "idle",
+        },
+      },
     })),
 
   toggleLayer: (layerId) =>
@@ -121,6 +136,13 @@ export const useMapStore = create<MapStoreState>((set) => ({
             ? s.layerStatus[layerId] || { status: "loading" }
             : { status: "idle" },
         },
+        layerMetadata: {
+          ...s.layerMetadata,
+          [layerId]: {
+            ...(s.layerMetadata[layerId] || { status: "idle" }),
+            status: next ? "loading" : "idle",
+          },
+        },
       };
     }),
 
@@ -130,19 +152,50 @@ export const useMapStore = create<MapStoreState>((set) => ({
         ...s.layerStatus,
         [layerId]: statusObj,
       },
+      layerMetadata: {
+        ...s.layerMetadata,
+        [layerId]: {
+          ...(s.layerMetadata[layerId] || { status: "idle" }),
+          status: statusObj.status,
+          error: statusObj.error,
+        },
+      },
     })),
 
-  setLayerData: (layerId, features) =>
+  setLayerMetadata: (layerId, meta) =>
+    set((s) => ({
+      layerMetadata: {
+        ...s.layerMetadata,
+        [layerId]: {
+          ...(s.layerMetadata[layerId] || { status: "idle" }),
+          ...meta,
+        },
+      },
+    })),
+
+  setLayerData: (layerId, features, meta) =>
     set((s) => ({
       layerData: { ...s.layerData, [layerId]: features },
       layerStatus: {
         ...s.layerStatus,
         [layerId]: { status: "ready" },
       },
+      layerMetadata: {
+        ...s.layerMetadata,
+        [layerId]: {
+          ...(s.layerMetadata[layerId] || { status: "idle" }),
+          status: "ready",
+          count: features.length,
+          lastUpdated: Date.now(),
+          ...meta,
+        },
+      },
     })),
 
   setSelectedFeature: (feature) => set({ selectedFeature: feature }),
   setRoute: (route) => set({ route }),
+  clearRoute: () => set({ route: null }),
+  clearSelection: () => set({ selectedFeature: null }),
 
   dispatchCommand: (command) =>
     set((s) => {
@@ -161,6 +214,12 @@ export const useMapStore = create<MapStoreState>((set) => ({
       return {};
     }),
 
+  setUserInteracting: (interacting) =>
+    set({
+      userInteracting: interacting,
+      lastUserInteractionTimestamp: Date.now(),
+    }),
+
   recordUserInteraction: () =>
     set({
       userInteracting: true,
@@ -172,5 +231,16 @@ export const useMapStore = create<MapStoreState>((set) => ({
       selectedFeature: null,
       route: null,
       activeLayers: {},
+    }),
+
+  resetMap: () =>
+    set({
+      longitude: 15.0,
+      latitude: 25.0,
+      zoom: 1.8,
+      pitch: 0,
+      bearing: 0,
+      selectedFeature: null,
+      route: null,
     }),
 }));

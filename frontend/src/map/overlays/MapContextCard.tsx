@@ -17,24 +17,27 @@ export function MapContextCard(): ReactElement | null {
 
   // If a route is active and no specific point is selected, display route card
   if (!selectedFeature && route) {
+    const isGeodesic = route.mode === "geodesic_measurement";
     return (
       <div className="absolute top-16 left-6 z-30 max-w-sm w-full pointer-events-auto">
         <ContextCard variant="standard" elevation="floating">
           <ContextCardHeader
             title={`${route.startLabel} → ${route.destinationLabel}`}
-            category="TACTICAL ROUTE NAVIGATION"
-            badge={route.mode ? route.mode.toUpperCase() : "DRIVING"}
-            badgeVariant="cyan"
+            category={isGeodesic ? "GEODESIC DISTANCE MEASUREMENT" : "TACTICAL ROUTE NAVIGATION"}
+            badge={isGeodesic ? "GEODESIC" : (route.mode ? route.mode.toUpperCase() : "DRIVING")}
+            badgeVariant={isGeodesic ? "amber" : "cyan"}
             onClose={() => setRoute(null)}
           />
           <ContextCardBody>
             <p className="text-[12.5px] text-slate-200">
-              Optimal navigation corridor calculated across real transportation network geometry.
+              {isGeodesic
+                ? "Direct great-circle point-to-point measurement corridor across spherical coordinates."
+                : "Optimal navigation corridor calculated across real transportation network geometry."}
             </p>
-            {route.steps && route.steps.length > 0 && (
+            {!isGeodesic && route.steps && route.steps.length > 0 && (
               <div className="mt-2.5 pt-2 border-t border-cyan-500/10 space-y-1">
                 <div className="text-[10px] text-cyan-400 font-bold uppercase tracking-wider">
-                  WAYPOINTS
+                  WAYPOINTS & MANEUVERS
                 </div>
                 {route.steps.slice(0, 3).map((step, idx) => (
                   <div key={idx} className="flex items-start justify-between text-[11px] text-slate-300 font-sans">
