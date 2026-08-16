@@ -138,6 +138,50 @@ export function createRouteLayer(
 }
 
 /**
+ * Creates Deck.gl ScatterplotLayer for route origin & destination endpoints.
+ */
+export function createRouteEndpointsLayer(
+  route: MapRoute,
+  quality: QualityTier = "auto"
+): ScatterplotLayer<any> | null {
+  const geometry = (route.geometry || (route as any).coordinates || []) as [number, number][];
+  if (geometry.length < 2) return null;
+  const effectiveQuality = resolveEffectiveQuality(quality);
+
+  const endpoints = [
+    {
+      id: "origin",
+      coordinates: geometry[0],
+      type: "origin",
+      label: route.startLabel || "Origin",
+      color: [34, 211, 238, 240] as [number, number, number, number],
+    },
+    {
+      id: "destination",
+      coordinates: geometry[geometry.length - 1],
+      type: "destination",
+      label: route.destinationLabel || "Destination",
+      color: [244, 63, 94, 240] as [number, number, number, number],
+    },
+  ];
+
+  return new ScatterplotLayer({
+    id: "route-endpoints-layer",
+    data: endpoints,
+    pickable: true,
+    stroked: true,
+    filled: true,
+    lineWidthMinPixels: 2,
+    radiusMinPixels: effectiveQuality === "low" ? 5 : 6,
+    radiusMaxPixels: effectiveQuality === "low" ? 12 : 16,
+    getPosition: (d: any) => d.coordinates,
+    getRadius: 1000,
+    getFillColor: (d: any) => d.color,
+    getLineColor: [255, 255, 255, 255],
+  });
+}
+
+/**
  * Creates selection pulse radar ring around the selected feature.
  */
 export function createSelectionPulseLayer(

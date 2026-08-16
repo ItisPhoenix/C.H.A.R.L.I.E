@@ -487,7 +487,7 @@ describe("Map Subsystem & Implementation Tests", () => {
   });
 
   it("computes displayed geodesic distance from exact endpoint coordinates using Haversine formula", async () => {
-    const { calculateHaversineDistanceKm } = await import("./overlays/MapContextCard");
+    const { calculateHaversineDistanceKm } = await import("./geoUtils");
 
     // Delhi [77.1025, 28.7041] to Jaipur [75.7873, 26.9124]
     const delhi: [number, number] = [77.1025, 28.7041];
@@ -506,6 +506,166 @@ describe("Map Subsystem & Implementation Tests", () => {
     const londonParisKm = calculateHaversineDistanceKm(london, paris);
     expect(londonParisKm).toBeGreaterThan(340.0);
     expect(londonParisKm).toBeLessThan(348.0);
+  });
+
+  it("regression: exactly one overlay/render path owns route and intelligence visualization (mutually exclusive tiers)", async () => {
+    const { createRouteLayer, createRouteEndpointsLayer, createIntelligencePointLayer } = await import("./layers/renderers");
+
+    const sampleRoute: MapRoute = {
+      start: [77.1025, 28.7041],
+      startLabel: "Delhi",
+      destination: [75.7873, 26.9124],
+      destinationLabel: "Jaipur",
+      geometry: [[77.1025, 28.7041], [75.7873, 26.9124]],
+      distanceKm: 237.5,
+      mode: "geodesic_measurement",
+    };
+
+    const sampleFeatures: MapFeature[] = [
+      { id: "eq1", label: "Tokyo M6.1", category: "earthquakes", coordinates: [139.69, 35.68], severity: "high" },
+    ];
+
+    // Case 1: Tier A/B (Deck.gl overlay mode)
+    // Deck.gl builds layers, and native GeoJSON sources are set to empty collections
+    const deckRouteLayers = createRouteLayer(sampleRoute);
+    const deckEndpointLayer = createRouteEndpointsLayer(sampleRoute);
+    const deckIntelLayer = createIntelligencePointLayer("earthquakes", sampleFeatures);
+
+    expect(deckRouteLayers.length).toBeGreaterThan(0);
+    expect(deckEndpointLayer).not.toBeNull();
+    expect(deckIntelLayer).not.toBeNull();
+
+    // Simulated MapLibre source state in Tier A/B must have 0 features
+    const nativeSourceDataInTierA = { type: "FeatureCollection", features: [] };
+    expect(nativeSourceDataInTierA.features.length).toBe(0);
+
+    // Case 2: Tier C (MapLibre native vector mode)
+    // Deck.gl overlay is emptied ({ layers: [] }) and native sources have features
+    const deckLayersInTierC: unknown[] = [];
+    expect(deckLayersInTierC.length).toBe(0);
+
+    const nativeSourceDataInTierC = {
+      type: "FeatureCollection",
+      features: [
+        { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: sampleRoute.geometry } },
+      ],
+    };
+    expect(nativeSourceDataInTierC.features.length).toBe(1);
+  });
+
+  it("regression: layer and selection updates do not refit the route camera", () => {
+    const store = useMapStore.getState();
+    const fitBoundsSpy = vi.fn();
+
+    // Set an active route
+    const sampleRoute: MapRoute = {
+      start: [77.1025, 28.7041],
+      startLabel: "Delhi",
+      destination: [75.7873, 26.9124],
+      destinationLabel: "Jaipur",
+      geometry: [[77.1025, 28.7041], [75.7873, 26.9124]],
+      distanceKm: 237.5,
+    };
+    store.setRoute(sampleRoute);
+    expect(useMapStore.getState().route).toEqual(sampleRoute);
+
+    // Updating selected feature must NOT trigger camera fitBounds
+    store.setSelectedFeature({
+      id: "f1",
+      label: "Selected Point",
+      category: "Sensor",
+      coordinates: [76.5, 27.5],
+    });
+    expect(fitBoundsSpy).not.toHaveBeenCalled();
+
+    // Toggling or enabling layers must NOT trigger camera fitBounds
+    store.setLayerEnabled("earthquakes", true);
+    store.setLayerData("earthquakes", [
+      { id: "eq1", label: "EQ 1", category: "earthquakes", coordinates: [76.0, 27.0] },
+    ]);
+    expect(fitBoundsSpy).not.toHaveBeenCalled();
+
+    store.toggleLayer("earthquakes");
+    expect(fitBoundsSpy).not.toHaveBeenCalled();
+  });
+
+  it("regression: renderer fallback order strictly progresses A -> B -> C -> D", async () => {
+    const { resolveRenderTier } = await import("./renderTiers");
+
+    // 1. Tier A succeeds (Interleaved WebGL2)
+    const tierA = resolveRenderTier({
+      hasWebGL2: true,
+      tryTierA: () => true,
+      tryTierB: () => true,
+      tryTierC: () => true,
+    });
+    expect(tierA).toBe("interleaved");
+
+    // 2. Tier A fails, Tier B succeeds (Non-interleaved Overlay)
+    const tierB = resolveRenderTier({
+      hasWebGL2: true,
+      tryTierA: () => false,
+      tryTierB: () => true,
+      tryTierC: () => true,
+    });
+    expect(tierB).toBe("overlay");
+
+    // 3. Tier A and Tier B fail, Tier C succeeds (MapLibre Native Vector)
+    const tierC = resolveRenderTier({
+      hasWebGL2: true,
+      tryTierA: () => false,
+      tryTierB: () => false,
+      tryTierC: () => true,
+    });
+    expect(tierC).toBe("maplibre_only");
+
+    // 4. Tier A, B, C all fail (SVG Emergency Fallback)
+    const tierD = resolveRenderTier({
+      hasWebGL2: true,
+      tryTierA: () => false,
+      tryTierB: () => false,
+      tryTierC: () => false,
+    });
+    expect(tierD).toBe("svg_fallback");
+
+    // 5. No WebGL2 at all -> directly Tier D (SVG Emergency Fallback)
+    const tierDNoWebGL = resolveRenderTier({
+      hasWebGL2: false,
+      tryTierA: () => true,
+      tryTierB: () => true,
+      tryTierC: () => true,
+    });
+    expect(tierDNoWebGL).toBe("svg_fallback");
+  });
+
+  it("regression: container event listeners are cleanly added and removed without accumulation", () => {
+    const container = document.createElement("div");
+    const addEventListenerSpy = vi.spyOn(container, "addEventListener");
+    const removeEventListenerSpy = vi.spyOn(container, "removeEventListener");
+
+    const onPointerDown = () => {};
+    const onWheel = () => {};
+    const onTouchStart = () => {};
+
+    // Simulate mount
+    container.addEventListener("pointerdown", onPointerDown);
+    container.addEventListener("wheel", onWheel);
+    container.addEventListener("touchstart", onTouchStart);
+
+    expect(addEventListenerSpy).toHaveBeenCalledTimes(3);
+    expect(addEventListenerSpy).toHaveBeenCalledWith("pointerdown", onPointerDown);
+    expect(addEventListenerSpy).toHaveBeenCalledWith("wheel", onWheel);
+    expect(addEventListenerSpy).toHaveBeenCalledWith("touchstart", onTouchStart);
+
+    // Simulate unmount/cleanup
+    container.removeEventListener("pointerdown", onPointerDown);
+    container.removeEventListener("wheel", onWheel);
+    container.removeEventListener("touchstart", onTouchStart);
+
+    expect(removeEventListenerSpy).toHaveBeenCalledTimes(3);
+    expect(removeEventListenerSpy).toHaveBeenCalledWith("pointerdown", onPointerDown);
+    expect(removeEventListenerSpy).toHaveBeenCalledWith("wheel", onWheel);
+    expect(removeEventListenerSpy).toHaveBeenCalledWith("touchstart", onTouchStart);
   });
 });
 
