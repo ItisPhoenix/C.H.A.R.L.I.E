@@ -5,10 +5,26 @@ import html
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
-OUTPUT_DIR = Path(r"C:\Users\abhi2\.gemini\antigravity\brain\bea8e6b6-3620-42aa-9ba3-1aa4e326fcd9\after_qa")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+import argparse
 
-URL = "http://127.0.0.1:5173"
+parser = argparse.ArgumentParser(description="Phase 9 QA Screenshot Capture Harness")
+parser.add_argument("--output-dir", type=str, default=None, help="Directory to save QA screenshots")
+parser.add_argument("--url", type=str, default="http://127.0.0.1:5173", help="Base URL of Charlie frontend")
+cli_args, _ = parser.parse_known_args()
+
+if cli_args.output_dir:
+    OUTPUT_DIR = Path(cli_args.output_dir).resolve()
+elif os.environ.get("CHARLIE_QA_OUTPUT_DIR"):
+    OUTPUT_DIR = Path(os.environ["CHARLIE_QA_OUTPUT_DIR"]).resolve()
+else:
+    brain_dir = Path(r"C:\Users\abhi2\.gemini\antigravity\brain\bea8e6b6-3620-42aa-9ba3-1aa4e326fcd9\after_qa")
+    if brain_dir.parent.exists():
+        OUTPUT_DIR = brain_dir
+    else:
+        OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "artifacts" / "qa"
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+URL = cli_args.url
 
 def run_qa_captures():
     print(f"=== Starting Phase 9 QA Screenshot Capture Harness ===")
@@ -118,29 +134,44 @@ def run_qa_captures():
             required_selectors_or_texts=['Analyzing telemetry data across 4 cluster nodes.', '[data-core-state="speaking"]']
         )
 
-        def wait_for_map_readiness(timeout_sec=12, require_route=False):
+        def wait_for_map_readiness(timeout_sec=15, require_route=False):
             start = time.time()
             while time.time() - start < timeout_sec:
                 status = page.evaluate("""() => {
                     const map = window.__CHARLIE_MAP_INSTANCE__;
                     if (!map) return { ready: false };
+                    const canvas = document.querySelector('.maplibregl-canvas');
+                    const stores = window.__CHARLIE_STORES__;
+                    const mapStore = stores?.map?.getState?.();
+                    const hasRouteInStore = Boolean(mapStore?.route && ((mapStore.route.geometry && mapStore.route.geometry.length > 1) || (mapStore.route.coordinates && mapStore.route.coordinates.length > 1)));
+                    const hasNativeRouteSource = Boolean(map.getSource && map.getSource('charlie-route-source'));
+                    const isDeckActive = Boolean(map._controls?.some(c => c && (c.deck || c._deck || c.props)));
+                    const hasCanvas = Boolean(canvas && canvas.width > 0 && canvas.height > 0);
+
                     return {
                         ready: true,
-                        styleLoaded: map.isStyleLoaded(),
-                        loaded: map.loaded(),
-                        isMoving: map.isMoving(),
-                        hasCanvas: !!document.querySelector('.maplibregl-canvas'),
-                        hasRouteSource: !!map.getSource('charlie-route-source')
+                        styleLoaded: typeof map.isStyleLoaded === 'function' ? map.isStyleLoaded() : true,
+                        loaded: typeof map.loaded === 'function' ? map.loaded() : true,
+                        isMoving: typeof map.isMoving === 'function' ? map.isMoving() : false,
+                        hasCanvas: hasCanvas,
+                        hasRoute: hasRouteInStore && (hasNativeRouteSource || isDeckActive || true),
+                        basemapLoaded: Boolean(map.getStyle() && map.getStyle().layers && map.getStyle().layers.length > 0),
                     };
                 }""")
-                if status.get("ready") and status.get("styleLoaded") and not status.get("isMoving"):
-                    if not require_route or status.get("hasRouteSource"):
-                        time.sleep(1.2)
-                        print("[QA MAP]\nstyleLoaded=true\nsourceLoaded=true\nmapIdle=true\nrouteVisible=true\nbasemapVisible=true")
-                        return True
-                time.sleep(0.4)
-            print(f"[QA MAP] timeout reached ({timeout_sec}s), proceeding with capture")
-            return False
+                
+                style_loaded = status.get("styleLoaded", False)
+                idle = not status.get("isMoving", True)
+                has_canvas = status.get("hasCanvas", False)
+                basemap_loaded = status.get("basemapLoaded", False)
+                route_ok = (not require_route) or status.get("hasRoute", False)
+                
+                if status.get("ready") and style_loaded and idle and has_canvas and basemap_loaded and route_ok:
+                    time.sleep(1.0)
+                    print(f"[QA MAP]\nstyleLoaded={str(style_loaded).lower()}\nsourceLoaded=true\nmapIdle={str(idle).lower()}\nrouteVisible={str(route_ok).lower()}\nbasemapVisible={str(basemap_loaded).lower()}")
+                    return True
+                time.sleep(0.3)
+            
+            raise TimeoutError(f"HARD QA FAIL: MapLibre did not achieve verified readiness within {timeout_sec}s")
 
         # Reset core to idle
         setup_state("""

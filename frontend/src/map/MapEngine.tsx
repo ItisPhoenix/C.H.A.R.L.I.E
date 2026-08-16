@@ -40,14 +40,6 @@ export function MapEngine(): ReactElement {
 
   const [renderMode, setRenderMode] = useState<RenderMode>("interleaved");
   const [initError, setInitError] = useState<string | null>(null);
-  const [projectedOverlay, setProjectedOverlay] = useState<{
-    routePath?: string;
-    origin?: [number, number];
-    dest?: [number, number];
-    originLabel?: string;
-    destLabel?: string;
-    features: Array<{ id: string; x: number; y: number; label: string; severity?: string }>;
-  }>({ features: [] });
 
   // Store State
   const providerMode = useMapStore((s) => s.providerMode);
@@ -117,18 +109,42 @@ export function MapEngine(): ReactElement {
       mapRef.current = map;
       (window as any).__CHARLIE_MAP_INSTANCE__ = map;
 
-      // Render Mode Hierarchy: Try Deck.gl overlay mode first, fallback to native MapLibre vector layers
+      // Render Mode Progression (Tier A -> Tier B -> Tier C)
+      let tierInitialized = false;
+
+      // Tier A: MapLibre + Deck.gl interleaved
       try {
-        const overlay = new MapboxOverlay({
-          interleaved: false,
+        const overlayA = new MapboxOverlay({
+          interleaved: true,
         });
-        map.addControl(overlay as unknown as maplibregl.IControl);
-        overlayRef.current = overlay;
-        setRenderMode("overlay");
-      } catch (deckErr) {
-        console.warn("[MapEngine] Deck.gl overlay initialization failed, falling back to MapLibre-only native vector layers:", deckErr);
+        map.addControl(overlayA as unknown as maplibregl.IControl);
+        overlayRef.current = overlayA;
+        setRenderMode("interleaved");
+        tierInitialized = true;
+      } catch (tierAErr) {
+        console.warn("[MapEngine] Tier A (interleaved) failed, falling back to Tier B:", tierAErr);
+      }
+
+      // Tier B: MapLibre + Deck.gl non-interleaved overlay (if Tier A threw)
+      if (!tierInitialized) {
+        try {
+          const overlayB = new MapboxOverlay({
+            interleaved: false,
+          });
+          map.addControl(overlayB as unknown as maplibregl.IControl);
+          overlayRef.current = overlayB;
+          setRenderMode("overlay");
+          tierInitialized = true;
+        } catch (tierBErr) {
+          console.warn("[MapEngine] Tier B (overlay) failed, falling back to Tier C:", tierBErr);
+        }
+      }
+
+      // Tier C: Native MapLibre vector layers (if Deck.gl failed)
+      if (!tierInitialized) {
         overlayRef.current = null;
         setRenderMode("maplibre_only");
+        tierInitialized = true;
       }
 
       const handleLoad = () => {
@@ -171,6 +187,25 @@ export function MapEngine(): ReactElement {
         }
       };
 
+      const handleMapError = (e: any) => {
+        if (overlayRef.current && (e?.error?.message?.includes("height") || e?.error?.message?.includes("getViewport"))) {
+          console.warn("[MapEngine] Interleaved render exception detected, falling back to Tier B (overlay mode)");
+          try {
+            map.removeControl(overlayRef.current as unknown as maplibregl.IControl);
+            const overlayB = new MapboxOverlay({ interleaved: false });
+            map.addControl(overlayB as unknown as maplibregl.IControl);
+            overlayRef.current = overlayB;
+            setRenderMode("overlay");
+            syncLayersAndRouteRef.current();
+          } catch {
+            overlayRef.current = null;
+            setRenderMode("maplibre_only");
+            syncLayersAndRouteRef.current();
+          }
+        }
+      };
+
+      map.on("error", handleMapError);
       map.on("load", handleLoad);
       map.on("styledata", handleStyleData);
       map.on("dragstart", handleUserInteractionStart);
@@ -204,6 +239,7 @@ export function MapEngine(): ReactElement {
             container.removeEventListener("wheel", onWheel);
             container.removeEventListener("touchstart", onTouchStart);
           }
+          map.off("error", handleMapError);
           map.off("load", handleLoad);
           map.off("styledata", handleStyleData);
           map.off("dragstart", handleUserInteractionStart);
@@ -579,72 +615,9 @@ export function MapEngine(): ReactElement {
 
   syncLayersAndRouteRef.current = syncLayersAndRoute;
 
-  const updateProjectedOverlay = useCallback(() => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    let routePath: string | undefined;
-    let origin: [number, number] | undefined;
-    let dest: [number, number] | undefined;
-    const originLabel = route?.startLabel || "Origin";
-    const destLabel = route?.destinationLabel || "Destination";
-
-    const hasValidRoute = Boolean(route && (route.geometry?.length > 1 || (route as any).coordinates?.length > 1));
-    const routeCoords = (hasValidRoute ? (route!.geometry || (route as any).coordinates) : []) as [number, number][];
-
-    if (hasValidRoute && routeCoords.length >= 2) {
-      const points = routeCoords.map((c) => {
-        const pt = map.project([c[0], c[1]]);
-        return `${pt.x},${pt.y}`;
-      });
-      routePath = `M ${points.join(" L ")}`;
-      const p0 = map.project([routeCoords[0][0], routeCoords[0][1]]);
-      const p1 = map.project([routeCoords[routeCoords.length - 1][0], routeCoords[routeCoords.length - 1][1]]);
-      origin = [p0.x, p0.y];
-      dest = [p1.x, p1.y];
-    }
-
-    const features: Array<{ id: string; x: number; y: number; label: string; severity?: string }> = [];
-    for (const [layerId, isEnabled] of Object.entries(activeLayers)) {
-      if (isEnabled && layerData[layerId]) {
-        for (const feat of layerData[layerId]) {
-          const pt = map.project([feat.coordinates[0], feat.coordinates[1]]);
-          features.push({
-            id: feat.id,
-            x: pt.x,
-            y: pt.y,
-            label: feat.label,
-            severity: feat.severity,
-          });
-        }
-      }
-    }
-
-    setProjectedOverlay({
-      routePath,
-      origin,
-      dest,
-      originLabel,
-      destLabel,
-      features,
-    });
-  }, [route, activeLayers, layerData]);
-
   useEffect(() => {
     syncLayersAndRoute();
-    updateProjectedOverlay();
-  }, [syncLayersAndRoute, updateProjectedOverlay]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    map.on("move", updateProjectedOverlay);
-    map.on("render", updateProjectedOverlay);
-    return () => {
-      map.off("move", updateProjectedOverlay);
-      map.off("render", updateProjectedOverlay);
-    };
-  }, [updateProjectedOverlay]);
+  }, [syncLayersAndRoute]);
 
   // 4. MapCommand Execution Queue Listener (Supports all 16 commands)
   useEffect(() => {
@@ -903,137 +876,8 @@ export function MapEngine(): ReactElement {
 
   return (
     <div className="w-full h-full relative overflow-hidden bg-[#020710] select-none font-mono">
-      {/* 1. MapLibre GL Canvas Container */}
+      {/* 1. MapLibre GL Canvas Container (Hosts WebGL & Deck.gl layers) */}
       <div ref={mapContainerRef} className="w-full h-full absolute inset-0 z-0" tabIndex={-1} />
-
-      {/* 1b. Real-time GPU Projected SVG Tactical Overlay */}
-      <svg className="w-full h-full absolute inset-0 z-10 pointer-events-none overflow-hidden">
-        {projectedOverlay.routePath && (
-          <g>
-            {/* Glow corridor casing */}
-            <path
-              d={projectedOverlay.routePath}
-              fill="none"
-              stroke="rgba(0, 240, 255, 0.4)"
-              strokeWidth={14}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            {/* Main high-contrast route polyline */}
-            <path
-              d={projectedOverlay.routePath}
-              fill="none"
-              stroke="#00f0ff"
-              strokeWidth={4.5}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            {/* Pulse dashes */}
-            <path
-              d={projectedOverlay.routePath}
-              fill="none"
-              stroke="#ffffff"
-              strokeWidth={2}
-              strokeDasharray="6 12"
-              className="animate-pulse opacity-80"
-            />
-          </g>
-        )}
-
-        {projectedOverlay.origin && (
-          <g>
-            <circle
-              cx={projectedOverlay.origin[0]}
-              cy={projectedOverlay.origin[1]}
-              r={16}
-              fill="rgba(34, 211, 238, 0.35)"
-              stroke="#22d3ee"
-              strokeWidth={2}
-            />
-            <circle
-              cx={projectedOverlay.origin[0]}
-              cy={projectedOverlay.origin[1]}
-              r={6}
-              fill="#ffffff"
-            />
-            <text
-              x={projectedOverlay.origin[0]}
-              y={projectedOverlay.origin[1] + 26}
-              fill="#22d3ee"
-              fontSize={11}
-              fontFamily="JetBrains Mono"
-              fontWeight="bold"
-              textAnchor="middle"
-            >
-              {projectedOverlay.originLabel}
-            </text>
-          </g>
-        )}
-
-        {projectedOverlay.dest && (
-          <g>
-            <circle
-              cx={projectedOverlay.dest[0]}
-              cy={projectedOverlay.dest[1]}
-              r={16}
-              fill="rgba(244, 63, 94, 0.35)"
-              stroke="#f43f5e"
-              strokeWidth={2}
-            />
-            <circle
-              cx={projectedOverlay.dest[0]}
-              cy={projectedOverlay.dest[1]}
-              r={6}
-              fill="#ffffff"
-            />
-            <text
-              x={projectedOverlay.dest[0]}
-              y={projectedOverlay.dest[1] + 26}
-              fill="#f43f5e"
-              fontSize={11}
-              fontFamily="JetBrains Mono"
-              fontWeight="bold"
-              textAnchor="middle"
-            >
-              {projectedOverlay.destLabel}
-            </text>
-          </g>
-        )}
-
-        {projectedOverlay.features.map((feat) => {
-          const isCrit = feat.severity === "critical" || feat.severity === "high";
-          const color = isCrit ? "#ef4444" : "#eab308";
-          return (
-            <g key={feat.id}>
-              <circle
-                cx={feat.x}
-                cy={feat.y}
-                r={isCrit ? 18 : 12}
-                fill={isCrit ? "rgba(239, 68, 68, 0.35)" : "rgba(234, 179, 8, 0.35)"}
-                stroke={color}
-                strokeWidth={2}
-                className="animate-pulse"
-              />
-              <circle
-                cx={feat.x}
-                cy={feat.y}
-                r={5}
-                fill="#ffffff"
-              />
-              <text
-                x={feat.x}
-                y={feat.y + 24}
-                fill="#f8fafc"
-                fontSize={10.5}
-                fontFamily="JetBrains Mono"
-                textAnchor="middle"
-              >
-                {feat.label}
-              </text>
-            </g>
-          );
-        })}
-      </svg>
 
       {/* 2. Top-Right Technical Compass & Controls */}
       <MapToolbar />
