@@ -129,7 +129,17 @@ export function LayerControls(): ReactElement {
                             {isLoading && (
                               <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
                             )}
-                            {count !== undefined && isActive && (
+                            {status?.status === "unconfigured" && isActive && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-400">
+                                Unconfigured
+                              </span>
+                            )}
+                            {status?.status === "error" && isActive && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-950/60 border border-red-500/40 text-red-300">
+                                Unavailable
+                              </span>
+                            )}
+                            {count !== undefined && isActive && status?.status === "ready" && (
                               <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-cyan-950 border border-cyan-500/30 text-cyan-300">
                                 {count}
                               </span>

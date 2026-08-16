@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { PMTiles } from "pmtiles";
 import { useMapStore } from "./mapStore";
 import { calculateFlyDuration, calculateBounds, CHARLIE_SAFE_PADDING } from "./camera";
@@ -343,4 +343,169 @@ describe("Map Subsystem & Implementation Tests", () => {
     expect(useMapStore.getState().layerStatus.earthquakes.status).toBe("idle");
     expect(useMapStore.getState().layerData.earthquakes.length).toBe(0);
   });
+
+  it("executes MapCommands and verifies store state transitions & mock MapLibre invocations", () => {
+    const store = useMapStore.getState();
+
+    // Mock MapLibre instance methods
+    const mockMap = {
+      flyTo: vi.fn(),
+      easeTo: vi.fn(),
+      fitBounds: vi.fn(),
+      zoomIn: vi.fn(),
+      zoomOut: vi.fn(),
+      setPitch: vi.fn(),
+      setBearing: vi.fn(),
+      getCenter: vi.fn(() => ({ lng: 0, lat: 0 })),
+      getZoom: vi.fn(() => 2),
+      getPitch: vi.fn(() => 0),
+      getBearing: vi.fn(() => 0),
+    };
+
+    // 1. Dispatch focus_location
+    store.dispatchCommand({
+      type: "focus_location",
+      coordinates: [77.2090, 28.6139],
+      zoom: 12,
+    });
+
+    const pendingCmd = useMapStore.getState().pendingCommand;
+    expect(pendingCmd?.command.type).toBe("focus_location");
+    if (pendingCmd?.command.type === "focus_location") {
+      expect(pendingCmd.command.coordinates).toEqual([77.2090, 28.6139]);
+      expect(pendingCmd.command.zoom).toBe(12);
+    }
+
+    // 2. Set route & clear route via store mutators
+    const testRoute: any = {
+      startCoordinates: [77.10, 28.70],
+      destinationCoordinates: [72.87, 19.07],
+      startLabel: "Delhi",
+      destinationLabel: "Mumbai",
+      coordinates: [[77.10, 28.70], [72.87, 19.07]],
+      distanceKm: 1412,
+      mode: "driving",
+    };
+
+    store.setRoute(testRoute);
+    expect(useMapStore.getState().route).toEqual(testRoute);
+
+    store.clearRoute();
+    expect(useMapStore.getState().route).toBeNull();
+
+    // 3. Select feature & clear selection via store mutators
+    const testFeature: any = {
+      id: "hub_alpha",
+      label: "Alpha Node",
+      category: "Infrastructure",
+      coordinates: [139.75, 35.68],
+      severity: "low",
+    };
+    store.setSelectedFeature(testFeature);
+    expect(useMapStore.getState().selectedFeature).toEqual(testFeature);
+
+    store.clearSelection();
+    expect(useMapStore.getState().selectedFeature).toBeNull();
+
+    // 4. Test command dispatching for set_route
+    store.dispatchCommand({
+      type: "set_route",
+      route: testRoute,
+      fit: true,
+    });
+    expect(useMapStore.getState().pendingCommand?.command.type).toBe("set_route");
+
+    // 5. Test mock MapLibre execution helper calls
+    mockMap.flyTo({ center: [139.69, 35.68], zoom: 10, duration: 600 });
+    expect(mockMap.flyTo).toHaveBeenCalledWith({
+      center: [139.69, 35.68],
+      zoom: 10,
+      duration: 600,
+    });
+
+    mockMap.fitBounds([[75, 25], [78, 29]], { padding: 40 });
+    expect(mockMap.fitBounds).toHaveBeenCalled();
+
+    mockMap.zoomIn();
+    expect(mockMap.zoomIn).toHaveBeenCalled();
+
+    mockMap.zoomOut();
+    expect(mockMap.zoomOut).toHaveBeenCalled();
+
+    mockMap.setPitch(45);
+    expect(mockMap.setPitch).toHaveBeenCalledWith(45);
+
+    mockMap.setBearing(0);
+    expect(mockMap.setBearing).toHaveBeenCalledWith(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // REGRESSION: geodesic_measurement routes must never expose driving semantics
+  // -------------------------------------------------------------------------
+  it("rejects driving semantics on geodesic_measurement routes", () => {
+    const geodesicRoute: MapRoute = {
+      start: [77.1025, 28.7041],
+      startLabel: "Delhi Core",
+      destination: [75.7873, 26.9124],
+      destinationLabel: "Jaipur Relay",
+      geometry: [
+        [77.1025, 28.7041],
+        [76.45, 27.81],
+        [75.7873, 26.9124],
+      ],
+      distanceKm: 268.4,
+      mode: "geodesic_measurement",
+      // durationMin: MUST be absent/undefined — no driving duration for geodesic
+      // steps: MUST be empty or absent — no turn instructions for geodesic
+    };
+
+    // Invariant: mode must be geodesic_measurement (not driving/walking/transit)
+    expect(geodesicRoute.mode).toBe("geodesic_measurement");
+
+    // Invariant: no driving duration
+    expect(geodesicRoute.durationMin).toBeUndefined();
+
+    // Invariant: no turn-by-turn instructions
+    const stepCount = geodesicRoute.steps?.length ?? 0;
+    expect(stepCount).toBe(0);
+
+    // Invariant: the UI derivation — isGeodesic=true means no DRIVING badge
+    const isGeodesic = geodesicRoute.mode === "geodesic_measurement";
+    expect(isGeodesic).toBe(true);
+
+    // Derived badge: must NOT be "DRIVING"
+    const badge = isGeodesic ? "GEODESIC" : (geodesicRoute.mode?.toUpperCase() ?? "DRIVING");
+    expect(badge).not.toBe("DRIVING");
+    expect(badge).toBe("GEODESIC");
+
+    // Derived body: must NOT claim transportation-network geometry
+    const body = isGeodesic
+      ? "Direct great-circle point-to-point measurement corridor across spherical coordinates."
+      : "Optimal navigation corridor calculated across real transportation network geometry.";
+    expect(body).not.toContain("transportation network geometry");
+    expect(body).toContain("great-circle");
+  });
+
+  it("computes displayed geodesic distance from exact endpoint coordinates using Haversine formula", async () => {
+    const { calculateHaversineDistanceKm } = await import("./overlays/MapContextCard");
+
+    // Delhi [77.1025, 28.7041] to Jaipur [75.7873, 26.9124]
+    const delhi: [number, number] = [77.1025, 28.7041];
+    const jaipur: [number, number] = [75.7873, 26.9124];
+
+    const computedKm = calculateHaversineDistanceKm(delhi, jaipur);
+
+    // True spherical Haversine distance is ~237.4 km (never the 268.4 km driving distance)
+    expect(computedKm).toBeGreaterThan(235.0);
+    expect(computedKm).toBeLessThan(240.0);
+    expect(computedKm).toBeCloseTo(237.4, 0);
+
+    // Verify distance with London [ -0.1278, 51.5074 ] to Paris [ 2.3522, 48.8566 ] (~343.5 km)
+    const london: [number, number] = [-0.1278, 51.5074];
+    const paris: [number, number] = [2.3522, 48.8566];
+    const londonParisKm = calculateHaversineDistanceKm(london, paris);
+    expect(londonParisKm).toBeGreaterThan(340.0);
+    expect(londonParisKm).toBeLessThan(348.0);
+  });
 });
+

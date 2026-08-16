@@ -3,14 +3,19 @@ import type { StyleSpecification } from "maplibre-gl";
 /**
  * C.H.A.R.L.I.E. Dark Spatial Intelligence Map Style
  *
- * Characteristics:
- * - Almost-black water (#020710 / #030a16)
- * - Deep dark navy landmasses (#061422 / #081a2c)
- * - Subdued administrative boundaries in muted cyan (rgba(34, 211, 238, 0.35))
- * - Arterial roads slightly luminescent (#00f0ff / #38bdf8), local roads faint
- * - Muted sparse labels with dark halos
- * - 3D building extrusions at high zoom levels
- * - Fully compliant legal attribution
+ * Visual hierarchy (brightest → dimmest):
+ *   active intelligence / route overlay
+ *   > luminous city / network hub nodes
+ *   > major network corridors (motorway/trunk) at regional zoom
+ *   > primary roads at city zoom
+ *   > minor roads (city zoom only)
+ *   > administrative boundaries (faint at world, more visible at regional)
+ *   > base geography (water / land)
+ *
+ * Zoom vocabulary:
+ *   World    z0–3   : only country outlines + sparse labels
+ *   Regional z4–7   : state boundaries appear, major corridors brighten
+ *   City     z8–14  : roads fill in, buildings extrude
  */
 
 export const CHARLIE_DARK_MAP_STYLE: StyleSpecification = {
@@ -41,16 +46,16 @@ export const CHARLIE_DARK_MAP_STYLE: StyleSpecification = {
   },
   glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
   layers: [
-    // 1. Deep space base
+    // 1. Deep space technical base
     {
       id: "background",
       type: "background",
       paint: {
-        "background-color": "#020710",
+        "background-color": "#040a17",
       },
     },
 
-    // 2. High-speed raster foundation layer
+    // 2. High-speed raster foundation — provides visible continent landmass / oceans
     {
       id: "carto-dark-base",
       type: "raster",
@@ -58,66 +63,35 @@ export const CHARLIE_DARK_MAP_STYLE: StyleSpecification = {
       minzoom: 0,
       maxzoom: 19,
       paint: {
-        "raster-opacity": 0.85,
-        "raster-contrast": 0.18,
-        "raster-brightness-min": 0.02,
-        "raster-brightness-max": 0.72,
+        "raster-opacity": 0.95,
       },
     },
 
-    // 3. Vector Water Polygons
+    // 3. Vector Water — near-black, crisp separation
     {
       id: "water-vector",
       type: "fill",
       source: "openfreemap",
       "source-layer": "water",
       paint: {
-        "fill-color": "#020710",
+        "fill-color": "#020b18",
         "fill-opacity": 0.95,
       },
     },
 
-    // 4. Vector Landcover & Landuse
+    // 4. Vector Landcover — subtle texture overlay
     {
       id: "landcover-vector",
       type: "fill",
       source: "openfreemap",
       "source-layer": "landcover",
       paint: {
-        "fill-color": "#061422",
-        "fill-opacity": 0.65,
+        "fill-color": "#081526",
+        "fill-opacity": 0.5,
       },
     },
 
-    // 5. Minor / Secondary Road Network
-    {
-      id: "roads-minor",
-      type: "line",
-      source: "openfreemap",
-      "source-layer": "transportation",
-      filter: ["!in", "class", "motorway", "trunk", "primary"],
-      minzoom: 11,
-      paint: {
-        "line-color": "rgba(34, 211, 238, 0.15)",
-        "line-width": ["interpolate", ["linear"], ["zoom"], 11, 0.5, 16, 1.8],
-      },
-    },
-
-    // 6. Primary Arterial Roads & Highways
-    {
-      id: "roads-arterial",
-      type: "line",
-      source: "openfreemap",
-      "source-layer": "transportation",
-      filter: ["in", "class", "motorway", "trunk", "primary"],
-      minzoom: 6,
-      paint: {
-        "line-color": "rgba(0, 240, 255, 0.45)",
-        "line-width": ["interpolate", ["linear"], ["zoom"], 6, 0.8, 12, 2.4, 16, 4.0],
-      },
-    },
-
-    // 7. Administrative Country Boundaries
+    // 5. Administrative Country Boundaries — crisp technical dashed lines
     {
       id: "boundaries-country",
       type: "line",
@@ -125,13 +99,23 @@ export const CHARLIE_DARK_MAP_STYLE: StyleSpecification = {
       "source-layer": "boundary",
       filter: ["==", "admin_level", 2],
       paint: {
-        "line-color": "rgba(34, 211, 238, 0.45)",
-        "line-width": 1.2,
-        "line-dasharray": [3, 2],
+        "line-color": [
+          "interpolate", ["linear"], ["zoom"],
+          0, "rgba(56, 189, 248, 0.35)",
+          4, "rgba(56, 189, 248, 0.50)",
+          8, "rgba(56, 189, 248, 0.60)",
+        ],
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          0, 0.8,
+          4, 1.2,
+          8, 1.5,
+        ],
+        "line-dasharray": [4, 3],
       },
     },
 
-    // 8. Administrative State / Regional Boundaries
+    // 6. State / Regional Boundaries
     {
       id: "boundaries-state",
       type: "line",
@@ -140,13 +124,107 @@ export const CHARLIE_DARK_MAP_STYLE: StyleSpecification = {
       filter: [">", "admin_level", 2],
       minzoom: 4,
       paint: {
-        "line-color": "rgba(34, 211, 238, 0.25)",
-        "line-width": 0.8,
-        "line-dasharray": [2, 2],
+        "line-color": [
+          "interpolate", ["linear"], ["zoom"],
+          4, "rgba(56, 189, 248, 0.15)",
+          7, "rgba(56, 189, 248, 0.28)",
+          10, "rgba(56, 189, 248, 0.35)",
+        ],
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          4, 0.5,
+          8, 0.9,
+        ],
+        "line-dasharray": [3, 3],
       },
     },
 
-    // 9. 3D Extruded Buildings (Visible when pitched at high zoom)
+    // 7. Major Network Corridors — Motorways and Trunk roads (Muted Cyan Corridor)
+    {
+      id: "roads-motorway",
+      type: "line",
+      source: "openfreemap",
+      "source-layer": "transportation",
+      filter: ["in", "class", "motorway", "trunk"],
+      minzoom: 4,
+      paint: {
+        "line-color": [
+          "interpolate", ["linear"], ["zoom"],
+          4, "rgba(0, 180, 216, 0.28)",
+          7, "rgba(0, 180, 216, 0.45)",
+          12, "rgba(0, 180, 216, 0.60)",
+        ],
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          4, 0.8,
+          8, 1.6,
+          12, 2.8,
+          16, 4.2,
+        ],
+      },
+    },
+
+    // 8. Primary Arterial Roads — Deep slate-blue (distinctly dimmer than active route)
+    {
+      id: "roads-primary",
+      type: "line",
+      source: "openfreemap",
+      "source-layer": "transportation",
+      filter: ["in", "class", "primary"],
+      minzoom: 6,
+      paint: {
+        "line-color": [
+          "interpolate", ["linear"], ["zoom"],
+          6, "rgba(30, 120, 180, 0.18)",
+          9, "rgba(30, 120, 180, 0.32)",
+          13, "rgba(30, 120, 180, 0.45)",
+        ],
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          6, 0.5,
+          10, 1.4,
+          15, 2.8,
+        ],
+      },
+    },
+
+    // 9. Secondary / Tertiary Roads — Dark muted navy (subdued background fabric)
+    {
+      id: "roads-secondary",
+      type: "line",
+      source: "openfreemap",
+      "source-layer": "transportation",
+      filter: ["in", "class", "secondary", "tertiary"],
+      minzoom: 9,
+      paint: {
+        "line-color": [
+          "interpolate", ["linear"], ["zoom"],
+          9, "rgba(15, 60, 110, 0.12)",
+          13, "rgba(15, 60, 110, 0.24)",
+        ],
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          9, 0.4,
+          14, 1.2,
+        ],
+      },
+    },
+
+    // 10. Minor Roads — deepest zoom only, ultra-faint
+    {
+      id: "roads-minor",
+      type: "line",
+      source: "openfreemap",
+      "source-layer": "transportation",
+      filter: ["!in", "class", "motorway", "trunk", "primary", "secondary", "tertiary"],
+      minzoom: 12,
+      paint: {
+        "line-color": "rgba(15, 50, 90, 0.10)",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.4, 16, 1.0],
+      },
+    },
+
+    // 11. 3D Extruded Buildings (city zoom + pitched)
     {
       id: "building-3d",
       type: "fill-extrusion",
@@ -154,14 +232,46 @@ export const CHARLIE_DARK_MAP_STYLE: StyleSpecification = {
       "source-layer": "building",
       minzoom: 14,
       paint: {
-        "fill-extrusion-color": "#0a223a",
+        "fill-extrusion-color": "#0c2844",
         "fill-extrusion-height": ["coalesce", ["get", "render_height"], 15],
         "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
         "fill-extrusion-opacity": 0.85,
       },
     },
 
-    // 10. Country & Capital City Place Labels
+    // 12. Luminous city / network hub nodes — subtle glow at world/regional zoom
+    //     Appear as faint pulsing hubs at z3-7, grow detail at city zoom
+    {
+      id: "place-hub-circles",
+      type: "circle",
+      source: "openfreemap",
+      "source-layer": "place",
+      filter: ["in", "class", "city", "capital"],
+      minzoom: 2,
+      maxzoom: 9,
+      paint: {
+        "circle-radius": [
+          "interpolate", ["linear"], ["zoom"],
+          2, 1.5,
+          5, 3.0,
+          8, 4.5,
+        ],
+        "circle-color": "rgba(34, 211, 238, 0.55)",
+        "circle-blur": [
+          "interpolate", ["linear"], ["zoom"],
+          2, 1.2,
+          6, 0.6,
+        ],
+        "circle-opacity": [
+          "interpolate", ["linear"], ["zoom"],
+          2, 0.4,
+          5, 0.7,
+          8, 0.0,
+        ],
+      },
+    },
+
+    // 13. Country & State Place Labels — restrained, zoom-appropriate
     {
       id: "place-labels-country",
       type: "symbol",
@@ -171,36 +281,54 @@ export const CHARLIE_DARK_MAP_STYLE: StyleSpecification = {
       layout: {
         "text-field": ["coalesce", ["get", "name_en"], ["get", "name"]],
         "text-font": ["Open Sans Regular", "Arial Unicode MS Regular"],
-        "text-size": ["interpolate", ["linear"], ["zoom"], 2, 9, 6, 13],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 1, 8.0, 4, 11.0, 7, 13.5],
         "text-transform": "uppercase",
-        "text-letter-spacing": 0.15,
+        "text-letter-spacing": 0.12,
         "text-max-width": 8,
       },
       paint: {
-        "text-color": "rgba(148, 163, 184, 0.85)",
+        "text-color": [
+          "interpolate", ["linear"], ["zoom"],
+          0, "rgba(148, 163, 184, 0.65)",
+          4, "rgba(203, 213, 225, 0.90)",
+        ],
         "text-halo-color": "#020710",
-        "text-halo-width": 1.5,
+        "text-halo-width": 2.0,
+        "text-opacity": [
+          "interpolate", ["linear"], ["zoom"],
+          0, 0.6,
+          3, 1.0,
+        ],
       },
     },
 
-    // 11. Major City Labels
+    // 14. Major City Labels — sparse, zoom-appropriate brightness
     {
       id: "place-labels-city",
       type: "symbol",
       source: "openfreemap",
       "source-layer": "place",
       filter: ["in", "class", "city", "town"],
-      minzoom: 4,
+      minzoom: 3,
       layout: {
         "text-field": ["coalesce", ["get", "name_en"], ["get", "name"]],
         "text-font": ["Open Sans Regular", "Arial Unicode MS Regular"],
-        "text-size": ["interpolate", ["linear"], ["zoom"], 4, 9, 10, 14],
+        "text-size": [
+          "interpolate", ["linear"], ["zoom"],
+          3, 8.5,
+          6, 11.5,
+          10, 14.5,
+        ],
         "text-max-width": 10,
       },
       paint: {
-        "text-color": "#38bdf8",
+        "text-color": [
+          "interpolate", ["linear"], ["zoom"],
+          3, "rgba(125, 211, 252, 0.65)",
+          7, "rgba(125, 211, 252, 0.90)",
+        ],
         "text-halo-color": "#020710",
-        "text-halo-width": 1.2,
+        "text-halo-width": 1.5,
       },
     },
   ],

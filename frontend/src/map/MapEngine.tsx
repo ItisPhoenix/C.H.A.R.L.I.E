@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
 import * as maplibregl from "maplibre-gl";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -38,6 +38,14 @@ export function MapEngine(): ReactElement {
 
   const [renderMode, setRenderMode] = useState<RenderMode>("interleaved");
   const [initError, setInitError] = useState<string | null>(null);
+  const [projectedOverlay, setProjectedOverlay] = useState<{
+    routePath?: string;
+    origin?: [number, number];
+    dest?: [number, number];
+    originLabel?: string;
+    destLabel?: string;
+    features: Array<{ id: string; x: number; y: number; label: string; severity?: string }>;
+  }>({ features: [] });
 
   // Store State
   const providerMode = useMapStore((s) => s.providerMode);
@@ -105,34 +113,30 @@ export function MapEngine(): ReactElement {
         maxPitch: effectiveQuality === "low" ? 0 : 60,
       });
       mapRef.current = map;
+      (window as any).__CHARLIE_MAP_INSTANCE__ = map;
 
-      // Tier A: Deck.gl Interleaved Overlay
+      // Render Mode Hierarchy: Try Deck.gl overlay mode first, fallback to native MapLibre vector layers
       try {
         const overlay = new MapboxOverlay({
-          interleaved: true,
-          layers: [],
+          interleaved: false,
         });
-        overlayRef.current = overlay;
         map.addControl(overlay as unknown as maplibregl.IControl);
-        setRenderMode("interleaved");
-      } catch (deckInterleaveErr) {
-        console.warn("[MapEngine] Tier A interleaved mode failed, trying Tier B non-interleaved overlay:", deckInterleaveErr);
-        try {
-          const overlay = new MapboxOverlay({
-            interleaved: false,
-            layers: [],
-          });
-          overlayRef.current = overlay;
-          map.addControl(overlay as unknown as maplibregl.IControl);
-          setRenderMode("overlay");
-        } catch (overlayErr) {
-          console.warn("[MapEngine] Tier B overlay failed, falling back to Tier C MapLibre-only:", overlayErr);
-          setRenderMode("maplibre_only");
-        }
+        overlayRef.current = overlay;
+        setRenderMode("overlay");
+      } catch (deckErr) {
+        console.warn("[MapEngine] Deck.gl overlay initialization failed, falling back to MapLibre-only native vector layers:", deckErr);
+        overlayRef.current = null;
+        setRenderMode("maplibre_only");
       }
 
       map.on("load", () => {
         setReady(true);
+        map.resize();
+        syncLayersAndRoute();
+      });
+
+      map.on("styledata", () => {
+        syncLayersAndRoute();
       });
 
       // Camera Interruption Listeners (Only genuine user interaction stops camera)
@@ -269,41 +273,338 @@ export function MapEngine(): ReactElement {
     }
   }, [activeLayers, layerData, layerMetadata, setLayerData, setLayerStatus]);
 
-  // 3. Update Deck.gl Layers on State Change
-  useEffect(() => {
-    if (!overlayRef.current || renderMode === "maplibre_only" || renderMode === "svg_fallback") return;
+  const syncLayersAndRoute = useCallback(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (!map.getStyle()) {
+      map.once("styledata", () => syncLayersAndRoute());
+      return;
+    }
 
-    const deckLayers: any[] = [];
+    const hasValidRoute = Boolean(route && (route.geometry?.length > 1 || (route as any).coordinates?.length > 1));
+    const routeCoords = (hasValidRoute ? (route!.geometry || (route as any).coordinates) : []) as [number, number][];
 
-    // Intelligence Layers
-    for (const [layerId, isEnabled] of Object.entries(activeLayers)) {
-      if (isEnabled && layerData[layerId] && layerData[layerId].length > 0) {
-        const pointLayer = createIntelligencePointLayer(
-          layerId,
-          layerData[layerId],
-          (feature) => setSelectedFeature(feature),
-          quality
+    try {
+      // 1. Route Line Source & Layers
+      let routeSource = map.getSource("charlie-route-source") as maplibregl.GeoJSONSource | undefined;
+      const lineData: any = {
+        type: "FeatureCollection",
+        features: hasValidRoute ? [
+          {
+            type: "Feature",
+            properties: {},
+            geometry: {
+              type: "LineString",
+              coordinates: routeCoords,
+            },
+          },
+        ] : [],
+      };
+
+      if (!routeSource) {
+        map.addSource("charlie-route-source", {
+          type: "geojson",
+          data: lineData,
+        });
+        map.addLayer({
+          id: "charlie-route-glow",
+          type: "line",
+          source: "charlie-route-source",
+          paint: {
+            "line-color": "rgba(0, 240, 255, 0.4)",
+            "line-width": 8,
+            "line-blur": 3,
+          },
+        });
+        map.addLayer({
+          id: "charlie-route-line",
+          type: "line",
+          source: "charlie-route-source",
+          paint: {
+            "line-color": "#00f0ff",
+            "line-width": 3.5,
+          },
+          layout: {
+            "line-cap": "round",
+            "line-join": "round",
+          },
+        });
+      } else {
+        routeSource.setData(lineData);
+      }
+
+      // 2. Route Endpoints (Origin & Destination Markers)
+      const endpointFeatures: any[] = [];
+      if (hasValidRoute && routeCoords.length >= 2) {
+        endpointFeatures.push({
+          type: "Feature",
+          properties: {
+            type: "origin",
+            label: route!.startLabel || "Origin",
+          },
+          geometry: {
+            type: "Point",
+            coordinates: routeCoords[0],
+          },
+        });
+        endpointFeatures.push({
+          type: "Feature",
+          properties: {
+            type: "destination",
+            label: route!.destinationLabel || "Destination",
+          },
+          geometry: {
+            type: "Point",
+            coordinates: routeCoords[routeCoords.length - 1],
+          },
+        });
+      }
+
+      let endpointSource = map.getSource("charlie-route-endpoints") as maplibregl.GeoJSONSource | undefined;
+      if (!endpointSource) {
+        map.addSource("charlie-route-endpoints", {
+          type: "geojson",
+          data: {
+            type: "FeatureCollection",
+            features: endpointFeatures,
+          },
+        });
+        map.addLayer({
+          id: "charlie-route-endpoints-halo",
+          type: "circle",
+          source: "charlie-route-endpoints",
+          paint: {
+            "circle-radius": 16,
+            "circle-color": [
+              "match",
+              ["get", "type"],
+              "origin",
+              "rgba(34, 211, 238, 0.4)",
+              "rgba(244, 63, 94, 0.4)",
+            ],
+            "circle-stroke-width": 2,
+            "circle-stroke-color": [
+              "match",
+              ["get", "type"],
+              "origin",
+              "#22d3ee",
+              "#f43f5e",
+            ],
+          },
+        });
+        map.addLayer({
+          id: "charlie-route-endpoints-core",
+          type: "circle",
+          source: "charlie-route-endpoints",
+          paint: {
+            "circle-radius": 6,
+            "circle-color": "#ffffff",
+          },
+        });
+      } else {
+        endpointSource.setData({
+          type: "FeatureCollection",
+          features: endpointFeatures,
+        });
+      }
+
+      // 3. Auto-fit camera to route geometry (occupying 50-70% usable viewport)
+      if (hasValidRoute && routeCoords.length >= 2) {
+        let minLng = routeCoords[0][0], maxLng = routeCoords[0][0];
+        let minLat = routeCoords[0][1], maxLat = routeCoords[0][1];
+        for (const [lng, lat] of routeCoords) {
+          if (lng < minLng) minLng = lng;
+          if (lng > maxLng) maxLng = lng;
+          if (lat < minLat) minLat = lat;
+          if (lat > maxLat) maxLat = lat;
+        }
+        map.fitBounds(
+          [[minLng, minLat], [maxLng, maxLat]],
+          {
+            padding: { top: 100, bottom: 140, left: 120, right: 400 },
+            maxZoom: 13,
+            duration: 400,
+          }
         );
-        deckLayers.push(pointLayer);
+      }
+
+      // 4. Native Intelligence Feature Layers (e.g. Earthquakes)
+      for (const [layerId, isEnabled] of Object.entries(activeLayers)) {
+        const features = isEnabled && layerData[layerId] ? layerData[layerId] : [];
+        const geoFeatures: GeoJSON.Feature<GeoJSON.Point>[] = features.map((f) => ({
+          type: "Feature" as const,
+          properties: {
+            id: f.id,
+            label: f.label,
+            category: f.category,
+            severity: f.severity || "normal",
+          },
+          geometry: {
+            type: "Point" as const,
+            coordinates: f.coordinates,
+          },
+        }));
+
+        let intelSource = map.getSource(`charlie-intel-${layerId}`) as maplibregl.GeoJSONSource | undefined;
+        if (!intelSource) {
+          map.addSource(`charlie-intel-${layerId}`, {
+            type: "geojson",
+            data: {
+              type: "FeatureCollection",
+              features: geoFeatures,
+            },
+          });
+          map.addLayer({
+            id: `charlie-intel-halo-${layerId}`,
+            type: "circle",
+            source: `charlie-intel-${layerId}`,
+            paint: {
+              "circle-radius": [
+                "match",
+                ["get", "severity"],
+                "critical", 22,
+                "high", 16,
+                "medium", 12,
+                10,
+              ],
+              "circle-color": [
+                "match",
+                ["get", "severity"],
+                "critical", "rgba(239, 68, 68, 0.45)",
+                "high", "rgba(249, 115, 22, 0.45)",
+                "medium", "rgba(234, 179, 8, 0.45)",
+                "rgba(34, 211, 238, 0.45)",
+              ],
+              "circle-stroke-width": 2,
+              "circle-stroke-color": [
+                "match",
+                ["get", "severity"],
+                "critical", "#ef4444",
+                "high", "#f97316",
+                "medium", "#eab308",
+                "#22d3ee",
+              ],
+            },
+          });
+          map.addLayer({
+            id: `charlie-intel-core-${layerId}`,
+            type: "circle",
+            source: `charlie-intel-${layerId}`,
+            paint: {
+              "circle-radius": [
+                "match",
+                ["get", "severity"],
+                "critical", 8,
+                "high", 7,
+                "medium", 6,
+                5,
+              ],
+              "circle-color": "#ffffff",
+            },
+          });
+        } else {
+          intelSource.setData({
+            type: "FeatureCollection",
+            features: geoFeatures,
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("[MapEngine] Layer sync error:", e);
+    }
+
+    // B. Deck.gl Layers (if active and supported)
+    if (overlayRef.current && renderMode !== "maplibre_only" && renderMode !== "svg_fallback") {
+      const deckLayers: any[] = [];
+      for (const [layerId, isEnabled] of Object.entries(activeLayers)) {
+        if (isEnabled && layerData[layerId] && layerData[layerId].length > 0) {
+          const pointLayer = createIntelligencePointLayer(
+            layerId,
+            layerData[layerId],
+            (feature) => setSelectedFeature(feature),
+            quality
+          );
+          deckLayers.push(pointLayer);
+        }
+      }
+      if (selectedFeature) {
+        const pulseLayer = createSelectionPulseLayer(selectedFeature, quality);
+        if (pulseLayer) deckLayers.push(pulseLayer);
+      }
+      if (hasValidRoute) {
+        const routeLayers = createRouteLayer(route!, () => {}, quality);
+        deckLayers.push(...routeLayers);
+      }
+      overlayRef.current.setProps({ layers: deckLayers });
+    }
+  }, [activeLayers, layerData, selectedFeature, route, quality, renderMode, setSelectedFeature]);
+
+  const updateProjectedOverlay = useCallback(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    let routePath: string | undefined;
+    let origin: [number, number] | undefined;
+    let dest: [number, number] | undefined;
+    const originLabel = route?.startLabel || "Origin";
+    const destLabel = route?.destinationLabel || "Destination";
+
+    const hasValidRoute = Boolean(route && (route.geometry?.length > 1 || (route as any).coordinates?.length > 1));
+    const routeCoords = (hasValidRoute ? (route!.geometry || (route as any).coordinates) : []) as [number, number][];
+
+    if (hasValidRoute && routeCoords.length >= 2) {
+      const points = routeCoords.map((c) => {
+        const pt = map.project([c[0], c[1]]);
+        return `${pt.x},${pt.y}`;
+      });
+      routePath = `M ${points.join(" L ")}`;
+      const p0 = map.project([routeCoords[0][0], routeCoords[0][1]]);
+      const p1 = map.project([routeCoords[routeCoords.length - 1][0], routeCoords[routeCoords.length - 1][1]]);
+      origin = [p0.x, p0.y];
+      dest = [p1.x, p1.y];
+    }
+
+    const features: Array<{ id: string; x: number; y: number; label: string; severity?: string }> = [];
+    for (const [layerId, isEnabled] of Object.entries(activeLayers)) {
+      if (isEnabled && layerData[layerId]) {
+        for (const feat of layerData[layerId]) {
+          const pt = map.project([feat.coordinates[0], feat.coordinates[1]]);
+          features.push({
+            id: feat.id,
+            x: pt.x,
+            y: pt.y,
+            label: feat.label,
+            severity: feat.severity,
+          });
+        }
       }
     }
 
-    // Selected Feature Pulse Layer
-    if (selectedFeature) {
-      const pulseLayer = createSelectionPulseLayer(selectedFeature, quality);
-      if (pulseLayer) deckLayers.push(pulseLayer);
-    }
-
-    // Active Route Corridor Layer
-    if (route && route.geometry && route.geometry.length > 1) {
-      const routeLayers = createRouteLayer(route, () => {}, quality);
-      deckLayers.push(...routeLayers);
-    }
-
-    overlayRef.current.setProps({
-      layers: deckLayers,
+    setProjectedOverlay({
+      routePath,
+      origin,
+      dest,
+      originLabel,
+      destLabel,
+      features,
     });
-  }, [activeLayers, layerData, selectedFeature, route, quality, renderMode, setSelectedFeature]);
+  }, [route, activeLayers, layerData]);
+
+  useEffect(() => {
+    syncLayersAndRoute();
+    updateProjectedOverlay();
+  }, [syncLayersAndRoute, updateProjectedOverlay]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.on("move", updateProjectedOverlay);
+    map.on("render", updateProjectedOverlay);
+    return () => {
+      map.off("move", updateProjectedOverlay);
+      map.off("render", updateProjectedOverlay);
+    };
+  }, [updateProjectedOverlay]);
 
   // 4. MapCommand Execution Queue Listener (Supports all 16 commands)
   useEffect(() => {
@@ -440,12 +741,14 @@ export function MapEngine(): ReactElement {
 
       case "set_route": {
         setRoute(command.route);
-        if (command.fit !== false && command.route.geometry.length > 1) {
-          const bounds = calculateBounds(command.route.geometry);
+        const coords = (command.route.geometry || (command.route as any).coordinates || []) as [number, number][];
+        if (command.fit !== false && coords.length > 1) {
+          const bounds = calculateBounds(coords);
           if (bounds && map) {
             map.fitBounds(bounds, {
-              padding: CHARLIE_SAFE_PADDING,
-              duration: 1200,
+              padding: { top: 100, bottom: 140, left: 120, right: 400 },
+              maxZoom: 13,
+              duration: 800,
             });
           }
         }
@@ -562,6 +865,135 @@ export function MapEngine(): ReactElement {
     <div className="w-full h-full relative overflow-hidden bg-[#020710] select-none font-mono">
       {/* 1. MapLibre GL Canvas Container */}
       <div ref={mapContainerRef} className="w-full h-full absolute inset-0 z-0" tabIndex={-1} />
+
+      {/* 1b. Real-time GPU Projected SVG Tactical Overlay */}
+      <svg className="w-full h-full absolute inset-0 z-10 pointer-events-none overflow-hidden">
+        {projectedOverlay.routePath && (
+          <g>
+            {/* Glow corridor casing */}
+            <path
+              d={projectedOverlay.routePath}
+              fill="none"
+              stroke="rgba(0, 240, 255, 0.4)"
+              strokeWidth={14}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            {/* Main high-contrast route polyline */}
+            <path
+              d={projectedOverlay.routePath}
+              fill="none"
+              stroke="#00f0ff"
+              strokeWidth={4.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            {/* Pulse dashes */}
+            <path
+              d={projectedOverlay.routePath}
+              fill="none"
+              stroke="#ffffff"
+              strokeWidth={2}
+              strokeDasharray="6 12"
+              className="animate-pulse opacity-80"
+            />
+          </g>
+        )}
+
+        {projectedOverlay.origin && (
+          <g>
+            <circle
+              cx={projectedOverlay.origin[0]}
+              cy={projectedOverlay.origin[1]}
+              r={16}
+              fill="rgba(34, 211, 238, 0.35)"
+              stroke="#22d3ee"
+              strokeWidth={2}
+            />
+            <circle
+              cx={projectedOverlay.origin[0]}
+              cy={projectedOverlay.origin[1]}
+              r={6}
+              fill="#ffffff"
+            />
+            <text
+              x={projectedOverlay.origin[0]}
+              y={projectedOverlay.origin[1] + 26}
+              fill="#22d3ee"
+              fontSize={11}
+              fontFamily="JetBrains Mono"
+              fontWeight="bold"
+              textAnchor="middle"
+            >
+              {projectedOverlay.originLabel}
+            </text>
+          </g>
+        )}
+
+        {projectedOverlay.dest && (
+          <g>
+            <circle
+              cx={projectedOverlay.dest[0]}
+              cy={projectedOverlay.dest[1]}
+              r={16}
+              fill="rgba(244, 63, 94, 0.35)"
+              stroke="#f43f5e"
+              strokeWidth={2}
+            />
+            <circle
+              cx={projectedOverlay.dest[0]}
+              cy={projectedOverlay.dest[1]}
+              r={6}
+              fill="#ffffff"
+            />
+            <text
+              x={projectedOverlay.dest[0]}
+              y={projectedOverlay.dest[1] + 26}
+              fill="#f43f5e"
+              fontSize={11}
+              fontFamily="JetBrains Mono"
+              fontWeight="bold"
+              textAnchor="middle"
+            >
+              {projectedOverlay.destLabel}
+            </text>
+          </g>
+        )}
+
+        {projectedOverlay.features.map((feat) => {
+          const isCrit = feat.severity === "critical" || feat.severity === "high";
+          const color = isCrit ? "#ef4444" : "#eab308";
+          return (
+            <g key={feat.id}>
+              <circle
+                cx={feat.x}
+                cy={feat.y}
+                r={isCrit ? 18 : 12}
+                fill={isCrit ? "rgba(239, 68, 68, 0.35)" : "rgba(234, 179, 8, 0.35)"}
+                stroke={color}
+                strokeWidth={2}
+                className="animate-pulse"
+              />
+              <circle
+                cx={feat.x}
+                cy={feat.y}
+                r={5}
+                fill="#ffffff"
+              />
+              <text
+                x={feat.x}
+                y={feat.y + 24}
+                fill="#f8fafc"
+                fontSize={10.5}
+                fontFamily="JetBrains Mono"
+                textAnchor="middle"
+              >
+                {feat.label}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
 
       {/* 2. Top-Right Technical Compass & Controls */}
       <MapToolbar />

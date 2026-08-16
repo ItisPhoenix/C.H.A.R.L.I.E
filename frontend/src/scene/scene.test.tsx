@@ -75,7 +75,7 @@ describe("CharlieScene spatial projection & layers", () => {
 
     const ws = screen.getByRole("region", { name: /primary workspace/i });
     expect(ws).toBeDefined();
-    expect(screen.getByText(/Deep Research: Quantum Computing/i)).toBeDefined();
+    expect(screen.getAllByText(/Deep Research: Quantum Computing/i).length).toBeGreaterThan(0);
   });
 
   test("removing workspace intent restores core to center", () => {

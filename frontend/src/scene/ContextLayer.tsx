@@ -16,9 +16,9 @@ export function ContextLayer({
 }: ContextLayerProps): ReactElement {
   return (
     <div className="charlie-context-layer" role="region" aria-label="Contextual Notifications and Captions">
-      {/* 1. Near-Core Caption */}
+      {/* 1. Near-Core Caption (Anchored lower-center) */}
       {captionText && (
-        <div className="charlie-caption-anchor" role="status" aria-live="polite">
+        <div className="charlie-caption-container" role="status" aria-live="polite">
           <div className="charlie-caption-box">
             <span>{captionText}</span>
           </div>

@@ -49,8 +49,8 @@ export function TelemetryGaugesPrimitive({
         )}
       </div>
 
-      {/* Main Gauges & Stats Grid */}
-      <div className="p-3.5 rounded-xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md flex flex-wrap items-center justify-between gap-4">
+      {/* Main Gauges & Stats Grid (Integrated directly onto canvas) */}
+      <div className="py-2 px-1 flex flex-wrap items-center justify-between gap-4 border-b border-cyan-500/15 pb-3">
         {gauges.length === 0 && stats.length === 0 && (
           <div className="text-xs text-slate-500 italic">No telemetry metrics recorded.</div>
         )}

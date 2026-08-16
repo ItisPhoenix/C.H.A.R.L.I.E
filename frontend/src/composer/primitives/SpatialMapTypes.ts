@@ -26,6 +26,21 @@ export interface SpatialMapLayer {
   defaultActive?: boolean;
 }
 
+export interface SpatialMapRadarObject {
+  id?: string;
+  label?: string;
+  type?: string;
+  status?: string;
+  angle?: number;
+  distance?: number;
+}
+
+export interface SpatialMapRadar {
+  mode?: string;
+  center?: [number, number];
+  objects?: SpatialMapRadarObject[];
+}
+
 export interface SpatialMapData {
   mode?: "radar" | "geo" | "topology" | "generic_spatial";
   title?: string;
@@ -35,4 +50,7 @@ export interface SpatialMapData {
   layers?: SpatialMapLayer[];
   centerLabel?: string;
   useRealEngine?: boolean;
+  radar?: SpatialMapRadar;
+  objects?: SpatialMapRadarObject[];
 }
+

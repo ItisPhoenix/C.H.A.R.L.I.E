@@ -35,9 +35,49 @@ export function SpatialMapFallback({ data }: { data?: SpatialMapData }): ReactEl
   const title = mapData.title;
   const subtitle = mapData.subtitle || "SPATIAL FEED";
 
-  const rawNodes: SpatialMapNode[] = Array.isArray(mapData.nodes) ? mapData.nodes : [];
-  const rawEdges: SpatialMapEdge[] = Array.isArray(mapData.edges) ? mapData.edges : [];
+  const rawNodes: SpatialMapNode[] = Array.isArray(mapData.nodes) ? [...mapData.nodes] : [];
+  const rawEdges: SpatialMapEdge[] = Array.isArray(mapData.edges) ? [...mapData.edges] : [];
   const initialLayers: SpatialMapLayer[] = Array.isArray(mapData.layers) ? mapData.layers : [];
+
+  // If radar objects are provided without explicit nodes, synthesize meaningful topology network
+  if (rawNodes.length === 0 && (mapData.radar?.objects || (mapData as any).objects)) {
+    const radarObjects = mapData.radar?.objects || (mapData as any).objects || [];
+    const center = [500, 250];
+    const maxRadius = 210;
+    radarObjects.forEach((obj: any, idx: number) => {
+      const rad = ((obj.angle ?? (idx * 360) / Math.max(1, radarObjects.length)) - 90) * (Math.PI / 180);
+      const dist = (obj.distance ?? 0.6) * maxRadius;
+      const nx = Math.max(80, Math.min(920, center[0] + Math.cos(rad) * dist));
+      const ny = Math.max(60, Math.min(440, center[1] + Math.sin(rad) * dist));
+      rawNodes.push({
+        id: obj.id || `node_${idx}`,
+        label: obj.label || `NODE_${idx}`,
+        sublabel: obj.type ? `${String(obj.type).toUpperCase()} UPLINK` : undefined,
+        x: (nx / 1000) * 100,
+        y: (ny / 500) * 100,
+        status: obj.status || "active",
+        color: obj.type === "hub" ? "#22d3ee" : obj.type === "signal" ? "#38bdf8" : "#818cf8",
+      });
+    });
+
+    // Synthesize fiber corridor links between hubs and gateways
+    for (let i = 0; i < rawNodes.length - 1; i++) {
+      rawEdges.push({
+        from: rawNodes[i].id,
+        to: rawNodes[i + 1].id,
+        type: "route",
+        active: true,
+      });
+    }
+    if (rawNodes.length > 2) {
+      rawEdges.push({
+        from: rawNodes[rawNodes.length - 1].id,
+        to: rawNodes[0].id,
+        type: "route",
+        active: true,
+      });
+    }
+  }
 
   const [activeLayers, setActiveLayers] = useState<Record<string, boolean>>(() =>
     initialLayers.reduce((acc, l) => ({ ...acc, [l.id]: l.defaultActive ?? true }), {})
@@ -72,10 +112,11 @@ export function SpatialMapFallback({ data }: { data?: SpatialMapData }): ReactEl
       <div className="flex-1 w-full min-h-[280px] relative rounded-2xl border border-cyan-500/20 bg-slate-950/70 backdrop-blur-md overflow-hidden shadow-2xl">
         <svg viewBox="0 0 1000 500" className="w-full h-full" preserveAspectRatio="xMidYMid meet">
           <defs>
-            <radialGradient id="map-radar-glow" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stopColor="#00f0ff" stopOpacity="0.14" />
-              <stop offset="60%" stopColor="#00f0ff" stopOpacity="0.04" />
-              <stop offset="100%" stopColor="#000000" stopOpacity="0.8" />
+            {/* Focused circular radar glow — restrained, topology remains focal data */}
+            <radialGradient id="map-radar-glow" cx="500" cy="250" r="240" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#00f0ff" stopOpacity="0.06" />
+              <stop offset="60%" stopColor="#00f0ff" stopOpacity="0.01" />
+              <stop offset="100%" stopColor="#000000" stopOpacity="0.0" />
             </radialGradient>
             <filter id="glow-cyan" x="-20%" y="-20%" width="140%" height="140%">
               <feGaussianBlur stdDeviation="3" result="blur" />
@@ -83,7 +124,7 @@ export function SpatialMapFallback({ data }: { data?: SpatialMapData }): ReactEl
             </filter>
           </defs>
 
-          {/* Radar background glow */}
+          {/* Radar background glow — focused circle centered on radar coordinates */}
           <rect width="1000" height="500" fill="url(#map-radar-glow)" />
 
           {/* Coordinate Technical Grids */}
@@ -96,14 +137,14 @@ export function SpatialMapFallback({ data }: { data?: SpatialMapData }): ReactEl
             ))}
           </g>
 
-          {/* Concentric Radar Rings in Radar Mode */}
+          {/* Concentric Radar Rings in Radar Mode — fainter, tighter radius */}
           {mode === "radar" && (
-            <g stroke="rgba(0, 240, 255, 0.12)" strokeWidth="1" fill="none">
-              <circle cx="500" cy="250" r="100" />
-              <circle cx="500" cy="250" r="200" strokeDasharray="4 4" />
-              <circle cx="500" cy="250" r="240" stroke="rgba(0, 240, 255, 0.2)" />
-              <line x1="500" y1="10" x2="500" y2="490" strokeDasharray="2 4" />
-              <line x1="10" y1="250" x2="990" y2="250" strokeDasharray="2 4" />
+            <g stroke="rgba(0, 240, 255, 0.08)" strokeWidth="0.8" fill="none">
+              <circle cx="500" cy="250" r="80" />
+              <circle cx="500" cy="250" r="150" strokeDasharray="4 4" />
+              <circle cx="500" cy="250" r="180" stroke="rgba(0, 240, 255, 0.12)" />
+              <line x1="500" y1="70" x2="500" y2="430" strokeDasharray="2 5" stroke="rgba(0,240,255,0.06)" />
+              <line x1="320" y1="250" x2="680" y2="250" strokeDasharray="2 5" stroke="rgba(0,240,255,0.06)" />
             </g>
           )}
 

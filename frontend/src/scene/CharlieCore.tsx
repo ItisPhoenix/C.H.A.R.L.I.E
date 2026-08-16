@@ -34,7 +34,11 @@ export function CharlieCore({
     customSubtext ||
     (coreState === "idle"
       ? "I'M HERE WHEN YOU NEED ME."
-      : "TASK IN PROGRESS");
+      : coreState === "listening"
+        ? "AWAITING INPUT"
+        : coreState === "speaking"
+          ? ""
+          : "TASK IN PROGRESS");
 
   return (
     <div

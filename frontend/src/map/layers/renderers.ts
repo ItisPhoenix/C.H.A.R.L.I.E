@@ -92,9 +92,10 @@ export function createRouteLayer(
   const isGeodesic = route.mode === "geodesic_measurement";
   const lineColor: [number, number, number] = isGeodesic ? [56, 189, 248] : [0, 240, 255];
 
+  const geometry = (route.geometry || (route as any).coordinates || []) as [number, number][];
   const routeData = [
     {
-      path: route.geometry,
+      path: geometry,
       color: lineColor,
     },
   ];

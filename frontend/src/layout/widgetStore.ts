@@ -189,11 +189,11 @@ export const useWidgetStore = create<WidgetStoreState>((set, get) => ({
     const newWidget: WidgetInstance = {
       id: intent.id,
       presentationIntentId: intent.id,
-      widgetType: intent.widgetType || "widget",
+      widgetType: intent.widgetType || (intent as any).widget_type || "system",
       taskId: intent.taskId ?? null,
       title: intent.title || "WIDGET",
       summary: intent.summary || "",
-      content: intent.content || {},
+      content: (intent.content || (intent as any).contentState || {}) as Record<string, unknown>,
       position,
       size,
       zone,

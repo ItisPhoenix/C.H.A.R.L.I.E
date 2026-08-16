@@ -48,9 +48,9 @@ class PMTilesManager:
             try:
                 # Valid TileJSON-compliant metadata
                 meta_dict = {
-                    "name": "Regional Test Dataset",
-                    "attribution": "Charlie OS Offline",
-                    "description": "Sample regional vector dataset",
+                    "name": "Regional Sample (Metadata Fixture)",
+                    "attribution": "Charlie OS Offline Test",
+                    "description": "Charlie OS regional test/metadata fixture",
                     "version": "1.0.0",
                     "vector_layers": [
                         {

@@ -173,16 +173,16 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
     <div className="charlie-workspace-layer" role="region" aria-label={`Primary Workspace ${wsTitle}`}>
       <ContentMaskLayer>
         <div className="charlie-panel p-6 flex flex-col justify-between h-full pointer-events-auto relative">
-          <div className="flex items-center justify-between pb-3 border-b border-cyan-500/20 text-xs font-mono text-cyan-300 select-none">
+          <div className="flex items-center justify-between pb-2.5 border-b border-cyan-500/10 text-[11px] font-mono text-cyan-400/80 select-none">
             <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-              <span className="tracking-wider uppercase font-semibold">{wsTitle}</span>
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+              <span className="tracking-wider uppercase font-medium">{wsTitle}</span>
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 opacity-60 hover:opacity-100 transition-opacity">
               <button
                 type="button"
                 onClick={handleMinimize}
-                className="px-2 py-0.5 text-xs rounded bg-slate-900/60 border border-cyan-500/20 text-slate-400 hover:text-cyan-300 hover:border-cyan-400/40 transition cursor-pointer"
+                className="px-2 py-0.5 text-[11px] rounded bg-slate-900/40 border border-cyan-500/15 text-slate-400 hover:text-cyan-300 hover:border-cyan-400/30 transition cursor-pointer"
                 title="Minimize [_]"
                 aria-label="Minimize workspace"
               >
@@ -191,7 +191,7 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
               <button
                 type="button"
                 onClick={handleClose}
-                className="px-2 py-0.5 text-xs rounded bg-slate-900/60 border border-cyan-500/20 text-slate-400 hover:text-rose-400 hover:border-rose-500/40 transition cursor-pointer"
+                className="px-2 py-0.5 text-[11px] rounded bg-slate-900/40 border border-cyan-500/15 text-slate-400 hover:text-rose-400 hover:border-rose-500/30 transition cursor-pointer"
                 title="Close [ESC]"
                 aria-label="Close workspace"
               >

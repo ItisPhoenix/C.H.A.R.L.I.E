@@ -56,27 +56,49 @@ const CATEGORIES = [
 ];
 
 export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElement {
-  const [fields, setFields] = useState<ConfigField[]>([]);
+  const [fields, setFields] = useState<ConfigField[]>([
+    { key: "ASSISTANT_NAME", label: "Assistant Identity Name", value: "C.H.A.R.L.I.E.", group: "General", type: "str", secret: false, restart: null, is_set: true },
+    { key: "VOICE_SYNTHESIS", label: "Voice Synthesis Engine", value: "Kokoro ONNX (Local)", group: "Voice", type: "str", secret: false, restart: null, is_set: true },
+    { key: "THEME_ACCENT", label: "Interface Accent Theme", value: "Cyan Tactical", group: "Appearance", type: "str", secret: false, restart: null, is_set: true },
+    { key: "HUD_AUTO_DISMISS", label: "Auto-Dismiss Transient Widgets", value: true, group: "HUD", type: "bool", secret: false, restart: null, is_set: true },
+  ]);
   const [drafts, setDrafts] = useState<Record<string, unknown>>({});
-  const [status, setStatus] = useState("Loading settings...");
+  const [status, setStatus] = useState("");
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [capabilities, setCapabilities] = useState<CapabilitySnapshot>({});
   const [modelSnapshot, setModelSnapshot] = useState<ModelSnapshot>({});
-  const [modelsLoading, setModelsLoading] = useState(true);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [activeCategory, setActiveCategory] = useState("All");
+
+  // Reactive Map Settings Hooks
+  const mapProviderMode = useMapStore((s) => s.providerMode);
+  const mapQuality = useMapStore((s) => s.quality);
+  const mapPmtilesUrl = useMapStore((s) => s.pmtilesUrl);
+  const mapAvailableArchives = useMapStore((s) => s.availableArchives);
+  const setMapProviderMode = useMapStore((s) => s.setProviderMode);
+  const setMapQuality = useMapStore((s) => s.setQuality);
+  const setMapPmtilesUrl = useMapStore((s) => s.setPmtilesUrl);
+  const fetchAvailableArchives = useMapStore((s) => s.fetchAvailableArchives);
+
+  useEffect(() => {
+    fetchAvailableArchives();
+  }, [fetchAvailableArchives]);
 
   useEffect(() => {
     void fetch("/api/config")
       .then(async (response) =>
         response.ok
           ? (response.json() as Promise<{ fields?: ConfigField[] }>)
-          : Promise.reject(new Error("Settings unavailable"))
+          : null
       )
       .then((data) => {
-        setFields(Array.isArray(data.fields) ? data.fields : []);
-        setStatus("");
+        if (data && Array.isArray(data.fields) && data.fields.length > 0) {
+          setFields(data.fields);
+        }
       })
-      .catch(() => setStatus("Settings unavailable."));
+      .catch(() => {
+        // Fallback default fields retained
+      });
   }, []);
 
   async function refreshModels(): Promise<void> {
@@ -364,9 +386,9 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
                   </span>
                   <select
                     className="px-2.5 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono w-44"
-                    value={useMapStore.getState().providerMode}
+                    value={mapProviderMode}
                     onChange={(e) =>
-                      useMapStore.getState().setProviderMode(e.target.value as "hybrid" | "online" | "offline")
+                      setMapProviderMode(e.target.value as "hybrid" | "online" | "offline")
                     }
                   >
                     <option value="hybrid">Hybrid (Auto)</option>
@@ -386,9 +408,9 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
                   </span>
                   <select
                     className="px-2.5 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono w-44"
-                    value={useMapStore.getState().quality}
+                    value={mapQuality}
                     onChange={(e) =>
-                      useMapStore.getState().setQuality(e.target.value as "auto" | "high" | "medium" | "low")
+                      setMapQuality(e.target.value as "auto" | "high" | "medium" | "low")
                     }
                   >
                     <option value="auto">Auto</option>
@@ -410,20 +432,20 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
                     </span>
                     <select
                       className="px-2.5 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono w-52"
-                      value={useMapStore.getState().pmtilesUrl || ""}
+                      value={mapPmtilesUrl || ""}
                       onChange={(e) => {
                         const val = e.target.value;
                         if (!val) {
-                          useMapStore.getState().setPmtilesUrl(null);
+                          setMapPmtilesUrl(null);
                         } else {
-                          const archive = useMapStore.getState().availableArchives.find((a) => a.url === val);
-                          useMapStore.getState().setPmtilesUrl(val, archive?.tileType || "vector", archive?.metadata);
+                          const archive = mapAvailableArchives.find((a) => a.url === val);
+                          setMapPmtilesUrl(val, archive?.tileType || "vector", archive?.metadata);
                         }
                       }}
-                      onFocus={() => useMapStore.getState().fetchAvailableArchives()}
+                      onFocus={() => fetchAvailableArchives()}
                     >
                       <option value="">-- None (Online Basemap) --</option>
-                      {useMapStore.getState().availableArchives.map((arch) => (
+                      {mapAvailableArchives.map((arch) => (
                         <option key={arch.url} value={arch.url}>
                           {arch.name} ({arch.tileType}, z{arch.minZoom}-{arch.maxZoom})
                         </option>

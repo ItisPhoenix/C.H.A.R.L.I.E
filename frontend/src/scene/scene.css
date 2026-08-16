@@ -23,7 +23,7 @@
   --scene-safe-y: clamp(16px, 3.5vh, 48px);
 
   --core-center-size: clamp(280px, 36vw, 460px);
-  --core-docked-size: clamp(200px, 22vw, 260px);
+  --core-docked-size: 200px;
 
   --ease-spatial: cubic-bezier(0.16, 1, 0.3, 1);
   --duration-fast: 150ms;
@@ -461,6 +461,19 @@
     transparent 24px
   );
   opacity: 0.5;
+}
+
+/* Responsive Docked Core Sizing */
+@media (max-width: 1439px) {
+  :root {
+    --core-docked-size: 178px;
+  }
+}
+
+@media (max-width: 1099px) {
+  :root {
+    --core-docked-size: 156px;
+  }
 }
 
 /* Reduced motion overrides */

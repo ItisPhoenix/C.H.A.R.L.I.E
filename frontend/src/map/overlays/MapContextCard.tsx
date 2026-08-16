@@ -8,6 +8,25 @@ import {
 } from "../../ui/context";
 import { useMapStore } from "../mapStore";
 
+export function calculateHaversineDistanceKm(
+  coord1: [number, number],
+  coord2: [number, number]
+): number {
+  const [lon1, lat1] = coord1;
+  const [lon2, lat2] = coord2;
+  const r = 6371.0;
+  const phi1 = (lat1 * Math.PI) / 180;
+  const phi2 = (lat2 * Math.PI) / 180;
+  const deltaPhi = ((lat2 - lat1) * Math.PI) / 180;
+  const deltaLambda = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(deltaPhi / 2) ** 2 +
+    Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(r * c * 10) / 10;
+}
+
 export function MapContextCard(): ReactElement | null {
   const selectedFeature = useMapStore((s) => s.selectedFeature);
   const route = useMapStore((s) => s.route);
@@ -18,6 +37,15 @@ export function MapContextCard(): ReactElement | null {
   // If a route is active and no specific point is selected, display route card
   if (!selectedFeature && route) {
     const isGeodesic = route.mode === "geodesic_measurement";
+    const startCoord = route.start || route.geometry?.[0] || (route as any).coordinates?.[0] || [0, 0];
+    const destCoord =
+      route.destination ||
+      route.geometry?.[route.geometry.length - 1] ||
+      (route as any).coordinates?.[(route as any).coordinates?.length - 1] ||
+      [0, 0];
+    const computedGeodesicKm = calculateHaversineDistanceKm(startCoord, destCoord);
+    const displayDistance = isGeodesic ? `${computedGeodesicKm} km` : `${route.distanceKm ?? computedGeodesicKm} km`;
+
     return (
       <div className="absolute top-16 left-6 z-30 max-w-sm w-full pointer-events-auto">
         <ContextCard variant="standard" elevation="floating">
@@ -49,8 +77,8 @@ export function MapContextCard(): ReactElement | null {
             )}
           </ContextCardBody>
           <ContextCardMetadata
-            distance={`${route.distanceKm} km`}
-            duration={route.durationMin ? `${route.durationMin} mins` : undefined}
+            distance={displayDistance}
+            duration={isGeodesic ? undefined : (route.durationMin ? `${route.durationMin} mins` : undefined)}
           />
           <ContextCardActions
             actions={[

@@ -5,7 +5,9 @@ import tailwindcss from '@tailwindcss/vite'
 // base '/' keeps asset URLs absolute -- QWebEngineView loads this from /surface/<id>, not the root.
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  base: '/',
+  optimizeDeps: {
+    exclude: ['maplibre-gl'],
+  },
   build: {
     outDir: 'dist',
   },

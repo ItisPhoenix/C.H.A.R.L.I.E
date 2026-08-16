@@ -83,12 +83,21 @@ export const useWorkspaceStore = create<WorkspaceStoreState>((set, get) => ({
       }
     }
 
+    const resolvedType = (
+      intent.workspaceType ||
+      (intent as any).workspace_type ||
+      (intent as any).type ||
+      "custom"
+    ).toLowerCase();
+
+    const resolvedContent = (intent.content || (intent as any).contentState || {}) as Record<string, unknown>;
+
     const newInstance: WorkspaceInstance = {
       id: intent.id,
-      type: intent.workspaceType || "custom",
+      type: resolvedType,
       presentationIntentId: intent.id,
       taskId: intent.taskId ?? null,
-      title: intent.title || `WORKSPACE // ${(intent.workspaceType || "CANVAS").toUpperCase()}`,
+      title: intent.title || `WORKSPACE // ${resolvedType.toUpperCase()}`,
       summary: intent.summary || "",
       status: "active",
       lifecycleState: "active",
@@ -97,7 +106,7 @@ export const useWorkspaceStore = create<WorkspaceStoreState>((set, get) => ({
       lastFocusedAt: now,
       persistent: intent.dismissPolicy === "persistent",
       replayable: intent.replayable,
-      contentState: intent.content || {},
+      contentState: resolvedContent,
     };
 
     set((state) => ({
