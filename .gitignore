@@ -73,10 +73,12 @@ voicedock-preview.html
 .agents/
 requirements.txt
 plans/
+
 # === Personal / project docs excluded from git ===
 OPINIONS.md
 CHANGELOG.md
 AGENTS.md
 CLAUDE.md
 design-system.md
-plans/
+CHARLIE_V1_*.md
+scratch/

@@ -1,11 +1,20 @@
-"""Cyber Threat Intelligence Layer with pluggable IP geolocation enrichment."""
+"""Cyber Threat Intelligence Layer with pluggable IP geolocation enrichment.
+
+Strict Rules:
+- IP geolocation is fully abstracted behind the IPGeolocationProvider interface.
+- If provider is unconfigured or unavailable, cyber indicators remain non-geographic.
+- Never fabricate geographic coordinates.
+- Treat URLhaus authentication and feed endpoint availability honestly.
+"""
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 import ipaddress
 import logging
+import os
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -17,10 +26,79 @@ logger = logging.getLogger("charlie.geo.intelligence.cyber")
 URLHAUS_RECENT_FEED = "https://urlhaus.abuse.ch/downloads/json_recent/"
 
 
+class IPGeolocationProvider(ABC):
+    """Abstract interface for IP address geolocation lookups."""
+
+    @abstractmethod
+    async def geolocate(self, ip: str) -> Optional[List[float]]:
+        """Geolocate public IP string to [longitude, latitude], or return None if unresolvable."""
+        pass
+
+
+class NoOpIPGeolocationProvider(IPGeolocationProvider):
+    """Default no-op provider when no external IP geolocation service is configured."""
+
+    async def geolocate(self, ip: str) -> Optional[List[float]]:
+        return None
+
+
+class HttpIPGeolocationProvider(IPGeolocationProvider):
+    """Configurable HTTP-based IP geolocation provider (e.g. IPInfo, MaxMind, or custom gateway)."""
+
+    def __init__(
+        self,
+        endpoint_template: str = "https://ipinfo.io/{ip}/geo",
+        api_token: Optional[str] = None,
+        timeout_sec: float = 3.0,
+    ) -> None:
+        self.endpoint_template = endpoint_template
+        self.api_token = api_token
+        self.timeout_sec = timeout_sec
+
+    async def geolocate(self, ip: str) -> Optional[List[float]]:
+        try:
+            url = self.endpoint_template.format(ip=ip)
+            headers = {"User-Agent": "Charlie-Spatial-Engine/1.0"}
+            if self.api_token:
+                headers["Authorization"] = f"Bearer {self.api_token}"
+
+            async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Handle "loc": "lat,lon" (ipinfo style) or "lat"/"lon" directly
+                    if "loc" in data and isinstance(data["loc"], str):
+                        parts = data["loc"].split(",")
+                        if len(parts) == 2:
+                            return [float(parts[1].strip()), float(parts[0].strip())]
+                    elif "lat" in data and "lon" in data:
+                        return [float(data["lon"]), float(data["lat"])]
+                    elif "latitude" in data and "longitude" in data:
+                        return [float(data["longitude"]), float(data["latitude"])]
+        except Exception as e:
+            logger.debug(f"HTTP IP Geolocation lookup failed for {ip}: {e}")
+        return None
+
+
+class OfflineIPGeolocationProvider(IPGeolocationProvider):
+    """Static lookup for known local test networks and reference prefixes."""
+
+    def __init__(self, static_ranges: Optional[Dict[str, List[float]]] = None) -> None:
+        self.static_ranges = static_ranges or {}
+
+    async def geolocate(self, ip: str) -> Optional[List[float]]:
+        return self.static_ranges.get(ip)
+
+
 class IPGeolocationEnricher:
     """Enriches IP addresses with geographic coordinates without fabricating locations."""
 
-    def __init__(self, cache_ttl_sec: float = 86400.0) -> None:
+    def __init__(
+        self,
+        provider: Optional[IPGeolocationProvider] = None,
+        cache_ttl_sec: float = 86400.0,
+    ) -> None:
+        self.provider = provider or NoOpIPGeolocationProvider()
         self.cache_ttl_sec = cache_ttl_sec
         self._cache: Dict[str, Tuple[float, Optional[List[float]]]] = {}
 
@@ -34,7 +112,7 @@ class IPGeolocationEnricher:
 
     async def resolve_ip(self, ip_str: str) -> Optional[List[float]]:
         """Resolve a public IP to [longitude, latitude].
-        
+
         Strict rule: Returns None if unresolvable. Never fabricates coordinates.
         """
         if not self.is_public_ip(ip_str):
@@ -46,34 +124,26 @@ class IPGeolocationEnricher:
             if now - ts < self.cache_ttl_sec:
                 return coords
 
-        # Query lightweight IP geolocation endpoint
-        try:
-            url = f"http://ip-api.com/json/{ip_str}?fields=status,lat,lon"
-            async with httpx.AsyncClient(timeout=2.5) as client:
-                resp = await client.get(url, headers={"User-Agent": "Charlie-Spatial-Engine/1.0"})
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get("status") == "success":
-                        lat = float(data.get("lat", 0.0))
-                        lon = float(data.get("lon", 0.0))
-                        coords = [lon, lat]
-                        self._cache[ip_str] = (now, coords)
-                        return coords
-        except Exception as e:
-            logger.debug(f"IP geolocation lookup failed for {ip_str}: {e}")
-
-        # Mark as None in cache to avoid repetitive failed lookups
-        self._cache[ip_str] = (now, None)
-        return None
+        coords = await self.provider.geolocate(ip_str)
+        self._cache[ip_str] = (now, coords)
+        return coords
 
 
 class CyberThreatProvider(IntelligenceProvider):
     """Provider for verified cyber infrastructure and C2 indicators with strict geolocation."""
 
-    def __init__(self, cache_ttl_sec: float = 300.0) -> None:
+    def __init__(
+        self,
+        cache_ttl_sec: float = 300.0,
+        api_key: Optional[str] = None,
+        feed_url: Optional[str] = None,
+        enricher: Optional[IPGeolocationEnricher] = None,
+    ) -> None:
         self.cache_ttl_sec = cache_ttl_sec
+        self.api_key = api_key or os.environ.get("CHARLIE_URLHAUS_API_KEY")
+        self.feed_url = feed_url or os.environ.get("CHARLIE_URLHAUS_FEED_URL") or URLHAUS_RECENT_FEED
+        self.enricher = enricher or IPGeolocationEnricher()
         self._last_result: LayerDataResult | None = None
-        self.enricher = IPGeolocationEnricher()
 
     @property
     def layer_id(self) -> str:
@@ -90,17 +160,20 @@ class CyberThreatProvider(IntelligenceProvider):
 
         features: List[MapFeature] = []
 
+        headers = {
+            "User-Agent": "Charlie-Spatial-Engine/1.0 (Autonomous-AI-OS)",
+        }
+        if self.api_key:
+            headers["Auth-Key"] = self.api_key
+
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(
-                    URLHAUS_RECENT_FEED,
-                    headers={"User-Agent": "Charlie-Spatial-Engine/1.0 (Autonomous-AI-OS)"},
-                )
+            async with httpx.AsyncClient(timeout=4.5) as client:
+                resp = await client.get(self.feed_url, headers=headers)
 
                 if resp.status_code == 200:
                     data = resp.json()
                     # Inspect recent records
-                    for item_id, entries in list(data.items())[:20]:
+                    for item_id, entries in list(data.items())[:25]:
                         if not isinstance(entries, list) or not entries:
                             continue
                         entry = entries[0]
@@ -128,27 +201,39 @@ class CyberThreatProvider(IntelligenceProvider):
                                 )
                             )
 
-            result = LayerDataResult(
-                layer_id=self.layer_id,
-                status="ready",
-                features=features,
-                attribution=self.attribution,
-                timestamp=now,
-            )
-            self._last_result = result
-            return result
-
+                    result = LayerDataResult(
+                        layer_id=self.layer_id,
+                        status="ready",
+                        features=features,
+                        attribution=self.attribution,
+                        timestamp=now,
+                    )
+                    self._last_result = result
+                    return result
+                elif resp.status_code in (401, 403):
+                    # Authentication required
+                    return LayerDataResult(
+                        layer_id=self.layer_id,
+                        status="unconfigured",
+                        features=[],
+                        attribution=self.attribution,
+                        timestamp=now,
+                        error="URLhaus API authentication required for live cyber threat feed.",
+                    )
+                else:
+                    logger.warning(f"URLhaus feed query returned status {resp.status_code}")
         except Exception as e:
-            logger.warning(f"Cyber threat feed fetch failed: {e}")
+            logger.warning(f"Cyber threat feed fetch error: {e}")
 
         if self._last_result:
             return self._last_result
 
+        # Honest unconfigured / unavailable status
         return LayerDataResult(
             layer_id=self.layer_id,
-            status="error",
+            status="unconfigured",
             features=[],
             attribution=self.attribution,
             timestamp=now,
-            error="Could not fetch URLhaus threat feed",
+            error="Live cyber threat feed is unconfigured or unavailable. Configure CHARLIE_URLHAUS_API_KEY in settings.",
         )

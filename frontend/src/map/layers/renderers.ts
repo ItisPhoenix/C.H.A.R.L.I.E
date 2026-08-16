@@ -2,6 +2,25 @@ import { ScatterplotLayer, PathLayer } from "@deck.gl/layers";
 import type { MapFeature, MapRoute, QualityTier } from "../types";
 
 /**
+ * Deterministically resolves effective quality tier based on explicit choice or runtime/hardware capability.
+ */
+export function resolveEffectiveQuality(quality: QualityTier = "auto"): "high" | "medium" | "low" {
+  if (quality !== "auto") return quality;
+
+  if (typeof navigator !== "undefined") {
+    const cores = navigator.hardwareConcurrency || 4;
+    const memory = (navigator as unknown as { deviceMemory?: number }).deviceMemory || 8;
+    if (cores <= 2 || memory <= 2) {
+      return "low";
+    }
+    if (cores <= 4 || memory <= 4) {
+      return "medium";
+    }
+  }
+  return "high";
+}
+
+/**
  * Creates a high-performance Deck.gl ScatterplotLayer for intelligence points.
  */
 export function createIntelligencePointLayer(
@@ -10,16 +29,18 @@ export function createIntelligencePointLayer(
   onSelectFeature?: (feature: MapFeature) => void,
   quality: QualityTier = "auto"
 ): ScatterplotLayer<MapFeature> {
+  const effectiveQuality = resolveEffectiveQuality(quality);
+
   // Quality tier adaptations: cap feature count and simplify stroke geometry
   let displayData = data;
   let stroked = true;
   let radiusMin = 4.5;
 
-  if (quality === "low") {
+  if (effectiveQuality === "low") {
     displayData = data.slice(0, 100);
     stroked = false;
     radiusMin = 3.5;
-  } else if (quality === "medium") {
+  } else if (effectiveQuality === "medium") {
     displayData = data.slice(0, 500);
   }
 
@@ -32,7 +53,7 @@ export function createIntelligencePointLayer(
     filled: true,
     radiusScale: 6,
     radiusMinPixels: radiusMin,
-    radiusMaxPixels: quality === "low" ? 16 : 24,
+    radiusMaxPixels: effectiveQuality === "low" ? 16 : 24,
     lineWidthMinPixels: 1.5,
     getPosition: (d: MapFeature) => [d.coordinates[0], d.coordinates[1]],
     getRadius: (d: MapFeature) => {
@@ -67,6 +88,7 @@ export function createRouteLayer(
   onSelectRoute?: () => void,
   quality: QualityTier = "auto"
 ): PathLayer<unknown>[] {
+  const effectiveQuality = resolveEffectiveQuality(quality);
   const isGeodesic = route.mode === "geodesic_measurement";
   const lineColor: [number, number, number] = isGeodesic ? [56, 189, 248] : [0, 240, 255];
 
@@ -93,8 +115,8 @@ export function createRouteLayer(
     },
   });
 
-  // In Low quality tier, omit the expensive outer glow layer
-  if (quality === "low") {
+  // In Low quality tier, omit the outer glow layer
+  if (effectiveQuality === "low") {
     return [coreLayer];
   }
 
@@ -122,6 +144,7 @@ export function createSelectionPulseLayer(
   quality: QualityTier = "auto"
 ): ScatterplotLayer<MapFeature> | null {
   if (!selectedFeature) return null;
+  const effectiveQuality = resolveEffectiveQuality(quality);
 
   return new ScatterplotLayer<MapFeature>({
     id: "selected-feature-pulse",
@@ -130,8 +153,8 @@ export function createSelectionPulseLayer(
     stroked: true,
     filled: false,
     lineWidthMinPixels: 2,
-    radiusMinPixels: quality === "low" ? 12 : 16,
-    radiusMaxPixels: quality === "low" ? 24 : 32,
+    radiusMinPixels: effectiveQuality === "low" ? 12 : 16,
+    radiusMaxPixels: effectiveQuality === "low" ? 24 : 32,
     getPosition: (d: MapFeature) => [d.coordinates[0], d.coordinates[1]],
     getRadius: 3000,
     getLineColor: [0, 240, 255, 240],

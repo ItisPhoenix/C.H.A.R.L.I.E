@@ -381,7 +381,7 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
                       Rendering Quality
                     </strong>
                     <small className="text-[10px] text-slate-400">
-                      Adaptive visual effects and particle density
+                      Adaptive visual effects and feature density
                     </small>
                   </span>
                   <select
@@ -391,30 +391,46 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
                       useMapStore.getState().setQuality(e.target.value as "auto" | "high" | "medium" | "low")
                     }
                   >
-                    <option value="auto">Auto (Hardware)</option>
+                    <option value="auto">Auto</option>
                     <option value="high">High Fidelity</option>
                     <option value="medium">Medium</option>
                     <option value="low">Low / Fast</option>
                   </select>
                 </label>
 
-                <label className="flex items-center justify-between gap-4 text-slate-300">
-                  <span className="max-w-[240px]">
-                    <strong className="text-slate-200 font-mono text-[11px] block">
-                      Local PMTiles Source
-                    </strong>
-                    <small className="text-[10px] text-slate-400">
-                      Optional local PMTiles file path or URL for air-gapped mapping
-                    </small>
-                  </span>
-                  <input
-                    type="text"
-                    placeholder="/tiles/planet.pmtiles"
-                    className="px-2.5 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono w-52 text-right placeholder-slate-600"
-                    defaultValue={useMapStore.getState().pmtilesUrl || ""}
-                    onBlur={(e) => useMapStore.getState().setPmtilesUrl(e.target.value || null)}
-                  />
-                </label>
+                <div className="flex flex-col gap-2 pt-1 border-t border-cyan-500/10">
+                  <div className="flex items-center justify-between gap-4 text-slate-300">
+                    <span className="max-w-[240px]">
+                      <strong className="text-slate-200 font-mono text-[11px] block">
+                        Discovered PMTiles Archives
+                      </strong>
+                      <small className="text-[10px] text-slate-400">
+                        Select a verified dataset served via /api/geo/pmtiles/
+                      </small>
+                    </span>
+                    <select
+                      className="px-2.5 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono w-52"
+                      value={useMapStore.getState().pmtilesUrl || ""}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (!val) {
+                          useMapStore.getState().setPmtilesUrl(null);
+                        } else {
+                          const archive = useMapStore.getState().availableArchives.find((a) => a.url === val);
+                          useMapStore.getState().setPmtilesUrl(val, archive?.tileType || "vector", archive?.metadata);
+                        }
+                      }}
+                      onFocus={() => useMapStore.getState().fetchAvailableArchives()}
+                    >
+                      <option value="">-- None (Online Basemap) --</option>
+                      {useMapStore.getState().availableArchives.map((arch) => (
+                        <option key={arch.url} value={arch.url}>
+                          {arch.name} ({arch.tileType}, z{arch.minZoom}-{arch.maxZoom})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
               </div>
             </section>
           )}

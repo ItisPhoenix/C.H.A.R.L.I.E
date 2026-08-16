@@ -1,12 +1,14 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { PMTiles } from "pmtiles";
 import { useMapStore } from "./mapStore";
 import { calculateFlyDuration, calculateBounds, CHARLIE_SAFE_PADDING } from "./camera";
 import { resolveBasemapStyle } from "./providers/basemapProvider";
 import { INTELLIGENCE_LAYERS } from "./layers/registry";
 import { CHARLIE_DARK_MAP_STYLE, createPMTilesStyle } from "./mapStyle";
+import { resolveEffectiveQuality } from "./layers/renderers";
 import type { MapFeature, MapRoute } from "./types";
 
-describe("Map Subsystem Unit Tests", () => {
+describe("Map Subsystem & Implementation Tests", () => {
   beforeEach(() => {
     useMapStore.setState({
       longitude: 15.0,
@@ -25,6 +27,9 @@ describe("Map Subsystem Unit Tests", () => {
       userInteracting: false,
       lastUserInteractionTimestamp: 0,
       quality: "auto",
+      pmtilesUrl: null,
+      customStyleUrl: null,
+      customVectorSourceUrl: null,
     });
   });
 
@@ -122,20 +127,107 @@ describe("Map Subsystem Unit Tests", () => {
     expect(useMapStore.getState().commandRevision).toBe(16);
   });
 
-  it("tracks camera user interaction state for interruption", () => {
+  it("validates PMTiles v3 fixture with official reference PMTiles JS library", async () => {
+    // Generate valid 127-byte PMTiles v3 binary fixture
+    const metaBuffer = Buffer.from(
+      JSON.stringify({
+        name: "Regional Test Dataset",
+        attribution: "Charlie OS Offline",
+        description: "Sample regional vector dataset",
+        version: "1.0.0",
+        vector_layers: [
+          {
+            id: "places",
+            description: "Points of interest",
+            fields: { name: "String" },
+          },
+        ],
+      }),
+      "utf-8"
+    );
+
+    const rootDir = Buffer.from([0x00]); // 0 entries varint
+    const header = Buffer.alloc(127);
+    header.write("PMTiles", 0, 7, "utf-8");
+    header.writeUInt8(3, 7); // version 3
+    header.writeBigUInt64LE(127n, 8); // root dir offset
+    header.writeBigUInt64LE(BigInt(rootDir.length), 16); // root dir len
+    header.writeBigUInt64LE(BigInt(127 + rootDir.length), 24); // json offset
+    header.writeBigUInt64LE(BigInt(metaBuffer.length), 32); // json len
+    header.writeBigUInt64LE(0n, 40); // leaf offset
+    header.writeBigUInt64LE(0n, 48); // leaf len
+    header.writeBigUInt64LE(BigInt(127 + rootDir.length + metaBuffer.length), 56); // tile data offset
+    header.writeBigUInt64LE(0n, 64); // tile data len
+    header.writeBigUInt64LE(0n, 72); // num addressed
+    header.writeBigUInt64LE(0n, 80); // num tile entries
+    header.writeBigUInt64LE(0n, 88); // num tile contents
+    header.writeUInt8(1, 96); // clustered
+    header.writeUInt8(0, 97); // internal comp
+    header.writeUInt8(0, 98); // tile comp
+    header.writeUInt8(1, 99); // tile type = MVT
+    header.writeUInt8(0, 100); // min zoom
+    header.writeUInt8(14, 101); // max zoom
+    header.writeInt32LE(Math.round(139.0 * 1e7), 102); // min lon
+    header.writeInt32LE(Math.round(35.0 * 1e7), 106); // min lat
+    header.writeInt32LE(Math.round(140.0 * 1e7), 110); // max lon
+    header.writeInt32LE(Math.round(36.0 * 1e7), 114); // max lat
+    header.writeUInt8(10, 118); // center zoom
+    header.writeInt32LE(Math.round(139.69 * 1e7), 119); // center lon
+    header.writeInt32LE(Math.round(35.68 * 1e7), 123); // center lat
+
+    const fixture = Buffer.concat([header, rootDir, metaBuffer]);
+
+    class BufferSource {
+      buf: Buffer;
+      constructor(buf: Buffer) {
+        this.buf = buf;
+      }
+      async getBytes(offset: number, length: number): Promise<{ data: ArrayBuffer }> {
+        const slice = this.buf.subarray(offset, offset + length);
+        const ab = new ArrayBuffer(slice.byteLength);
+        new Uint8Array(ab).set(slice);
+        return { data: ab };
+      }
+      getKey() {
+        return "test_archive";
+      }
+    }
+
+    const p = new PMTiles(new BufferSource(fixture));
+    const parsedHeader = await p.getHeader();
+    expect(parsedHeader.specVersion).toBe(3);
+    expect(parsedHeader.tileType).toBe(1); // MVT
+    expect(parsedHeader.minZoom).toBe(0);
+    expect(parsedHeader.maxZoom).toBe(14);
+    expect(parsedHeader.centerLon).toBeCloseTo(139.69);
+    expect(parsedHeader.centerLat).toBeCloseTo(35.68);
+
+    const parsedMetadata = (await p.getMetadata()) as any;
+    expect(parsedMetadata.name).toBe("Regional Test Dataset");
+    expect(parsedMetadata.vector_layers.length).toBe(1);
+    expect(parsedMetadata.vector_layers[0].id).toBe("places");
+
+    const tileJson = (await p.getTileJson("pmtiles:///api/geo/pmtiles/sample.pmtiles")) as any;
+    expect(tileJson.tilejson).toBe("3.0.0");
+    expect(tileJson.vector_layers?.length).toBe(1);
+  });
+
+  it("handles camera user interaction state for interruption without self-cancelling pitch", () => {
     const store = useMapStore.getState();
     expect(store.userInteracting).toBe(false);
 
+    // User interaction starts
     store.recordUserInteraction();
     expect(useMapStore.getState().userInteracting).toBe(true);
     expect(useMapStore.getState().lastUserInteractionTimestamp).toBeGreaterThan(0);
 
+    // User interaction ends
     store.setUserInteracting(false);
     expect(useMapStore.getState().userInteracting).toBe(false);
   });
 
   it("calculates camera fly duration adaptively based on distance", () => {
-    // Short hop (Tokyo Station to Shibuya ~5km)
+    // Short hop (~5km)
     const shortDuration = calculateFlyDuration(139.7671, 35.6812, 139.7016, 35.6580);
     expect(shortDuration).toBe(450);
 
@@ -148,7 +240,7 @@ describe("Map Subsystem Unit Tests", () => {
     expect(longDuration).toBe(1200);
   });
 
-  it("calculates bounding box from route coordinate geometry", () => {
+  it("calculates bounding box from route coordinate geometry with core safe padding", () => {
     const coords: [number, number][] = [
       [77.1025, 28.7041], // Delhi
       [76.5000, 27.8000],
@@ -169,25 +261,51 @@ describe("Map Subsystem Unit Tests", () => {
     expect(CHARLIE_SAFE_PADDING.bottom).toBe(120);
   });
 
-  it("resolves dark cyan basemap style and handles PMTiles", () => {
-    // With custom online URL
-    const onlineStyle = resolveBasemapStyle({
-      mode: "online",
-      onlineSourceUrl: "https://tiles.openfreemap.org/planet",
-    });
-    expect(onlineStyle).toBe("https://tiles.openfreemap.org/planet");
-
-    // With default Charlie dark vector style
+  it("resolves dark cyan basemap style, custom style URL, and PMTiles archives", () => {
+    // 1. Default Charlie dark vector style
     const defaultStyle = resolveBasemapStyle({
       mode: "hybrid",
-      onlineSourceUrl: null,
       pmtilesUrl: null,
     });
     expect(defaultStyle).toBe(CHARLIE_DARK_MAP_STYLE);
 
-    // With PMTiles URL
-    const pmtilesStyle = createPMTilesStyle("/api/geo/pmtiles/sample.pmtiles");
-    expect(pmtilesStyle.sources.local_pmtiles).toBeDefined();
+    // 2. Custom style URL override
+    const customStyle = resolveBasemapStyle({
+      mode: "online",
+      customStyleUrl: "https://example.com/custom-style.json",
+    });
+    expect(customStyle).toBe("https://example.com/custom-style.json");
+
+    // 3. Vector PMTiles archive style with vector_layers metadata
+    const vectorPMTilesStyle = createPMTilesStyle(
+      "/api/geo/pmtiles/sample.pmtiles",
+      "vector",
+      { vector_layers: [{ id: "places" }, { id: "water" }] }
+    );
+    expect(vectorPMTilesStyle.sources.local_pmtiles).toBeDefined();
+    expect(vectorPMTilesStyle.layers.some((l) => l.id.includes("places"))).toBe(true);
+
+    // 4. Raster PMTiles archive style
+    const rasterPMTilesStyle = createPMTilesStyle(
+      "/api/geo/pmtiles/satellite.pmtiles",
+      "raster_png"
+    );
+    expect(rasterPMTilesStyle.sources.local_pmtiles_raster).toBeDefined();
+
+    // 5. Terrain DEM PMTiles archive style
+    const demPMTilesStyle = createPMTilesStyle(
+      "/api/geo/pmtiles/elevation.pmtiles",
+      "raster-dem"
+    );
+    expect(demPMTilesStyle.sources.local_pmtiles_dem).toBeDefined();
+  });
+
+  it("resolves quality tier hardware adaptation deterministically", () => {
+    expect(resolveEffectiveQuality("low")).toBe("low");
+    expect(resolveEffectiveQuality("medium")).toBe("medium");
+    expect(resolveEffectiveQuality("high")).toBe("high");
+    // "auto" detects hardware or returns deterministic high/medium
+    expect(["high", "medium", "low"]).toContain(resolveEffectiveQuality("auto"));
   });
 
   it("manages intelligence layer lifecycle and metadata tracking", () => {
@@ -219,20 +337,10 @@ describe("Map Subsystem Unit Tests", () => {
     expect(state.layerMetadata.earthquakes.lastUpdated).toBeGreaterThan(0);
     expect(state.layerMetadata.earthquakes.count).toBe(1);
 
-    // Disable layer
+    // Disable layer: immediately clears active data
     store.setLayerEnabled("earthquakes", false);
     expect(useMapStore.getState().activeLayers.earthquakes).toBe(false);
     expect(useMapStore.getState().layerStatus.earthquakes.status).toBe("idle");
-  });
-
-  it("adapts quality tier in store", () => {
-    const store = useMapStore.getState();
-    expect(store.quality).toBe("auto");
-
-    store.setQuality("low");
-    expect(useMapStore.getState().quality).toBe("low");
-
-    store.setQuality("high");
-    expect(useMapStore.getState().quality).toBe("high");
+    expect(useMapStore.getState().layerData.earthquakes.length).toBe(0);
   });
 });

@@ -131,6 +131,7 @@ class NominatimProvider(GeocodingProvider):
                 return results
 
         # 2. Priority: Real Upstream Geocoding Query (Nominatim)
+        provider_failed = False
         async with self._lock:
             elapsed = time.time() - self._last_request_time
             if elapsed < self.min_request_interval_sec:
@@ -181,14 +182,18 @@ class NominatimProvider(GeocodingProvider):
                                 )
                             )
 
-                        if results:
-                            self._cache[cleaned_query] = (now, results)
-                            return results
+                        # Cache and return authoritative upstream result (including legitimate empty results)
+                        self._cache[cleaned_query] = (now, results)
+                        return results
+                    else:
+                        provider_failed = True
+                        logger.warning(f"Nominatim upstream returned HTTP {resp.status_code} for '{query}'")
             except Exception as e:
+                provider_failed = True
                 logger.warning(f"Nominatim upstream query failed for '{query}': {e}")
 
         # 3. Offline / Air-Gapped Fallback ONLY after provider failure AND on exact match
-        if self.allow_offline_fallback and cleaned_query in OFFLINE_EMERGENCY_HUBS:
+        if provider_failed and self.allow_offline_fallback and cleaned_query in OFFLINE_EMERGENCY_HUBS:
             loc = OFFLINE_EMERGENCY_HUBS[cleaned_query]
             fallback_res = GeocodingResult(
                 name=loc["name"],

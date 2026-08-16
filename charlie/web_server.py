@@ -1579,8 +1579,8 @@ async def geo_pmtiles_list():
 @app.get("/api/geo/pmtiles/{archive_name}")
 @app.head("/api/geo/pmtiles/{archive_name}")
 async def geo_pmtiles_serve(archive_name: str, request: Request):
-    """Serve PMTiles archives supporting HTTP Range requests for pmtiles.js protocol."""
-    from fastapi.responses import Response
+    """Serve PMTiles archives supporting HTTP Range requests for pmtiles.js protocol with streaming."""
+    from fastapi.responses import Response, StreamingResponse
     from charlie.geo import geo_service
 
     safe_path = geo_service.pmtiles.resolve_safe_path(archive_name)
@@ -1607,10 +1607,28 @@ async def geo_pmtiles_serve(archive_name: str, request: Request):
         try:
             byte_range = range_header[6:].strip()
             parts = byte_range.split("-")
-            start = int(parts[0]) if parts[0] else 0
-            end = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
 
-            if start >= file_size or end >= file_size or start > end:
+            if len(parts) == 2:
+                if parts[0] == "" and parts[1] != "":
+                    # Suffix byte range: bytes=-500 (last 500 bytes)
+                    suffix_len = int(parts[1])
+                    if suffix_len <= 0:
+                        return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}", **common_headers})
+                    start = max(0, file_size - suffix_len)
+                    end = file_size - 1
+                elif parts[0] != "" and parts[1] == "":
+                    # Open ended range: bytes=500- (from 500 to end)
+                    start = int(parts[0])
+                    end = file_size - 1
+                elif parts[0] != "" and parts[1] != "":
+                    start = int(parts[0])
+                    end = int(parts[1])
+                else:
+                    return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}", **common_headers})
+            else:
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}", **common_headers})
+
+            if start < 0 or start >= file_size or end >= file_size or start > end:
                 return Response(
                     status_code=416,
                     headers={"Content-Range": f"bytes */{file_size}", **common_headers},
@@ -1631,10 +1649,17 @@ async def geo_pmtiles_serve(archive_name: str, request: Request):
             logger.warning(f"Error serving PMTiles range {range_header}: {e}")
             raise HTTPException(status_code=500, detail="Error reading PMTiles byte range")
 
-    # Full file fallback
-    with open(safe_path, "rb") as f:
-        data = f.read()
-    return Response(content=data, status_code=200, headers={**common_headers, "Content-Length": str(file_size)})
+    # Non-range full download: stream in chunks without loading entire file into memory
+    def file_chunk_generator(path: Path, chunk_size: int = 65536):
+        with open(path, "rb") as f:
+            while chunk := f.read(chunk_size):
+                yield chunk
+
+    return StreamingResponse(
+        file_chunk_generator(safe_path),
+        status_code=200,
+        headers={**common_headers, "Content-Length": str(file_size)},
+    )
 
 
 

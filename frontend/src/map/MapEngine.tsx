@@ -10,27 +10,23 @@ import {
   createIntelligencePointLayer,
   createRouteLayer,
   createSelectionPulseLayer,
+  resolveEffectiveQuality,
 } from "./layers/renderers";
 import { LAYER_BY_ID } from "./layers/registry";
 import { calculateBounds, calculateFlyDuration, CHARLIE_SAFE_PADDING } from "./camera";
-import type { MapCommand, MapFeature, RenderMode } from "./types";
+import type { RenderMode } from "./types";
 import { MapToolbar } from "./overlays/MapToolbar";
 import { LayerControls } from "./overlays/LayerControls";
 import { MapAttribution } from "./overlays/MapAttribution";
 import { MapContextCard } from "./overlays/MapContextCard";
-import { SpatialMapPrimitive } from "../composer/primitives/SpatialMapPrimitive";
+import { SpatialMapFallback } from "../composer/primitives/SpatialMapFallback";
 
-function detectWebGLSupport(): { webgl2: boolean; webgl1: boolean } {
+function detectWebGL2Support(): boolean {
   try {
     const canvas = document.createElement("canvas");
-    const gl2 = typeof window !== "undefined" && !!window.WebGL2RenderingContext && !!canvas.getContext("webgl2");
-    const gl1 =
-      typeof window !== "undefined" &&
-      !!window.WebGLRenderingContext &&
-      !!(canvas.getContext("webgl") || canvas.getContext("experimental-webgl"));
-    return { webgl2: gl2, webgl1: gl1 };
+    return typeof window !== "undefined" && !!window.WebGL2RenderingContext && !!canvas.getContext("webgl2");
   } catch {
-    return { webgl2: false, webgl1: false };
+    return false;
   }
 }
 
@@ -47,7 +43,11 @@ export function MapEngine(): ReactElement {
   const providerMode = useMapStore((s) => s.providerMode);
   const quality = useMapStore((s) => s.quality);
   const pmtilesUrl = useMapStore((s) => s.pmtilesUrl);
+  const pmtilesTileType = useMapStore((s) => s.pmtilesTileType);
+  const pmtilesMetadata = useMapStore((s) => s.pmtilesMetadata);
   const onlineSourceUrl = useMapStore((s) => s.onlineSourceUrl);
+  const customStyleUrl = useMapStore((s) => s.customStyleUrl);
+  const customVectorSourceUrl = useMapStore((s) => s.customVectorSourceUrl);
   const activeLayers = useMapStore((s) => s.activeLayers);
   const layerData = useMapStore((s) => s.layerData);
   const layerMetadata = useMapStore((s) => s.layerMetadata);
@@ -70,13 +70,13 @@ export function MapEngine(): ReactElement {
   const consumeCommand = useMapStore((s) => s.consumeCommand);
   const setUserInteracting = useMapStore((s) => s.setUserInteracting);
 
-  // 1. Initialize MapLibre & Deck.gl Instance with 4-Tier Fallback Hierarchy
+  // 1. Initialize MapLibre & Deck.gl Instance with Honest Fallback Model (WebGL2 Required)
   useEffect(() => {
     if (!mapContainerRef.current) return;
 
-    const { webgl2, webgl1 } = detectWebGLSupport();
-    if (!webgl2 && !webgl1) {
-      console.warn("[MapEngine] No WebGL support detected. Falling back to Tier-4 SVG Spatial Vector.");
+    const hasWebGL2 = detectWebGL2Support();
+    if (!hasWebGL2) {
+      console.warn("[MapEngine] WebGL2 not supported. Falling back to Tier-D SVG Spatial Vector.");
       setRenderMode("svg_fallback");
       setReady(true);
       return;
@@ -86,48 +86,37 @@ export function MapEngine(): ReactElement {
       const style = resolveBasemapStyle({
         mode: providerMode,
         pmtilesUrl,
-        onlineSourceUrl,
+        pmtilesTileType,
+        pmtilesMetadata,
+        customStyleUrl,
+        customVectorSourceUrl,
       });
+
+      const effectiveQuality = resolveEffectiveQuality(quality);
 
       const map = new maplibregl.Map({
         container: mapContainerRef.current,
         style,
         center: [15.0, 25.0],
         zoom: 1.8,
-        pitch: quality === "low" ? 0 : 0,
+        pitch: effectiveQuality === "low" ? 0 : 0,
         bearing: 0,
         attributionControl: false,
-        maxPitch: quality === "low" ? 0 : 60,
+        maxPitch: effectiveQuality === "low" ? 0 : 60,
       });
       mapRef.current = map;
 
-      // Tier 1 & 2: Deck.gl Overlay Setup
-      if (webgl2) {
-        try {
-          const overlay = new MapboxOverlay({
-            interleaved: true,
-            layers: [],
-          });
-          overlayRef.current = overlay;
-          map.addControl(overlay as unknown as maplibregl.IControl);
-          setRenderMode("interleaved");
-        } catch (deckInterleaveErr) {
-          console.warn("[MapEngine] Interleaved mode failed, trying non-interleaved overlay:", deckInterleaveErr);
-          try {
-            const overlay = new MapboxOverlay({
-              interleaved: false,
-              layers: [],
-            });
-            overlayRef.current = overlay;
-            map.addControl(overlay as unknown as maplibregl.IControl);
-            setRenderMode("overlay");
-          } catch (overlayErr) {
-            console.warn("[MapEngine] Deck.gl overlay failed, falling back to MapLibre-only:", overlayErr);
-            setRenderMode("maplibre_only");
-          }
-        }
-      } else {
-        // WebGL1: Non-interleaved overlay or maplibre-only
+      // Tier A: Deck.gl Interleaved Overlay
+      try {
+        const overlay = new MapboxOverlay({
+          interleaved: true,
+          layers: [],
+        });
+        overlayRef.current = overlay;
+        map.addControl(overlay as unknown as maplibregl.IControl);
+        setRenderMode("interleaved");
+      } catch (deckInterleaveErr) {
+        console.warn("[MapEngine] Tier A interleaved mode failed, trying Tier B non-interleaved overlay:", deckInterleaveErr);
         try {
           const overlay = new MapboxOverlay({
             interleaved: false,
@@ -136,7 +125,8 @@ export function MapEngine(): ReactElement {
           overlayRef.current = overlay;
           map.addControl(overlay as unknown as maplibregl.IControl);
           setRenderMode("overlay");
-        } catch {
+        } catch (overlayErr) {
+          console.warn("[MapEngine] Tier B overlay failed, falling back to Tier C MapLibre-only:", overlayErr);
           setRenderMode("maplibre_only");
         }
       }
@@ -145,10 +135,14 @@ export function MapEngine(): ReactElement {
         setReady(true);
       });
 
-      // Real Camera Interruption Listeners
-      const handleUserInteractionStart = () => {
+      // Camera Interruption Listeners (Only genuine user interaction stops camera)
+      const handleUserInteractionStart = (e?: { originalEvent?: unknown }) => {
+        if (e && !e.originalEvent) {
+          // Programmatic camera change (flyTo/easeTo/setPitch), do not interrupt
+          return;
+        }
         if (mapRef.current) {
-          mapRef.current.stop(); // Immediately stop programmatic camera flyTo/easeTo
+          mapRef.current.stop(); // Stop active programmatic camera animation
         }
         setUserInteracting(true);
       };
@@ -160,7 +154,6 @@ export function MapEngine(): ReactElement {
       map.on("dragstart", handleUserInteractionStart);
       map.on("touchstart", handleUserInteractionStart);
       map.on("rotatestart", handleUserInteractionStart);
-      map.on("pitchstart", handleUserInteractionStart);
       map.on("boxzoomstart", handleUserInteractionStart);
       map.on("wheel", handleUserInteractionStart);
 
@@ -168,6 +161,14 @@ export function MapEngine(): ReactElement {
       map.on("touchend", handleUserInteractionEnd);
       map.on("rotateend", handleUserInteractionEnd);
       map.on("pitchend", handleUserInteractionEnd);
+
+      // Direct container DOM listeners for unambiguous user interaction detection
+      const container = mapContainerRef.current;
+      if (container) {
+        container.addEventListener("pointerdown", () => handleUserInteractionStart());
+        container.addEventListener("wheel", () => handleUserInteractionStart(), { passive: true });
+        container.addEventListener("touchstart", () => handleUserInteractionStart(), { passive: true });
+      }
 
       map.on("moveend", () => {
         const center = map.getCenter();
@@ -202,7 +203,19 @@ export function MapEngine(): ReactElement {
       setInitError(err instanceof Error ? err.message : "MapLibre GL initialization failed");
       setReady(true);
     }
-  }, [providerMode, pmtilesUrl, onlineSourceUrl, quality, setCamera, setReady, setUserInteracting]);
+  }, [
+    providerMode,
+    pmtilesUrl,
+    pmtilesTileType,
+    pmtilesMetadata,
+    onlineSourceUrl,
+    customStyleUrl,
+    customVectorSourceUrl,
+    quality,
+    setCamera,
+    setReady,
+    setUserInteracting,
+  ]);
 
   // 2. Strict Intelligence Layer Lifecycle (TTL, Abort, Zero Polling on Disabled)
   useEffect(() => {
@@ -233,251 +246,283 @@ export function MapEngine(): ReactElement {
         fetchBackendIntelligenceLayer(layerId, controller.signal)
           .then((res) => {
             setLayerData(layerId, res.features, {
-              status: "ready",
+              status: (res.status as "ready" | "loading" | "error" | "unconfigured") || "ready",
               attribution: res.attribution || def.attribution,
-              lastUpdated: Date.now(),
+              lastUpdated: res.timestamp || Date.now(),
               count: res.features.length,
             });
           })
           .catch((err) => {
-            if (controller.signal.aborted) return;
+            if (err?.name === "AbortError") return;
             setLayerStatus(layerId, {
               status: "error",
-              error: err instanceof Error ? err.message : "Layer fetch failed",
+              error: err instanceof Error ? err.message : "Layer data fetch failed",
             });
           });
       } else {
-        // Disabled: Abort in-flight request and ensure no background polling occurs
+        // Disabled: cancel any in-flight request immediately
         if (abortControllersRef.current[layerId]) {
           abortControllersRef.current[layerId].abort();
           delete abortControllersRef.current[layerId];
         }
       }
     }
+  }, [activeLayers, layerData, layerMetadata, setLayerData, setLayerStatus]);
 
-    return () => {
-      // Abort all in-flight requests on unmount
-      Object.values(abortControllersRef.current).forEach((ctrl) => ctrl.abort());
-      abortControllersRef.current = {};
-    };
-  }, [activeLayers, layerMetadata, layerData, setLayerData, setLayerStatus]);
-
-  // 3. Update deck.gl Overlay Layers (Tiers 1 & 2)
+  // 3. Update Deck.gl Layers on State Change
   useEffect(() => {
-    if (!overlayRef.current) return;
+    if (!overlayRef.current || renderMode === "maplibre_only" || renderMode === "svg_fallback") return;
 
-    const layers: unknown[] = [];
+    const deckLayers: any[] = [];
 
-    const pulseLayer = createSelectionPulseLayer(selectedFeature, quality);
-    if (pulseLayer) {
-      layers.push(pulseLayer);
-    }
-
+    // Intelligence Layers
     for (const [layerId, isEnabled] of Object.entries(activeLayers)) {
-      if (!isEnabled) continue;
-      const features = layerData[layerId];
-      if (features && features.length > 0) {
+      if (isEnabled && layerData[layerId] && layerData[layerId].length > 0) {
         const pointLayer = createIntelligencePointLayer(
           layerId,
-          features,
-          (f: MapFeature) => {
-            setSelectedFeature(f);
-          },
+          layerData[layerId],
+          (feature) => setSelectedFeature(feature),
           quality
         );
-        layers.push(pointLayer);
+        deckLayers.push(pointLayer);
       }
     }
 
-    if (route) {
+    // Selected Feature Pulse Layer
+    if (selectedFeature) {
+      const pulseLayer = createSelectionPulseLayer(selectedFeature, quality);
+      if (pulseLayer) deckLayers.push(pulseLayer);
+    }
+
+    // Active Route Corridor Layer
+    if (route && route.geometry && route.geometry.length > 1) {
       const routeLayers = createRouteLayer(route, () => {}, quality);
-      layers.push(...routeLayers);
+      deckLayers.push(...routeLayers);
     }
 
     overlayRef.current.setProps({
-      layers: layers as never,
+      layers: deckLayers,
     });
-  }, [activeLayers, layerData, selectedFeature, route, quality, setSelectedFeature]);
+  }, [activeLayers, layerData, selectedFeature, route, quality, renderMode, setSelectedFeature]);
 
-  // 4. Complete Command Execution Engine (All 16 Declared Commands)
+  // 4. MapCommand Execution Queue Listener (Supports all 16 commands)
   useEffect(() => {
     if (!pendingCommand) return;
-
-    const cmd: MapCommand = pendingCommand.command;
-    const revision = pendingCommand.revision;
+    const { command, revision } = pendingCommand;
     const map = mapRef.current;
 
-    try {
-      switch (cmd.type) {
-        case "fly_to": {
-          if (map) {
-            const currentCenter = map.getCenter();
-            const duration =
-              cmd.durationMs ??
-              calculateFlyDuration(currentCenter.lng, currentCenter.lat, cmd.longitude, cmd.latitude);
+    switch (command.type) {
+      case "fly_to": {
+        if (map) {
+          const currentCenter = map.getCenter();
+          const duration =
+            command.durationMs ??
+            calculateFlyDuration(currentCenter.lng, currentCenter.lat, command.longitude, command.latitude);
 
-            map.flyTo({
-              center: [cmd.longitude, cmd.latitude],
-              zoom: cmd.zoom ?? map.getZoom(),
-              pitch: cmd.pitch ?? map.getPitch(),
-              bearing: cmd.bearing ?? map.getBearing(),
-              duration,
-              essential: true,
-            });
-          }
-          break;
+          map.flyTo({
+            center: [command.longitude, command.latitude],
+            zoom: command.zoom ?? map.getZoom(),
+            pitch: command.pitch ?? map.getPitch(),
+            bearing: command.bearing ?? map.getBearing(),
+            duration,
+            essential: true,
+            padding: CHARLIE_SAFE_PADDING,
+          });
+        } else {
+          setCamera({
+            longitude: command.longitude,
+            latitude: command.latitude,
+            zoom: command.zoom,
+            pitch: command.pitch,
+            bearing: command.bearing,
+          });
         }
-
-        case "ease_to": {
-          if (map) {
-            map.easeTo({
-              center: [cmd.longitude, cmd.latitude],
-              zoom: cmd.zoom ?? map.getZoom(),
-              pitch: cmd.pitch ?? map.getPitch(),
-              bearing: cmd.bearing ?? map.getBearing(),
-              duration: cmd.durationMs ?? 600,
-              essential: true,
-            });
-          }
-          break;
-        }
-
-        case "fit_bounds": {
-          if (map) {
-            map.fitBounds(cmd.bounds, {
-              padding: { ...CHARLIE_SAFE_PADDING, ...(cmd.padding || {}) },
-              duration: cmd.durationMs ?? 900,
-            });
-          }
-          break;
-        }
-
-        case "focus_location": {
-          if (map) {
-            map.flyTo({
-              center: [cmd.coordinates[0], cmd.coordinates[1]],
-              zoom: cmd.zoom ?? 11,
-              duration: 800,
-              essential: true,
-            });
-          }
-          break;
-        }
-
-        case "zoom_in": {
-          if (map) map.zoomIn({ duration: 300 });
-          break;
-        }
-
-        case "zoom_out": {
-          if (map) map.zoomOut({ duration: 300 });
-          break;
-        }
-
-        case "reset_north": {
-          if (map) map.resetNorth({ duration: 500 });
-          break;
-        }
-
-        case "set_pitch": {
-          if (map) map.easeTo({ pitch: cmd.pitch, duration: 450 });
-          break;
-        }
-
-        case "set_bearing": {
-          if (map) map.easeTo({ bearing: cmd.bearing, duration: 450 });
-          break;
-        }
-
-        case "select_feature": {
-          setSelectedFeature(cmd.feature);
-          if (cmd.flyTo && cmd.feature && map) {
-            map.flyTo({
-              center: [cmd.feature.coordinates[0], cmd.feature.coordinates[1]],
-              zoom: Math.max(map.getZoom(), 8),
-              duration: 700,
-            });
-          }
-          break;
-        }
-
-        case "clear_selection": {
-          clearSelection();
-          break;
-        }
-
-        case "set_layer": {
-          setLayerEnabled(cmd.layerId, cmd.enabled);
-          break;
-        }
-
-        case "toggle_layer": {
-          toggleLayer(cmd.layerId);
-          break;
-        }
-
-        case "set_route": {
-          setRoute(cmd.route);
-          if (cmd.fit && cmd.route.geometry && cmd.route.geometry.length > 0 && map) {
-            const bounds = calculateBounds(cmd.route.geometry);
-            if (bounds) {
-              map.fitBounds(bounds, {
-                padding: CHARLIE_SAFE_PADDING,
-                duration: 1000,
-              });
-            }
-          }
-          break;
-        }
-
-        case "clear_route": {
-          clearRoute();
-          break;
-        }
-
-        case "reset_map": {
-          resetMapStore();
-          if (map) {
-            map.flyTo({
-              center: [15.0, 25.0],
-              zoom: 1.8,
-              pitch: 0,
-              bearing: 0,
-              duration: 900,
-            });
-          }
-          break;
-        }
+        break;
       }
-    } catch (err) {
-      console.warn("[MapEngine] Command execution error:", err);
-    } finally {
-      consumeCommand(revision);
+
+      case "ease_to": {
+        if (map) {
+          map.easeTo({
+            center: [command.longitude, command.latitude],
+            zoom: command.zoom ?? map.getZoom(),
+            pitch: command.pitch ?? map.getPitch(),
+            bearing: command.bearing ?? map.getBearing(),
+            duration: command.durationMs ?? 800,
+            padding: CHARLIE_SAFE_PADDING,
+          });
+        } else {
+          setCamera({
+            longitude: command.longitude,
+            latitude: command.latitude,
+            zoom: command.zoom,
+            pitch: command.pitch,
+            bearing: command.bearing,
+          });
+        }
+        break;
+      }
+
+      case "fit_bounds": {
+        if (map) {
+          map.fitBounds(command.bounds, {
+            padding: {
+              ...CHARLIE_SAFE_PADDING,
+              ...command.padding,
+            },
+            duration: command.durationMs ?? 1200,
+            maxZoom: 16,
+          });
+        }
+        break;
+      }
+
+      case "zoom_in": {
+        if (map) map.zoomIn({ duration: 300 });
+        break;
+      }
+
+      case "zoom_out": {
+        if (map) map.zoomOut({ duration: 300 });
+        break;
+      }
+
+      case "reset_north": {
+        if (map) map.resetNorthPitch({ duration: 600 });
+        break;
+      }
+
+      case "set_pitch": {
+        if (map) map.setPitch(command.pitch);
+        break;
+      }
+
+      case "set_bearing": {
+        if (map) map.setBearing(command.bearing);
+        break;
+      }
+
+      case "focus_location": {
+        if (map) {
+          map.flyTo({
+            center: command.coordinates,
+            zoom: command.zoom ?? 12,
+            duration: 1200,
+            padding: CHARLIE_SAFE_PADDING,
+          });
+        }
+        break;
+      }
+
+      case "select_feature": {
+        setSelectedFeature(command.feature);
+        if (command.feature && command.flyTo !== false) {
+          if (map) {
+            map.flyTo({
+              center: [command.feature.coordinates[0], command.feature.coordinates[1]],
+              zoom: Math.max(map.getZoom(), 8),
+              duration: 1000,
+              padding: CHARLIE_SAFE_PADDING,
+            });
+          }
+        }
+        break;
+      }
+
+      case "set_layer": {
+        setLayerEnabled(command.layerId, command.enabled);
+        break;
+      }
+
+      case "toggle_layer": {
+        toggleLayer(command.layerId);
+        break;
+      }
+
+      case "set_route": {
+        setRoute(command.route);
+        if (command.fit !== false && command.route.geometry.length > 1) {
+          const bounds = calculateBounds(command.route.geometry);
+          if (bounds && map) {
+            map.fitBounds(bounds, {
+              padding: CHARLIE_SAFE_PADDING,
+              duration: 1200,
+            });
+          }
+        }
+        break;
+      }
+
+      case "clear_route": {
+        clearRoute();
+        break;
+      }
+
+      case "clear_selection": {
+        clearSelection();
+        break;
+      }
+
+      case "reset_map": {
+        resetMapStore();
+        if (map) {
+          map.flyTo({
+            center: [15.0, 25.0],
+            zoom: 1.8,
+            pitch: 0,
+            bearing: 0,
+            duration: 1000,
+          });
+        }
+        break;
+      }
     }
+
+    consumeCommand(revision);
   }, [
     pendingCommand,
     consumeCommand,
-    setSelectedFeature,
-    clearSelection,
+    setCamera,
     setLayerEnabled,
-    toggleLayer,
+    setSelectedFeature,
     setRoute,
     clearRoute,
+    clearSelection,
     resetMapStore,
+    toggleLayer,
   ]);
 
-  // Tier 4: Interactive SVG Spatial Renderer Fallback
+  // Fallback Render View (Tier-D: Lightweight SVG Equirectangular Projection)
   if (renderMode === "svg_fallback") {
-    // Transform intelligence layer points to spatial map nodes for vector visualizer
-    const vectorNodes: { id: string; x: number; y: number; label: string; severity?: string }[] = [];
-    Object.entries(activeLayers).forEach(([layerId, isEnabled]) => {
-      if (isEnabled && layerData[layerId]) {
+    const vectorNodes: any[] = [];
+
+    // Origin and Destination if route exists
+    if (route) {
+      vectorNodes.push({
+        id: "origin",
+        label: route.startLabel,
+        x: ((route.start[0] + 180) / 360) * 100,
+        y: ((90 - route.start[1]) / 180) * 100,
+        color: "#00f0ff",
+      });
+      vectorNodes.push({
+        id: "dest",
+        label: route.destinationLabel,
+        x: ((route.destination[0] + 180) / 360) * 100,
+        y: ((90 - route.destination[1]) / 180) * 100,
+        color: "#38bdf8",
+      });
+    }
+
+    // Active Intelligence Layers
+    Object.entries(activeLayers).forEach(([layerId, enabled]) => {
+      if (enabled && layerData[layerId]) {
         layerData[layerId].forEach((feat) => {
           vectorNodes.push({
             id: feat.id,
-            x: ((feat.coordinates[0] + 180) / 360) * 1000,
-            y: ((90 - feat.coordinates[1]) / 180) * 500,
             label: feat.label,
+            x: ((feat.coordinates[0] + 180) / 360) * 100,
+            y: ((90 - feat.coordinates[1]) / 180) * 100,
+            color: feat.color,
             severity: feat.severity,
           });
         });
@@ -486,12 +531,11 @@ export function MapEngine(): ReactElement {
 
     return (
       <div className="w-full h-full relative overflow-hidden bg-[#020710] font-mono">
-        <SpatialMapPrimitive
+        <SpatialMapFallback
           data={{
             mode: "geo",
-            useRealEngine: false,
-            title: "SPATIAL VECTOR RADAR (TIER-4)",
-            subtitle: initError ? `Fallback active: ${initError}` : "Fallback 2D vector projection",
+            title: "SPATIAL VECTOR RADAR (TIER-D)",
+            subtitle: initError ? `Fallback active: ${initError}` : "2D equirectangular vector projection",
             nodes: vectorNodes,
             edges: route
               ? [
@@ -500,6 +544,7 @@ export function MapEngine(): ReactElement {
                     to: "dest",
                     type: "route",
                     active: true,
+                    label: `${route.startLabel} → ${route.destinationLabel}`,
                   },
                 ]
               : [],
@@ -513,13 +558,21 @@ export function MapEngine(): ReactElement {
     );
   }
 
-  // Tiers 1, 2, 3: Full Spatial Canvas
   return (
-    <div className="w-full h-full relative overflow-hidden bg-[#020710] select-none">
-      <div ref={mapContainerRef} className="w-full h-full" />
+    <div className="w-full h-full relative overflow-hidden bg-[#020710] select-none font-mono">
+      {/* 1. MapLibre GL Canvas Container */}
+      <div ref={mapContainerRef} className="w-full h-full absolute inset-0 z-0" tabIndex={-1} />
+
+      {/* 2. Top-Right Technical Compass & Controls */}
       <MapToolbar />
+
+      {/* 3. Top-Left Intelligence Layer Toggle Panel */}
       <LayerControls />
+
+      {/* 4. Bottom-Right Dynamic Context & Telemetry Card */}
       <MapContextCard />
+
+      {/* 5. Bottom-Left Legal Attribution */}
       <MapAttribution renderMode={renderMode} />
     </div>
   );

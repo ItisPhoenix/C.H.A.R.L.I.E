@@ -71,160 +71,184 @@ export const CHARLIE_DARK_MAP_STYLE: StyleSpecification = {
       type: "fill",
       source: "openfreemap",
       "source-layer": "water",
-      minzoom: 4,
       paint: {
-        "fill-color": "#030a16",
-        "fill-opacity": 0.65,
+        "fill-color": "#020710",
+        "fill-opacity": 0.95,
       },
     },
 
-    // 4. Vector Landcover & Parks
+    // 4. Vector Landcover & Landuse
     {
       id: "landcover-vector",
       type: "fill",
       source: "openfreemap",
       "source-layer": "landcover",
-      minzoom: 5,
       paint: {
-        "fill-color": "#061524",
-        "fill-opacity": 0.45,
+        "fill-color": "#061422",
+        "fill-opacity": 0.65,
       },
     },
 
-    // 5. Minor / Local Roads
+    // 5. Minor / Secondary Road Network
     {
       id: "roads-minor",
       type: "line",
       source: "openfreemap",
       "source-layer": "transportation",
+      filter: ["!in", "class", "motorway", "trunk", "primary"],
       minzoom: 11,
-      filter: ["!in", "class", "motorway", "trunk", "primary", "secondary"],
       paint: {
-        "line-color": "rgba(34, 211, 238, 0.18)",
-        "line-width": 0.8,
+        "line-color": "rgba(34, 211, 238, 0.15)",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 11, 0.5, 16, 1.8],
       },
     },
 
-    // 6. Secondary Roads
+    // 6. Primary Arterial Roads & Highways
     {
-      id: "roads-secondary",
+      id: "roads-arterial",
       type: "line",
       source: "openfreemap",
       "source-layer": "transportation",
-      minzoom: 7,
-      filter: ["in", "class", "secondary", "tertiary"],
+      filter: ["in", "class", "motorway", "trunk", "primary"],
+      minzoom: 6,
       paint: {
-        "line-color": "rgba(34, 211, 238, 0.4)",
-        "line-width": 1.2,
+        "line-color": "rgba(0, 240, 255, 0.45)",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 6, 0.8, 12, 2.4, 16, 4.0],
       },
     },
 
-    // 7. Primary Arterials
-    {
-      id: "roads-primary",
-      type: "line",
-      source: "openfreemap",
-      "source-layer": "transportation",
-      minzoom: 5,
-      filter: ["in", "class", "primary", "trunk"],
-      paint: {
-        "line-color": "rgba(56, 189, 248, 0.6)",
-        "line-width": 1.8,
-      },
-    },
-
-    // 8. Motorways & Expressways
-    {
-      id: "roads-motorway",
-      type: "line",
-      source: "openfreemap",
-      "source-layer": "transportation",
-      minzoom: 3,
-      filter: ["==", "class", "motorway"],
-      paint: {
-        "line-color": "rgba(0, 240, 255, 0.8)",
-        "line-width": 2.2,
-      },
-    },
-
-    // 9. Administrative Boundaries (State/Province)
-    {
-      id: "boundaries-state",
-      type: "line",
-      source: "openfreemap",
-      "source-layer": "boundary",
-      filter: ["==", "admin_level", 4],
-      paint: {
-        "line-color": "rgba(34, 211, 238, 0.25)",
-        "line-dasharray": [2, 2],
-        "line-width": 0.8,
-      },
-    },
-
-    // 10. Country Boundaries
+    // 7. Administrative Country Boundaries
     {
       id: "boundaries-country",
       type: "line",
       source: "openfreemap",
       "source-layer": "boundary",
-      filter: ["<=", "admin_level", 2],
+      filter: ["==", "admin_level", 2],
       paint: {
-        "line-color": "rgba(34, 211, 238, 0.5)",
+        "line-color": "rgba(34, 211, 238, 0.45)",
+        "line-width": 1.2,
         "line-dasharray": [3, 2],
-        "line-width": 1.4,
       },
     },
 
-    // 11. 3D Buildings Extrusion (High Zoom)
+    // 8. Administrative State / Regional Boundaries
     {
-      id: "buildings-3d",
+      id: "boundaries-state",
+      type: "line",
+      source: "openfreemap",
+      "source-layer": "boundary",
+      filter: [">", "admin_level", 2],
+      minzoom: 4,
+      paint: {
+        "line-color": "rgba(34, 211, 238, 0.25)",
+        "line-width": 0.8,
+        "line-dasharray": [2, 2],
+      },
+    },
+
+    // 9. 3D Extruded Buildings (Visible when pitched at high zoom)
+    {
+      id: "building-3d",
       type: "fill-extrusion",
       source: "openfreemap",
       "source-layer": "building",
       minzoom: 14,
       paint: {
-        "fill-extrusion-color": "#081f33",
-        "fill-extrusion-height": ["coalesce", ["get", "render_height"], ["get", "height"], 12],
-        "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], ["get", "min_height"], 0],
-        "fill-extrusion-opacity": 0.75,
+        "fill-extrusion-color": "#0a223a",
+        "fill-extrusion-height": ["coalesce", ["get", "render_height"], 15],
+        "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
+        "fill-extrusion-opacity": 0.85,
       },
     },
 
-    // 12. City / Place Labels
+    // 10. Country & Capital City Place Labels
     {
-      id: "place-labels",
+      id: "place-labels-country",
       type: "symbol",
       source: "openfreemap",
       "source-layer": "place",
-      minzoom: 3,
+      filter: ["in", "class", "country", "state"],
       layout: {
-        "text-field": ["coalesce", ["get", "name:en"], ["get", "name:latin"], ["get", "name"]],
-        "text-size": 11,
+        "text-field": ["coalesce", ["get", "name_en"], ["get", "name"]],
         "text-font": ["Open Sans Regular", "Arial Unicode MS Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 2, 9, 6, 13],
+        "text-transform": "uppercase",
+        "text-letter-spacing": 0.15,
         "text-max-width": 8,
       },
       paint: {
-        "text-color": "#94a3b8",
+        "text-color": "rgba(148, 163, 184, 0.85)",
         "text-halo-color": "#020710",
         "text-halo-width": 1.5,
       },
     },
 
-    // 13. Charlie Ambient Vignette Overlay
+    // 11. Major City Labels
     {
-      id: "charlie-hud-tint",
-      type: "background",
+      id: "place-labels-city",
+      type: "symbol",
+      source: "openfreemap",
+      "source-layer": "place",
+      filter: ["in", "class", "city", "town"],
+      minzoom: 4,
+      layout: {
+        "text-field": ["coalesce", ["get", "name_en"], ["get", "name"]],
+        "text-font": ["Open Sans Regular", "Arial Unicode MS Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 4, 9, 10, 14],
+        "text-max-width": 10,
+      },
       paint: {
-        "background-color": "rgba(4, 18, 30, 0.15)",
+        "text-color": "#38bdf8",
+        "text-halo-color": "#020710",
+        "text-halo-width": 1.2,
       },
     },
   ],
 };
 
 /**
- * Generate a standalone offline-compatible style for PMTiles vector or raster archives.
+ * Generate a standalone offline-compatible style for PMTiles vector, raster, or terrain archives.
  */
-export function createPMTilesStyle(pmtilesUrl: string, isRaster: boolean = false): StyleSpecification {
+export function createPMTilesStyle(
+  pmtilesUrl: string,
+  tileType: "vector" | "raster_png" | "raster_jpeg" | "raster_webp" | "raster_avif" | "raster-dem" | string = "vector",
+  metadata?: { vector_layers?: Array<{ id: string }> } | null
+): StyleSpecification {
+  const isRaster = tileType.startsWith("raster_") || tileType === "raster";
+  const isDem = tileType === "raster-dem" || tileType === "terrain";
+
+  if (isDem) {
+    return {
+      version: 8,
+      name: "Charlie Offline PMTiles Terrain",
+      sources: {
+        local_pmtiles_dem: {
+          type: "raster-dem",
+          url: `pmtiles://${pmtilesUrl}`,
+          tileSize: 256,
+        },
+      },
+      layers: [
+        {
+          id: "background",
+          type: "background",
+          paint: {
+            "background-color": "#020710",
+          },
+        },
+        {
+          id: "pmtiles-dem-hillshade",
+          type: "hillshade",
+          source: "local_pmtiles_dem",
+          paint: {
+            "hillshade-shadow-color": "#020710",
+            "hillshade-highlight-color": "#22d3ee",
+          },
+        },
+      ],
+    };
+  }
+
   if (isRaster) {
     return {
       version: 8,
@@ -256,6 +280,99 @@ export function createPMTilesStyle(pmtilesUrl: string, isRaster: boolean = false
     };
   }
 
+  // Vector archive: Adapt dynamically to discovered vector_layers metadata
+  const vectorLayers: Array<{ id: string }> = metadata?.vector_layers && metadata.vector_layers.length > 0
+    ? metadata.vector_layers
+    : [
+        { id: "water" },
+        { id: "landuse" },
+        { id: "transportation" },
+        { id: "boundary" },
+        { id: "places" },
+      ];
+
+  const layers: any[] = [
+    {
+      id: "background",
+      type: "background",
+      paint: {
+        "background-color": "#020710",
+      },
+    },
+  ];
+
+  for (const vl of vectorLayers) {
+    const layerName = vl.id.toLowerCase();
+    if (layerName.includes("water") || layerName.includes("ocean")) {
+      layers.push({
+        id: `pmtiles-water-${vl.id}`,
+        type: "fill",
+        source: "local_pmtiles",
+        "source-layer": vl.id,
+        paint: {
+          "fill-color": "#030a16",
+        },
+      });
+    } else if (layerName.includes("land") || layerName.includes("building") || layerName.includes("structure")) {
+      layers.push({
+        id: `pmtiles-land-${vl.id}`,
+        type: "fill",
+        source: "local_pmtiles",
+        "source-layer": vl.id,
+        paint: {
+          "fill-color": "#061422",
+        },
+      });
+    } else if (layerName.includes("road") || layerName.includes("transport") || layerName.includes("street")) {
+      layers.push({
+        id: `pmtiles-roads-${vl.id}`,
+        type: "line",
+        source: "local_pmtiles",
+        "source-layer": vl.id,
+        paint: {
+          "line-color": "rgba(34, 211, 238, 0.45)",
+          "line-width": 1.2,
+        },
+      });
+    } else if (layerName.includes("bound") || layerName.includes("admin")) {
+      layers.push({
+        id: `pmtiles-bounds-${vl.id}`,
+        type: "line",
+        source: "local_pmtiles",
+        "source-layer": vl.id,
+        paint: {
+          "line-color": "rgba(34, 211, 238, 0.35)",
+          "line-dasharray": [2, 2],
+          "line-width": 1,
+        },
+      });
+    } else {
+      // Generic feature representation
+      layers.push({
+        id: `pmtiles-feat-line-${vl.id}`,
+        type: "line",
+        source: "local_pmtiles",
+        "source-layer": vl.id,
+        paint: {
+          "line-color": "rgba(34, 211, 238, 0.35)",
+          "line-width": 1,
+        },
+      });
+      layers.push({
+        id: `pmtiles-feat-circle-${vl.id}`,
+        type: "circle",
+        source: "local_pmtiles",
+        "source-layer": vl.id,
+        paint: {
+          "circle-radius": 3,
+          "circle-color": "#22d3ee",
+          "circle-stroke-width": 1,
+          "circle-stroke-color": "#020710",
+        },
+      });
+    }
+  }
+
   return {
     version: 8,
     name: "Charlie Offline PMTiles Intelligence",
@@ -266,53 +383,6 @@ export function createPMTilesStyle(pmtilesUrl: string, isRaster: boolean = false
       },
     },
     glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
-    layers: [
-      {
-        id: "background",
-        type: "background",
-        paint: {
-          "background-color": "#020710",
-        },
-      },
-      {
-        id: "water",
-        type: "fill",
-        source: "local_pmtiles",
-        "source-layer": "water",
-        paint: {
-          "fill-color": "#030a16",
-        },
-      },
-      {
-        id: "landuse",
-        type: "fill",
-        source: "local_pmtiles",
-        "source-layer": "landuse",
-        paint: {
-          "fill-color": "#061422",
-        },
-      },
-      {
-        id: "roads",
-        type: "line",
-        source: "local_pmtiles",
-        "source-layer": "transportation",
-        paint: {
-          "line-color": "rgba(34, 211, 238, 0.35)",
-          "line-width": 1.2,
-        },
-      },
-      {
-        id: "boundaries",
-        type: "line",
-        source: "local_pmtiles",
-        "source-layer": "boundary",
-        paint: {
-          "line-color": "rgba(34, 211, 238, 0.35)",
-          "line-dasharray": [2, 2],
-          "line-width": 1,
-        },
-      },
-    ],
+    layers,
   };
 }
