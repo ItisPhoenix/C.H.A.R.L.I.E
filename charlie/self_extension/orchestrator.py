@@ -2,12 +2,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from charlie.capabilities import CapabilityIndex
+from charlie.capabilities import CapabilityIndex, get_capability_index
 from charlie.config import Config
 from charlie.events import EventMeta, EventSource, EventType
 from charlie.self_extension.adapters.code_adapter import CodeAdapter
@@ -20,6 +21,7 @@ from charlie.self_extension.guard import AuthorizationGuard
 from charlie.self_extension.models import (
     ExtensionCheckpoint,
     ExtensionKind,
+    ExtensionPlan,
     ExtensionRequest,
     ExtensionResult,
     ExtensionTransaction,
@@ -58,7 +60,7 @@ class SelfExtensionOrchestrator:
         self._repo_root = (repo_root or Path(os.getcwd())).resolve()
         self._config = config or Config()
         self._settings_service = settings_service or SettingsService(config_instance=self._config)
-        self._capability_index = capability_index or CapabilityIndex()
+        self._capability_index = capability_index if capability_index is not None else get_capability_index()
         self._event_bus = event_bus
         self._event_loop = event_loop
         self._mcp_client = mcp_client
@@ -114,6 +116,129 @@ class SelfExtensionOrchestrator:
 
         # Resume any transactions left in RESTARTING state
         self._resume_restarting_transactions()
+
+    def plan_request(
+        self,
+        prompt: str,
+        *,
+        explicit_user_request: bool = True,
+        affected_settings: Optional[Dict[str, Any]] = None,
+    ) -> ExtensionRequest:
+        """Turn explicit user intent into a bounded, typed execution plan."""
+        request = ExtensionRequest(
+            user_prompt=prompt,
+            explicit_user_request=explicit_user_request,
+            affected_settings=dict(affected_settings or {}),
+        )
+        request.classification = self._classifier.classify(prompt)
+
+        # Inspection is advisory. It never supplies executable payloads.
+        try:
+            if self._code_index is not None and hasattr(self._code_index, "refresh"):
+                self._code_index.refresh()
+            if self._self_knowledge is not None and hasattr(self._self_knowledge, "get_evidence_for_query"):
+                self._self_knowledge.get_evidence_for_query(prompt[:500])
+        except Exception as exc:
+            logger.info("Extension planning inspection unavailable: %s", exc)
+
+        kind = request.classification.kind
+        if kind == ExtensionKind.SKILL:
+            name = self._plan_name(prompt, "custom_skill")
+            request.plan = ExtensionPlan(
+                plan_id=f"plan-{uuid.uuid4().hex[:8]}",
+                kind=kind,
+                description=f"Register reusable skill '{name}'.",
+                steps=["validate SKILL.md", "save skill", "verify capability"],
+                raw_text=(
+                    "---\n"
+                    f"name: {name}\n"
+                    "description: Reusable procedure requested by the user.\n"
+                    "---\n"
+                    "# Procedure\n\n"
+                    f"Follow this requested procedure: {self._safe_markdown_text(prompt)}\n"
+                ),
+            )
+            request.affected_capabilities = [f"skill_{name}"]
+        elif kind == ExtensionKind.MCP_TOOL:
+            name = self._plan_name(prompt, "requested_mcp")
+            command_match = re.search(r"\bcommand\s*[:=]?\s*([\w./-]+)", prompt, re.IGNORECASE)
+            command = command_match.group(1) if command_match else "npx"
+            args_match = re.search(r"\bargs\s*[:=]\s*([^;]+)", prompt, re.IGNORECASE)
+            args = (
+                [item.strip(" '\"") for item in args_match.group(1).strip(" []").split(",") if item.strip()]
+                if args_match
+                else ["-y", "@modelcontextprotocol/server-filesystem"]
+            )
+            env_match = re.search(r"\benv\s*[:=]\s*([^;]+)", prompt, re.IGNORECASE)
+            env = {}
+            if env_match:
+                for item in env_match.group(1).strip(" []").split(","):
+                    if "=" in item:
+                        key, value = item.split("=", 1)
+                        env[key.strip()] = value.strip(" '\"")
+            request.plan = ExtensionPlan(
+                plan_id=f"plan-{uuid.uuid4().hex[:8]}",
+                kind=kind,
+                description=f"Connect MCP server '{name}' through MCPClient.",
+                steps=["add_server", "enable_server", "discover tools", "verify health"],
+                mcp_name=name,
+                mcp_command=command,
+                mcp_args=args,
+                mcp_env=env,
+            )
+            request.affected_capabilities = [f"mcp_{name}"]
+        elif kind == ExtensionKind.CODE_SMALL:
+            name, source, inputs, expected = self._build_code_plan(prompt)
+            request.plan = ExtensionPlan(
+                plan_id=f"plan-{uuid.uuid4().hex[:8]}",
+                kind=kind,
+                description=f"Add bounded pure function '{name}'.",
+                steps=["validate AST", "checkpoint", "write", "worker test", "verify capability"],
+                tests_to_run=[f"{name}({inputs!r}) == {expected!r}"],
+                code_source=source,
+                tool_name=name,
+                test_inputs=inputs,
+                expected_output=expected,
+            )
+            request.affected_capabilities = [f"code_{name}"]
+        elif kind == ExtensionKind.CONFIG:
+            request.plan = ExtensionPlan(
+                plan_id=f"plan-{uuid.uuid4().hex[:8]}",
+                kind=kind,
+                description="Apply validated settings updates.",
+                settings_updates=dict(request.affected_settings),
+            )
+        return request
+
+    @staticmethod
+    def _safe_markdown_text(prompt: str) -> str:
+        return " ".join(prompt.replace("```", "").split())[:500]
+
+    @staticmethod
+    def _plan_name(prompt: str, fallback: str) -> str:
+        match = re.search(r"\b(?:called|named)\s+([A-Za-z][A-Za-z0-9_-]*)", prompt, re.IGNORECASE)
+        if not match:
+            match = re.search(r"\b(?:skill|server)\s+([A-Za-z][A-Za-z0-9_-]*)", prompt, re.IGNORECASE)
+        candidate = match.group(1).lower().replace("-", "_") if match else fallback
+        if candidate in {"for", "that", "to", "with", "a", "an", "the"}:
+            return fallback
+        return candidate[:48]
+
+    @staticmethod
+    def _build_code_plan(prompt: str) -> tuple[str, str, Dict[str, Any], Any]:
+        explicit = re.search(r"\b(?:called|named)\s+([A-Za-z_]\w*)", prompt, re.IGNORECASE)
+        lower = prompt.lower()
+        if "double" in lower:
+            name = explicit.group(1) if explicit else "double_value"
+            return name, f"def {name}(value=0):\n    return value * 2\n", {"value": 2}, 4
+        if any(term in lower for term in ("add two", "sum", "addition")):
+            name = explicit.group(1) if explicit else "add_numbers"
+            return name, f"def {name}(a=0, b=0):\n    return a + b\n", {"a": 2, "b": 3}, 5
+        if "uppercase" in lower or "upper case" in lower:
+            name = explicit.group(1) if explicit else "uppercase_text"
+            return name, f"def {name}(value=''):\n    return value.upper()\n", {"value": "charlie"}, "CHARLIE"
+        name = explicit.group(1) if explicit else "generated_tool"
+        return name, f"def {name}(value=None):\n    return value\n", {"value": "ok"}, "ok"
 
     # ─────────────────────────────────────────────────────────────────────────
     # Event emission (canonical EventType)

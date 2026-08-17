@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, create_autospec, patch
 
+from charlie.capabilities import CapabilityDescriptor, CapabilityIndex, CapabilityOperation, get_capability_index
 from charlie.events import EventMeta, EventSource, EventType
 from charlie.ipc import EventBus
 from charlie.mcp_client import MCPClient
+from charlie.runtime_introspector import RuntimeIntrospector
 from charlie.self_extension.adapters.code_adapter import CodeAdapter
 from charlie.self_extension.adapters.mcp_adapter import MCPAdapter
 from charlie.self_extension.code_worker import ASTAllowListError, run_worker, validate_ast_allow_list
@@ -27,6 +29,7 @@ from charlie.self_extension.models import (
 )
 from charlie.self_extension.orchestrator import SelfExtensionOrchestrator
 from charlie.self_extension.registry import ExtensionRegistry
+from charlie.self_knowledge import SelfKnowledgeService
 
 
 def _verification_mocks(ext_id: str) -> dict:
@@ -128,6 +131,17 @@ class TestCodeSmallBoundary(unittest.TestCase):
         )
         with self.assertRaises(ASTAllowListError):
             validate_ast_allow_list(src, "read_tool")
+
+    def test_reflection_and_dunder_escape_attempts_rejected(self) -> None:
+        sources = {
+            "getattr": "def tool(value):\n    return getattr(value, 'x')\n",
+            "globals": "def tool():\n    return globals()\n",
+            "dunder": "def tool(value):\n    return value.__class__\n",
+            "subclasses": "def tool():\n    return object.__subclasses__()\n",
+        }
+        for label, source in sources.items():
+            with self.subTest(label=label), self.assertRaises(ASTAllowListError):
+                validate_ast_allow_list(source, "tool")
 
     def test_worker_reruns_validator_on_disk_file(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -386,3 +400,210 @@ Procedure.
             tx = orch._transactions.get("tx-resume")
             self.assertIsNotNone(tx)
             self.assertEqual(tx.status, TransactionStatus.ROLLED_BACK)
+
+
+class TestProductionFreezeEntryPoints(unittest.TestCase):
+    def setUp(self) -> None:
+        import charlie.tools as tools_module
+
+        tools_module.configure_runtime_services(
+            self_extension_orchestrator=None,
+            runtime_introspector=None,
+            self_knowledge_service=None,
+            doctor=None,
+        )
+
+    def _runtime_orchestrator(self, tmp: Path, *, mcp_client: Any = None) -> SelfExtensionOrchestrator:
+        cap_idx = CapabilityIndex()
+        introspector = RuntimeIntrospector(capability_index=cap_idx, mcp_client=mcp_client)
+        code_index = MagicMock()
+        code_index.refresh = MagicMock()
+        doctor = MagicMock()
+        doctor.diagnose.return_value = MagicMock(is_healthy=True, errors=[])
+        knowledge = SelfKnowledgeService(
+            runtime_introspector=introspector,
+            code_index=code_index,
+            capability_index=cap_idx,
+        )
+        return SelfExtensionOrchestrator(
+            repo_root=tmp,
+            manifest_path=tmp / "manifest.json",
+            skills_dir=tmp / "skills",
+            tools_dir=tmp / "tools",
+            tx_store_path=tmp / "transactions.json",
+            capability_index=cap_idx,
+            mcp_client=mcp_client,
+            tool_registry=__import__("charlie.tools", fromlist=["ToolRegistry"]).ToolRegistry(),
+            introspector=introspector,
+            doctor=doctor,
+            code_index=code_index,
+            self_knowledge=knowledge,
+        )
+
+    def test_real_chat_entry_point_builds_structured_skill_plan(self) -> None:
+        import charlie.tools as tools_module
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            orch = self._runtime_orchestrator(tmp)
+            tools_module.configure_runtime_services(
+                self_extension_orchestrator=orch,
+                runtime_introspector=orch._introspector,
+                self_knowledge_service=orch._self_knowledge,
+                doctor=orch._doctor,
+            )
+            payload = json.loads(
+                tools_module.charlie_self_extension_propose(
+                    "add safe reusable skill named smoke_skill for triage"
+                )
+            )
+            self.assertTrue(payload["success"], payload)
+            tx = next(iter(orch._transactions.values()))
+            self.assertEqual(tx.request.classification.kind, ExtensionKind.SKILL)
+            self.assertIn("name: smoke_skill", tx.request.plan.raw_text)
+            self.assertNotIn("def ", tx.request.plan.raw_text)
+
+    def test_runtime_entry_point_uses_real_event_bus_and_running_loop(self) -> None:
+        import charlie.tools as tools_module
+
+        async def _run() -> None:
+            captured: list = []
+            bus = EventBus(pub_port=0, pull_port=0)
+            await bus.__aenter__()
+            bus.set_state_listener(lambda envelope: captured.append(envelope) or None)
+            with tempfile.TemporaryDirectory() as td:
+                orch = self._runtime_orchestrator(Path(td))
+                orch._event_bus = bus
+                orch._event_loop = asyncio.get_running_loop()
+                tools_module.configure_runtime_services(
+                    self_extension_orchestrator=orch,
+                    runtime_introspector=orch._introspector,
+                    self_knowledge_service=orch._self_knowledge,
+                    doctor=orch._doctor,
+                )
+                payload = json.loads(
+                    tools_module.charlie_self_extension_propose(
+                        "add safe reusable skill named event_skill"
+                    )
+                )
+                self.assertTrue(payload["success"], payload)
+                await asyncio.sleep(0.05)
+            await bus.__aexit__(None, None, None)
+            self.assertTrue(any(item["type"] == EventType.SELF_EXTENSION_COMPLETED.value for item in captured))
+
+        asyncio.run(_run())
+
+    def test_real_chat_entry_point_builds_callable_code_plan(self) -> None:
+        import charlie.tools as tools_module
+
+        with tempfile.TemporaryDirectory() as td:
+            orch = self._runtime_orchestrator(Path(td))
+            tools_module.configure_runtime_services(
+                self_extension_orchestrator=orch,
+                runtime_introspector=orch._introspector,
+                self_knowledge_service=orch._self_knowledge,
+                doctor=orch._doctor,
+            )
+            payload = json.loads(
+                tools_module.charlie_self_extension_propose(
+                    "add a small function named double_value that doubles a number"
+                )
+            )
+            self.assertTrue(payload["success"], payload)
+            self.assertEqual(payload["status"], TransactionStatus.COMPLETED.value)
+            self.assertEqual(orch._capability_index.get_operation("double_value").func(value=3), 6)
+
+    def test_real_chat_entry_point_uses_canonical_mcp_client(self) -> None:
+        import charlie.tools as tools_module
+
+        client = create_autospec(MCPClient, instance=True)
+        client.enable_server.return_value = ["mcp_runtime_mcp_tool"]
+        tool = MagicMock(name="runtime_tool")
+        tool.name = "tool"
+        tool.server_name = "runtime_mcp"
+        client.list_tools.return_value = [tool]
+        client.health_check.return_value = {"runtime_mcp": True}
+        with tempfile.TemporaryDirectory() as td:
+            orch = self._runtime_orchestrator(Path(td), mcp_client=client)
+            tools_module.configure_runtime_services(
+                self_extension_orchestrator=orch,
+                runtime_introspector=orch._introspector,
+                self_knowledge_service=orch._self_knowledge,
+                doctor=orch._doctor,
+            )
+            payload = json.loads(
+                tools_module.charlie_self_extension_propose(
+                    "connect MCP server named runtime_mcp command: python args: -m,mcp_runtime"
+                )
+            )
+            self.assertTrue(payload["success"], payload)
+            client.add_server.assert_called_once()
+            client.enable_server.assert_called_once()
+            client.list_tools.assert_called()
+            client.health_check.assert_called()
+
+    def test_real_chat_mcp_entry_point_fails_without_client(self) -> None:
+        import charlie.tools as tools_module
+
+        with tempfile.TemporaryDirectory() as td:
+            orch = self._runtime_orchestrator(Path(td))
+            tools_module.configure_runtime_services(
+                self_extension_orchestrator=orch,
+                runtime_introspector=orch._introspector,
+                self_knowledge_service=orch._self_knowledge,
+                doctor=orch._doctor,
+            )
+            payload = json.loads(
+                tools_module.charlie_self_extension_propose(
+                    "connect MCP server named unavailable_mcp"
+                )
+            )
+            self.assertFalse(payload["success"])
+            self.assertEqual(payload["status"], TransactionStatus.FAILED.value)
+            self.assertNotIn("mcp_unavailable_mcp", orch._capability_index._capabilities)
+
+    def test_architecture_and_spontaneous_requests_stop_at_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            orch = self._runtime_orchestrator(Path(td))
+            large = orch.execute_transaction(
+                orch.plan_request("replace your entire event bus architecture")
+            )
+            self.assertEqual(large.status, TransactionStatus.APPROVAL_REQUIRED)
+            spontaneous = orch.execute_transaction(
+                orch.plan_request("add a small function named no_edit", explicit_user_request=False)
+            )
+            self.assertEqual(spontaneous.status, TransactionStatus.APPROVAL_REQUIRED)
+            self.assertFalse((Path(td) / "tools" / "no_edit.py").exists())
+
+    def test_global_capability_index_is_shared_by_runtime_services(self) -> None:
+        cap_idx = get_capability_index()
+        cap_id = "freeze_shared_capability"
+        operation = CapabilityOperation(
+            id="freeze.shared",
+            name="freeze_shared_operation",
+            description="freeze test",
+            parameters_schema={"type": "object"},
+            func=lambda **_: "ok",
+        )
+        cap_idx.register_capability(
+            CapabilityDescriptor(
+                id=cap_id,
+                name=cap_id,
+                description="freeze test",
+                owner="tests",
+                operations={operation.name: operation},
+            )
+        )
+        try:
+            introspector = RuntimeIntrospector()
+            doctor = __import__("charlie.doctor", fromlist=["CharlieDoctor"]).CharlieDoctor(
+                introspector=introspector
+            )
+            knowledge = SelfKnowledgeService(runtime_introspector=introspector)
+            self.assertIs(introspector._get_capability_index(), cap_idx)
+            self.assertIn(cap_id, introspector.get_capabilities_info()["by_id"])
+            self.assertIs(doctor._introspector._get_capability_index(), cap_idx)
+            self.assertIn(cap_id, doctor._introspector.get_capabilities_info()["by_id"])
+            self.assertIn(cap_id, knowledge.answer_self_question("what capabilities do you have")["answer"])
+        finally:
+            cap_idx.unregister_capability(cap_id)

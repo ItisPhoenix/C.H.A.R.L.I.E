@@ -30,7 +30,10 @@ _SKILL_PATTERNS = [
         r"(procedure|process|workflow|playbook|steps?|routine)\b",
         re.IGNORECASE,
     ),
-    re.compile(r"\b(add|create|install)\s+(a\s+)?(reusable\s+)?skill\b", re.IGNORECASE),
+    re.compile(
+        r"\b(add|create|install)\s+(a\s+)?(?:safe\s+)?(reusable\s+)?skill\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\b(skill\.md)\b", re.IGNORECASE),
 ]
 
@@ -80,8 +83,9 @@ class ExtensionClassifier:
         p_lower = prompt.lower()
         if not self._capability_index:
             try:
-                from charlie.capabilities import CapabilityIndex
-                self._capability_index = CapabilityIndex()
+                from charlie.capabilities import get_capability_index
+
+                self._capability_index = get_capability_index()
             except Exception:
                 return None
 

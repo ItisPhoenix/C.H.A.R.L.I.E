@@ -12,12 +12,13 @@ Validates:
 
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, create_autospec
 
 import pytest
 
 from charlie.capabilities import CapabilityIndex
 from charlie.config import Config
+from charlie.mcp_client import MCPClient, MCPTool
 from charlie.self_extension.adapters.code_adapter import (
     ASTValidationError,
     CodeAdapter,
@@ -55,6 +56,14 @@ def isolated_env():
         cfg.llm_model = "gpt-4o-mini"
         settings_service = SettingsService(config_instance=cfg, env_path=env_file)
         cap_idx = CapabilityIndex()
+        mcp_client = create_autospec(MCPClient, instance=True)
+        mcp_client.enable_server.return_value = ["mcp_github_create_issue", "mcp_github_list_prs"]
+        mcp_client.list_tools.return_value = [
+            MCPTool(name="create_issue", description="create", server_name="github"),
+            MCPTool(name="list_prs", description="list", server_name="github"),
+        ]
+        mcp_client.health_check.return_value = {"github": True}
+        from charlie.tools import ToolRegistry
 
         orchestrator = SelfExtensionOrchestrator(
             repo_root=repo_root,
@@ -64,6 +73,8 @@ def isolated_env():
             settings_service=settings_service,
             config=cfg,
             capability_index=cap_idx,
+            mcp_client=mcp_client,
+            tool_registry=ToolRegistry(),
             doctor=MagicMock(diagnose=MagicMock(return_value=MagicMock(is_healthy=True, errors=[]))),
             code_index=MagicMock(refresh=MagicMock()),
             introspector=MagicMock(

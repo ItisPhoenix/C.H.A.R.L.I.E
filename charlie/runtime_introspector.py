@@ -55,6 +55,10 @@ class RuntimeIntrospector:
         terminal_manager: Optional[Any] = None,
     ) -> None:
         self._config = config
+        if capability_index is None:
+            from charlie.capabilities import get_capability_index
+
+            capability_index = get_capability_index()
         self._capability_index = capability_index
         self._health_registry = health_registry
         self._task_journal = task_journal
@@ -77,13 +81,7 @@ class RuntimeIntrospector:
             return None
 
     def _get_capability_index(self) -> Any:
-        if self._capability_index is not None:
-            return self._capability_index
-        try:
-            from charlie.capabilities import get_capability_index
-            return get_capability_index()
-        except Exception:
-            return None
+        return self._capability_index
 
     def _get_health_registry(self) -> Any:
         if self._health_registry is not None:

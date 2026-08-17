@@ -1707,6 +1707,59 @@ async def main():
 
             charlie.mcp_client.set_event_bus(bus, asyncio.get_running_loop())
 
+            # Build one authoritative self-extension service only after the
+            # real EventBus loop and MCP subsystem are available. Chat tools
+            # delegate to this instance; they never construct an orchestrator.
+            await mcp_start_task
+            from charlie.capabilities import get_capability_index
+            from charlie.code_index import CodeIndex
+            from charlie.doctor import CharlieDoctor
+            from charlie.runtime_introspector import RuntimeIntrospector
+            from charlie.self_extension import SelfExtensionOrchestrator
+            from charlie.self_knowledge import SelfKnowledgeService
+            from charlie.settings_service import SettingsService
+
+            shared_capability_index = get_capability_index()
+            runtime_introspector = RuntimeIntrospector(
+                config=config,
+                capability_index=shared_capability_index,
+                mcp_client=mcp_client,
+            )
+            code_index = CodeIndex()
+            self_knowledge = SelfKnowledgeService(
+                runtime_introspector=runtime_introspector,
+                code_index=code_index,
+                capability_index=shared_capability_index,
+                config=config,
+            )
+            doctor = CharlieDoctor(
+                config=config,
+                introspector=runtime_introspector,
+                capability_index=shared_capability_index,
+                mcp_client=mcp_client,
+            )
+            from charlie.tools import configure_runtime_services, registry as tool_registry
+
+            configure_runtime_services(
+                self_extension_orchestrator=SelfExtensionOrchestrator(
+                    repo_root=Path(__file__).resolve().parent,
+                    settings_service=SettingsService(config_instance=config),
+                    config=config,
+                    capability_index=shared_capability_index,
+                    event_bus=bus,
+                    event_loop=asyncio.get_running_loop(),
+                    mcp_client=mcp_client,
+                    tool_registry=tool_registry,
+                    doctor=doctor,
+                    code_index=code_index,
+                    self_knowledge=self_knowledge,
+                    introspector=runtime_introspector,
+                ),
+                runtime_introspector=runtime_introspector,
+                self_knowledge_service=self_knowledge,
+                doctor=doctor,
+            )
+
             from charlie.calendar_scheduler import deliver_due_reminders
             from charlie.calendar_store import CalendarStore
             from charlie.utils import utc_now_iso

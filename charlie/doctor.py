@@ -95,6 +95,10 @@ class CharlieDoctor:
         mcp_client: Optional[Any] = None,
         memory_service: Optional[Any] = None,
     ) -> None:
+        if capability_index is None:
+            from charlie.capabilities import get_capability_index
+
+            capability_index = get_capability_index()
         self._config = config
         self._introspector = introspector or RuntimeIntrospector(
             config=config,

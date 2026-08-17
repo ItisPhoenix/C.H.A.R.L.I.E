@@ -2,14 +2,15 @@
 
 import tempfile
 from pathlib import Path
+
 import pytest
 
-from charlie.config import Config
-from charlie.settings_service import SettingsService
 from charlie.capabilities import CapabilityIndex
-from charlie.self_extension.registry import ExtensionRegistry
+from charlie.config import Config
 from charlie.self_extension.adapters.config_adapter import ConfigAdapter
 from charlie.self_extension.adapters.mcp_adapter import MCPAdapter
+from charlie.self_extension.registry import ExtensionRegistry
+from charlie.settings_service import SettingsService
 
 
 @pytest.fixture
@@ -62,15 +63,16 @@ def test_mcp_adapter_register_and_rollback(mock_config_mcp_env):
         "declared_tools": ["query_db", "list_tables"],
     }
 
-    # Apply MCP registration
+    # Production MCP registration must not claim success without MCPClient.
     res = mcp_adapter.register_mcp_server(
         name=spec["name"],
         command=spec["command"],
         args=spec["args"],
         declared_tools=spec["declared_tools"],
     )
-    assert res.success is True
-    assert cap_idx.get_capability("mcp_sqlite_tool") is not None
+    assert res.success is False
+    assert "MCPClient unavailable" in res.message
+    assert cap_idx.get_capability("mcp_sqlite_tool") is None
 
     # Rollback MCP registration
     rb_res = mcp_adapter.rollback_mcp_server("sqlite_tool")

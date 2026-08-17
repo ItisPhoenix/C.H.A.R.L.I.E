@@ -37,7 +37,7 @@ from charlie.calendar_store import CalendarStore
 from charlie.media_adapter import WindowsMediaAdapter
 from charlie.audit_store import AuditStore
 from charlie.backup_service import export_snapshot
-from charlie.capabilities import build_capability_snapshot
+from charlie.capabilities import build_capability_snapshot, get_capability_index
 from charlie.events import EventValidationError, build_event, normalize_event, replay_event
 from charlie.settings_service import SettingsService, SettingValidationError
 from charlie.memory_service import MemoryService
@@ -54,18 +54,20 @@ logger.addFilter(SensitiveDataFilter())
 _memory_service = MemoryService()
 _privacy_service = PrivacyService()
 _code_index = CodeIndex()
-_runtime_introspector = RuntimeIntrospector()
+_shared_capability_index = get_capability_index()
+_runtime_introspector = RuntimeIntrospector(config=config, capability_index=_shared_capability_index)
 _self_knowledge_service = SelfKnowledgeService(
-    runtime_introspector=_runtime_introspector, code_index=_code_index
-)
-_doctor = CharlieDoctor(introspector=_runtime_introspector)
-_self_extension_orchestrator = SelfExtensionOrchestrator(
-    config=config,
-    doctor=_doctor,
+    runtime_introspector=_runtime_introspector,
     code_index=_code_index,
-    introspector=_runtime_introspector,
-    self_knowledge=_self_knowledge_service,
+    capability_index=_shared_capability_index,
+    config=config,
 )
+_doctor = CharlieDoctor(
+    config=config,
+    introspector=_runtime_introspector,
+    capability_index=_shared_capability_index,
+)
+_self_extension_orchestrator = None
 
 _START_TIME = time.time()
 
@@ -287,7 +289,7 @@ async def lifespan(app: FastAPI):
     """Startup: init EventBus + ZMQ guard + plugin tools. MCP starts lazily,
     see _ensure_mcp_client(). Shutdown: tear down EventBus."""
     # --- startup ---
-    global event_bus, plugin_manager, _calendar_store, _audit_store
+    global event_bus, plugin_manager, _calendar_store, _audit_store, _self_extension_orchestrator
     if config.plugins_enabled:
         try:
             from charlie.tools import register_plugin_tools
@@ -306,6 +308,27 @@ async def lifespan(app: FastAPI):
     await event_bus.__aenter__()
     asyncio.create_task(_event_bridge())
     logger.info("Web server started, event bridge active")
+
+    await _ensure_mcp_client_async()
+    from charlie.settings_service import SettingsService
+    from charlie.tools import registry as tool_registry
+
+    _runtime_introspector._mcp_client = mcp_client
+    _doctor._mcp_client = mcp_client
+    _self_extension_orchestrator = SelfExtensionOrchestrator(
+        repo_root=Path(__file__).resolve().parents[1],
+        settings_service=SettingsService(config_instance=config),
+        config=config,
+        capability_index=_shared_capability_index,
+        event_bus=event_bus,
+        event_loop=asyncio.get_running_loop(),
+        mcp_client=mcp_client,
+        tool_registry=tool_registry,
+        doctor=_doctor,
+        code_index=_code_index,
+        self_knowledge=_self_knowledge_service,
+        introspector=_runtime_introspector,
+    )
 
     # ZMQ guard -- suppress CancelledError traceback on Windows shutdown
     loop = asyncio.get_event_loop()
@@ -1821,8 +1844,6 @@ async def uninstall_extension(name: str):
 @app.post("/api/extensions/request")
 async def request_self_extension(payload: Dict[str, Any]):
     """Execute or propose a controlled self-extension transaction."""
-    from charlie.self_extension import ExtensionRequest
-
     prompt = str(payload.get("prompt", "")).strip()
     if not prompt:
         return JSONResponse(status_code=400, content={"error": "prompt parameter required"})
@@ -1830,8 +1851,10 @@ async def request_self_extension(payload: Dict[str, Any]):
     explicit = bool(payload.get("explicit", True))
     settings = dict(payload.get("settings") or {})
 
-    req = ExtensionRequest(
-        user_prompt=prompt,
+    if _self_extension_orchestrator is None:
+        return JSONResponse(status_code=503, content={"error": "self-extension runtime is not initialized"})
+    req = _self_extension_orchestrator.plan_request(
+        prompt,
         explicit_user_request=explicit,
         affected_settings=settings,
     )

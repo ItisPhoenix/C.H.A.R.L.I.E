@@ -54,7 +54,11 @@ class MCPAdapter:
         env = dict(env or {})
 
         if self._mcp_client is None:
-            return self._register_without_client(name, command, args, env, declared_tools or [])
+            return MCPAdapterResult(
+                success=False,
+                message="MCPClient unavailable; refusing registry-only MCP installation.",
+                server_name=name,
+            )
 
         if self._tool_registry is None:
             return MCPAdapterResult(
@@ -121,39 +125,6 @@ class MCPAdapter:
             message=f"MCP server '{name}' connected and {len(discovered_names)} tools discovered.",
             server_name=name,
             tools=discovered_names,
-        )
-
-    def _register_without_client(
-        self,
-        name: str,
-        command: str,
-        args: List[str],
-        env: Dict[str, str],
-        declared_tools: List[str],
-    ) -> MCPAdapterResult:
-        raw_spec = json.dumps({"name": name, "command": command, "args": args})
-        content_hash = hashlib.sha256(raw_spec.encode()).hexdigest()[:16]
-        ext_id = f"mcp_{name}"
-        entry = ExtensionEntry(
-            extension_id=ext_id,
-            name=name,
-            kind=ExtensionKind.MCP_TOOL,
-            source=f"{command} {' '.join(args)}",
-            content_hash=content_hash,
-            enabled=True,
-            declared_tools=declared_tools,
-            metadata={"command": command, "args": args, "env": {}},
-        )
-        self._registry.register(entry)
-
-        if self._capability_index:
-            self._register_capability(name, ext_id, declared_tools)
-
-        return MCPAdapterResult(
-            success=True,
-            message=f"MCP server '{name}' registered (no client, {len(declared_tools)} declared tools).",
-            server_name=name,
-            tools=declared_tools,
         )
 
     def _register_capability(self, name: str, ext_id: str, tool_names: List[str]) -> None:

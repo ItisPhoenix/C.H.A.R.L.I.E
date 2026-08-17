@@ -59,8 +59,16 @@ class SelfKnowledgeService:
         capability_index: Optional[Any] = None,
         config: Optional[Any] = None,
     ) -> None:
-        self._introspector = runtime_introspector or RuntimeIntrospector(config=config)
+        self._introspector = runtime_introspector or RuntimeIntrospector(
+            config=config, capability_index=capability_index
+        )
         self._code_index = code_index
+        if capability_index is None:
+            capability_index = getattr(self._introspector, "_capability_index", None)
+        if capability_index is None:
+            from charlie.capabilities import get_capability_index
+
+            capability_index = get_capability_index()
         self._capability_index = capability_index
         self._config = config
 

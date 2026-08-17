@@ -113,8 +113,24 @@ _DISALLOWED_CALLS: frozenset[str] = frozenset(
         "open",
         "input",
         "print",
+        "getattr",
+        "setattr",
+        "delattr",
+        "globals",
+        "locals",
+        "vars",
+        "dir",
+        "type",
+        "object",
+        "super",
     }
 )
+
+_DISALLOWED_NAMES: frozenset[str] = _DISALLOWED_CALLS | {
+    "__builtins__",
+    "__loader__",
+    "__spec__",
+}
 
 # ── Execution timeout ──────────────────────────────────────────────────────
 
@@ -148,6 +164,13 @@ def validate_ast_allow_list(source: str, tool_name: str) -> ast.AST:
         raise ASTAllowListError(f"Syntax error in generated code: {exc}") from exc
 
     for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and (
+            node.id.startswith("__") or node.id in _DISALLOWED_NAMES
+        ):
+            raise ASTAllowListError(
+                f"Disallowed reflective name '{node.id}' in CODE_SMALL extension."
+            )
+
         # ── Import statements ──────────────────────────────────────────────
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -186,7 +209,7 @@ def validate_ast_allow_list(source: str, tool_name: str) -> ast.AST:
 
         # ── Attribute access (non-call) ─────────────────────────────────
         elif isinstance(node, ast.Attribute):
-            if node.attr in _DISALLOWED_CALLS:
+            if node.attr.startswith("__") or node.attr in _DISALLOWED_CALLS:
                 raise ASTAllowListError(
                     f"Reference to disallowed attribute '.{node.attr}' "
                     f"is not permitted in CODE_SMALL extensions."

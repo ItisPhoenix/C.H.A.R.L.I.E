@@ -604,6 +604,11 @@ class CapabilityIndex:
 capability_index = CapabilityIndex()
 
 
+def get_capability_index() -> CapabilityIndex:
+    """Return Charlie's process-authoritative capability registry."""
+    return capability_index
+
+
 def register_tool_in_index(
     name: str,
     description: str,

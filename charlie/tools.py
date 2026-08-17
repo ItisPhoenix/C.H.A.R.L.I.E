@@ -7,6 +7,7 @@ No business logic -- just tool I/O.
 import asyncio
 import base64
 import inspect
+import json
 import logging
 import os
 import re
@@ -1513,6 +1514,10 @@ def _desktop_ready() -> bool:
 _event_bus = None  # type: Optional[Any]
 _event_loop = None  # type: Optional[Any]
 _last_frame_emit_at = 0.0
+_self_extension_orchestrator = None  # type: Optional[Any]
+_runtime_introspector = None  # type: Optional[Any]
+_self_knowledge_service = None  # type: Optional[Any]
+_charlie_doctor = None  # type: Optional[Any]
 
 
 def set_event_bus(bus: Any, loop: Any) -> None:
@@ -1522,6 +1527,21 @@ def set_event_bus(bus: Any, loop: Any) -> None:
     global _event_bus, _event_loop
     _event_bus = bus
     _event_loop = loop
+
+
+def configure_runtime_services(
+    *,
+    self_extension_orchestrator: Any,
+    runtime_introspector: Any,
+    self_knowledge_service: Any,
+    doctor: Any,
+) -> None:
+    """Install runtime-owned services used by chat tools."""
+    global _self_extension_orchestrator, _runtime_introspector, _self_knowledge_service, _charlie_doctor
+    _self_extension_orchestrator = self_extension_orchestrator
+    _runtime_introspector = runtime_introspector
+    _self_knowledge_service = self_knowledge_service
+    _charlie_doctor = doctor
 
 
 def _downscale_png(png_bytes: bytes, max_edge: int = _DESKTOP_FRAME_MAX_EDGE) -> bytes:
@@ -2121,7 +2141,7 @@ def browser_read(url: str) -> str:
 def charlie_self_query(question: str) -> str:
     from charlie.self_knowledge import SelfKnowledgeService
 
-    service = SelfKnowledgeService()
+    service = _self_knowledge_service or SelfKnowledgeService()
     res = service.answer_self_question(question)
     return res.get("answer", "No self-knowledge answer available.")
 
@@ -2142,7 +2162,7 @@ def charlie_self_query(question: str) -> str:
 def charlie_doctor_diagnose() -> str:
     from charlie.doctor import CharlieDoctor
 
-    doctor = CharlieDoctor()
+    doctor = _charlie_doctor or CharlieDoctor()
     report = doctor.diagnose()
     return doctor.format_cli_report(report)
 
@@ -2167,12 +2187,17 @@ def charlie_doctor_diagnose() -> str:
     risk_class="reversible",
 )
 def charlie_self_extension_propose(prompt: str) -> str:
-    from charlie.self_extension import SelfExtensionOrchestrator, ExtensionRequest
-
-    orchestrator = SelfExtensionOrchestrator()
-    req = ExtensionRequest(user_prompt=prompt, explicit_user_request=True)
-    res = orchestrator.execute_transaction(req)
-    return f"Extension Result: {res.status.value} - {res.message}"
+    if _self_extension_orchestrator is None:
+        return json.dumps(
+            {
+                "success": False,
+                "status": "failed",
+                "message": "Self-extension runtime service is not initialized; no mutation was attempted.",
+            }
+        )
+    req = _self_extension_orchestrator.plan_request(prompt, explicit_user_request=True)
+    res = _self_extension_orchestrator.execute_transaction(req)
+    return json.dumps(res.to_dict())
 
 
 def set_pending_vision_image(url: Optional[str]) -> None:
