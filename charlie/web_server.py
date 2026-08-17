@@ -428,10 +428,21 @@ async def _event_bridge():
         elif etype == "terminal_command_result":
             payload = event.get("payload", {})
             if payload.get("approved") is True:
+                task_id = payload.get("task_id") or payload.get("request_id") or "charlie-agent"
+                cmd = payload.get("command", "")
+                session_id = payload.get("terminal_session_id") or "primary"
                 try:
-                    await _terminal_manager.write(payload["terminal_session_id"], payload["command"], source="charlie")
-                except (KeyError, RuntimeError):
-                    logger.warning("Terminal command could not be delivered", exc_info=True)
+                    asyncio.create_task(
+                        _terminal_manager.execute_charlie_command(
+                            session_id=session_id,
+                            command=cmd,
+                            task_id=task_id,
+                            audit_store=_get_audit_store(),
+                            approved=True,
+                        )
+                    )
+                except Exception:
+                    logger.warning("Terminal command could not be scheduled", exc_info=True)
         elif etype == "extension_proposed":
             await _stage_proposed_extension(event.get("payload", {}))
             return
@@ -500,6 +511,43 @@ async def websocket_endpoint(ws: WebSocket):
                     _active_frontend_session = msg.get("session_id") or msg.get("payload", {}).get("session_id")
                     ws_sessions[ws] = _active_frontend_session
                     logger.info("Active session synced: %s", _active_frontend_session)
+                elif msg_type == "terminal_command_result":
+                    payload = msg.get("payload", {})
+                    if payload.get("approved") is True:
+                        task_id = payload.get("task_id") or payload.get("request_id") or "charlie-agent"
+                        cmd = payload.get("command", "")
+                        session_id = payload.get("terminal_session_id") or "primary"
+                        try:
+                            asyncio.create_task(
+                                _terminal_manager.execute_charlie_command(
+                                    session_id=session_id,
+                                    command=cmd,
+                                    task_id=task_id,
+                                    audit_store=_get_audit_store(),
+                                    approved=True,
+                                )
+                            )
+                        except Exception:
+                            logger.warning("Terminal command could not be scheduled", exc_info=True)
+                    if event_bus:
+                        await event_bus.send_command(msg)
+                    await broadcast(msg)
+                elif msg_type in (
+                    "tool_approval_request",
+                    "tool_approval_resolved",
+                    "activity",
+                    "surface_spawn",
+                    "surface_update",
+                    "surface_dismiss",
+                    "presentation_intent",
+                ):
+                    if msg_type in ("tool_approval_request", "tool_approval_resolved"):
+                        _apply_approval_event(_pending_approvals, msg)
+                    elif msg_type in ("surface_spawn", "surface_update", "surface_dismiss"):
+                        _apply_surface_event(_active_surfaces, msg)
+                    await broadcast(msg)
+                    if event_bus:
+                        await event_bus.send_command(msg)
                 elif event_bus:
                     await event_bus.send_command(msg)
                     logger.debug("WS forwarded command: %s", msg)
@@ -965,11 +1013,7 @@ def _primary_session_id() -> str:
 @app.get("/api/session/active")
 async def get_active_session():
     session_id = _primary_session_id()
-    if session_id:
-        _get_store().create_session(
-            session_id, "Primary conversation", source="voice", launch_id=config.charlie_launch_id
-        )
-    return {"active_session": session_id}
+    return {"session_id": session_id, "active_session": session_id}
 
 
 def _initial_state_events() -> List[dict]:

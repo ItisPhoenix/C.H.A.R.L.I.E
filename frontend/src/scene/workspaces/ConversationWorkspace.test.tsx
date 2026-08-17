@@ -64,10 +64,25 @@ describe("ConversationWorkspace Component", () => {
     expect(screen.getByText("Reject")).toBeDefined();
   });
 
-  test("submits input text when Send button is clicked", () => {
+  test("submits input text when Send button is clicked", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/session/active")) {
+        return {
+          ok: true,
+          json: async () => ({ active_session: "canonical_sess_123" }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({ messages: [] }),
+      } as Response;
+    };
+
     render(<ConversationWorkspace workspace={mockWorkspace} />);
 
-    const textarea = screen.getByPlaceholderText(/Send prompt to Charlie.../i);
+    const textarea = await screen.findByPlaceholderText(/Send prompt to Charlie.../i);
     fireEvent.change(textarea, { target: { value: "Run diagnostic check" } });
 
     const sendBtn = screen.getByText("Send");
@@ -76,6 +91,8 @@ describe("ConversationWorkspace Component", () => {
     // Verifies store optimistic update
     const messages = useCharlieStore.getState().chatMessages;
     expect(messages.some((m) => m.text === "Run diagnostic check")).toBe(true);
+
+    global.fetch = originalFetch;
   });
 
   test("arbitrary workspace ID does not become chat session ID", async () => {
@@ -104,6 +121,42 @@ describe("ConversationWorkspace Component", () => {
     expect(await screen.findByText("voice_active_canonical")).toBeDefined();
     expect(screen.queryByText("presentation-conversation-7f83")).toBeNull();
 
+    global.fetch = originalFetch;
+  });
+
+  test("never sends 'default' session while canonical session resolution is pending", async () => {
+    let pendingResolve: (val: any) => void = () => {};
+    const pendingPromise = new Promise((resolve) => {
+      pendingResolve = resolve;
+    });
+
+    const originalFetch = global.fetch;
+    global.fetch = async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/session/active")) {
+        return pendingPromise as any;
+      }
+      return {
+        ok: true,
+        json: async () => ({ messages: [] }),
+      } as Response;
+    };
+
+    render(<ConversationWorkspace workspace={mockWorkspace} />);
+
+    // While pending, shows CONNECTING and textarea/send is disabled
+    expect(screen.getByText(/CONNECTING.../i)).toBeDefined();
+    expect(screen.queryByText("default")).toBeNull();
+    const textarea = screen.getByPlaceholderText(/Connecting to active session.../i);
+    expect(textarea.hasAttribute("disabled")).toBe(true);
+
+    // Resolve active session
+    pendingResolve({
+      ok: true,
+      json: async () => ({ active_session: "session_abc_789" }),
+    });
+
+    expect(await screen.findByText("session_abc_789")).toBeDefined();
     global.fetch = originalFetch;
   });
 });

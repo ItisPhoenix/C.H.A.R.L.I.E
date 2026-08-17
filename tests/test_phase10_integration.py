@@ -6,7 +6,8 @@ from charlie.web_server import app, validate_ws_origin
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    with TestClient(app) as c:
+        yield c
 
 
 def test_terminal_api_endpoints(client):
@@ -94,3 +95,29 @@ def test_audit_api_and_export(client):
     exp_data = exp_res.json()
     assert exp_data.get("format") == "json"
     assert "entries" in exp_data
+
+
+def test_terminal_command_result_approval_execution(client):
+    """Verify that terminal_command_result approval triggers authoritative terminal execution."""
+    with client.websocket_connect("/ws", headers={"origin": "http://localhost:5173"}) as ws:
+        # Send approved terminal command result
+        ws.send_json({
+            "type": "terminal_command_result",
+            "payload": {
+                "approved": True,
+                "terminal_session_id": "primary",
+                "command": "echo 'route_approved_ok'",
+                "task_id": "task-integration-approved",
+                "request_id": "req-appr-123",
+            }
+        })
+        # Verify event broadcast reaches subscribers
+        found_msg = None
+        for _ in range(30):
+            msg = ws.receive_json()
+            if msg.get("type") == "terminal_command_result":
+                found_msg = msg
+                break
+        assert found_msg is not None
+        assert found_msg["type"] == "terminal_command_result"
+        assert found_msg["payload"]["approved"] is True

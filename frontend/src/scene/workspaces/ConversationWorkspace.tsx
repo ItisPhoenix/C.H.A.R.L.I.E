@@ -14,7 +14,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
   const isThinking = coreState === "thinking" || coreState === "working";
   const [inputVal, setInputVal] = useState("");
   const [sending, setSending] = useState(false);
-  const [canonicalSessionId, setCanonicalSessionId] = useState<string>("default");
+  const [canonicalSessionId, setCanonicalSessionId] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -28,7 +28,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
         setCanonicalSessionId(data.active_session);
       })
       .catch(() => {
-        // Fallback default
+        // Fallback default only if mount remains active
       });
 
     return () => {
@@ -75,7 +75,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
 
   const handleSendMessage = async () => {
     const text = inputVal.trim();
-    if (!text || sending) return;
+    if (!text || sending || !canonicalSessionId) return;
 
     setInputVal("");
     setSending(true);
@@ -139,7 +139,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
             CONVERSATION & DIALOGUE LOG
           </span>
           <span className="text-[10px] text-slate-400 font-mono">
-            SESSION: <strong className="text-cyan-200">{canonicalSessionId}</strong>
+            SESSION: <strong className="text-cyan-200">{canonicalSessionId ?? "CONNECTING..."}</strong>
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -164,9 +164,9 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
       </div>
 
       {/* Message Stream */}
-      <div className="flex-1 w-full p-4 rounded-xl border border-cyan-500/20 bg-slate-950/70 backdrop-blur-md overflow-y-auto space-y-4">
+      <div className="flex-1 overflow-y-auto min-h-0 space-y-3 pr-1">
         {timeline.length === 0 ? (
-          <div className="text-xs text-slate-500 italic py-8 text-center">
+          <div className="h-full flex items-center justify-center text-xs text-slate-500 italic">
             No conversation messages yet. Send a prompt to start dialogue.
           </div>
         ) : (
@@ -175,8 +175,8 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
             return (
               <div
                 key={msg.id || idx}
-                className={`flex flex-col gap-1 max-w-[85%] ${
-                  isUser ? "ml-auto items-end" : "mr-auto items-start"
+                className={`flex flex-col space-y-1 ${
+                  isUser ? "items-end" : "items-start"
                 }`}
               >
                 <div className="flex items-center gap-1.5 text-[9px] text-cyan-400/70 uppercase">
@@ -257,13 +257,18 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
           value={inputVal}
           onChange={(e) => setInputVal(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Send prompt to Charlie... (Enter to send, Shift+Enter for newline)"
-          className="flex-1 bg-transparent border-none outline-none text-xs text-slate-200 placeholder-slate-500 font-sans resize-none focus:ring-0 leading-relaxed"
+          placeholder={
+            canonicalSessionId
+              ? "Send prompt to Charlie... (Enter to send, Shift+Enter for newline)"
+              : "Connecting to active session..."
+          }
+          disabled={!canonicalSessionId}
+          className="flex-1 bg-transparent border-none outline-none text-xs text-slate-200 placeholder-slate-500 font-sans resize-none focus:ring-0 leading-relaxed disabled:opacity-50"
         />
         <div className="flex flex-col gap-1">
           <button
             type="button"
-            disabled={!inputVal.trim() || sending}
+            disabled={!canonicalSessionId || !inputVal.trim() || sending}
             onClick={() => void handleSendMessage()}
             className="px-4 py-2 text-xs font-bold rounded-lg bg-cyan-950 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-900 transition disabled:opacity-40 cursor-pointer"
           >

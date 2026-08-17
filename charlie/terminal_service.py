@@ -5,6 +5,7 @@ import ctypes
 from ctypes import wintypes
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -44,7 +45,7 @@ if sys.platform == "win32":
             ("dwFlags", wintypes.DWORD),
             ("wShowWindow", wintypes.WORD),
             ("cbReserved2", wintypes.WORD),
-            ("lpReserved2", ctypes.c_char_p),
+            ("lpReserved2", ctypes.c_void_p),
             ("hStdInput", wintypes.HANDLE),
             ("hStdOutput", wintypes.HANDLE),
             ("hStdError", wintypes.HANDLE),
@@ -66,6 +67,48 @@ if sys.platform == "win32":
 
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
     EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+
+    kernel32.CreatePseudoConsole.argtypes = [
+        COORD,
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    kernel32.CreatePseudoConsole.restype = ctypes.c_long
+
+    kernel32.InitializeProcThreadAttributeList.argtypes = [
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    kernel32.InitializeProcThreadAttributeList.restype = wintypes.BOOL
+
+    kernel32.UpdateProcThreadAttribute.argtypes = [
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_size_t,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    kernel32.UpdateProcThreadAttribute.restype = wintypes.BOOL
+
+    kernel32.CreateProcessW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPWSTR,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.BOOL,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.LPCWSTR,
+        ctypes.POINTER(STARTUPINFO),
+        ctypes.POINTER(PROCESS_INFORMATION),
+    ]
+    kernel32.CreateProcessW.restype = wintypes.BOOL
 
 _HAS_CONPTY = sys.platform == "win32"
 
@@ -138,6 +181,10 @@ class WindowsConPTY:
 
         si = STARTUPINFOEX()
         si.StartupInfo.cb = ctypes.sizeof(STARTUPINFOEX)
+        si.StartupInfo.dwFlags = 0x00000100  # STARTF_USESTDHANDLES
+        si.StartupInfo.hStdInput = wintypes.HANDLE(0)
+        si.StartupInfo.hStdOutput = wintypes.HANDLE(0)
+        si.StartupInfo.hStdError = wintypes.HANDLE(0)
         si.lpAttributeList = ctypes.cast(self._attr_list, ctypes.c_void_p)
 
         cmd = "powershell.exe -NoLogo -NoProfile"
@@ -323,6 +370,7 @@ class TerminalSession:
 
         self._history: str = ""
         self._subscribers: Set[asyncio.Queue[str]] = set()
+        self._pending_transactions: Dict[str, asyncio.Future[dict]] = {}
         self._reader_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._closed = False
@@ -395,6 +443,34 @@ class TerminalSession:
     def _append_output(self, text: str) -> None:
         self._history = (self._history + text)[-_MAX_OUTPUT_CHARS:]
         self._broadcast_event({"type": "output", "data": text})
+        # Check for Charlie transaction completion marker: __CHARLIE_TX_END__:<tx_id>:<exit_code>
+        search_buf = self._history[-2000:]
+        if "__CHARLIE_TX_END__:" in search_buf:
+            matches = re.findall(r"__CHARLIE_TX_END__:([a-f0-9]{12}):(-?\d+)", search_buf)
+            for tx_id, code_str in matches:
+                fut = self._pending_transactions.pop(tx_id, None)
+                if fut and not fut.done():
+                    exit_code = int(code_str)
+                    status = "ok" if exit_code == 0 else "failed"
+                    try:
+                        fut.get_loop().call_soon_threadsafe(
+                            fut.set_result,
+                            {"status": status, "exit_code": exit_code, "tx_id": tx_id},
+                        )
+                    except Exception:
+                        pass
+
+    def _cancel_pending_transactions(self, reason: str = "Transaction cancelled") -> None:
+        for tx_id, fut in list(self._pending_transactions.items()):
+            if not fut.done():
+                try:
+                    fut.cancel()
+                except Exception:
+                    try:
+                        fut.get_loop().call_soon_threadsafe(fut.cancel)
+                    except Exception:
+                        pass
+        self._pending_transactions.clear()
 
     def _broadcast_event(self, event_data: dict) -> None:
         for q in list(self._subscribers):
@@ -413,6 +489,7 @@ class TerminalSession:
             if current is not None and current != "user":
                 default_lease_manager.manual_takeover(["terminal"])
             self.lease_holder = "user"
+            self._cancel_pending_transactions("Interrupted by user input")
 
         if isinstance(data, str):
             data = data.encode("utf-8")
@@ -432,6 +509,7 @@ class TerminalSession:
         default_lease_manager.manual_takeover(["terminal"])
         self.lease_holder = "user"
         self._last_user_input_time = time.monotonic()
+        self._cancel_pending_transactions("Interrupted by user Ctrl+C")
         self.backend.write(b"\x03")
 
     def subscribe(self) -> asyncio.Queue[dict]:
@@ -446,6 +524,11 @@ class TerminalSession:
         return self._history
 
     def snapshot(self) -> dict:
+        if not self._closed:
+            code = self.backend.get_exit_code()
+            if code is not None:
+                self.exit_code = code
+                self.status = "exited" if code == 0 else "failed"
         return {
             "session_id": self.session_id,
             "status": self.status,
@@ -464,6 +547,7 @@ class TerminalSession:
         self._closed = True
         self.status = "closed"
         self._stop_event.set()
+        self._cancel_pending_transactions("Terminal session closed")
         self.backend.close()
         for q in list(self._subscribers):
             try:
@@ -506,6 +590,8 @@ class TerminalManager:
             session = TerminalSession(session_id=session_id, backend=backend_fallback, loop=loop)
 
         session.start_reader()
+        if sys.platform == "win32":
+            await asyncio.sleep(0.25)
         self._sessions[session.session_id] = session
         return session
 
@@ -525,8 +611,9 @@ class TerminalManager:
         task_id: str = "charlie-agent",
         audit_store: Optional[object] = None,
         approved: bool = False,
+        timeout: float = 30.0,
     ) -> dict:
-        """Execute a command as Charlie with capability lease arbitration, autonomy policy, and audit."""
+        """Execute a command as Charlie with capability lease arbitration, autonomy policy, transaction tracking, and audit."""
         session = self._sessions.get(session_id)
         if session is None:
             if session_id == self._primary_id:
@@ -562,23 +649,56 @@ class TerminalManager:
                     )
                 raise PermissionError(f"Approval required for command execution: {reason or str(risk_class)}")
 
-            # 4. Write command to terminal
+            # 4. Set lease holder and execute with transaction sentinel
             session.lease_holder = task_id
-            session.write(command, source="charlie")
+            tx_id = uuid.uuid4().hex[:12]
+            loop = asyncio.get_running_loop()
+            fut = loop.create_future()
+            session._pending_transactions[tx_id] = fut
 
-            # 5. Audit completed execution
-            if audit_store is not None and hasattr(audit_store, "record"):
-                audit_store.record(
-                    "terminal_exec",
-                    {"command": command, "task_id": task_id, "source": "charlie"},
-                    "COMPLETED",
-                )
+            # Construct wrapped command with transaction completion marker
+            if "powershell" in session.shell_name.lower():
+                wrapped = f"{command}; $charlie_code = if ($LASTEXITCODE -ne $null) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }}; [Console]::WriteLine(\"__CHARLIE_TX_END__:{tx_id}:$charlie_code\")"
+            elif "cmd" in session.shell_name.lower():
+                wrapped = f"{command} & (if errorlevel 1 (echo __CHARLIE_TX_END__:{tx_id}:1) else (echo __CHARLIE_TX_END__:{tx_id}:0))"
+            else:
+                wrapped = f"{command}; echo __CHARLIE_TX_END__:{tx_id}:$?"
+
+            session.write(wrapped, source="charlie")
+
+            # 5. Await command completion future
+            try:
+                res = await asyncio.wait_for(fut, timeout=timeout)
+                status = res.get("status", "ok")
+                exit_code = res.get("exit_code", 0)
+                outcome = "COMPLETED" if status == "ok" else f"FAILED (exit code {exit_code})"
+            except asyncio.TimeoutError:
+                outcome = "TIMEOUT"
+                session._pending_transactions.pop(tx_id, None)
+                raise TimeoutError(f"Terminal command timed out after {timeout}s")
+            except asyncio.CancelledError:
+                outcome = "CANCELLED (user takeover)"
+                session._pending_transactions.pop(tx_id, None)
+                raise
+            except Exception as e:
+                outcome = f"ERROR: {e}"
+                session._pending_transactions.pop(tx_id, None)
+                raise
+            finally:
+                if audit_store is not None and hasattr(audit_store, "record"):
+                    audit_store.record(
+                        "terminal_exec",
+                        {"command": command, "task_id": task_id, "source": "charlie", "tx_id": tx_id},
+                        outcome,
+                    )
 
             return {
-                "status": "ok",
+                "status": status,
                 "session_id": session.session_id,
                 "task_id": task_id,
                 "command": command,
+                "tx_id": tx_id,
+                "exit_code": exit_code,
                 "risk_class": str(risk_class),
             }
         finally:

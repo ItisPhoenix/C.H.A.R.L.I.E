@@ -18,21 +18,41 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 import zmq
-from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import (
-    QAction,
-    QColor,
-    QCursor,
-    QFont,
-    QFontMetrics,
-    QGuiApplication,
-    QImage,
-    QMouseEvent,
-    QPainter,
-    QPen,
-    QRegion,
-)
-from PySide6.QtWidgets import QApplication, QMenu, QWidget
+try:
+    from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
+    from PySide6.QtGui import (
+        QAction,
+        QColor,
+        QCursor,
+        QFont,
+        QFontMetrics,
+        QGuiApplication,
+        QImage,
+        QMouseEvent,
+        QPainter,
+        QPen,
+        QRegion,
+    )
+    from PySide6.QtWidgets import QApplication, QMenu, QWidget
+except ImportError:
+    try:
+        from PyQt6.QtCore import QPoint, QRectF, Qt, QTimer, pyqtSignal as Signal
+        from PyQt6.QtGui import (
+            QAction,
+            QColor,
+            QCursor,
+            QFont,
+            QFontMetrics,
+            QGuiApplication,
+            QImage,
+            QMouseEvent,
+            QPainter,
+            QPen,
+            QRegion,
+        )
+        from PyQt6.QtWidgets import QApplication, QMenu, QWidget
+    except ImportError:
+        pass
 
 from charlie.config import config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT
