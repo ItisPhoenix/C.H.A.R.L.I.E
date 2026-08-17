@@ -39,9 +39,15 @@ from charlie.audit_store import AuditStore
 from charlie.backup_service import export_snapshot
 from charlie.capabilities import build_capability_snapshot
 from charlie.events import EventValidationError, build_event, normalize_event, replay_event
+from charlie.settings_service import SettingsService, SettingValidationError
+from charlie.memory_service import MemoryService
+from charlie.privacy_service import PrivacyService
 
 logger = logging.getLogger("charlie.web_server")
 logger.addFilter(SensitiveDataFilter())
+
+_memory_service = MemoryService()
+_privacy_service = PrivacyService()
 
 _START_TIME = time.time()
 
@@ -1158,6 +1164,240 @@ async def get_memory_facts():
     return {"facts": []}
 
 
+@app.get("/api/memory/items")
+async def get_memory_items(category: Optional[str] = None, limit: int = 200):
+    """List memory items with optional category filtering."""
+    service = _memory_service
+    if service._graph is None:
+        service._graph = _get_memory_graph()
+    try:
+        return {"items": service.list_items(category=category, limit=limit)}
+    except Exception as e:
+        logger.error(f"Error listing memory items: {e}", exc_info=True)
+        return {"items": []}
+
+
+@app.get("/api/memory/search")
+async def search_memory_items(q: str = "", category: Optional[str] = None, limit: int = 50):
+    """Search memory items by query string and category."""
+    service = _memory_service
+    if service._graph is None:
+        service._graph = _get_memory_graph()
+    try:
+        return {"items": service.search_items(query=q, category=category, limit=limit)}
+    except Exception as e:
+        logger.error(f"Error searching memory: {e}", exc_info=True)
+        return {"items": []}
+
+
+@app.post("/api/memory/items")
+async def create_memory_item(data: dict):
+    """Create a new memory item."""
+    service = _memory_service
+    if service._graph is None:
+        service._graph = _get_memory_graph()
+    try:
+        category = str(data.get("category", "fact")).strip()
+        content = str(data.get("content", "")).strip()
+        subject = str(data.get("subject", "")).strip()
+        predicate = str(data.get("predicate", "")).strip()
+        obj = str(data.get("object", "")).strip()
+        metadata = data.get("metadata")
+
+        item = service.add_item(
+            category=category,
+            content=content,
+            subject=subject,
+            predicate=predicate,
+            obj=obj,
+            metadata=metadata,
+        )
+        return {"status": "ok", "item": item}
+    except Exception as e:
+        logger.error(f"Error creating memory item: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/memory/items/{item_id}")
+async def update_memory_item(item_id: str, data: dict):
+    """Update an existing memory item."""
+    service = _memory_service
+    if service._graph is None:
+        service._graph = _get_memory_graph()
+    try:
+        content = str(data.get("content", "")).strip()
+        category = data.get("category")
+        metadata = data.get("metadata")
+
+        updated = service.update_item(item_id, content=content, category=category, metadata=metadata)
+        if not updated:
+            raise HTTPException(status_code=404, detail="Memory item not found")
+        return {"status": "ok", "item": updated}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating memory item: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/memory/items/{item_id}")
+async def delete_memory_item(item_id: str):
+    """Delete a memory item by ID."""
+    service = _memory_service
+    if service._graph is None:
+        service._graph = _get_memory_graph()
+    try:
+        success = service.delete_item(item_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Memory item not found")
+        return {"status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting memory item: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/memory/clear")
+async def clear_memory(data: Optional[dict] = None):
+    """Clear memory items by category or completely."""
+    service = _memory_service
+    if service._graph is None:
+        service._graph = _get_memory_graph()
+    try:
+        category = (data or {}).get("category")
+        cleared_count = service.clear_category(category=category)
+        return {"status": "ok", "cleared_count": cleared_count}
+    except Exception as e:
+        logger.error(f"Error clearing memory: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/memory/export")
+async def export_memory():
+    """Export complete memory dataset as structured JSON."""
+    service = _memory_service
+    if service._graph is None:
+        service._graph = _get_memory_graph()
+    try:
+        return service.export_all()
+    except Exception as e:
+        logger.error(f"Error exporting memory: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/memory/stats")
+async def get_memory_stats():
+    """Get memory statistics and category counts."""
+    service = _memory_service
+    if service._graph is None:
+        service._graph = _get_memory_graph()
+    try:
+        return service.get_stats()
+    except Exception as e:
+        logger.error(f"Error fetching memory stats: {e}", exc_info=True)
+        return {"stats": {}}
+
+
+@app.get("/api/privacy/summary")
+async def get_privacy_summary():
+    """Live storage usage summary across transcripts, terminal, audit, browser, memory, and logs."""
+    try:
+        return _privacy_service.get_storage_summary()
+    except Exception as e:
+        logger.error(f"Error fetching privacy summary: {e}", exc_info=True)
+        return {"total_bytes": 0, "categories": {}}
+
+
+@app.post("/api/privacy/purge")
+async def purge_privacy_data(data: dict):
+    """Selectively purge stored privacy data by category."""
+    category = str(data.get("category", "")).strip()
+    older_than_days = data.get("older_than_days")
+    if older_than_days is not None:
+        try:
+            older_than_days = int(older_than_days)
+        except (ValueError, TypeError):
+            older_than_days = None
+
+    if not category:
+        raise HTTPException(status_code=400, detail="Category is required")
+
+    result = _privacy_service.purge_category(category, older_than_days=older_than_days)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result.get("message", "Purge failed"))
+    return result
+
+
+_DEV_LOGS_PATH = Path("logs/charlie.log")
+
+
+@app.get("/api/developer/diagnostics")
+async def get_developer_diagnostics():
+    """Developer-only detailed diagnostics: task journal, capability leases, telemetry, system metrics."""
+    dev_enabled = getattr(config, "developer_mode_enabled", False)
+
+    journal_snapshot = []
+    try:
+        from charlie.task_journal import TaskJournal
+        journal = TaskJournal()
+        journal_snapshot = journal.snapshot()
+    except Exception:
+        pass
+
+    leases = {}
+    try:
+        from charlie.resource_locks import get_all_leases
+        leases = get_all_leases()
+    except Exception:
+        pass
+
+    telemetry_data = {}
+    try:
+        from charlie.telemetry import llm_error_rate, tool_error_rate, tool_error_rate_by_name, unreliable_tools
+        telemetry_data = {
+            "llm_error_rate": llm_error_rate(),
+            "tool_error_rate": tool_error_rate(),
+            "tool_stats": tool_error_rate_by_name(),
+            "unreliable_tools": unreliable_tools(),
+        }
+    except Exception:
+        pass
+
+    import threading
+    system_metrics = {
+        "uptime_seconds": round(time.time() - _START_TIME, 2),
+        "active_threads": threading.active_count(),
+        "active_ws_connections": len(active_connections),
+        "subsystems": dict(_subsystem_health),
+    }
+
+    return {
+        "developer_mode_enabled": dev_enabled,
+        "diagnostics": {
+            "tasks": journal_snapshot,
+            "leases": leases,
+            "telemetry": telemetry_data,
+            "system": system_metrics,
+        },
+    }
+
+
+@app.get("/api/developer/logs")
+async def get_developer_logs(limit: int = 100):
+    """Retrieve recent log lines for the developer inspection console."""
+    lines: List[str] = []
+    log_path = _DEV_LOGS_PATH
+    if log_path.exists():
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                all_lines = f.readlines()
+                lines = [l.strip() for l in all_lines[-limit:]]
+        except Exception as e:
+            logger.warning("Could not read developer logs: %s", e)
+    return {"lines": lines, "total_lines": len(lines)}
+
+
 @app.get("/api/mcp/tools")
 async def get_mcp_tools():
     """Return discovered MCP tool definitions.
@@ -1213,6 +1453,133 @@ async def get_mcp_status():
     except Exception as e:
         logger.error(f"Error fetching MCP status: {e}", exc_info=True)
         return {"servers": {}}
+
+
+@app.get("/api/mcp/servers")
+async def get_mcp_servers():
+    """List configured MCP servers with connection state and exposed tools."""
+    client = mcp_client
+    if client is None and config.mcp_enabled:
+        client = await _ensure_mcp_client_async()
+    if client is None:
+        from charlie.mcp_client import load_config_file, parse_server_spec
+        configured = []
+        for spec in config.mcp_servers:
+            try:
+                cfg = parse_server_spec(spec)
+                configured.append({
+                    "name": cfg.name,
+                    "command": cfg.command,
+                    "args": cfg.args,
+                    "running": False,
+                    "status": "disconnected",
+                    "tools_count": 0,
+                    "tools": [],
+                })
+            except Exception:
+                pass
+        for cfg in load_config_file(config.mcp_config_path):
+            if not any(c["name"] == cfg.name for c in configured):
+                configured.append({
+                    "name": cfg.name,
+                    "command": cfg.command,
+                    "args": cfg.args,
+                    "running": False,
+                    "status": "disconnected",
+                    "tools_count": 0,
+                    "tools": [],
+                })
+        return {"servers": configured}
+
+    try:
+        return {"servers": client.list_servers_detailed()}
+    except Exception as e:
+        logger.error(f"Error fetching MCP servers: {e}", exc_info=True)
+        return {"servers": []}
+
+
+@app.post("/api/mcp/servers")
+async def add_mcp_server(data: dict):
+    """Add or update an MCP server configuration."""
+    name = str(data.get("name", "")).strip()
+    command = str(data.get("command", "")).strip()
+    args_raw = data.get("args", [])
+    if isinstance(args_raw, str):
+        args = [a.strip() for a in args_raw.split(",") if a.strip()]
+    elif isinstance(args_raw, list):
+        args = [str(a).strip() for a in args_raw if str(a).strip()]
+    else:
+        args = []
+
+    if not name or not command:
+        raise HTTPException(status_code=400, detail="Server name and command are required")
+
+    from charlie.mcp_client import MCPServerConfig
+    srv_config = MCPServerConfig(name=name, command=command, args=args)
+
+    global mcp_client
+    if mcp_client is None:
+        from charlie.mcp_client import MCPClient
+        mcp_client = MCPClient()
+
+    mcp_client.add_server(srv_config)
+    return {"status": "ok", "message": f"Server '{name}' configured"}
+
+
+@app.post("/api/mcp/servers/{name}/connect")
+async def connect_mcp_server(name: str):
+    """Connect/enable a registered MCP server."""
+    global mcp_client
+    if mcp_client is None:
+        await _ensure_mcp_client_async()
+    if mcp_client is None:
+        raise HTTPException(status_code=500, detail="MCP client unavailable")
+
+    success = mcp_client.connect_server(name)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+    return {"status": "ok"}
+
+
+@app.post("/api/mcp/servers/{name}/disconnect")
+async def disconnect_mcp_server(name: str):
+    """Disconnect/disable a registered MCP server."""
+    global mcp_client
+    if mcp_client is None:
+        return {"status": "ok"}
+
+    success = mcp_client.disconnect_server(name)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+    return {"status": "ok"}
+
+
+@app.post("/api/mcp/servers/{name}/restart")
+async def restart_mcp_server(name: str):
+    """Restart a registered MCP server."""
+    global mcp_client
+    if mcp_client is None:
+        await _ensure_mcp_client_async()
+    if mcp_client is None:
+        raise HTTPException(status_code=500, detail="MCP client unavailable")
+
+    success = mcp_client.restart_server(name)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+    return {"status": "ok"}
+
+
+@app.delete("/api/mcp/servers/{name}")
+async def delete_mcp_server(name: str):
+    """Remove an MCP server."""
+    global mcp_client
+    if mcp_client is None:
+        return {"status": "ok"}
+
+    success = mcp_client.remove_server_by_name(name)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+    return {"status": "ok"}
 
 
 @app.get("/api/extensions")
@@ -1396,81 +1763,29 @@ async def set_active_session(data: dict):
     return {"active_session": _active_frontend_session}
 
 
+_settings_service = SettingsService(config)
+
+
 def _update_env_file(updates: dict):
-    from pathlib import Path
-    env_path = Path(".env")
-    if not env_path.exists():
-        env_path.touch()
-    content = env_path.read_text(encoding="utf-8")
-    lines = content.splitlines()
-    new_lines = []
-    matched_keys = set()
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in line:
-            parts = line.split("=", 1)
-            key = parts[0].strip()
-            if key in updates:
-                val = updates[key]
-                if isinstance(val, list):
-                    val = ",".join(val)
-                elif isinstance(val, bool):
-                    val = "true" if val else "false"
-                new_lines.append(f"{key}={val}")
-                matched_keys.add(key)
-            else:
-                new_lines.append(line)
-        else:
-            new_lines.append(line)
-    for key, val in updates.items():
-        if key not in matched_keys:
-            if isinstance(val, list):
-                val = ",".join(val)
-            elif isinstance(val, bool):
-                val = "true" if val else "false"
-            new_lines.append(f"{key}={val}")
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    _settings_service._atomic_write_env(updates)
 
 
 @app.get("/api/config")
 async def get_dashboard_config():
     """Describe every .env-backed setting for the settings page.
 
-    Driven entirely by Config.editable_field_specs() (charlie/config.py) --
-    adding a new Config field there is enough for it to appear here with no
-    other file needing to know its name. Secret fields never echo their
-    value, only whether one is set.
+    Driven entirely by SettingsService and Config metadata.
+    Secret fields never echo their value, only whether one is set.
     """
-    out = []
-    for spec in Config.editable_field_specs():
-        value = getattr(config, spec["field"])
-        out.append(
-            {
-                "key": spec["key"],
-                "group": spec["group"],
-                "label": spec["label"],
-                "type": spec["type"],
-                "secret": spec["secret"],
-                "restart": spec["restart"],
-                "value": None if spec["secret"] else value,
-                "is_set": bool(value) if spec["secret"] else None,
-            }
-        )
-    return {"fields": out}
+    return {"fields": _settings_service.get_field_specs()}
 
 
 @app.post("/api/config")
 async def update_dashboard_config(data: dict):
-    """Persist one or more .env-backed settings -- on disk and in this process.
+    """Persist one or more .env-backed settings -- safely and atomically.
 
     `data` is {ENV_VAR_NAME: value}; unknown keys are ignored so this can't be
-    used to inject arbitrary env vars. This only writes .env and updates the
-    web-server process's own config copy (so GET /api/config echoes back the
-    new value immediately) -- it does NOT push the change to the running
-    voice process. The settings page's Save button calls this; its separate
-    Reload button (POST /api/config/reload) is what actually applies saved
-    settings to the live engine. Keeping those two steps distinct means
-    nothing ever reloads a subsystem as a side effect of typing.
+    used to inject arbitrary env vars. Validates types and atomically writes to .env.
     """
     known_keys = {spec["key"] for spec in Config.editable_field_specs()}
     updates = {k: v for k, v in data.items() if k in known_keys}
@@ -1478,10 +1793,13 @@ async def update_dashboard_config(data: dict):
         return {"status": "error", "message": "no recognized settings in request"}
 
     try:
-        config.validate_env_updates(updates)
-        touched = config.apply_env_updates(updates)
-        _update_env_file(updates)
+        validated = _settings_service.validate_updates(updates)
+        touched = config.apply_env_updates(validated)
+        _update_env_file(validated)
         return {"status": "ok", "touched": sorted(touched)}
+    except SettingValidationError as exc:
+        logger.warning("Setting validation error: %s", exc)
+        return {"status": "error", "message": "One or more settings have an invalid value."}
     except Exception:
         logger.error("Error updating config", exc_info=True)
         return {"status": "error", "message": "One or more settings have an invalid value."}

@@ -1,8 +1,22 @@
 import asyncio
 import json
+import sys
 import time
+from types import ModuleType
 
 import pytest
+
+if "scrapling" not in sys.modules:
+    _m_scrapling = ModuleType("scrapling")
+    _m_fetchers = ModuleType("scrapling.fetchers")
+    class _Fetcher:
+        @staticmethod
+        def get(*args, **kwargs):
+            raise NotImplementedError
+    _m_fetchers.Fetcher = _Fetcher
+    _m_scrapling.fetchers = _m_fetchers
+    sys.modules["scrapling"] = _m_scrapling
+    sys.modules["scrapling.fetchers"] = _m_fetchers
 
 from charlie.browser import intent, session, task
 from charlie.browser.agent import run_task

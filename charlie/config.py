@@ -540,6 +540,27 @@ class Config:
         default=int(os.getenv("CHARLIE_PORT", "8000")),
         metadata=_meta("CHARLIE_PORT", "Server", restart="process"),
     )
+    # Developer & Privacy controls
+    developer_mode_enabled: bool = field(
+        default=os.getenv("DEVELOPER_MODE_ENABLED", "false").lower() == "true",
+        metadata=_meta("DEVELOPER_MODE_ENABLED", "Developer"),
+    )
+    retention_transcripts_days: int = field(
+        default=int(os.getenv("RETENTION_TRANSCRIPTS_DAYS", "30")),
+        metadata=_meta("RETENTION_TRANSCRIPTS_DAYS", "Privacy"),
+    )
+    retention_terminal_days: int = field(
+        default=int(os.getenv("RETENTION_TERMINAL_DAYS", "14")),
+        metadata=_meta("RETENTION_TERMINAL_DAYS", "Privacy"),
+    )
+    retention_audit_days: int = field(
+        default=int(os.getenv("RETENTION_AUDIT_DAYS", "60")),
+        metadata=_meta("RETENTION_AUDIT_DAYS", "Privacy"),
+    )
+    retention_artifacts_days: int = field(
+        default=int(os.getenv("RETENTION_ARTIFACTS_DAYS", "7")),
+        metadata=_meta("RETENTION_ARTIFACTS_DAYS", "Privacy"),
+    )
     # Not user-editable .env values -- process identity / OS-derived / file-loaded, so no _meta().
     charlie_launch_id: str = os.getenv("CHARLIE_LAUNCH_ID", "")
     system_root: str = os.getenv("SystemRoot", r"C:\Windows").lower()

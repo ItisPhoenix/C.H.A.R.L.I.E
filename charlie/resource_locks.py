@@ -243,3 +243,10 @@ class CapabilityLeaseManager:
 
 
 default_lease_manager = CapabilityLeaseManager()
+
+
+def get_all_leases() -> Dict[str, str]:
+    """Return a snapshot of all active capability owners."""
+    with _lock:
+        return dict(_owners)
+

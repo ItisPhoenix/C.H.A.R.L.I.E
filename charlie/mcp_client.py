@@ -364,12 +364,75 @@ class MCPClient:
         if name not in self._servers:
             return False
         self.unregister_server_tools(registry, name)
-        self._tools = {k: t for k, t in self._tools.items() if t.server_name != name}
         server = self._servers.pop(name)
         try:
             server.stop()
         except Exception:
             logger.debug("Error stopping server '%s' during removal", name, exc_info=True)
+        return True
+
+    def list_servers_detailed(self) -> List[Dict[str, Any]]:
+        """Return full details of each configured server and its tools."""
+        out = []
+        for name, server in self._servers.items():
+            running = server.is_running()
+            server_tools = [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                }
+                for t in self._tools.values()
+                if getattr(t, "server_name", "") == name
+            ]
+            out.append({
+                "name": name,
+                "command": server.config.command,
+                "args": server.config.args,
+                "running": running,
+                "status": "connected" if running else "disconnected",
+                "tools_count": len(server_tools),
+                "tools": server_tools,
+            })
+        return out
+
+    def connect_server(self, name: str) -> bool:
+        """Start a registered server and discover its tools."""
+        server = self._servers.get(name)
+        if server is None:
+            return False
+        if not server.is_running():
+            server.start()
+        for tool in server.list_tools():
+            tool.server_name = name
+            self._tools[f"{name}:{tool.name}"] = tool
+        _emit_mcp_status(name, "connected", len(server.list_tools()))
+        return True
+
+    def disconnect_server(self, name: str) -> bool:
+        """Stop a server and remove its tools from active list."""
+        server = self._servers.get(name)
+        if server is None:
+            return False
+        self._tools = {k: t for k, t in self._tools.items() if getattr(t, "server_name", "") != name}
+        try:
+            server.stop()
+            _emit_mcp_status(name, "disconnected")
+        except Exception:
+            logger.debug("Error stopping server '%s'", name, exc_info=True)
+        return True
+
+    def restart_server(self, name: str) -> bool:
+        """Stop and restart a server."""
+        self.disconnect_server(name)
+        return self.connect_server(name)
+
+    def remove_server_by_name(self, name: str) -> bool:
+        """Stop and remove a server from the client."""
+        if name not in self._servers:
+            return False
+        self.disconnect_server(name)
+        self._servers.pop(name, None)
         return True
 
 

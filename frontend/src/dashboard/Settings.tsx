@@ -32,6 +32,55 @@ interface ModelSnapshot {
   has_api_key?: boolean;
 }
 
+interface MCPServerInfo {
+  name: string;
+  command: string;
+  args: string[];
+  running: boolean;
+  status: string;
+  tools_count: number;
+  tools: Array<{ name: string; description: string }>;
+}
+
+interface MemoryItem {
+  id: string;
+  category: string;
+  content: string;
+  subject?: string;
+  predicate?: string;
+  object?: string;
+  created_at?: string;
+}
+
+interface PrivacyCategoryUsage {
+  name: string;
+  bytes: number;
+  formatted: string;
+  path?: string;
+}
+
+interface PrivacySummary {
+  total_bytes: number;
+  total_formatted: string;
+  categories: Record<string, PrivacyCategoryUsage>;
+}
+
+interface DeveloperDiagnostics {
+  tasks?: Array<{ id: string; origin: string; status: string; progress?: number; started_at?: string }>;
+  leases?: Record<string, string>;
+  telemetry?: {
+    llm_error_rate?: number;
+    tool_error_rate?: number;
+    tool_stats?: Record<string, { calls: number; errors: number; error_rate: number }>;
+  };
+  system?: {
+    uptime_seconds?: number;
+    active_threads?: number;
+    active_ws_connections?: number;
+    subsystems?: Record<string, { status?: string }>;
+  };
+}
+
 function fieldValue(field: ConfigField, drafts: Record<string, unknown>): unknown {
   return field.key in drafts ? drafts[field.key] : field.value;
 }
@@ -110,6 +159,31 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
   const [modelsLoading, setModelsLoading] = useState(false);
   const [activeCategory, setActiveCategory] = useState("All");
 
+  // MCP State
+  const [mcpServers, setMcpServers] = useState<MCPServerInfo[]>([]);
+  const [mcpLoading, setMcpLoading] = useState(false);
+  const [newMcpName, setNewMcpName] = useState("");
+  const [newMcpCommand, setNewMcpCommand] = useState("");
+  const [newMcpArgs, setNewMcpArgs] = useState("");
+
+  // Memory State
+  const [memoryItems, setMemoryItems] = useState<MemoryItem[]>([]);
+  const [memoryQuery, setMemoryQuery] = useState("");
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [newMemContent, setNewMemContent] = useState("");
+  const [newMemCategory, setNewMemCategory] = useState("fact");
+  const [editingMemId, setEditingMemId] = useState<string | null>(null);
+  const [editContent, setEditContent] = useState("");
+
+  // Privacy State
+  const [privacySummary, setPrivacySummary] = useState<PrivacySummary | null>(null);
+  const [privacyLoading, setPrivacyLoading] = useState(false);
+
+  // Developer State
+  const [devDiagnostics, setDevDiagnostics] = useState<DeveloperDiagnostics | null>(null);
+  const [devLogs, setDevLogs] = useState<string[]>([]);
+  const [devLoading, setDevLoading] = useState(false);
+
   // Reactive Map Settings Hooks
   const mapProviderMode = useMapStore((s) => s.providerMode);
   const mapQuality = useMapStore((s) => s.quality);
@@ -154,6 +228,78 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
     }
   }
 
+  // Fetch MCP Servers
+  async function fetchMcpServers(): Promise<void> {
+    setMcpLoading(true);
+    try {
+      const res = await fetch("/api/mcp/servers");
+      if (res.ok) {
+        const data = (await res.json()) as { servers?: MCPServerInfo[] };
+        setMcpServers(Array.isArray(data.servers) ? data.servers : []);
+      }
+    } catch {
+      setMcpServers([]);
+    } finally {
+      setMcpLoading(false);
+    }
+  }
+
+  // Fetch Memory Items
+  async function fetchMemoryItems(q = ""): Promise<void> {
+    setMemoryLoading(true);
+    try {
+      const url = q.trim() ? `/api/memory/search?q=${encodeURIComponent(q.trim())}` : "/api/memory/items";
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = (await res.json()) as { items?: MemoryItem[] };
+        setMemoryItems(Array.isArray(data.items) ? data.items : []);
+      }
+    } catch {
+      setMemoryItems([]);
+    } finally {
+      setMemoryLoading(false);
+    }
+  }
+
+  // Fetch Privacy Summary
+  async function fetchPrivacySummary(): Promise<void> {
+    setPrivacyLoading(true);
+    try {
+      const res = await fetch("/api/privacy/summary");
+      if (res.ok) {
+        setPrivacySummary((await res.json()) as PrivacySummary);
+      }
+    } catch {
+      setPrivacySummary(null);
+    } finally {
+      setPrivacyLoading(false);
+    }
+  }
+
+  // Fetch Developer Diagnostics
+  async function fetchDeveloperDiagnostics(): Promise<void> {
+    setDevLoading(true);
+    try {
+      const [diagRes, logsRes] = await Promise.all([
+        fetch("/api/developer/diagnostics"),
+        fetch("/api/developer/logs?limit=50"),
+      ]);
+      if (diagRes.ok) {
+        const data = (await diagRes.json()) as { diagnostics?: DeveloperDiagnostics };
+        setDevDiagnostics(data.diagnostics ?? null);
+      }
+      if (logsRes.ok) {
+        const data = (await logsRes.json()) as { lines?: string[] };
+        setDevLogs(Array.isArray(data.lines) ? data.lines : []);
+      }
+    } catch {
+      setDevDiagnostics(null);
+      setDevLogs([]);
+    } finally {
+      setDevLoading(false);
+    }
+  }
+
   useEffect(() => {
     void fetch("/api/capabilities")
       .then(async (response) =>
@@ -168,6 +314,21 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
   useEffect(() => {
     void refreshModels();
   }, []);
+
+  useEffect(() => {
+    if (activeCategory === "Tools / MCP" || activeCategory === "All") {
+      void fetchMcpServers();
+    }
+    if (activeCategory === "Memory" || activeCategory === "All") {
+      void fetchMemoryItems();
+    }
+    if (activeCategory === "Privacy" || activeCategory === "All") {
+      void fetchPrivacySummary();
+    }
+    if (activeCategory === "Developer" || activeCategory === "All") {
+      void fetchDeveloperDiagnostics();
+    }
+  }, [activeCategory]);
 
   useEffect(() => {
     void fetch("/api/audit")
@@ -238,6 +399,134 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
     URL.revokeObjectURL(link.href);
   }
 
+  // MCP Actions
+  async function handleAddMcpServer(): Promise<void> {
+    if (!newMcpName.trim() || !newMcpCommand.trim()) return;
+    try {
+      const argsList = newMcpArgs.split(",").map((a) => a.trim()).filter(Boolean);
+      const res = await fetch("/api/mcp/servers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newMcpName.trim(), command: newMcpCommand.trim(), args: argsList }),
+      });
+      if (res.ok) {
+        setNewMcpName("");
+        setNewMcpCommand("");
+        setNewMcpArgs("");
+        await fetchMcpServers();
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function handleMcpAction(name: string, action: "connect" | "disconnect" | "restart" | "delete"): Promise<void> {
+    try {
+      const url = action === "delete" ? `/api/mcp/servers/${encodeURIComponent(name)}` : `/api/mcp/servers/${encodeURIComponent(name)}/${action}`;
+      const method = action === "delete" ? "DELETE" : "POST";
+      const res = await fetch(url, { method });
+      if (res.ok) {
+        await fetchMcpServers();
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  // Memory Actions
+  async function handleAddMemory(): Promise<void> {
+    if (!newMemContent.trim()) return;
+    try {
+      const res = await fetch("/api/memory/items", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ category: newMemCategory, content: newMemContent.trim() }),
+      });
+      if (res.ok) {
+        setNewMemContent("");
+        await fetchMemoryItems(memoryQuery);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function handleSaveEditMemory(id: string): Promise<void> {
+    if (!editContent.trim()) return;
+    try {
+      const res = await fetch(`/api/memory/items/${encodeURIComponent(id)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: editContent.trim() }),
+      });
+      if (res.ok) {
+        setEditingMemId(null);
+        setEditContent("");
+        await fetchMemoryItems(memoryQuery);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function handleDeleteMemory(id: string): Promise<void> {
+    try {
+      const res = await fetch(`/api/memory/items/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (res.ok) {
+        await fetchMemoryItems(memoryQuery);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function handleClearMemory(category?: string): Promise<void> {
+    try {
+      const res = await fetch("/api/memory/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ category: category || "all" }),
+      });
+      if (res.ok) {
+        await fetchMemoryItems(memoryQuery);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function handleExportMemory(): Promise<void> {
+    try {
+      const res = await fetch("/api/memory/export");
+      if (!res.ok) return;
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "charlie-memory.json";
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  // Privacy Actions
+  async function handlePurge(category: string): Promise<void> {
+    try {
+      const res = await fetch("/api/privacy/purge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ category }),
+      });
+      if (res.ok) {
+        await fetchPrivacySummary();
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
   // Filter visible groups according to active category
   const visibleGroups = useMemo(() => {
     if (activeCategory === "All") return groups;
@@ -292,6 +581,10 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
               cat === "All" ||
               cat === "Audit & Diagnostics" ||
               cat === "Map" ||
+              cat === "Tools / MCP" ||
+              cat === "Memory" ||
+              cat === "Privacy" ||
+              cat === "Developer" ||
               Object.keys(groups).some(
                 (g) =>
                   getCategoryForGroup(g).toLowerCase() === cat.toLowerCase() ||
@@ -351,7 +644,7 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
                           aria-label={field.label}
                           type="password"
                           className="px-2.5 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono w-52 text-right"
-                          placeholder={field.is_set ? "Configured" : "Not configured"}
+                          placeholder={field.is_set ? "•••••••• (configured)" : "Not configured"}
                           onChange={(event) =>
                             setDrafts((current) => ({
                               ...current,
@@ -418,11 +711,438 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
                 </div>
               </section>
             ))
-          ) : activeCategory !== "Audit & Diagnostics" && activeCategory !== "Map" ? (
+          ) : activeCategory !== "Audit & Diagnostics" &&
+            activeCategory !== "Map" &&
+            activeCategory !== "Tools / MCP" &&
+            activeCategory !== "Memory" &&
+            activeCategory !== "Privacy" &&
+            activeCategory !== "Developer" ? (
             <div className="p-6 rounded-xl border border-cyan-500/10 bg-slate-950/40 text-center text-slate-400 text-xs">
               No configuration properties in category &ldquo;{activeCategory}&rdquo;.
             </div>
           ) : null}
+
+          {/* MCP Server Management Section */}
+          {(activeCategory === "All" || activeCategory === "Tools / MCP") && (
+            <section className="settings-group p-3.5 rounded-xl border border-cyan-500/15 bg-slate-950/60 space-y-3">
+              <div className="flex items-center justify-between border-b border-cyan-500/10 pb-1">
+                <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                  Model Context Protocol (MCP) Servers
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => void fetchMcpServers()}
+                  disabled={mcpLoading}
+                  className="text-[10px] text-cyan-300 hover:underline cursor-pointer"
+                >
+                  {mcpLoading ? "Refreshing..." : "Refresh"}
+                </button>
+              </div>
+
+              {/* Server List */}
+              {mcpServers.length === 0 ? (
+                <p className="text-[11px] text-slate-500 italic py-2">
+                  No MCP servers currently registered. Add a server below.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {mcpServers.map((srv) => (
+                    <div
+                      key={srv.name}
+                      className="p-2.5 rounded-lg bg-slate-900/80 border border-cyan-500/20 flex flex-col gap-2"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`w-2 h-2 rounded-full ${
+                              srv.running || srv.status === "connected"
+                                ? "bg-emerald-400 shadow-sm shadow-emerald-400"
+                                : "bg-slate-500"
+                            }`}
+                          />
+                          <span className="text-xs font-bold text-cyan-200">{srv.name}</span>
+                          <span className="text-[10px] text-slate-400 font-mono">
+                            {srv.command} {srv.args.join(" ")}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          {srv.running ? (
+                            <button
+                              type="button"
+                              onClick={() => void handleMcpAction(srv.name, "disconnect")}
+                              className="px-2 py-0.5 text-[10px] rounded bg-amber-950/60 border border-amber-500/30 text-amber-300 hover:bg-amber-900/60 transition cursor-pointer"
+                            >
+                              Disconnect
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => void handleMcpAction(srv.name, "connect")}
+                              className="px-2 py-0.5 text-[10px] rounded bg-emerald-950/60 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-900/60 transition cursor-pointer"
+                            >
+                              Connect
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => void handleMcpAction(srv.name, "restart")}
+                            className="px-2 py-0.5 text-[10px] rounded bg-cyan-950/60 border border-cyan-500/30 text-cyan-300 hover:bg-cyan-900/60 transition cursor-pointer"
+                          >
+                            Restart
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleMcpAction(srv.name, "delete")}
+                            className="px-2 py-0.5 text-[10px] rounded bg-rose-950/60 border border-rose-500/30 text-rose-300 hover:bg-rose-900/60 transition cursor-pointer"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+
+                      {srv.tools && srv.tools.length > 0 ? (
+                        <div className="pt-1.5 border-t border-cyan-500/10 flex flex-wrap gap-1">
+                          <span className="text-[10px] text-slate-400 mr-1">Tools ({srv.tools.length}):</span>
+                          {srv.tools.map((t) => (
+                            <span
+                              key={t.name}
+                              className="px-1.5 py-0.5 rounded text-[9px] bg-cyan-950/80 border border-cyan-500/20 text-cyan-300 font-mono"
+                              title={t.description}
+                            >
+                              {t.name}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Add MCP Server Form */}
+              <div className="pt-2 border-t border-cyan-500/15">
+                <div className="text-[11px] font-bold text-slate-300 mb-2">Register MCP Server</div>
+                <div className="grid grid-cols-3 gap-2 mb-2">
+                  <input
+                    type="text"
+                    placeholder="Server Name (e.g. github)"
+                    value={newMcpName}
+                    onChange={(e) => setNewMcpName(e.target.value)}
+                    className="px-2 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Command (e.g. npx or uvx)"
+                    value={newMcpCommand}
+                    onChange={(e) => setNewMcpCommand(e.target.value)}
+                    className="px-2 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Args (comma separated)"
+                    value={newMcpArgs}
+                    onChange={(e) => setNewMcpArgs(e.target.value)}
+                    className="px-2 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleAddMcpServer()}
+                  disabled={!newMcpName.trim() || !newMcpCommand.trim()}
+                  className="px-3 py-1 text-xs rounded bg-cyan-950 border border-cyan-400/40 text-cyan-300 hover:bg-cyan-900/60 transition cursor-pointer disabled:opacity-40"
+                >
+                  + Add MCP Server
+                </button>
+              </div>
+            </section>
+          )}
+
+          {/* Interactive Memory Management Section */}
+          {(activeCategory === "All" || activeCategory === "Memory") && (
+            <section className="settings-group p-3.5 rounded-xl border border-cyan-500/15 bg-slate-950/60 space-y-3">
+              <div className="flex items-center justify-between border-b border-cyan-500/10 pb-1">
+                <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                  Knowledge & Memory Store
+                </h3>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleExportMemory()}
+                    className="text-[10px] text-cyan-300 hover:underline cursor-pointer"
+                  >
+                    Export JSON
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleClearMemory("all")}
+                    className="text-[10px] text-rose-400 hover:underline cursor-pointer"
+                  >
+                    Clear All
+                  </button>
+                </div>
+              </div>
+
+              {/* Memory Search & Filter Bar */}
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Search memories, facts, preferences..."
+                  value={memoryQuery}
+                  onChange={(e) => {
+                    setMemoryQuery(e.target.value);
+                    void fetchMemoryItems(e.target.value);
+                  }}
+                  className="flex-1 px-2.5 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => void fetchMemoryItems(memoryQuery)}
+                  disabled={memoryLoading}
+                  className="px-3 py-1 text-xs rounded bg-cyan-950 border border-cyan-400/40 text-cyan-300 hover:bg-cyan-900/60 transition cursor-pointer"
+                >
+                  {memoryLoading ? "Searching..." : "Search"}
+                </button>
+              </div>
+
+              {/* Memory Items List */}
+              <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
+                {memoryItems.length === 0 ? (
+                  <p className="text-[11px] text-slate-500 italic py-2">
+                    No memories found. Add entries below.
+                  </p>
+                ) : (
+                  memoryItems.map((item) => (
+                    <div
+                      key={item.id}
+                      className="p-2 rounded bg-slate-900/60 border border-cyan-500/10 flex items-center justify-between gap-3 text-xs"
+                    >
+                      {editingMemId === item.id ? (
+                        <div className="flex-1 flex gap-2">
+                          <input
+                            type="text"
+                            value={editContent}
+                            onChange={(e) => setEditContent(e.target.value)}
+                            className="flex-1 px-2 py-0.5 rounded bg-slate-950 border border-cyan-400 text-cyan-200 text-xs font-mono"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void handleSaveEditMemory(item.id)}
+                            className="px-2 py-0.5 text-[10px] rounded bg-emerald-950 border border-emerald-400 text-emerald-300 cursor-pointer"
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingMemId(null)}
+                            className="px-2 py-0.5 text-[10px] rounded bg-slate-800 text-slate-400 cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex-1 flex items-baseline gap-2 overflow-hidden">
+                            <span className="px-1.5 py-0.2 rounded text-[9px] uppercase font-bold bg-cyan-950 text-cyan-400 border border-cyan-500/30">
+                              {item.category}
+                            </span>
+                            <span className="text-slate-200 truncate">{item.content}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingMemId(item.id);
+                                setEditContent(item.content);
+                              }}
+                              className="text-[10px] text-cyan-400 hover:text-cyan-200 cursor-pointer"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleDeleteMemory(item.id)}
+                              className="text-[10px] text-rose-400 hover:text-rose-200 cursor-pointer"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* Add Memory Form */}
+              <div className="pt-2 border-t border-cyan-500/15 flex gap-2">
+                <select
+                  value={newMemCategory}
+                  onChange={(e) => setNewMemCategory(e.target.value)}
+                  className="px-2 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono w-28"
+                >
+                  <option value="fact">Fact</option>
+                  <option value="preference">Preference</option>
+                  <option value="concept">Concept</option>
+                  <option value="task">Task</option>
+                </select>
+                <input
+                  type="text"
+                  placeholder="Enter memory statement or fact..."
+                  value={newMemContent}
+                  onChange={(e) => setNewMemContent(e.target.value)}
+                  className="flex-1 px-2 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleAddMemory()}
+                  disabled={!newMemContent.trim()}
+                  className="px-3 py-1 text-xs rounded bg-cyan-950 border border-cyan-400/40 text-cyan-300 hover:bg-cyan-900/60 transition cursor-pointer disabled:opacity-40"
+                >
+                  + Add Memory
+                </button>
+              </div>
+            </section>
+          )}
+
+          {/* Privacy & Retention Controls Section */}
+          {(activeCategory === "All" || activeCategory === "Privacy") && (
+            <section className="settings-group p-3.5 rounded-xl border border-cyan-500/15 bg-slate-950/60 space-y-3">
+              <div className="flex items-center justify-between border-b border-cyan-500/10 pb-1">
+                <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                  Storage Usage & Data Retention
+                </h3>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-cyan-300 font-bold">
+                    Total Usage: {privacySummary?.total_formatted || "Calculating..."}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void fetchPrivacySummary()}
+                    disabled={privacyLoading}
+                    className="text-[10px] text-cyan-300 hover:underline cursor-pointer"
+                  >
+                    {privacyLoading ? "Refreshing..." : "Refresh"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Storage Breakdown Cards */}
+              <div className="grid grid-cols-2 gap-2">
+                {privacySummary &&
+                  Object.entries(privacySummary.categories).map(([catKey, info]) => (
+                    <div
+                      key={catKey}
+                      className="p-2 rounded bg-slate-900/60 border border-cyan-500/10 flex items-center justify-between"
+                    >
+                      <div>
+                        <div className="text-[11px] font-bold text-slate-200">{info.name}</div>
+                        <div className="text-[10px] text-slate-400">{info.formatted}</div>
+                      </div>
+                      {catKey !== "logs" && (
+                        <button
+                          type="button"
+                          onClick={() => void handlePurge(catKey)}
+                          className="px-2 py-0.5 text-[10px] rounded bg-rose-950/60 border border-rose-500/30 text-rose-300 hover:bg-rose-900/60 transition cursor-pointer"
+                        >
+                          Purge
+                        </button>
+                      )}
+                    </div>
+                  ))}
+              </div>
+
+              <div className="pt-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => void handlePurge("all")}
+                  className="px-3 py-1 text-xs rounded bg-rose-950/80 border border-rose-400/50 text-rose-200 hover:bg-rose-900/80 transition cursor-pointer"
+                >
+                  Purge All Stored Data
+                </button>
+              </div>
+            </section>
+          )}
+
+          {/* Developer Diagnostics Section */}
+          {(activeCategory === "All" || activeCategory === "Developer") && (
+            <section className="settings-group p-3.5 rounded-xl border border-cyan-500/15 bg-slate-950/60 space-y-3">
+              <div className="flex items-center justify-between border-b border-cyan-500/10 pb-1">
+                <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                  Developer Diagnostics & Live Telemetry
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => void fetchDeveloperDiagnostics()}
+                  disabled={devLoading}
+                  className="text-[10px] text-cyan-300 hover:underline cursor-pointer"
+                >
+                  {devLoading ? "Refreshing..." : "Refresh"}
+                </button>
+              </div>
+
+              {/* Metrics Grid */}
+              <div className="grid grid-cols-3 gap-2 text-xs">
+                <div className="p-2 rounded bg-slate-900/60 border border-cyan-500/10">
+                  <span className="text-[10px] text-slate-400 block">Uptime</span>
+                  <span className="text-cyan-300 font-bold">
+                    {devDiagnostics?.system?.uptime_seconds ?? 0}s
+                  </span>
+                </div>
+                <div className="p-2 rounded bg-slate-900/60 border border-cyan-500/10">
+                  <span className="text-[10px] text-slate-400 block">Active Threads</span>
+                  <span className="text-cyan-300 font-bold">
+                    {devDiagnostics?.system?.active_threads ?? 0}
+                  </span>
+                </div>
+                <div className="p-2 rounded bg-slate-900/60 border border-cyan-500/10">
+                  <span className="text-[10px] text-slate-400 block">Active WebSockets</span>
+                  <span className="text-cyan-300 font-bold">
+                    {devDiagnostics?.system?.active_ws_connections ?? 0}
+                  </span>
+                </div>
+              </div>
+
+              {/* Capability Leases */}
+              <div className="pt-2 border-t border-cyan-500/10">
+                <div className="text-[11px] font-bold text-slate-300 mb-1">Active Capability Leases</div>
+                {devDiagnostics?.leases && Object.keys(devDiagnostics.leases).length > 0 ? (
+                  <div className="space-y-1">
+                    {Object.entries(devDiagnostics.leases).map(([res, owner]) => (
+                      <div
+                        key={res}
+                        className="px-2 py-1 rounded bg-slate-900 text-[10px] flex justify-between font-mono"
+                      >
+                        <span className="text-cyan-300">{res}</span>
+                        <span className="text-slate-400">Owner: {owner}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-slate-500 italic">No exclusive leases held.</p>
+                )}
+              </div>
+
+              {/* Recent Logs Tail */}
+              <div className="pt-2 border-t border-cyan-500/10">
+                <div className="text-[11px] font-bold text-slate-300 mb-1">Console Log Tail</div>
+                <div className="p-2 rounded bg-black/80 border border-cyan-500/20 font-mono text-[10px] text-slate-300 h-32 overflow-y-auto space-y-0.5">
+                  {devLogs.length === 0 ? (
+                    <p className="text-slate-600 italic">No recent log entries.</p>
+                  ) : (
+                    devLogs.map((line, idx) => (
+                      <div key={idx} className="truncate">
+                        {line}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </section>
+          )}
 
           {/* Map & Spatial Intelligence Section */}
           {(activeCategory === "All" || activeCategory === "Map") && (

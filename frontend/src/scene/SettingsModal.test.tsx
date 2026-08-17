@@ -42,7 +42,7 @@ describe("SettingsModal Component", () => {
     ];
 
     for (const cat of categories) {
-      expect(screen.getByRole("button", { name: new RegExp(cat, "i") })).toBeDefined();
+      expect(screen.getByRole("button", { name: new RegExp(`^${cat.replace("/", "\\/")}$`, "i") })).toBeDefined();
     }
   });
 });

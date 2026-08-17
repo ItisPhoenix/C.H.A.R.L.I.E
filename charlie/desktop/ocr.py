@@ -23,6 +23,13 @@ try:
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
+    mss = None  # type: ignore
+    pytesseract = None  # type: ignore
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError:
+        Image = None  # type: ignore
+    Output = None  # type: ignore
 
 _MIN_CONF_DEFAULT = 60
 
@@ -40,7 +47,13 @@ def capture(
     """
     if not OCR_AVAILABLE:
         raise RuntimeError("mss/pytesseract/Pillow not installed -- OCR unavailable.")
-    with mss.MSS() as sct:
+    _mss = mss
+    if _mss is None:
+        import mss as _mss  # type: ignore
+    _Image = Image
+    if _Image is None:
+        from PIL import Image as _Image  # type: ignore
+    with _mss.MSS() as sct:
         if region is not None:
             grab_target = {
                 "left": region[0],
@@ -61,8 +74,8 @@ def capture(
         set_last_capture_bounds(bounds)
         try:
             shot = sct.grab(grab_target)
-            img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-        except (mss.exception.ScreenShotError, PermissionError) as e:
+            img = _Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        except (_mss.exception.ScreenShotError, PermissionError) as e:
             logger.warning("mss capture failed, attempting dxcam fallback: %s", e)
             img = None
             try:
