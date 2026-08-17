@@ -28,15 +28,7 @@ class MCPAdapterResult:
 
 
 class MCPAdapter:
-    """Configures and registers MCP servers using the canonical MCPClient.
-
-    Uses only existing MCPClient API:
-      add_server(), enable_server(), disable_server(), remove_server(),
-      list_tools(), health_check()
-
-    Never trusts caller-provided tool names as discovered truth.
-    Fails + rolls back when connect or discovery fails.
-    """
+    """Configures and registers MCP servers using the canonical MCPClient API."""
 
     def __init__(
         self,
@@ -48,11 +40,7 @@ class MCPAdapter:
         self._registry = registry or ExtensionRegistry(capability_index=capability_index)
         self._capability_index = capability_index
         self._mcp_client = mcp_client
-        self._tool_registry = tool_registry  # charlie.tools.registry for enable_server()
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Registration
-    # ─────────────────────────────────────────────────────────────────────────
+        self._tool_registry = tool_registry
 
     def register_mcp_server(
         self,
@@ -62,19 +50,19 @@ class MCPAdapter:
         env: Optional[Dict[str, str]] = None,
         declared_tools: Optional[List[str]] = None,
     ) -> MCPAdapterResult:
-        """Connect a new MCP server, discover its actual tools, register capabilities.
-
-        *declared_tools* is treated as a hint only — discovered tools override it.
-        Returns failure + rolls back if connect or discovery fails.
-        """
         args = list(args or [])
         env = dict(env or {})
 
-        # ── If no MCPClient wired, fall back to registry-only mode ──────────
         if self._mcp_client is None:
             return self._register_without_client(name, command, args, env, declared_tools or [])
 
-        # ── 1. Add server config (idempotent — skips if already registered) ─
+        if self._tool_registry is None:
+            return MCPAdapterResult(
+                success=False,
+                message="MCP registration requires tool_registry for enable_server().",
+                server_name=name,
+            )
+
         from charlie.mcp_client import MCPServerConfig
 
         config = MCPServerConfig(name=name, command=command, args=args, env=env)
@@ -87,36 +75,21 @@ class MCPAdapter:
                 server_name=name,
             )
 
-        # ── 2. Connect + discover real tools via enable_server() ─────────────
-        # enable_server() starts the server and returns registered tool names.
-        # We need a tool_registry to call enable_server(); if absent, use
-        # connect_server() + list_tools() as a discovery-only path.
         discovered_names: List[str] = []
         try:
-            if self._tool_registry is not None:
-                self._mcp_client.enable_server(self._tool_registry, name)
-                # Extract bare tool names by filtering discovered tools by server
-                discovered_names = [
-                    t.name
-                    for t in self._mcp_client.list_tools()
-                    if getattr(t, "server_name", "") == name
-                ]
-            else:
-                # No tool_registry available — connect and discover only
-                self._mcp_client.connect_server(name)
-                discovered_names = [
-                    t.name
-                    for t in self._mcp_client.list_tools()
-                    if getattr(t, "server_name", "") == name
-                ]
-
+            self._mcp_client.enable_server(self._tool_registry, name)
+            discovered_names = [
+                t.name
+                for t in self._mcp_client.list_tools()
+                if getattr(t, "server_name", "") == name
+            ]
             if not discovered_names and not self._mcp_client.health_check().get(name, False):
-                raise RuntimeError(f"Server '{name}' connected but reports unhealthy and discovered no tools.")
-
+                raise RuntimeError(
+                    f"Server '{name}' connected but reports unhealthy and discovered no tools."
+                )
         except Exception as exc:
-            # Roll back: remove the server we just added
             try:
-                self._mcp_client.remove_server_by_name(name)
+                self._mcp_client.remove_server(self._tool_registry, name)
             except Exception:
                 pass
             return MCPAdapterResult(
@@ -125,7 +98,6 @@ class MCPAdapter:
                 server_name=name,
             )
 
-        # ── 3. Persist in ExtensionRegistry ──────────────────────────────────
         raw_spec = json.dumps({"name": name, "command": command, "args": args, "env": env})
         content_hash = hashlib.sha256(raw_spec.encode()).hexdigest()[:16]
         ext_id = f"mcp_{name}"
@@ -141,7 +113,6 @@ class MCPAdapter:
         )
         self._registry.register(entry)
 
-        # ── 4. CapabilityIndex — availability tied to real health_check ──────
         if self._capability_index:
             self._register_capability(name, ext_id, discovered_names)
 
@@ -160,7 +131,6 @@ class MCPAdapter:
         env: Dict[str, str],
         declared_tools: List[str],
     ) -> MCPAdapterResult:
-        """Registry-only fallback when no MCPClient is injected (e.g. in tests with mock)."""
         raw_spec = json.dumps({"name": name, "command": command, "args": args})
         content_hash = hashlib.sha256(raw_spec.encode()).hexdigest()[:16]
         ext_id = f"mcp_{name}"
@@ -187,7 +157,6 @@ class MCPAdapter:
         )
 
     def _register_capability(self, name: str, ext_id: str, tool_names: List[str]) -> None:
-        """Register MCP tools in CapabilityIndex with real health_check availability."""
         try:
             from charlie.capabilities import CapabilityDescriptor, CapabilityOperation
 
@@ -234,22 +203,12 @@ class MCPAdapter:
         except Exception as exc:
             logger.warning("Failed registering capability for MCP server %s: %s", name, exc)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Rollback
-    # ─────────────────────────────────────────────────────────────────────────
-
     def rollback_mcp_server(self, name: str) -> MCPAdapterResult:
-        """Disconnect server (if client present), unregister from registry and capabilities."""
         ext_id = f"mcp_{name}"
 
-        # Stop via real MCPClient
-        if self._mcp_client is not None:
+        if self._mcp_client is not None and self._tool_registry is not None:
             try:
-                if self._tool_registry is not None:
-                    self._mcp_client.disable_server(self._tool_registry, name)
-                else:
-                    self._mcp_client.disconnect_server(name)
-                self._mcp_client.remove_server_by_name(name)
+                self._mcp_client.remove_server(self._tool_registry, name)
             except Exception as exc:
                 logger.warning("MCPClient rollback for '%s' partial: %s", name, exc)
 

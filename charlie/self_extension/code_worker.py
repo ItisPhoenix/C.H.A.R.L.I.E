@@ -22,12 +22,11 @@ network, no OS mutation, no process spawning):
     string, textwrap, difflib, unicodedata
     enum, dataclasses, weakref, pprint, reprlib
     hashlib, hmac, secrets      (pure crypto utilities)
-    pathlib.PurePath *names only* — PurePath is safe; Path mutation is NOT
-    io                          (BytesIO / StringIO only — validated by AST)
+    from io import BytesIO / StringIO only (validated by AST import check)
 
-IMPORTANT: os, sys, subprocess, socket, shutil, glob, pathlib.Path (write
-mode), importlib, inspect, gc, ctypes, cffi, and all third-party packages are
-NOT on the allow-list and are rejected at the AST level.
+IMPORTANT: os, sys, subprocess, socket, shutil, glob, pathlib, importlib,
+inspect, gc, ctypes, cffi, and all third-party packages are NOT on the
+allow-list and are rejected at the AST level.
 """
 
 from __future__ import annotations
@@ -97,12 +96,11 @@ _ALLOWED_IMPORTS: frozenset[str] = frozenset(
         "hashlib",
         "hmac",
         "secrets",
-        # Pure-path (no mutation)
-        "pathlib",
-        # In-memory I/O only (guarded by AST call check)
-        "io",
     }
 )
+
+# io submodules allowed via from io import ...
+_ALLOWED_IO_NAMES: frozenset[str] = frozenset({"BytesIO", "StringIO"})
 
 # ── Calls that are always rejected regardless of import ────────────────────
 
@@ -112,34 +110,11 @@ _DISALLOWED_CALLS: frozenset[str] = frozenset(
         "eval",
         "compile",
         "__import__",
-        "open",           # filesystem open — must not appear at call level
-        "input",          # stdin
-        "print",          # stdout — generator code should return values
+        "open",
+        "input",
+        "print",
     }
 )
-
-# ── pathlib attributes that mutate the filesystem ──────────────────────────
-# Accessing Path(<anything>).<attr> where attr is in this set → rejected.
-
-_PATHLIB_MUTATION_ATTRS: frozenset[str] = frozenset(
-    {
-        "write_text",
-        "write_bytes",
-        "unlink",
-        "rmdir",
-        "mkdir",
-        "rename",
-        "replace",
-        "symlink_to",
-        "hardlink_to",
-        "touch",
-        "chmod",
-    }
-)
-
-# ── io attributes that open real files ────────────────────────────────────
-
-_IO_DISALLOWED_ATTRS: frozenset[str] = frozenset({"FileIO", "open"})
 
 # ── Execution timeout ──────────────────────────────────────────────────────
 
@@ -186,32 +161,22 @@ def validate_ast_allow_list(source: str, tool_name: str) -> ast.AST:
 
         elif isinstance(node, ast.ImportFrom):
             root = (node.module or "").split(".")[0]
-            if root not in _ALLOWED_IMPORTS:
+            if root == "io":
+                for alias in node.names:
+                    if alias.name not in _ALLOWED_IO_NAMES:
+                        raise ASTAllowListError(
+                            f"Disallowed import 'io.{alias.name}': only BytesIO/StringIO permitted "
+                            f"in CODE_SMALL extensions."
+                        )
+            elif root not in _ALLOWED_IMPORTS:
                 raise ASTAllowListError(
                     f"Disallowed import '{node.module}': not on the pure-function allow-list. "
                     f"Extensions needing OS/network/filesystem access must use "
                     f"Charlie's policy-controlled capabilities instead."
                 )
-            # Guard pathlib mutation attributes
-            if root == "pathlib":
-                for alias in node.names:
-                    if alias.name in _PATHLIB_MUTATION_ATTRS:
-                        raise ASTAllowListError(
-                            f"Disallowed import 'pathlib.{alias.name}': filesystem-mutation operation "
-                            f"is not permitted in CODE_SMALL extensions."
-                        )
-            # Guard io real-file open
-            if root == "io":
-                for alias in node.names:
-                    if alias.name in _IO_DISALLOWED_ATTRS:
-                        raise ASTAllowListError(
-                            f"Disallowed import 'io.{alias.name}': opens real files and is not permitted "
-                            f"in CODE_SMALL extensions."
-                        )
 
         # ── Call expressions ───────────────────────────────────────────────
         elif isinstance(node, ast.Call):
-            # Direct builtin call: exec(...), eval(...), open(...), etc.
             if isinstance(node.func, ast.Name):
                 if node.func.id in _DISALLOWED_CALLS:
                     raise ASTAllowListError(
@@ -219,25 +184,11 @@ def validate_ast_allow_list(source: str, tool_name: str) -> ast.AST:
                         f"CODE_SMALL extensions."
                     )
 
-            # Attribute access: path_obj.write_text(...), io.open(...), etc.
-            elif isinstance(node.func, ast.Attribute):
-                attr = node.func.attr
-                if attr in _PATHLIB_MUTATION_ATTRS:
-                    raise ASTAllowListError(
-                        f"Disallowed call '.{attr}': filesystem mutation is not permitted "
-                        f"in CODE_SMALL extensions."
-                    )
-                if attr in _IO_DISALLOWED_ATTRS:
-                    raise ASTAllowListError(
-                        f"Disallowed call 'io.{attr}': real file I/O is not permitted "
-                        f"in CODE_SMALL extensions."
-                    )
-
         # ── Attribute access (non-call) ─────────────────────────────────
         elif isinstance(node, ast.Attribute):
-            if node.attr in _PATHLIB_MUTATION_ATTRS:
+            if node.attr in _DISALLOWED_CALLS:
                 raise ASTAllowListError(
-                    f"Reference to filesystem-mutation attribute '.{node.attr}' "
+                    f"Reference to disallowed attribute '.{node.attr}' "
                     f"is not permitted in CODE_SMALL extensions."
                 )
 
@@ -265,6 +216,16 @@ def run_worker(
 
     Returns (success, actual_output, error_message).
     """
+    try:
+        source = module_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, None, f"Cannot read module for validation: {exc}"
+
+    try:
+        validate_ast_allow_list(source, func_name)
+    except ASTAllowListError as exc:
+        return False, None, f"Pre-execution validation failed: {exc}"
+
     # Build the test call — zero-arg smoke test when no inputs provided.
     if not test_inputs:
         call_expr = "func()"
@@ -273,21 +234,30 @@ def run_worker(
         call_expr = "func(**inputs)"
         inputs_repr = json.dumps(test_inputs)
 
-    # The runner script uses importlib to load the module by file path.
-    # This is safe because: (a) the module has already passed AST allow-list
-    # validation; (b) the subprocess runs with a stripped environment.
+    # The child re-reads and validates the file immediately before execution.
+    # It then executes that exact validated source string, eliminating the
+    # parent-validation/write/execution TOCTOU gap.
     runner = textwrap.dedent(
         f"""\
-import sys, json, importlib.util, traceback
+import sys, json, traceback, types
+from charlie.self_extension.code_worker import validate_ast_allow_list
 
 module_path = {str(module_path)!r}
 func_name   = {func_name!r}
 inputs      = json.loads({inputs_repr!r})
 
 try:
-    spec = importlib.util.spec_from_file_location("_ext_worker", module_path)
-    mod  = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    with open(module_path, "r", encoding="utf-8") as source_file:
+        source = source_file.read()
+    validate_ast_allow_list(source, func_name)
+except Exception as exc:
+    sys.stdout.write(json.dumps({{"error": f"Validation failed: {{exc}}"}}))
+    sys.exit(1)
+
+try:
+    mod = types.ModuleType("_ext_worker")
+    mod.__file__ = module_path
+    exec(compile(source, module_path, "exec"), mod.__dict__)
 except Exception as exc:
     sys.stdout.write(json.dumps({{"error": f"Module load failed: {{exc}}"}}))
     sys.exit(1)

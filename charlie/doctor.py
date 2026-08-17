@@ -573,9 +573,10 @@ class CharlieDoctor:
             elif repair_id == "repair_mcp_reconnect":
                 mcp = self._introspector._get_mcp_client()
                 if mcp:
+                    from charlie.tools import registry
                     for s in mcp.list_servers_detailed():
                         if s.get("status") != "connected":
-                            mcp.connect_server(s["name"])
+                            mcp.enable_server(registry, s["name"])
                 self.record_repair_attempt(repair_id, success=True)
                 return {"success": True, "repair_id": repair_id, "message": "Triggered MCP server reconnection."}
 

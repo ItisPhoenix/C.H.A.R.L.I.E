@@ -12,6 +12,7 @@ Validates:
 
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -63,6 +64,14 @@ def isolated_env():
             settings_service=settings_service,
             config=cfg,
             capability_index=cap_idx,
+            doctor=MagicMock(diagnose=MagicMock(return_value=MagicMock(is_healthy=True, errors=[]))),
+            code_index=MagicMock(refresh=MagicMock()),
+            introspector=MagicMock(
+                get_capabilities_info=MagicMock(return_value={"by_id": {"code_add_two": {}}})
+            ),
+            self_knowledge=MagicMock(
+                answer_self_question=MagicMock(return_value={"answer": "code_add_two"})
+            ),
         )
 
         yield orchestrator, repo_root, cap_idx, tools_dir
@@ -170,6 +179,8 @@ class TestGenericPathRequiresPlanForMCPTool:
     def test_mcp_tool_with_plan_succeeds(self, isolated_env):
         """Generic execute_transaction executes MCP_TOOL when plan specifies mcp_name/mcp_command."""
         orchestrator, _, cap_idx, _ = isolated_env
+        orchestrator._introspector.get_capabilities_info.return_value = {"by_id": {"mcp_github": {}}}
+        orchestrator._self_knowledge.answer_self_question.return_value = {"answer": "mcp_github"}
 
         plan = ExtensionPlan(
             plan_id="plan-github-mcp",

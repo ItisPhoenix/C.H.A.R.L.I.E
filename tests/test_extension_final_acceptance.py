@@ -14,15 +14,20 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
-from typing import Any, List, Optional
-from unittest.mock import MagicMock
+from typing import Any, Dict, List, Optional
+from unittest.mock import MagicMock, create_autospec
 
 from charlie.events import EventType
+from charlie.ipc import EventBus
+from charlie.mcp_client import MCPClient
 from charlie.self_extension.adapters.code_adapter import CodeAdapter
 from charlie.self_extension.adapters.mcp_adapter import MCPAdapter
 from charlie.self_extension.checkpoint import CheckpointManager
@@ -41,6 +46,50 @@ from charlie.self_extension.models import (
 )
 from charlie.self_extension.registry import ExtensionEntry, ExtensionRegistry
 from charlie.self_extension.worktree_guard import WorktreeConflictError, WorktreeGuard
+
+
+def _verification_kwargs(ext_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    doctor = MagicMock()
+    doctor.diagnose.return_value = MagicMock(is_healthy=True, errors=[])
+    code_index = MagicMock()
+    code_index.refresh = MagicMock()
+    introspector = MagicMock()
+    by_id = {eid: {} for eid in (ext_ids or [])}
+    introspector.get_capabilities_info.return_value = {"by_id": by_id}
+    self_knowledge = MagicMock()
+    self_knowledge.answer_self_question.return_value = {"answer": " ".join(ext_ids or ["ok"])}
+    return {
+        "doctor": doctor,
+        "code_index": code_index,
+        "introspector": introspector,
+        "self_knowledge": self_knowledge,
+    }
+
+
+def _start_real_event_bus_capture(emitted: List[str]) -> tuple[EventBus, asyncio.AbstractEventLoop, threading.Thread]:
+    loop = asyncio.new_event_loop()
+    bus = EventBus(pub_port=0, pull_port=0)
+    ready = threading.Event()
+
+    def _run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(bus.__aenter__())
+        bus.set_state_listener(lambda envelope: emitted.append(envelope["type"]) or None)
+        ready.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=_run_loop, daemon=True)
+    thread.start()
+    if not ready.wait(timeout=2.0):
+        raise RuntimeError("real EventBus test loop did not start")
+    return bus, loop, thread
+
+
+def _stop_real_event_bus(bus: EventBus, loop: asyncio.AbstractEventLoop, thread: threading.Thread) -> None:
+    asyncio.run_coroutine_threadsafe(bus.__aexit__(None, None, None), loop).result(timeout=2.0)
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(timeout=2.0)
+    loop.close()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # B1: AST allow-list
@@ -112,10 +161,9 @@ class TestASTAllowList(unittest.TestCase):
                 "def f(): Path('/tmp/x').unlink()\n"
             )
 
-    def test_pathlib_purepathlike_import_accepted(self):
-        # PurePath itself is fine; the allow-list permits the pathlib root
-        code = "from pathlib import PurePosixPath\ndef f(s): return str(PurePosixPath(s).stem)\n"
-        self._validate(code)  # must not raise
+    def test_pathlib_import_rejected(self):
+        with self.assertRaises(ASTAllowListError):
+            self._validate("from pathlib import PurePosixPath\ndef f(s): return str(PurePosixPath(s).stem)\n")
 
     def test_importlib_rejected(self):
         with self.assertRaises(ASTAllowListError):
@@ -222,9 +270,9 @@ class TestMCPAdapter(unittest.TestCase):
     """B3 — MCPAdapter uses real MCPClient methods; rollback on discovery failure."""
 
     def _make_mock_client(self, discovered_tools: List[str], health: bool = True) -> MagicMock:
-        client = MagicMock()
+        client = create_autospec(MCPClient, instance=True)
         client.add_server.return_value = None
-        # list_tools returns objects with .name and .server_name
+        client.enable_server.return_value = [f"mcp_test_server_{t}" for t in discovered_tools]
         tool_objs = []
         for t in discovered_tools:
             obj = MagicMock()
@@ -233,17 +281,16 @@ class TestMCPAdapter(unittest.TestCase):
             tool_objs.append(obj)
         client.list_tools.return_value = tool_objs
         client.health_check.return_value = {"test_server": health}
-        client.connect_server.return_value = None
-        client.remove_server_by_name.return_value = None
+        client.remove_server.return_value = True
         return client
 
-    def _make_adapter(self, client: Any) -> MCPAdapter:
+    def _make_adapter(self, client: Any, tool_registry: Any = MagicMock()) -> MCPAdapter:
         with tempfile.TemporaryDirectory() as td:
             registry = ExtensionRegistry(
                 manifest_path=Path(td) / "manifest.json",
                 capability_index=None,
             )
-        return MCPAdapter(registry=registry, mcp_client=client)
+        return MCPAdapter(registry=registry, mcp_client=client, tool_registry=tool_registry)
 
     def test_register_calls_add_server(self):
         client = self._make_mock_client(["tool_a"])
@@ -252,11 +299,12 @@ class TestMCPAdapter(unittest.TestCase):
         client.add_server.assert_called_once()
         self.assertTrue(res.success, res.message)
 
-    def test_register_calls_connect_server_without_tool_registry(self):
+    def test_register_calls_enable_server(self):
         client = self._make_mock_client(["tool_a"])
-        adapter = self._make_adapter(client)
+        tool_registry = MagicMock()
+        adapter = self._make_adapter(client, tool_registry)
         adapter.register_mcp_server("test_server", "npx", [])
-        client.connect_server.assert_called_once_with("test_server")
+        client.enable_server.assert_called_once_with(tool_registry, "test_server")
 
     def test_register_discovers_real_tools(self):
         client = self._make_mock_client(["tool_x", "tool_y"])
@@ -265,24 +313,26 @@ class TestMCPAdapter(unittest.TestCase):
         self.assertEqual(sorted(res.tools), ["tool_x", "tool_y"])
 
     def test_rollback_on_connect_failure(self):
-        client = MagicMock()
+        client = create_autospec(MCPClient, instance=True)
         client.add_server.return_value = None
-        client.connect_server.side_effect = RuntimeError("connection refused")
-        client.remove_server_by_name.return_value = None
+        client.enable_server.side_effect = RuntimeError("connection refused")
+        client.remove_server.return_value = True
+        tool_registry = MagicMock()
         with tempfile.TemporaryDirectory() as td:
             registry = ExtensionRegistry(manifest_path=Path(td) / "m.json", capability_index=None)
-            adapter = MCPAdapter(registry=registry, mcp_client=client)
+            adapter = MCPAdapter(registry=registry, mcp_client=client, tool_registry=tool_registry)
         res = adapter.register_mcp_server("bad_server", "npx", [])
         self.assertFalse(res.success)
-        client.remove_server_by_name.assert_called_with("bad_server")
+        client.remove_server.assert_called_with(tool_registry, "bad_server")
 
     def test_rollback_mcp_calls_remove_server(self):
         client = self._make_mock_client(["tool_a"])
+        tool_registry = MagicMock()
         with tempfile.TemporaryDirectory() as td:
             registry = ExtensionRegistry(manifest_path=Path(td) / "m.json", capability_index=None)
-            adapter = MCPAdapter(registry=registry, mcp_client=client)
+            adapter = MCPAdapter(registry=registry, mcp_client=client, tool_registry=tool_registry)
         adapter.rollback_mcp_server("test_server")
-        client.remove_server_by_name.assert_called_with("test_server")
+        client.remove_server.assert_called_with(tool_registry, "test_server")
 
     def test_no_duplicate_api_methods(self):
         """Verify adapter doesn't define its own add_server/list_tools/etc."""
@@ -440,13 +490,15 @@ class TestTransactionPersistenceAndResume(unittest.TestCase):
         from charlie.self_extension.orchestrator import SelfExtensionOrchestrator
 
         cap_index = kwargs.pop("capability_index", CapabilityIndex())
+        verify = _verification_kwargs(kwargs.pop("ext_ids", None))
+        verify.update(kwargs)
         return SelfExtensionOrchestrator(
             repo_root=tmp,
             manifest_path=tmp / "manifest.json",
             tools_dir=tmp / "tools",
             tx_store_path=tmp / "transactions.json",
             capability_index=cap_index,
-            **kwargs,
+            **verify,
         )
 
     def test_restarting_transaction_persisted_to_disk(self):
@@ -674,23 +726,26 @@ class TestVerificationGate(unittest.TestCase):
     def test_gate_fails_when_capability_missing(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
+            doctor = MagicMock()
+            doctor.diagnose.return_value.is_healthy = True
+            doctor.diagnose.return_value.errors = []
             introspector = MagicMock()
             introspector.get_capabilities_info.return_value = {"by_id": {}}
 
-            orch = self._make_orch(tmp, introspector=introspector)
+            orch = self._make_orch(tmp, doctor=doctor, introspector=introspector)
             ok, msg = orch._run_verification_gate("tx-test", affected_ext_ids=["code_missing"])
             self.assertFalse(ok)
             self.assertIn("code_missing", msg)
 
-    def test_gate_tolerates_doctor_exception(self):
-        """Doctor raising must not crash the gate."""
+    def test_gate_fails_when_doctor_raises(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             doctor = MagicMock()
             doctor.diagnose.side_effect = RuntimeError("doctor down")
             orch = self._make_orch(tmp, doctor=doctor)
-            ok, _ = orch._run_verification_gate("tx-test")
-            self.assertTrue(ok)  # non-blocking — gate still passes
+            ok, msg = orch._run_verification_gate("tx-test")
+            self.assertFalse(ok)
+            self.assertIn("doctor", msg.lower())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -745,10 +800,18 @@ class TestEventTypeContract(unittest.TestCase):
 class TestOrchestratorEndToEnd(unittest.TestCase):
     """B9 — Full orchestrator pipeline for each extension kind."""
 
-    def _make_orch(self, tmp: Path, event_bus: Optional[Any] = None) -> Any:
+    def _make_orch(
+        self,
+        tmp: Path,
+        event_bus: Optional[Any] = None,
+        ext_ids: Optional[List[str]] = None,
+        **kwargs,
+    ) -> Any:
         from charlie.capabilities import CapabilityIndex
         from charlie.self_extension.orchestrator import SelfExtensionOrchestrator
 
+        verify = _verification_kwargs(ext_ids)
+        verify.update(kwargs)
         return SelfExtensionOrchestrator(
             repo_root=tmp,
             manifest_path=tmp / "manifest.json",
@@ -756,6 +819,7 @@ class TestOrchestratorEndToEnd(unittest.TestCase):
             tx_store_path=tmp / "tx.json",
             capability_index=CapabilityIndex(),
             event_bus=event_bus,
+            **verify,
         )
 
     def test_config_transaction_succeeds(self):
@@ -793,7 +857,7 @@ class TestOrchestratorEndToEnd(unittest.TestCase):
     def test_code_transaction_succeeds_with_valid_plan(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
-            orch = self._make_orch(tmp)
+            orch = self._make_orch(tmp, ext_ids=["code_multiply"])
             from charlie.self_extension.models import ExtensionClassification, ExtensionKind
 
             code = "def multiply(a, b):\n    return a * b\n"
@@ -856,9 +920,8 @@ class TestOrchestratorEndToEnd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             emitted: List[str] = []
-            bus = MagicMock()
-            bus.publish.side_effect = lambda name, *_, **__: emitted.append(name)
-            orch = self._make_orch(tmp, event_bus=bus)
+            bus, loop, thread = _start_real_event_bus_capture(emitted)
+            orch = self._make_orch(tmp, event_bus=bus, event_loop=loop, ext_ids=["code_noop"])
 
             from charlie.self_extension.models import ExtensionClassification, ExtensionKind
 
@@ -877,13 +940,22 @@ class TestOrchestratorEndToEnd(unittest.TestCase):
             )
             orch.execute_transaction(req)
 
+            terminal = (
+                "self_extension_completed",
+                "self_extension_failed",
+                "self_extension_rolled_back",
+            )
+            deadline = time.time() + 5.0
+            while not any(e in emitted for e in terminal) and time.time() < deadline:
+                time.sleep(0.05)
+            _stop_real_event_bus(bus, loop, thread)
+
             self.assertIn("self_extension_requested", emitted)
             self.assertIn("self_extension_classified", emitted)
             self.assertIn("self_extension_applying", emitted)
             self.assertIn("self_extension_testing", emitted)
-            # completed or failed — one of them must appear
             self.assertTrue(
-                "self_extension_completed" in emitted or "self_extension_failed" in emitted,
+                any(e in emitted for e in terminal),
                 f"No terminal event emitted. Events: {emitted}",
             )
 
@@ -891,9 +963,8 @@ class TestOrchestratorEndToEnd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             emitted: List[str] = []
-            bus = MagicMock()
-            bus.publish.side_effect = lambda name, *_, **__: emitted.append(name)
-            orch = self._make_orch(tmp, event_bus=bus)
+            bus, loop, thread = _start_real_event_bus_capture(emitted)
+            orch = self._make_orch(tmp, event_bus=bus, event_loop=loop)
 
             from charlie.self_extension.models import ExtensionRequest, ExtensionTransaction
 
@@ -901,6 +972,11 @@ class TestOrchestratorEndToEnd(unittest.TestCase):
             tx = ExtensionTransaction(transaction_id="tx-r-001", request=req)
             orch._transactions["tx-r-001"] = tx
             orch.rollback_transaction("tx-r-001")
+
+            deadline = time.time() + 2.0
+            while len(emitted) < 2 and time.time() < deadline:
+                time.sleep(0.05)
+            _stop_real_event_bus(bus, loop, thread)
 
             self.assertIn("self_extension_rollback_started", emitted)
             self.assertIn("self_extension_rolled_back", emitted)

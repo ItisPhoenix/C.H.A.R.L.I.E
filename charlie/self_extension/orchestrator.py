@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -8,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from charlie.capabilities import CapabilityIndex
 from charlie.config import Config
-from charlie.events import EventType
+from charlie.events import EventMeta, EventSource, EventType
 from charlie.self_extension.adapters.code_adapter import CodeAdapter
 from charlie.self_extension.adapters.config_adapter import ConfigAdapter
 from charlie.self_extension.adapters.mcp_adapter import MCPAdapter
@@ -45,6 +46,7 @@ class SelfExtensionOrchestrator:
         config: Optional[Config] = None,
         capability_index: Optional[CapabilityIndex] = None,
         event_bus: Optional[Any] = None,
+        event_loop: Optional[Any] = None,
         mcp_client: Optional[Any] = None,
         tool_registry: Optional[Any] = None,
         doctor: Optional[Any] = None,
@@ -58,6 +60,7 @@ class SelfExtensionOrchestrator:
         self._settings_service = settings_service or SettingsService(config_instance=self._config)
         self._capability_index = capability_index or CapabilityIndex()
         self._event_bus = event_bus
+        self._event_loop = event_loop
         self._mcp_client = mcp_client
         self._tool_registry = tool_registry
         self._doctor = doctor
@@ -118,11 +121,24 @@ class SelfExtensionOrchestrator:
 
     def _emit(self, event_type: EventType, payload: Dict[str, Any]) -> None:
         """Emit canonical lifecycle event via EventBus if wired."""
-        if self._event_bus:
-            try:
-                self._event_bus.publish(event_type.value, payload)
-            except Exception as exc:
-                logger.warning("Event emit failed %s: %s", event_type.value, exc)
+        if self._event_bus is None:
+            return
+        try:
+            if self._event_loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    self._event_bus.emit(
+                        event_type.value,
+                        payload,
+                        meta=EventMeta(source=EventSource.BRAIN),
+                    ),
+                    self._event_loop,
+                )
+            else:
+                logger.warning(
+                    "EventBus wired without event_loop; cannot emit %s", event_type.value
+                )
+        except Exception as exc:
+            logger.warning("Event emit failed %s: %s", event_type.value, exc)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Transaction persistence
@@ -156,28 +172,74 @@ class SelfExtensionOrchestrator:
         for tx_id, tx_dict in data.items():
             status = tx_dict.get("status", "")
             if status == TransactionStatus.RESTARTING:
-                logger.info("Resuming transaction %s from RESTARTING → VERIFYING", tx_id)
-                # Re-build a minimal transaction record
+                logger.info("Resuming transaction %s from RESTARTING -> VERIFYING", tx_id)
                 try:
-                    req = ExtensionRequest(
-                        user_prompt=tx_dict.get("user_prompt", ""),
-                        request_id=tx_dict.get("request_id", tx_id),
-                    )
-                    tx = ExtensionTransaction(transaction_id=tx_id, request=req)
+                    tx = ExtensionTransaction.from_dict({**tx_dict, "transaction_id": tx_id})
                     tx.status = TransactionStatus.VERIFYING
                     self._transactions[tx_id] = tx
-                    # Run post-change verification gate
-                    gate_ok, gate_msg = self._run_verification_gate(tx_id)
+                    affected = self._affected_capability_ids(tx)
+                    gate_ok, gate_msg = self._run_verification_gate(tx_id, affected_ext_ids=affected)
                     if gate_ok:
                         tx.status = TransactionStatus.COMPLETED
                         tx.finished_at = time.time()
                         self._emit(EventType.SELF_EXTENSION_COMPLETED, {"tx_id": tx_id})
                     else:
-                        tx.status = TransactionStatus.FAILED
-                        tx.error_message = gate_msg
-                        self._emit(EventType.SELF_EXTENSION_FAILED, {"tx_id": tx_id, "reason": gate_msg})
+                        self._rollback_resumed_transaction(tx, gate_msg)
                 except Exception as exc:
-                    logger.error("Failed resuming transaction %s: %s", tx_id, exc)
+                    logger.error("Failed resuming transaction %s: %s", tx_id, exc, exc_info=True)
+
+    def _affected_capability_ids(self, tx: ExtensionTransaction) -> List[str]:
+        ids = list(tx.verification_criteria or tx.request.affected_capabilities)
+        plan = tx.plan or tx.request.plan
+        if plan:
+            kind = tx.request.classification.kind if tx.request.classification else plan.kind
+            if kind == ExtensionKind.CODE_SMALL and plan.tool_name:
+                ids.append(f"code_{plan.tool_name}")
+            elif kind == ExtensionKind.MCP_TOOL and plan.mcp_name:
+                ids.append(f"mcp_{plan.mcp_name}")
+        return list(dict.fromkeys(ids))
+
+    def _rollback_resumed_transaction(self, tx: ExtensionTransaction, reason: str) -> None:
+        tx_id = tx.transaction_id
+        self._emit(EventType.SELF_EXTENSION_ROLLBACK_STARTED, {"tx_id": tx_id})
+        rollback_ok = True
+        rollback_message = ""
+        try:
+            kind = (
+                tx.request.classification.kind
+                if tx.request.classification
+                else ((tx.plan or tx.request.plan).kind if (tx.plan or tx.request.plan) else None)
+            )
+            plan = tx.plan or tx.request.plan
+            if kind == ExtensionKind.MCP_TOOL and plan and plan.mcp_name:
+                rollback = self._mcp_adapter.rollback_mcp_server(plan.mcp_name)
+            elif kind == ExtensionKind.CODE_SMALL and plan and plan.tool_name:
+                rollback = self._code_adapter.rollback_code_extension(plan.tool_name, checkpoint=tx.checkpoint)
+            elif kind == ExtensionKind.SKILL:
+                skill_id = next((item for item in self._affected_capability_ids(tx) if item.startswith("skill_")), "")
+                if not skill_id:
+                    raise RuntimeError("rollback_failed: resumed skill name is missing")
+                rollback = self._skill_adapter.remove_skill(skill_id[len("skill_"):])
+            elif kind == ExtensionKind.CONFIG and tx.checkpoint:
+                rollback = self._config_adapter.rollback(tx.checkpoint.config_preimage)
+            elif tx.checkpoint:
+                rollback = self._checkpoint_mgr.rollback(tx.checkpoint)
+            else:
+                raise RuntimeError("rollback_failed: transaction has no scoped rollback metadata")
+            if not getattr(rollback, "success", False):
+                raise RuntimeError(f"rollback_failed: {getattr(rollback, 'message', rollback)}")
+        except Exception as exc:
+            rollback_ok = False
+            rollback_message = str(exc)
+            logger.error("Resume rollback failed for %s: %s", tx_id, exc, exc_info=True)
+        if rollback_ok:
+            tx.status = TransactionStatus.ROLLED_BACK
+            tx.error_message = reason
+            self._emit(EventType.SELF_EXTENSION_ROLLED_BACK, {"tx_id": tx_id})
+        else:
+            tx.status = TransactionStatus.ROLLED_BACK
+            tx.error_message = f"rollback_failed: {rollback_message}; verification: {reason}"
+            self._emit(EventType.SELF_EXTENSION_ROLLED_BACK, {"tx_id": tx_id, "reason": tx.error_message})
 
     # ─────────────────────────────────────────────────────────────────────────
     # Post-change verification gate (Task 7)
@@ -199,7 +261,6 @@ class SelfExtensionOrchestrator:
         """
         self._emit(EventType.SELF_EXTENSION_VERIFYING, {"tx_id": tx_id})
 
-        # 1. Refresh CodeIndex
         if self._code_index is not None:
             try:
                 if hasattr(self._code_index, "refresh"):
@@ -207,48 +268,70 @@ class SelfExtensionOrchestrator:
                 elif hasattr(self._code_index, "reindex"):
                     self._code_index.reindex()
             except Exception as exc:
-                logger.warning("CodeIndex refresh failed: %s", exc)
+                logger.error("CodeIndex refresh failed: %s", exc, exc_info=True)
+                return False, f"CodeIndex refresh failed: {exc}"
 
-        # 2. CapabilityIndex reconcile via RuntimeIntrospector
-        if affected_ext_ids and self._introspector is not None:
+        if affected_ext_ids:
+            if self._introspector is None:
+                return False, "RuntimeIntrospector unavailable for capability verification."
             try:
                 caps_info = self._introspector.get_capabilities_info()
                 by_id = caps_info.get("by_id", {})
                 missing = [eid for eid in affected_ext_ids if eid not in by_id]
                 if missing:
-                    return False, f"Verification: expected capability/ies not visible after extension: {missing}"
+                    return False, (
+                        f"Verification: expected capability/ies not visible after extension: {missing}"
+                    )
+                unavailable = []
+                for eid in affected_ext_ids:
+                    record = by_id[eid]
+                    health = record.get("health", {}) if isinstance(record, dict) else {}
+                    if (
+                        isinstance(record, dict)
+                        and (
+                            record.get("available") is False
+                            or record.get("status")
+                            in {"degraded", "unavailable", "failed", "error"}
+                        )
+                    ) or (isinstance(health, dict) and health.get("available") is False):
+                        unavailable.append(eid)
+                if unavailable:
+                    return False, f"Verification: expected capability/ies unavailable after extension: {unavailable}"
             except Exception as exc:
-                logger.warning("Introspector caps check failed: %s", exc)
+                logger.error("Introspector caps check failed: %s", exc, exc_info=True)
+                return False, f"Capability introspection failed: {exc}"
 
-        # 3. Doctor health check
         self._emit(EventType.SELF_EXTENSION_HEALTH_CHECK, {"tx_id": tx_id})
-        if self._doctor is not None:
-            try:
-                report = self._doctor.diagnose()
-                if not report.is_healthy:
-                    error_summaries = [c.summary for c in report.errors[:3]]
-                    return False, f"Doctor reports errors after extension: {error_summaries}"
-            except Exception as exc:
-                logger.warning("Doctor diagnose failed: %s", exc)
+        if self._doctor is None:
+            return False, "CharlieDoctor unavailable for post-extension health check."
+        try:
+            report = self._doctor.diagnose()
+            is_healthy = report.get("is_healthy") if isinstance(report, dict) else getattr(report, "is_healthy", False)
+            errors = report.get("errors", []) if isinstance(report, dict) else getattr(report, "errors", [])
+            if not is_healthy:
+                error_summaries = [getattr(c, "summary", str(c)) for c in errors[:3]]
+                return False, f"Doctor reports errors after extension: {error_summaries}"
+        except Exception as exc:
+            logger.error("Doctor diagnose failed: %s", exc, exc_info=True)
+            return False, f"Doctor health check failed: {exc}"
 
-        # 4. SelfKnowledge grounded check
-        if affected_ext_ids and self._self_knowledge is not None:
+        if affected_ext_ids:
+            if self._self_knowledge is None:
+                return False, "SelfKnowledge unavailable for extension evidence check."
             try:
                 for ext_id in affected_ext_ids[:1]:
                     ans = self._self_knowledge.answer_self_question(
                         "what capabilities do you have"
                     )
-                    # answer_self_question returns a dict with "answer" key
                     answer_text = ans.get("answer", "") if isinstance(ans, dict) else str(ans)
-                    # Verify extension appears somewhere in self-knowledge answer
                     name_part = ext_id.replace("code_", "").replace("mcp_", "").replace("skill_", "")
                     if name_part not in answer_text and ext_id not in answer_text:
-                        logger.info(
-                            "SelfKnowledge does not yet reflect '%s' — CodeIndex may need a moment. Continuing.",
-                            ext_id,
+                        return False, (
+                            f"SelfKnowledge does not reflect extension '{ext_id}' after apply."
                         )
             except Exception as exc:
-                logger.warning("SelfKnowledge check failed (non-blocking): %s", exc)
+                logger.error("SelfKnowledge check failed: %s", exc, exc_info=True)
+                return False, f"SelfKnowledge verification failed: {exc}"
 
         return True, "Verification passed."
 
@@ -420,7 +503,7 @@ class SelfExtensionOrchestrator:
             )
 
         # Post-change verification gate
-        gate_ok, gate_msg = self._run_verification_gate(transaction_id, affected_ext_ids=["config"])
+        gate_ok, gate_msg = self._run_verification_gate(transaction_id, affected_ext_ids=None)
         if not gate_ok:
             self._config_adapter.rollback(preimage)
             tx.status = TransactionStatus.ROLLED_BACK
@@ -472,9 +555,22 @@ class SelfExtensionOrchestrator:
             )
 
         ext_id = f"skill_{skill_name}"
+        if ext_id not in tx.request.affected_capabilities:
+            tx.request.affected_capabilities.append(ext_id)
+        tx.verification_criteria = [ext_id]
         gate_ok, gate_msg = self._run_verification_gate(transaction_id, affected_ext_ids=[ext_id])
         if not gate_ok:
-            logger.warning("Skill verification gate failed (non-blocking): %s", gate_msg)
+            rollback = self._skill_adapter.remove_skill(skill_name)
+            tx.status = TransactionStatus.ROLLED_BACK
+            if not rollback.success:
+                tx.error_message = f"rollback_failed: {rollback.message}; verification: {gate_msg}"
+            self._emit(EventType.SELF_EXTENSION_ROLLED_BACK, {"tx_id": transaction_id})
+            return ExtensionResult(
+                success=False,
+                transaction_id=transaction_id,
+                status=TransactionStatus.ROLLED_BACK,
+                message=f"Skill extension rolled back — verification gate failed: {gate_msg}",
+            )
 
         tx.status = TransactionStatus.COMPLETED
         tx.finished_at = time.time()
@@ -525,6 +621,9 @@ class SelfExtensionOrchestrator:
             )
 
         ext_id = f"mcp_{name}"
+        if ext_id not in tx.request.affected_capabilities:
+            tx.request.affected_capabilities.append(ext_id)
+        tx.verification_criteria = [ext_id]
         self._emit(EventType.SELF_EXTENSION_TESTING, {"tx_id": transaction_id})
 
         gate_ok, gate_msg = self._run_verification_gate(transaction_id, affected_ext_ids=[ext_id])
@@ -589,7 +688,13 @@ class SelfExtensionOrchestrator:
                 message=res.message,
             )
 
+        if res.checkpoint:
+            tx.checkpoint = res.checkpoint
+
         ext_id = f"code_{name}"
+        if ext_id not in tx.request.affected_capabilities:
+            tx.request.affected_capabilities.append(ext_id)
+        tx.verification_criteria = [ext_id]
 
         # Handle requires_restart: persist state and emit RESTARTING event
         if getattr(request, "requires_restart", False):
@@ -609,8 +714,7 @@ class SelfExtensionOrchestrator:
         # Post-change verification gate
         gate_ok, gate_msg = self._run_verification_gate(transaction_id, affected_ext_ids=[ext_id])
         if not gate_ok:
-            # Roll back the code extension
-            self._code_adapter.rollback_code_extension(name)
+            self._code_adapter.rollback_code_extension(name, checkpoint=tx.checkpoint)
             tx.status = TransactionStatus.ROLLED_BACK
             self._emit(EventType.SELF_EXTENSION_ROLLED_BACK, {"tx_id": transaction_id})
             return ExtensionResult(

@@ -15,17 +15,15 @@ from charlie.self_extension.code_worker import (
     run_worker,
     validate_ast_allow_list,
 )
-from charlie.self_extension.models import ExtensionKind
+from charlie.self_extension.models import ExtensionCheckpoint, ExtensionKind
 from charlie.self_extension.registry import ExtensionEntry, ExtensionRegistry
+from charlie.self_extension.worktree_guard import WorktreeConflictError, WorktreeGuard
 
 logger = logging.getLogger("charlie.self_extension.code_adapter")
 
 _DEFAULT_TOOLS_DIR = Path("data/generated_tools")
 
-# Re-export so existing tests that import from code_adapter still work.
 ASTValidationError = ASTAllowListError
-
-# Keep the old function name as an alias so existing tests pass unchanged.
 _validate_ast_safety = validate_ast_allow_list
 
 
@@ -37,12 +35,14 @@ class CodeAdapterResult:
         module_path: Optional[str] = None,
         tool_name: Optional[str] = None,
         test_output: Optional[Any] = None,
+        checkpoint: Optional[ExtensionCheckpoint] = None,
     ):
         self.success = success
         self.message = message
         self.module_path = module_path
         self.tool_name = tool_name
         self.test_output = test_output
+        self.checkpoint = checkpoint
 
 
 def _run_subprocess_verification(
@@ -52,7 +52,6 @@ def _run_subprocess_verification(
     expected_output: Optional[Any] = None,
     timeout: int = 10,
 ) -> tuple[bool, Any, str]:
-    """Public shim kept for backward-compatibility with existing tests."""
     return run_worker(
         module_path=module_path,
         func_name=func_name,
@@ -81,6 +80,17 @@ class CodeAdapter:
         self._checkpoint_mgr = checkpoint_mgr or CheckpointManager(repo_root=self._repo_root)
         self._doctor = doctor
 
+    def _check_baseline_before_checkpoint(self, module_path: Path, name: str) -> None:
+        ext_id = f"code_{name}"
+        existing = self._registry.get(ext_id)
+        if not module_path.exists():
+            return
+        WorktreeGuard.check_repository_baseline(
+            module_path,
+            self._repo_root,
+            fallback_hash=existing.content_hash if existing is not None else None,
+        )
+
     def apply_code_extension(
         self,
         name: str,
@@ -89,23 +99,22 @@ class CodeAdapter:
         expected_output: Optional[Any] = None,
         transaction_id: Optional[str] = None,
     ) -> CodeAdapterResult:
-        """Validate (AST allow-list), write, smoke-test (subprocess), and register a new Python tool extension.
-
-        A smoke test is ALWAYS executed — no extension completes on static analysis alone.
-        """
+        """Validate (AST allow-list), checkpoint, guard, write, worker test, and register."""
         tx_id = transaction_id or f"code-{name}"
 
-        # 1. AST allow-list — primary security boundary, runs before any disk write.
         try:
             tree = validate_ast_allow_list(code, name)
         except ASTAllowListError as exc:
             return CodeAdapterResult(success=False, message=str(exc), tool_name=name)
 
-        # 2. Destination path
         self._tools_dir.mkdir(parents=True, exist_ok=True)
         module_path = self._tools_dir / f"{name}.py"
 
-        # 3. Checkpoint before write
+        try:
+            self._check_baseline_before_checkpoint(module_path, name)
+        except WorktreeConflictError as exc:
+            return CodeAdapterResult(success=False, message=str(exc), tool_name=name)
+
         files_to_modify = [module_path] if module_path.exists() else []
         files_to_create = [module_path] if not module_path.exists() else []
         cp = self._checkpoint_mgr.create_checkpoint(
@@ -115,10 +124,10 @@ class CodeAdapter:
         )
 
         try:
-            # 4. Write to disk
+            self._checkpoint_mgr.check_write_conflict(module_path, cp)
             module_path.write_text(code, encoding="utf-8")
+            self._checkpoint_mgr.record_postimage(tx_id, module_path, checkpoint=cp)
 
-            # 5. Verify the expected callable exists in the AST (no in-process load)
             top_level_funcs: List[str] = [
                 node.name
                 for node in ast.walk(tree)
@@ -130,17 +139,15 @@ class CodeAdapter:
                     f"Found: {top_level_funcs or '(none)'}"
                 )
 
-            # 6. Subprocess smoke/execution test — ALWAYS runs; test_inputs=None → zero-arg smoke call.
             ok, test_output, error_msg = run_worker(
                 module_path=module_path,
                 func_name=name,
-                test_inputs=test_inputs,      # None → smoke call in worker
+                test_inputs=test_inputs,
                 expected_output=expected_output,
             )
             if not ok:
                 raise RuntimeError(error_msg)
 
-            # 7. Registry entry
             content_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()[:16]
             ext_id = f"code_{name}"
             func_node = next(
@@ -160,11 +167,10 @@ class CodeAdapter:
             )
             self._registry.register(entry)
 
-            # 8. CapabilityIndex — operation.func dispatches through subprocess worker.
             if self._capability_index:
                 from charlie.capabilities import CapabilityDescriptor, CapabilityOperation
 
-                _mp = module_path  # capture for closure
+                _mp = module_path
                 _fn = name
 
                 def _dispatch(**kwargs: Any) -> Any:
@@ -190,7 +196,7 @@ class CodeAdapter:
                             description=docstring,
                             parameters_schema={"type": "object"},
                             risk_class="reversible",
-                            func=_dispatch,  # subprocess-backed; no in-process exec
+                            func=_dispatch,
                         )
                     },
                     availability_check=lambda: module_path.exists(),
@@ -203,33 +209,49 @@ class CodeAdapter:
                 module_path=str(module_path),
                 tool_name=name,
                 test_output=test_output,
+                checkpoint=cp,
             )
 
         except Exception as exc:
             logger.error("Code extension '%s' failed, rolling back: %s", name, exc)
-            self._checkpoint_mgr.rollback(cp)
+            rollback = self._checkpoint_mgr.rollback(cp)
+            rollback_suffix = "" if rollback.success else f" rollback_failed: {rollback.message}"
             return CodeAdapterResult(
                 success=False,
-                message=f"Verification failed, rolled back: {exc}",
+                message=f"Verification failed, rolled back: {exc}.{rollback_suffix}",
                 tool_name=name,
+                checkpoint=cp,
             )
 
-    def rollback_code_extension(self, name: str) -> CodeAdapterResult:
+    def rollback_code_extension(
+        self,
+        name: str,
+        checkpoint: Optional[ExtensionCheckpoint] = None,
+    ) -> CodeAdapterResult:
         ext_id = f"code_{name}"
         self._registry.unregister(ext_id)
 
-        module_path = self._tools_dir / f"{name}.py"
-        if module_path.exists():
-            try:
-                module_path.unlink()
-            except Exception as exc:
-                logger.warning("Failed removing tool module %s: %s", module_path, exc)
+        rollback = None
+        if checkpoint is not None:
+            rollback = self._checkpoint_mgr.rollback(checkpoint)
+        else:
+            module_path = self._tools_dir / f"{name}.py"
+            if module_path.exists():
+                try:
+                    module_path.unlink()
+                except Exception as exc:
+                    logger.warning("Failed removing tool module %s: %s", module_path, exc)
 
         if self._capability_index:
             self._capability_index._capabilities.pop(ext_id, None)
 
         return CodeAdapterResult(
-            success=True,
-            message=f"Code extension '{name}' unregistered and removed.",
+            success=rollback.success if rollback is not None else True,
+            message=(
+                f"Code extension '{name}' rolled back."
+                if rollback is None or rollback.success
+                else f"Code extension '{name}' rollback_failed: {rollback.message}"
+            ),
             tool_name=name,
+            checkpoint=checkpoint,
         )

@@ -91,7 +91,12 @@ class CheckpointManager:
             config_preimage=dict(config_preimage or {}),
         )
 
-    def record_postimage(self, transaction_id: str, path: Path) -> None:
+    def record_postimage(
+        self,
+        transaction_id: str,
+        path: Path,
+        checkpoint: Optional[ExtensionCheckpoint] = None,
+    ) -> None:
         """Record the SHA-256 of a file just written by a transaction.
 
         Called immediately after each file write so that rollback can detect
@@ -99,7 +104,10 @@ class CheckpointManager:
         """
         if not path.exists():
             return
-        self._postimages.setdefault(transaction_id, {})[str(path)] = _sha256(path)
+        postimage_hash = _sha256(path)
+        self._postimages.setdefault(transaction_id, {})[str(path)] = postimage_hash
+        if checkpoint is not None:
+            checkpoint.postimage_hashes[str(path)] = postimage_hash
 
     def get_postimage_hash(self, transaction_id: str, path: Path) -> Optional[str]:
         return self._postimages.get(transaction_id, {}).get(str(path))
@@ -135,7 +143,7 @@ class CheckpointManager:
         # 1. Restore modified files — skip if post-image conflict detected
         for path_str, original_bytes in checkpoint.affected_files_preimage.items():
             p = Path(path_str)
-            postimage_hash = self._postimages.get(tx_id, {}).get(path_str)
+            postimage_hash = checkpoint.postimage_hashes.get(path_str) or self._postimages.get(tx_id, {}).get(path_str)
             try:
                 WorktreeGuard.check_before_rollback(p, postimage_hash)
             except WorktreeConflictError as exc:
@@ -155,7 +163,7 @@ class CheckpointManager:
         # 2. Remove newly created files — skip if externally modified
         for path_str in checkpoint.new_files_created:
             p = Path(path_str)
-            postimage_hash = self._postimages.get(tx_id, {}).get(path_str)
+            postimage_hash = checkpoint.postimage_hashes.get(path_str) or self._postimages.get(tx_id, {}).get(path_str)
             try:
                 WorktreeGuard.check_before_rollback(p, postimage_hash)
             except WorktreeConflictError as exc:

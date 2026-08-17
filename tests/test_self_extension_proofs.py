@@ -1,8 +1,9 @@
 """Authoritative 6 Acceptance Proofs for Controlled Self-Extension."""
 
-import json
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock
+
 import pytest
 
 from charlie.config import Config
@@ -13,7 +14,6 @@ from charlie.self_extension.models import (
     ExtensionRequest,
     ExtensionClassification,
     TransactionStatus,
-    RiskClass,
 )
 from charlie.self_extension.orchestrator import SelfExtensionOrchestrator
 
@@ -24,7 +24,6 @@ def mock_orchestrator_env():
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_root = Path(tmpdir).resolve()
 
-        # Files
         env_file = repo_root / ".env"
         env_file.write_text("LLM_MODEL=gpt-4o-mini\n", encoding="utf-8")
 
@@ -39,6 +38,15 @@ def mock_orchestrator_env():
         settings_service = SettingsService(config_instance=cfg, env_path=env_file)
         cap_idx = CapabilityIndex()
 
+        doctor = MagicMock()
+        doctor.diagnose.return_value = MagicMock(is_healthy=True, errors=[])
+        code_index = MagicMock()
+        code_index.refresh = MagicMock()
+        introspector = MagicMock()
+        introspector.get_capabilities_info.return_value = {"by_id": {}}
+        self_knowledge = MagicMock()
+        self_knowledge.answer_self_question.return_value = {"answer": "capabilities"}
+
         orchestrator = SelfExtensionOrchestrator(
             repo_root=repo_root,
             manifest_path=manifest_path,
@@ -47,14 +55,18 @@ def mock_orchestrator_env():
             settings_service=settings_service,
             config=cfg,
             capability_index=cap_idx,
+            doctor=doctor,
+            code_index=code_index,
+            introspector=introspector,
+            self_knowledge=self_knowledge,
         )
 
-        yield orchestrator, repo_root, cfg, env_file, cap_idx
+        yield orchestrator, repo_root, cfg, env_file, cap_idx, introspector, self_knowledge
 
 
 def test_proof_1_reversible_config_extension(mock_orchestrator_env):
     """Proof 1: Reversible Config Extension applied via SettingsService and verifiable rollback."""
-    orchestrator, repo_root, cfg, env_file, _ = mock_orchestrator_env
+    orchestrator, repo_root, cfg, env_file, _, _, _ = mock_orchestrator_env
 
     # 1. User requests config update
     req = ExtensionRequest(
@@ -78,7 +90,9 @@ def test_proof_1_reversible_config_extension(mock_orchestrator_env):
 
 def test_proof_2_reusable_skill_extension_lifecycle(mock_orchestrator_env):
     """Proof 2: Reusable Skill lifecycle (creation, capability indexing, disable, and removal)."""
-    orchestrator, repo_root, _, _, cap_idx = mock_orchestrator_env
+    orchestrator, repo_root, _, _, cap_idx, introspector, self_knowledge = mock_orchestrator_env
+    introspector.get_capabilities_info.return_value = {"by_id": {"skill_triage_playbook": {}}}
+    self_knowledge.answer_self_question.return_value = {"answer": "skill_triage_playbook"}
 
     skill_md = """---
 name: triage_playbook
@@ -116,7 +130,9 @@ scripts:
 
 def test_proof_3_mcp_server_tool_extension(mock_orchestrator_env):
     """Proof 3: MCP tool integration, registration in CapabilityIndex, and rollback."""
-    orchestrator, _, _, _, cap_idx = mock_orchestrator_env
+    orchestrator, _, _, _, cap_idx, introspector, self_knowledge = mock_orchestrator_env
+    introspector.get_capabilities_info.return_value = {"by_id": {"mcp_github": {}}}
+    self_knowledge.answer_self_question.return_value = {"answer": "mcp_github"}
 
     req = ExtensionRequest(
         user_prompt="Connect the github MCP server",
@@ -139,7 +155,9 @@ def test_proof_3_mcp_server_tool_extension(mock_orchestrator_env):
 
 def test_proof_4_small_code_extension_ast_and_verification(mock_orchestrator_env):
     """Proof 4: Small code extension with static AST validation, test execution, and rollback on error."""
-    orchestrator, repo_root, _, _, cap_idx = mock_orchestrator_env
+    orchestrator, repo_root, _, _, cap_idx, introspector, self_knowledge = mock_orchestrator_env
+    introspector.get_capabilities_info.return_value = {"by_id": {"code_add_numbers": {}}}
+    self_knowledge.answer_self_question.return_value = {"answer": "code_add_numbers"}
 
     # 1. Valid code extension
     good_code = """
@@ -184,7 +202,7 @@ def broken_calc(x: int) -> int:
 
 def test_proof_5_spontaneous_modification_guard(mock_orchestrator_env):
     """Proof 5: Spontaneous self-modification guard blocks unprompted self-edits and gates large architecture."""
-    orchestrator, _, _, _, _ = mock_orchestrator_env
+    orchestrator, _, _, _, _, _, _ = mock_orchestrator_env
 
     # 1. Spontaneous (unprompted) self-edit attempt
     req_spontaneous = ExtensionRequest(
@@ -210,7 +228,9 @@ def test_proof_5_spontaneous_modification_guard(mock_orchestrator_env):
 
 def test_proof_6_worktree_safety_and_preservation_of_unrelated_files(mock_orchestrator_env):
     """Proof 6: Unrelated dirty and untracked files are preserved 100% byte-for-byte during rollbacks."""
-    orchestrator, repo_root, _, _, _ = mock_orchestrator_env
+    orchestrator, repo_root, _, _, _, introspector, self_knowledge = mock_orchestrator_env
+    introspector.get_capabilities_info.return_value = {"by_id": {"code_faulty_tool": {}}}
+    self_knowledge.answer_self_question.return_value = {"answer": "code_faulty_tool"}
 
     # Create unrelated user files (one tracked, one untracked)
     user_file_1 = repo_root / "user_notes.md"

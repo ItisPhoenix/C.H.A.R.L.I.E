@@ -305,8 +305,6 @@ class ExtensionRegistry:
                 mcp_client.add_server(config)
                 if tool_registry is not None:
                     mcp_client.enable_server(tool_registry, name)
-                else:
-                    mcp_client.connect_server(name)
                 discovered = [
                     t.name
                     for t in mcp_client.list_tools()

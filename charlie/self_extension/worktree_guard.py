@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +21,63 @@ def _sha256_bytes(path: Path) -> str:
 
 class WorktreeGuard:
     """Detects external modifications to files before write or rollback."""
+
+    @staticmethod
+    def check_repository_baseline(
+        path: Path,
+        repo_root: Path,
+        fallback_hash: Optional[str] = None,
+    ) -> None:
+        """Reject an existing target already dirty before checkpoint capture.
+
+        Tracked files use ``HEAD`` as repository baseline. Untracked generated
+        extensions use their registry hash as fallback; without either baseline,
+        an existing target is treated as unrelated user work.
+        """
+        if not path.exists():
+            return
+
+        try:
+            relative = path.resolve().relative_to(repo_root.resolve()).as_posix()
+            tracked = subprocess.run(
+                ["git", "ls-files", "--error-unmatch", "--", relative],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            ).returncode == 0
+            if tracked:
+                baseline = subprocess.run(
+                    ["git", "show", f"HEAD:{relative}"],
+                    cwd=repo_root,
+                    capture_output=True,
+                    check=False,
+                )
+                if baseline.returncode == 0:
+                    actual = _sha256_bytes(path)
+                    expected = hashlib.sha256(baseline.stdout).hexdigest()
+                    if actual != expected:
+                        raise WorktreeConflictError(
+                            f"Target file '{path}' is dirty relative to repository baseline. "
+                            "Refusing to capture it as a rollback preimage."
+                        )
+                    return
+        except WorktreeConflictError:
+            raise
+        except (OSError, subprocess.SubprocessError):
+            logger.debug("Repository baseline unavailable for %s", path, exc_info=True)
+
+        if fallback_hash is None:
+            raise WorktreeConflictError(
+                f"Target file '{path}' exists but has no known repository or extension baseline. "
+                "Cannot overwrite unrelated user work."
+            )
+        actual = _sha256_bytes(path)
+        if not (actual == fallback_hash or actual.startswith(fallback_hash)):
+            raise WorktreeConflictError(
+                f"Target file '{path}' differs from its recorded extension baseline. "
+                "Refusing to capture it as a rollback preimage."
+            )
 
     @staticmethod
     def check_before_write(

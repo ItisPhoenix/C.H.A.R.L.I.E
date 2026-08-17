@@ -59,7 +59,13 @@ _self_knowledge_service = SelfKnowledgeService(
     runtime_introspector=_runtime_introspector, code_index=_code_index
 )
 _doctor = CharlieDoctor(introspector=_runtime_introspector)
-_self_extension_orchestrator = SelfExtensionOrchestrator(config=config)
+_self_extension_orchestrator = SelfExtensionOrchestrator(
+    config=config,
+    doctor=_doctor,
+    code_index=_code_index,
+    introspector=_runtime_introspector,
+    self_knowledge=_self_knowledge_service,
+)
 
 _START_TIME = time.time()
 
@@ -1596,8 +1602,11 @@ async def connect_mcp_server(name: str):
     if mcp_client is None:
         raise HTTPException(status_code=500, detail="MCP client unavailable")
 
-    success = mcp_client.connect_server(name)
-    if not success:
+    from charlie.tools import registry
+
+    try:
+        mcp_client.enable_server(registry, name)
+    except KeyError:
         raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
     return {"status": "ok"}
 
@@ -1609,8 +1618,9 @@ async def disconnect_mcp_server(name: str):
     if mcp_client is None:
         return {"status": "ok"}
 
-    success = mcp_client.disconnect_server(name)
-    if not success:
+    from charlie.tools import registry
+
+    if not mcp_client.disable_server(registry, name):
         raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
     return {"status": "ok"}
 
@@ -1624,8 +1634,9 @@ async def restart_mcp_server(name: str):
     if mcp_client is None:
         raise HTTPException(status_code=500, detail="MCP client unavailable")
 
-    success = mcp_client.restart_server(name)
-    if not success:
+    from charlie.tools import registry
+
+    if not mcp_client.restart_server(registry, name):
         raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
     return {"status": "ok"}
 
@@ -1637,8 +1648,9 @@ async def delete_mcp_server(name: str):
     if mcp_client is None:
         return {"status": "ok"}
 
-    success = mcp_client.remove_server_by_name(name)
-    if not success:
+    from charlie.tools import registry
+
+    if not mcp_client.remove_server(registry, name):
         raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
     return {"status": "ok"}
 
