@@ -59,7 +59,19 @@ frontend/node_modules/
 frontend/.next/
 frontend/out/
 frontend/build/
+frontend/dist/
+dist/
 frontend/.env*
+playwright-report/
+test-results/
+
+# === Temp, Scratch & Cache ===
+tmp/
+temp/
+*.tmp
+*.temp
+.cache/
+.tempmediaStorage/
 
 # === Sensitive Artifacts ===
 *.key
