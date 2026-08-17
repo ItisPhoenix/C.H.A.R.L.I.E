@@ -80,6 +80,7 @@ class EventType(StrEnum):
     SELF_EXTENSION_RESTARTING = "self_extension_restarting"
     SELF_EXTENSION_VERIFYING = "self_extension_verifying"
     SELF_EXTENSION_COMPLETED = "self_extension_completed"
+    SELF_EXTENSION_RESULT = "self_extension_result"
     SELF_EXTENSION_FAILED = "self_extension_failed"
     SELF_EXTENSION_ROLLBACK_STARTED = "self_extension_rollback_started"
     SELF_EXTENSION_ROLLED_BACK = "self_extension_rolled_back"

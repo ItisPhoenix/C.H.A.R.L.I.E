@@ -2,26 +2,27 @@
 
 import pytest
 from starlette.testclient import TestClient
+
 from charlie.web_server import app
 
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 def test_api_extension_request_spontaneous_blocked(client):
-    """Verify POST /api/extensions/request blocks spontaneous requests without explicit flag."""
+    """Verify web delegates request; voice runtime owns approval decision."""
     res = client.post("/api/extensions/request", json={"prompt": "Internal optimize", "explicit": False})
-    assert res.status_code == 200
+    assert res.status_code == 202
     data = res.json()
-    assert data["success"] is False
-    assert data["status"] == "approval_required"
-    assert "spontaneous" in data["message"].lower()
+    assert data["status"] == "requested"
+    assert data["request_id"]
 
 
 def test_api_extension_request_config_applied(client):
-    """Verify POST /api/extensions/request applies config updates when explicit."""
+    """Verify web sends typed config request to authoritative voice runtime."""
     res = client.post(
         "/api/extensions/request",
         json={
@@ -30,10 +31,9 @@ def test_api_extension_request_config_applied(client):
             "settings": {"LLM_MODEL": "gpt-4o"},
         },
     )
-    assert res.status_code == 200
+    assert res.status_code == 202
     data = res.json()
-    assert data["success"] is True
-    assert data["status"] == "completed"
+    assert data["status"] == "requested"
 
 
 def test_api_extension_transactions_list(client):

@@ -62,6 +62,7 @@
     "self_extension_restarting":     {"category": "progress", "replay": true,  "required": ["tx_id"]},
     "self_extension_verifying":      {"category": "progress", "replay": false, "required": ["tx_id"]},
     "self_extension_completed":      {"category": "result",   "replay": false, "required": ["tx_id"]},
+    "self_extension_result":         {"category": "result",   "replay": false, "required": ["request_id", "status"]},
     "self_extension_failed":         {"category": "result",   "replay": false, "required": ["tx_id", "reason"]},
     "self_extension_rollback_started": {"category": "progress", "replay": false, "required": ["tx_id"]},
     "self_extension_rolled_back":    {"category": "result",   "replay": false, "required": ["tx_id"]}

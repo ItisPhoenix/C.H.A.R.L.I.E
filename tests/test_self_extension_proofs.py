@@ -2,20 +2,21 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, create_autospec
 
 import pytest
 
-from charlie.config import Config
-from charlie.settings_service import SettingsService
 from charlie.capabilities import CapabilityIndex
+from charlie.config import Config
+from charlie.mcp_client import MCPClient, MCPTool
 from charlie.self_extension.models import (
+    ExtensionClassification,
     ExtensionKind,
     ExtensionRequest,
-    ExtensionClassification,
     TransactionStatus,
 )
 from charlie.self_extension.orchestrator import SelfExtensionOrchestrator
+from charlie.settings_service import SettingsService
 
 
 @pytest.fixture
@@ -37,6 +38,13 @@ def mock_orchestrator_env():
         cfg.llm_model = "gpt-4o-mini"
         settings_service = SettingsService(config_instance=cfg, env_path=env_file)
         cap_idx = CapabilityIndex()
+        mcp_client = create_autospec(MCPClient, instance=True)
+        mcp_client.list_tools.return_value = [
+            MCPTool(name="create_issue", description="create", server_name="github"),
+            MCPTool(name="get_file", description="read", server_name="github"),
+        ]
+        mcp_client.health_check.return_value = {"github": True}
+        from charlie.tools import ToolRegistry
 
         doctor = MagicMock()
         doctor.diagnose.return_value = MagicMock(is_healthy=True, errors=[])
@@ -55,6 +63,8 @@ def mock_orchestrator_env():
             settings_service=settings_service,
             config=cfg,
             capability_index=cap_idx,
+            mcp_client=mcp_client,
+            tool_registry=ToolRegistry(),
             doctor=doctor,
             code_index=code_index,
             introspector=introspector,

@@ -162,12 +162,19 @@ class SelfExtensionOrchestrator:
         elif kind == ExtensionKind.MCP_TOOL:
             name = self._plan_name(prompt, "requested_mcp")
             command_match = re.search(r"\bcommand\s*[:=]?\s*([\w./-]+)", prompt, re.IGNORECASE)
-            command = command_match.group(1) if command_match else "npx"
+            if command_match is None:
+                request.requires_approval = True
+                request.planning_error = (
+                    "NEEDS_INPUT: MCP command is required. Provide explicit command, args, and env; "
+                    "Charlie will not guess a server package or transport."
+                )
+                return request
+            command = command_match.group(1)
             args_match = re.search(r"\bargs\s*[:=]\s*([^;]+)", prompt, re.IGNORECASE)
             args = (
                 [item.strip(" '\"") for item in args_match.group(1).strip(" []").split(",") if item.strip()]
                 if args_match
-                else ["-y", "@modelcontextprotocol/server-filesystem"]
+                else []
             )
             env_match = re.search(r"\benv\s*[:=]\s*([^;]+)", prompt, re.IGNORECASE)
             env = {}
@@ -188,7 +195,15 @@ class SelfExtensionOrchestrator:
             )
             request.affected_capabilities = [f"mcp_{name}"]
         elif kind == ExtensionKind.CODE_SMALL:
-            name, source, inputs, expected = self._build_code_plan(prompt)
+            code_plan = self._build_code_plan(prompt)
+            if code_plan is None:
+                request.requires_approval = True
+                request.planning_error = (
+                    "APPROVAL_REQUIRED: requested semantics cannot be translated confidently into "
+                    "the restricted pure-function CODE_SMALL subset."
+                )
+                return request
+            name, source, inputs, expected = code_plan
             request.plan = ExtensionPlan(
                 plan_id=f"plan-{uuid.uuid4().hex[:8]}",
                 kind=kind,
@@ -225,9 +240,12 @@ class SelfExtensionOrchestrator:
         return candidate[:48]
 
     @staticmethod
-    def _build_code_plan(prompt: str) -> tuple[str, str, Dict[str, Any], Any]:
+    def _build_code_plan(prompt: str) -> Optional[tuple[str, str, Dict[str, Any], Any]]:
         explicit = re.search(r"\b(?:called|named)\s+([A-Za-z_]\w*)", prompt, re.IGNORECASE)
         lower = prompt.lower()
+        if "celsius" in lower and "fahrenheit" in lower:
+            name = explicit.group(1) if explicit else "celsius_to_fahrenheit"
+            return name, f"def {name}(celsius=0):\n    return celsius * 9 / 5 + 32\n", {"celsius": 100}, 212
         if "double" in lower:
             name = explicit.group(1) if explicit else "double_value"
             return name, f"def {name}(value=0):\n    return value * 2\n", {"value": 2}, 4
@@ -237,8 +255,13 @@ class SelfExtensionOrchestrator:
         if "uppercase" in lower or "upper case" in lower:
             name = explicit.group(1) if explicit else "uppercase_text"
             return name, f"def {name}(value=''):\n    return value.upper()\n", {"value": "charlie"}, "CHARLIE"
-        name = explicit.group(1) if explicit else "generated_tool"
-        return name, f"def {name}(value=None):\n    return value\n", {"value": "ok"}, "ok"
+        restricted_terms = (
+            "filesystem", "file system", "read file", "write file", "network",
+            "socket", "http", "process", "os command",
+        )
+        if any(term in lower for term in restricted_terms):
+            return None
+        return None
 
     # ─────────────────────────────────────────────────────────────────────────
     # Event emission (canonical EventType)

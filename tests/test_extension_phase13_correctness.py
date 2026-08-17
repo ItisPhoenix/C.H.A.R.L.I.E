@@ -559,7 +559,7 @@ class TestProductionFreezeEntryPoints(unittest.TestCase):
                 )
             )
             self.assertFalse(payload["success"])
-            self.assertEqual(payload["status"], TransactionStatus.FAILED.value)
+            self.assertEqual(payload["status"], TransactionStatus.APPROVAL_REQUIRED.value)
             self.assertNotIn("mcp_unavailable_mcp", orch._capability_index._capabilities)
 
     def test_architecture_and_spontaneous_requests_stop_at_guard(self) -> None:
@@ -607,3 +607,63 @@ class TestProductionFreezeEntryPoints(unittest.TestCase):
             self.assertIn(cap_id, knowledge.answer_self_question("what capabilities do you have")["answer"])
         finally:
             cap_idx.unregister_capability(cap_id)
+
+    def test_mcp_missing_configuration_needs_input_without_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            orch = self._runtime_orchestrator(Path(td))
+            request = orch.plan_request("connect MCP server named foo")
+            self.assertIsNone(request.plan)
+            self.assertIn("NEEDS_INPUT", request.planning_error or "")
+            result = orch.execute_transaction(request)
+            self.assertEqual(result.status, TransactionStatus.APPROVAL_REQUIRED)
+            self.assertNotIn("filesystem", result.message.lower())
+            self.assertEqual(list((Path(td) / "tools").glob("*")), [])
+
+    def test_celsius_to_fahrenheit_semantics_reach_registered_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            orch = self._runtime_orchestrator(Path(td))
+            request = orch.plan_request("create a function that converts Celsius to Fahrenheit")
+            result = orch.execute_transaction(request)
+            self.assertTrue(result.success, result.message)
+            operation = orch._capability_index.get_operation("celsius_to_fahrenheit")
+            self.assertIsNotNone(operation)
+            self.assertEqual(operation.func(celsius=100), 212)
+
+    def test_unknown_and_restricted_code_requests_never_become_identity_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            orch = self._runtime_orchestrator(Path(td))
+            for prompt in (
+                "create a function that reverses a custom opaque object",
+                "create a function that reads a filesystem file",
+            ):
+                request = orch.plan_request(prompt)
+                self.assertIsNone(request.plan)
+                result = orch.execute_transaction(request)
+                self.assertEqual(result.status, TransactionStatus.APPROVAL_REQUIRED)
+                self.assertNotIn("generated_tool", orch._capability_index._op_by_name)
+
+    def test_web_self_extension_endpoint_delegates_over_event_bus(self) -> None:
+        import charlie.web_server as web_server
+
+        class FakeBus:
+            def __init__(self) -> None:
+                self.commands: list = []
+
+            async def send_command(self, command: dict) -> None:
+                self.commands.append(command)
+
+        async def _run() -> None:
+            previous = web_server.event_bus
+            fake = FakeBus()
+            web_server.event_bus = fake
+            try:
+                response = await web_server.request_self_extension(
+                    {"prompt": "connect MCP server named foo"}
+                )
+                self.assertEqual(response.status_code, 202)
+                self.assertEqual(fake.commands[0]["type"], "self_extension_request")
+                self.assertEqual(fake.commands[0]["payload"]["prompt"], "connect MCP server named foo")
+            finally:
+                web_server.event_bus = previous
+
+        asyncio.run(_run())

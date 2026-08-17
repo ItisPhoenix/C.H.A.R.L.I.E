@@ -651,6 +651,7 @@ async def main():
     # Wire the MCP subsystem into the SAME shared tool registry (no-op unless enabled).
     # Runs on a thread, awaited later, so it overlaps with VoiceEngine/STT startup instead of blocking it.
     mcp_client = None
+    self_extension_orchestrator = None
     if config.mcp_enabled:
         _set_subsystem_health("mcp", HealthStatus.STARTING)
 
@@ -1292,6 +1293,43 @@ async def main():
                     payload = cmd.get("payload", {})
                     mic_state = voice.set_mic_state(bool(payload.get("mic_muted", True)))
                     await event_bus.emit("mic_state", mic_state, meta=EventMeta(source=EventSource.VOICE))
+                elif cmd_type == "self_extension_request":
+                    payload = cmd.get("payload", {})
+                    request_id = str(payload.get("request_id") or cmd.get("request_id") or uuid.uuid4().hex)
+
+                    async def _run_self_extension(request_payload: dict, req_id: str) -> None:
+                        if self_extension_orchestrator is None:
+                            result = {
+                                "success": False,
+                                "status": "failed",
+                                "message": "Self-extension runtime is not initialized.",
+                            }
+                        else:
+                            request = self_extension_orchestrator.plan_request(
+                                str(request_payload.get("prompt", "")),
+                                explicit_user_request=bool(request_payload.get("explicit", True)),
+                                affected_settings=dict(request_payload.get("settings") or {}),
+                            )
+                            extension_result = await asyncio.to_thread(
+                                self_extension_orchestrator.execute_transaction,
+                                request,
+                            )
+                            result = extension_result.to_dict()
+                        await event_bus.emit(
+                            "self_extension_result",
+                            {"request_id": req_id, **result},
+                            meta=EventMeta(
+                                source=EventSource.BRAIN,
+                                rationale="authoritative self-extension transaction result",
+                            ),
+                        )
+
+                    asyncio.create_task(_run_self_extension(payload, request_id))
+                elif cmd_type == "self_extension_rollback":
+                    payload = cmd.get("payload", {})
+                    tx_id = str(payload.get("tx_id", ""))
+                    if tx_id and self_extension_orchestrator is not None:
+                        await asyncio.to_thread(self_extension_orchestrator.rollback_transaction, tx_id)
                 elif cmd_type == "ptt_start":
                     voice.start_ptt()
                     await event_bus.emit("ptt_start", {}, meta=EventMeta(source=EventSource.VOICE))
@@ -1740,21 +1778,22 @@ async def main():
             )
             from charlie.tools import configure_runtime_services, registry as tool_registry
 
+            self_extension_orchestrator = SelfExtensionOrchestrator(
+                repo_root=Path(__file__).resolve().parent,
+                settings_service=SettingsService(config_instance=config),
+                config=config,
+                capability_index=shared_capability_index,
+                event_bus=bus,
+                event_loop=asyncio.get_running_loop(),
+                mcp_client=mcp_client,
+                tool_registry=tool_registry,
+                doctor=doctor,
+                code_index=code_index,
+                self_knowledge=self_knowledge,
+                introspector=runtime_introspector,
+            )
             configure_runtime_services(
-                self_extension_orchestrator=SelfExtensionOrchestrator(
-                    repo_root=Path(__file__).resolve().parent,
-                    settings_service=SettingsService(config_instance=config),
-                    config=config,
-                    capability_index=shared_capability_index,
-                    event_bus=bus,
-                    event_loop=asyncio.get_running_loop(),
-                    mcp_client=mcp_client,
-                    tool_registry=tool_registry,
-                    doctor=doctor,
-                    code_index=code_index,
-                    self_knowledge=self_knowledge,
-                    introspector=runtime_introspector,
-                ),
+                self_extension_orchestrator=self_extension_orchestrator,
                 runtime_introspector=runtime_introspector,
                 self_knowledge_service=self_knowledge,
                 doctor=doctor,

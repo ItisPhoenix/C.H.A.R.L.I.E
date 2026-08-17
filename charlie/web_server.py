@@ -46,7 +46,6 @@ from charlie.code_index import CodeIndex
 from charlie.runtime_introspector import RuntimeIntrospector
 from charlie.self_knowledge import SelfKnowledgeService
 from charlie.doctor import CharlieDoctor
-from charlie.self_extension import SelfExtensionOrchestrator
 
 logger = logging.getLogger("charlie.web_server")
 logger.addFilter(SensitiveDataFilter())
@@ -67,7 +66,7 @@ _doctor = CharlieDoctor(
     introspector=_runtime_introspector,
     capability_index=_shared_capability_index,
 )
-_self_extension_orchestrator = None
+_self_extension_events: List[Dict[str, Any]] = []
 
 _START_TIME = time.time()
 
@@ -289,7 +288,7 @@ async def lifespan(app: FastAPI):
     """Startup: init EventBus + ZMQ guard + plugin tools. MCP starts lazily,
     see _ensure_mcp_client(). Shutdown: tear down EventBus."""
     # --- startup ---
-    global event_bus, plugin_manager, _calendar_store, _audit_store, _self_extension_orchestrator
+    global event_bus, plugin_manager, _calendar_store, _audit_store
     if config.plugins_enabled:
         try:
             from charlie.tools import register_plugin_tools
@@ -310,25 +309,8 @@ async def lifespan(app: FastAPI):
     logger.info("Web server started, event bridge active")
 
     await _ensure_mcp_client_async()
-    from charlie.settings_service import SettingsService
-    from charlie.tools import registry as tool_registry
-
     _runtime_introspector._mcp_client = mcp_client
     _doctor._mcp_client = mcp_client
-    _self_extension_orchestrator = SelfExtensionOrchestrator(
-        repo_root=Path(__file__).resolve().parents[1],
-        settings_service=SettingsService(config_instance=config),
-        config=config,
-        capability_index=_shared_capability_index,
-        event_bus=event_bus,
-        event_loop=asyncio.get_running_loop(),
-        mcp_client=mcp_client,
-        tool_registry=tool_registry,
-        doctor=_doctor,
-        code_index=_code_index,
-        self_knowledge=_self_knowledge_service,
-        introspector=_runtime_introspector,
-    )
 
     # ZMQ guard -- suppress CancelledError traceback on Windows shutdown
     loop = asyncio.get_event_loop()
@@ -476,6 +458,9 @@ async def _event_bridge():
         logger.debug(f"Event received: {event}")
         global pipeline_state
         etype = event.get("type", "")
+        if etype.startswith("self_extension_"):
+            _self_extension_events.append(event)
+            del _self_extension_events[:-200]
         if etype == "charlie_state":
             pipeline_state = event.get("payload", {}).get("state", pipeline_state)
 
@@ -1843,7 +1828,7 @@ async def uninstall_extension(name: str):
 
 @app.post("/api/extensions/request")
 async def request_self_extension(payload: Dict[str, Any]):
-    """Execute or propose a controlled self-extension transaction."""
+    """Delegate controlled self-extension to authoritative voice runtime."""
     prompt = str(payload.get("prompt", "")).strip()
     if not prompt:
         return JSONResponse(status_code=400, content={"error": "prompt parameter required"})
@@ -1851,37 +1836,54 @@ async def request_self_extension(payload: Dict[str, Any]):
     explicit = bool(payload.get("explicit", True))
     settings = dict(payload.get("settings") or {})
 
-    if _self_extension_orchestrator is None:
-        return JSONResponse(status_code=503, content={"error": "self-extension runtime is not initialized"})
-    req = _self_extension_orchestrator.plan_request(
-        prompt,
-        explicit_user_request=explicit,
-        affected_settings=settings,
+    if event_bus is None:
+        return JSONResponse(status_code=503, content={"error": "voice runtime is not connected"})
+    request_id = uuid.uuid4().hex
+    await event_bus.send_command(
+        {
+            "type": "self_extension_request",
+            "payload": {
+                "request_id": request_id,
+                "prompt": prompt,
+                "explicit": explicit,
+                "settings": settings,
+            },
+        }
     )
-    res = _self_extension_orchestrator.execute_transaction(req)
-    return res.to_dict()
+    return JSONResponse(status_code=202, content={"request_id": request_id, "status": "requested"})
 
 
 @app.get("/api/extensions/transactions")
 async def list_extension_transactions():
-    """List recorded extension transaction history."""
-    return {"transactions": _self_extension_orchestrator.list_transactions()}
+    """Return read-only lifecycle/result events received from voice runtime."""
+    return {"transactions": list(_self_extension_events)}
 
 
 @app.get("/api/extensions/transactions/{tx_id}")
 async def get_extension_transaction(tx_id: str):
-    """Retrieve details for a specific extension transaction."""
-    tx = _self_extension_orchestrator.get_transaction(tx_id)
-    if not tx:
+    """Retrieve read-only result/lifecycle evidence for a transaction."""
+    tx = next(
+        (
+            event
+            for event in reversed(_self_extension_events)
+            if event.get("payload", {}).get("tx_id") == tx_id
+        ),
+        None,
+    )
+    if tx is None:
         raise HTTPException(status_code=404, detail=f"Transaction '{tx_id}' not found")
     return tx
 
 
 @app.post("/api/extensions/transactions/{tx_id}/rollback")
 async def rollback_extension_transaction(tx_id: str):
-    """Safely roll back an extension transaction."""
-    res = _self_extension_orchestrator.rollback_transaction(tx_id)
-    return res.to_dict()
+    """Request rollback from authoritative voice runtime."""
+    if event_bus is None:
+        return JSONResponse(status_code=503, content={"error": "voice runtime is not connected"})
+    await event_bus.send_command(
+        {"type": "self_extension_rollback", "payload": {"tx_id": tx_id}}
+    )
+    return JSONResponse(status_code=202, content={"tx_id": tx_id, "status": "rollback_requested"})
 
 
 @app.post("/api/session/active")

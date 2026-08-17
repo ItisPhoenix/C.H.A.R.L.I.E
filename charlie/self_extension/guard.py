@@ -16,6 +16,14 @@ class AuthorizationGuard:
         """Evaluate an extension request against authorization and safety policies."""
         kind = request.classification.kind if request.classification else ExtensionKind.CODE_SMALL
 
+        if request.requires_approval or request.planning_error:
+            return GuardDecision(
+                is_authorized=False,
+                requires_approval=True,
+                reason=request.planning_error or "APPROVAL_REQUIRED: extension plan needs review.",
+                risk_class=RiskClass.DANGEROUS,
+            )
+
         # Rule 1: Spontaneous self-modification is strictly blocked without explicit approval
         if not request.explicit_user_request:
             return GuardDecision(

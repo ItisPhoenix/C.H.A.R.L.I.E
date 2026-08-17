@@ -90,6 +90,7 @@ class ExtensionRequest:
     risk_class: RiskClass = RiskClass.REVERSIBLE
     requires_approval: bool = False
     requires_restart: bool = False
+    planning_error: Optional[str] = None
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -124,6 +125,7 @@ class ExtensionRequest:
             risk_class=RiskClass(data.get("risk_class", RiskClass.REVERSIBLE.value)),
             requires_approval=bool(data.get("requires_approval", False)),
             requires_restart=bool(data.get("requires_restart", False)),
+            planning_error=data.get("planning_error"),
             created_at=float(data.get("created_at", time.time())),
         )
 
