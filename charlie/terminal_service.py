@@ -505,11 +505,12 @@ class TerminalSession:
         self.backend.resize(self.cols, self.rows)
 
     def interrupt(self) -> None:
-        # Ctrl+C = 0x03
+        # Ctrl+C = 0x03 into ConPTY input; repeat so a blocked Sleep still sees it
         default_lease_manager.manual_takeover(["terminal"])
         self.lease_holder = "user"
         self._last_user_input_time = time.monotonic()
         self._cancel_pending_transactions("Interrupted by user Ctrl+C")
+        self.backend.write(b"\x03")
         self.backend.write(b"\x03")
 
     def subscribe(self) -> asyncio.Queue[dict]:

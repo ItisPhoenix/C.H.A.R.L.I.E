@@ -72,6 +72,8 @@ temp/
 *.temp
 .cache/
 .tempmediaStorage/
+proofs/
+tools/
 
 # === Sensitive Artifacts ===
 *.key

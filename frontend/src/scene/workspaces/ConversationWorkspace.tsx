@@ -126,7 +126,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
   };
 
   return (
-    <div className="w-full h-full flex flex-col justify-between font-mono select-none text-left p-2 overflow-hidden space-y-3">
+    <div className="w-full h-full flex flex-col justify-between font-mono select-none text-left p-2 overflow-hidden space-y-3 pr-[calc(var(--core-docked-size)+12px)]">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-cyan-500/20 pb-2 px-1">
         <div className="flex items-center gap-3">

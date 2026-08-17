@@ -160,6 +160,49 @@ describe("CharlieScene spatial projection & layers", () => {
     expect(screen.getByText(/Delete \/tmp\/build directory\?/i)).toBeDefined();
   });
 
+  test("minimize and restore workspace recenters then re-docks core", () => {
+    useWorkspaceStore.getState().openWorkspace({
+      id: "ws-conv-proof",
+      kind: "workspace",
+      title: "Conversation",
+      summary: "Session history",
+      workspaceType: "conversation",
+      taskId: "task-conv",
+      content: {},
+      priority: 50,
+      attentionLevel: "normal",
+      dismissPolicy: "persistent",
+      preferredZone: "center",
+      anchor: "screen",
+      createdAt: new Date().toISOString(),
+      replayable: false,
+    });
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByRole("main").getAttribute("data-core-position")).toBe("dock_bottom_right");
+
+    useWorkspaceStore.getState().minimizeWorkspace("ws-conv-proof");
+    rerender(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>
+    );
+    expect(screen.getByRole("main").getAttribute("data-core-position")).toBe("center");
+
+    useWorkspaceStore.getState().restoreWorkspace("ws-conv-proof");
+    rerender(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>
+    );
+    expect(screen.getByRole("main").getAttribute("data-core-position")).toBe("dock_bottom_right");
+  });
+
   test("Escape key dismisses active workspace", () => {
     useCharlieStore.getState().applyEvent({
       type: "presentation_intent",

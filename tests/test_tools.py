@@ -32,6 +32,11 @@ from charlie.tools import (
 def test_registry_registration_and_schema():
     definitions = registry.get_tool_definitions()
     names = {d["function"]["name"] for d in definitions}
+    # Lifespan TestClient runs may register plugin/MCP tools onto the global
+    # registry; this test owns the built-in set only.
+    names = {
+        n for n in names if not n.startswith("plugin_") and not n.startswith("mcp_")
+    }
     assert names == {
         "web_search",
         "web_research",

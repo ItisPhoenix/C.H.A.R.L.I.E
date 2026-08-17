@@ -251,18 +251,24 @@
   justify-content: center;
   cursor: pointer;
   touch-action: none;
-  transition: all var(--duration-spatial) var(--ease-spatial);
+  transition: transform var(--duration-spatial) var(--ease-spatial),
+    width var(--duration-spatial) var(--ease-spatial),
+    height var(--duration-spatial) var(--ease-spatial);
 }
 
 .charlie-core-center {
   top: 50%;
   left: 50%;
+  right: auto;
+  bottom: auto;
   transform: translate(-50%, -50%);
   width: var(--core-center-size);
   height: var(--core-center-size);
 }
 
 .charlie-core-docked {
+  top: auto;
+  left: auto;
   bottom: calc(var(--scene-safe-y) + 16px);
   right: calc(var(--scene-safe-x) + 16px);
   transform: translate(0, 0);
