@@ -408,6 +408,16 @@ async def capture():
             #   for canonical session after UI submit.
             # ──────────────────────────────────────────────────────────────────
             print("[4/20] Capturing phase10_04_conversation_streaming_active.png...", flush=True)
+            # Fetch canonical-session messages BEFORE submitting stream_prompt
+            pre_msg_res = await page.request.get(
+                f"http://127.0.0.1:{BACKEND_PORT}/api/sessions/{canonical_session_id}/messages"
+            )
+            assert pre_msg_res.ok, "Failed to fetch session messages before prompt submit"
+            pre_msg_data = await pre_msg_res.json()
+            pre_msgs = pre_msg_data.get("messages", [])
+            initial_user_count = len([m for m in pre_msgs if m.get("role") == "user"])
+            initial_asst_count = len([m for m in pre_msgs if m.get("role") == "assistant"])
+
             # Use a prompt guaranteed to exercise LLM streaming path (not system shortcut)
             stream_prompt = (
                 "In two complete sentences, explain how capability leases prevent "
@@ -455,7 +465,7 @@ async def capture():
             proof_summary["token_observed"] = True
             proof_summary["response_done_observed"] = True
 
-            # Verify user prompt + assistant reply persisted
+            # Verify user prompt + assistant reply persisted with count increase and exact matching
             msg_res_p4 = await page.request.get(
                 f"http://127.0.0.1:{BACKEND_PORT}/api/sessions/{canonical_session_id}/messages"
             )
@@ -464,9 +474,16 @@ async def capture():
             msgs_p4 = msg_data_p4.get("messages", [])
             user_msgs = [m for m in msgs_p4 if m.get("role") == "user"]
             asst_msgs = [m for m in msgs_p4 if m.get("role") == "assistant"]
-            assert len(user_msgs) > 0, "User prompt was not persisted in session store!"
-            assert len(asst_msgs) > 0, "Assistant reply was not persisted in session store!"
-            assert asst_msgs[-1].get("content", "").strip(), (
+            assert len(user_msgs) > initial_user_count, (
+                f"User message count did not increase: {len(user_msgs)} <= {initial_user_count}"
+            )
+            assert len(asst_msgs) > initial_asst_count, (
+                f"Assistant message count did not increase: {len(asst_msgs)} <= {initial_asst_count}"
+            )
+            assert user_msgs[-1].get("content") == stream_prompt, (
+                f"Latest user content mismatch: expected={stream_prompt!r}, got={user_msgs[-1].get('content')!r}"
+            )
+            assert bool(asst_msgs[-1].get("content", "").strip()), (
                 "Persisted assistant reply is empty!"
             )
             proof_summary["persisted_user_message"] = True
@@ -613,13 +630,14 @@ async def capture():
             interrupt_events_before = len(observed_events)
 
             long_prompt = (
-                "Write at least twelve detailed paragraphs explaining distributed agent "
-                "scheduling, capability leases, terminal arbitration, memory isolation, "
-                "and cancellation semantics in a comprehensive AI operating system."
+                "Perform a comprehensive technical architecture audit of all capability domains in Charlie: "
+                "SystemCapability, DesktopCapability, BrowserCapability, ResearchCapability, TerminalCapability, "
+                "FileCapability, MediaCapability, VisionCapability, MemoryCapability, and TaskCapability. "
+                "For every domain, explain its state machine, lease requirements, failure recovery, and IPC contracts in full detail."
             )
             await textarea.click()
             await textarea.fill("")
-            await textarea.type(long_prompt, delay=8)
+            await textarea.type(long_prompt, delay=5)
             await page.wait_for_timeout(200)
 
             # Submit ONLY via ConversationWorkspace UI Enter
@@ -641,23 +659,28 @@ async def capture():
                 if await stop_btn.count() > 0 and await stop_btn.first.is_visible():
                     stop_visible = True
                     break
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(0.1)
             if not stop_visible:
                 raise AssertionError(
                     "HARD FAIL: INTERRUPT / STOP button did not appear in ConversationWorkspace UI! "
                     "No fallback JS injection allowed. The UI path itself is broken."
                 )
 
+            # Record events before stop action to ensure cancellation response_done happens after this index
+            stop_events_before = len(observed_events)
+
             p7_path = PROOFS_DIR / "phase10_07_conversation_stop_button.png"
             await page.screenshot(path=str(p7_path))
             assert p7_path.exists() and p7_path.stat().st_size > 5000
-            await stop_btn.first.evaluate("el => el.click()")
+
+            await stop_btn.first.click(force=True)
+            await stop_btn.first.dispatch_event("click")
 
             await _wait_for_event(
                 observed_events,
-                interrupt_events_before,
+                stop_events_before,
                 "response_done",
-                30.0,
+                45.0,
                 "HARD FAIL: No 'response_done' event observed after clicking INTERRUPT / STOP!",
                 session_id=canonical_session_id,
             )
@@ -827,13 +850,30 @@ async def capture():
             await ctrl_c_btn.first.click()
             await page.wait_for_timeout(2000)
             await page.locator(".xterm-screen").click(position={"x": 24, "y": 24}, force=True)
-            await _xterm_run(page, "Write-Output 'POST_INTERRUPT_OK'")
-            await _wait_terminal_contains(
-                page,
-                "POST_INTERRUPT_OK",
-                20.0,
-                "HARD FAIL: POST_INTERRUPT_OK not found in terminal output after Ctrl+C! "
-                "Ctrl+C shell-survival proof failed.",
+            await _xterm_run(page, "Write-Output (31337 + 42)")
+
+            # Verify a standalone terminal output line containing 31379 (not command echo)
+            computed_found = False
+            deadline_p12 = time.monotonic() + 20.0
+            while time.monotonic() < deadline_p12:
+                snap_res = await page.request.get(
+                    f"http://127.0.0.1:{BACKEND_PORT}/api/terminal/sessions/primary"
+                )
+                if snap_res.ok:
+                    snap_data = await snap_res.json()
+                    out_text = snap_data.get("output", "") or ""
+                    for line in out_text.splitlines():
+                        clean = line.strip()
+                        if "31379" in clean and "31337" not in clean:
+                            computed_found = True
+                            break
+                if computed_found:
+                    break
+                await asyncio.sleep(0.5)
+
+            assert computed_found, (
+                "HARD FAIL: Standalone evaluated output line containing '31379' without '31337' "
+                "not found in terminal output after Ctrl+C! Shell-survival proof failed."
             )
             proof_summary["ctrl_c_shell_survival"] = True
 
@@ -843,7 +883,7 @@ async def capture():
 
             # ──────────────────────────────────────────────────────────────────
             # Proof 13: Terminal persistence — minimize → restore
-            #   Same session_id, same PID, POST_INTERRUPT_OK still in output
+            #   Same session_id, same PID, evaluated output 31379 still in output
             # ──────────────────────────────────────────────────────────────────
             print("[13/20] Capturing phase10_13_terminal_persistent_reopen.png...", flush=True)
             await page.evaluate("""() => {
@@ -874,18 +914,22 @@ async def capture():
             proof_summary["pid_after_reopen"] = restored_pid
             print(f"Verified persistent Terminal PID after restore: {initial_term_pid}", flush=True)
 
-            # POST_INTERRUPT_OK must still be in terminal output after restore
+            # Standalone evaluated output 31379 must still be in terminal output after restore
             snap_res_restore = await page.request.get(
                 f"http://127.0.0.1:{BACKEND_PORT}/api/terminal/sessions/primary"
             )
             assert snap_res_restore.ok
             snap_data_restore = await snap_res_restore.json()
             term_output_restore = snap_data_restore.get("output", "") or ""
-            assert "POST_INTERRUPT_OK" in term_output_restore, (
-                f"HARD FAIL: POST_INTERRUPT_OK not present after terminal restore! "
+            has_31379_persisted = any(
+                "31379" in line and "31337" not in line
+                for line in term_output_restore.splitlines()
+            )
+            assert has_31379_persisted, (
+                f"HARD FAIL: Standalone evaluated output 31379 not present after terminal restore! "
                 f"Persistence proof failed. Partial: {term_output_restore[-400:]}"
             )
-            proof_summary["post_interrupt_ok_persisted"] = True
+            proof_summary["evaluated_output_persisted"] = True
 
             p13_path = PROOFS_DIR / "phase10_13_terminal_persistent_reopen.png"
             await page.screenshot(path=str(p13_path))
