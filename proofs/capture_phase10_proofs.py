@@ -673,7 +673,6 @@ async def capture():
             # Record events immediately before stop action to ensure cancellation response_done happens after this click
             stop_events_before = len(observed_events)
             await stop_btn.first.click(force=True)
-            await stop_btn.first.dispatch_event("click")
 
             await _wait_for_event(
                 observed_events,
