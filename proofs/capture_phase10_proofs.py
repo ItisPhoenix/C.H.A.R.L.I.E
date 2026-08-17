@@ -666,13 +666,12 @@ async def capture():
                     "No fallback JS injection allowed. The UI path itself is broken."
                 )
 
-            # Record events before stop action to ensure cancellation response_done happens after this index
-            stop_events_before = len(observed_events)
-
             p7_path = PROOFS_DIR / "phase10_07_conversation_stop_button.png"
             await page.screenshot(path=str(p7_path))
             assert p7_path.exists() and p7_path.stat().st_size > 5000
 
+            # Record events immediately before stop action to ensure cancellation response_done happens after this click
+            stop_events_before = len(observed_events)
             await stop_btn.first.click(force=True)
             await stop_btn.first.dispatch_event("click")
 
