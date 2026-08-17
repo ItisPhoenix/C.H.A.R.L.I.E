@@ -10,30 +10,27 @@ Validates:
   6. SKILL generic path requires validated ExtensionPlan with raw_text.
 """
 
-import json
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from charlie.config import Config
-from charlie.settings_service import SettingsService
 from charlie.capabilities import CapabilityIndex
-from charlie.self_extension.models import (
-    ExtensionClassification,
-    ExtensionKind,
-    ExtensionPlan,
-    ExtensionRequest,
-    RiskClass,
-    TransactionStatus,
-)
+from charlie.config import Config
 from charlie.self_extension.adapters.code_adapter import (
     ASTValidationError,
     CodeAdapter,
     _validate_ast_safety,
 )
+from charlie.self_extension.models import (
+    ExtensionClassification,
+    ExtensionKind,
+    ExtensionPlan,
+    ExtensionRequest,
+    TransactionStatus,
+)
 from charlie.self_extension.orchestrator import SelfExtensionOrchestrator
-
+from charlie.settings_service import SettingsService
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -78,8 +75,8 @@ def code_adapter_env():
         repo_root = Path(tmpdir).resolve()
         tools_dir = repo_root / "generated_tools"
         tools_dir.mkdir()
-        from charlie.self_extension.registry import ExtensionRegistry
         from charlie.self_extension.checkpoint import CheckpointManager
+        from charlie.self_extension.registry import ExtensionRegistry
 
         cap_idx = CapabilityIndex()
         registry = ExtensionRegistry(manifest_path=repo_root / "ext.json", capability_index=cap_idx)
@@ -270,30 +267,27 @@ def safe_fn(x: float) -> float:
 
 class TestSubprocessIsolation:
     def test_code_executes_in_subprocess_not_in_process(self, code_adapter_env):
-        """Verify CodeAdapter subprocess verification actually runs in a separate process."""
+        """Verify CodeAdapter subprocess verification runs without polluting host sys.modules."""
         adapter, tools_dir, cap_idx = code_adapter_env
 
-        # A function that records the PID of the process that executed it.
-        pid_code = """\
-import os
+        pure_code = """\
+import math
 
-def get_exec_pid() -> int:
-    \"\"\"Return the PID of the process running this code.\"\"\"
-    return os.getpid()
+def calc_hypot(a: float, b: float) -> float:
+    \"\"\"Calculate hypotenuse.\"\"\"
+    return math.hypot(a, b)
 """
-        import os
-        current_pid = os.getpid()
-
         res = adapter.apply_code_extension(
-            name="get_exec_pid",
-            code=pid_code,
-            test_inputs={},
-            # We cannot assert the exact PID from outside the subprocess easily,
-            # but we CAN verify that the test ran successfully and the file was written.
+            name="calc_hypot",
+            code=pure_code,
+            test_inputs={"a": 3.0, "b": 4.0},
+            expected_output=5.0,
         )
-        # The subprocess should succeed (os.getpid() is safe to call)
+        import sys
         assert res.success is True, res.message
-        assert (tools_dir / "get_exec_pid.py").exists()
+        assert (tools_dir / "calc_hypot.py").exists()
+        # Verify module was not imported directly into current host process namespace
+        assert "calc_hypot" not in sys.modules
 
     def test_code_with_side_effect_fails_in_subprocess_and_rolls_back(self, code_adapter_env):
         """Verify that if subprocess execution raises, the file is rolled back."""

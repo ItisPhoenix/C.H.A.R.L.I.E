@@ -70,6 +70,19 @@ class EventType(StrEnum):
     PRESENTATION_UPDATE = "presentation_update"
     PRESENTATION_DISMISS = "presentation_dismiss"
     SURFACE_ACTION = "surface_action"
+    SELF_EXTENSION_REQUESTED = "self_extension_requested"
+    SELF_EXTENSION_CLASSIFIED = "self_extension_classified"
+    SELF_EXTENSION_PLANNED = "self_extension_planned"
+    SELF_EXTENSION_APPROVAL_REQUIRED = "self_extension_approval_required"
+    SELF_EXTENSION_APPLYING = "self_extension_applying"
+    SELF_EXTENSION_TESTING = "self_extension_testing"
+    SELF_EXTENSION_HEALTH_CHECK = "self_extension_health_check"
+    SELF_EXTENSION_RESTARTING = "self_extension_restarting"
+    SELF_EXTENSION_VERIFYING = "self_extension_verifying"
+    SELF_EXTENSION_COMPLETED = "self_extension_completed"
+    SELF_EXTENSION_FAILED = "self_extension_failed"
+    SELF_EXTENSION_ROLLBACK_STARTED = "self_extension_rollback_started"
+    SELF_EXTENSION_ROLLED_BACK = "self_extension_rolled_back"
 
 
 

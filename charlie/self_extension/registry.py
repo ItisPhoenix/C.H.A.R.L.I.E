@@ -1,10 +1,8 @@
-"""Durable manifest store for installed extensions."""
-
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -16,6 +14,16 @@ logger = logging.getLogger("charlie.self_extension.registry")
 
 _DEFAULT_MANIFEST_PATH = Path("data/extensions.json")
 _SECRET_KEYS = frozenset({"api_key", "token", "secret", "password", "auth", "private_key", "key"})
+
+
+@dataclass
+class RehydrationReport:
+    """Outcome of manifest rehydration on startup."""
+
+    restored: int = 0
+    skipped_disabled: int = 0
+    failed: int = 0
+    details: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _redact_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -139,3 +147,214 @@ class ExtensionRegistry:
         entry.enabled = enabled
         self._save()
         return True
+
+    def rehydrate(
+        self,
+        capability_index: Any,
+        code_worker_module: Any = None,
+        mcp_client: Any = None,
+        tool_registry: Any = None,
+    ) -> RehydrationReport:
+        """Restore capabilities from the durable manifest into *capability_index*.
+
+        Called once on new orchestrator/process startup so extensions registered in
+        a previous run become available again without re-applying them.
+
+        Rules:
+          - Disabled entries are skipped (capability NOT registered).
+          - CODE_SMALL: validates source file exists and content hash matches before
+            registering.  Invalid → verification_status=failed, skip registration.
+          - SKILL: registers a read-only capability descriptor.
+          - MCP_TOOL: attempts reconnect via mcp_client if available; on failure
+            marks entry verification_status=failed but does NOT remove the entry.
+          - No duplicate ownership: re-registration replaces any stale descriptor.
+        """
+        report = RehydrationReport()
+
+        for ext_id, entry in list(self._entries.items()):
+            if not entry.enabled:
+                report.skipped_disabled += 1
+                continue
+
+            kind = entry.kind
+            try:
+                if kind == ExtensionKind.CODE_SMALL:
+                    self._rehydrate_code(ext_id, entry, capability_index, code_worker_module)
+                elif kind == ExtensionKind.SKILL:
+                    self._rehydrate_skill(ext_id, entry, capability_index)
+                elif kind == ExtensionKind.MCP_TOOL:
+                    self._rehydrate_mcp(ext_id, entry, capability_index, mcp_client, tool_registry)
+                else:
+                    # CONFIG / ARCHITECTURE_LARGE: no runtime capability descriptor needed
+                    pass
+                report.restored += 1
+                report.details.append({"id": ext_id, "status": "restored"})
+            except Exception as exc:
+                logger.warning("Rehydration failed for '%s': %s", ext_id, exc)
+                entry.verification_status = "failed"
+                self._save()
+                report.failed += 1
+                report.details.append({"id": ext_id, "status": "failed", "error": str(exc)})
+
+        return report
+
+    def _rehydrate_code(
+        self,
+        ext_id: str,
+        entry: ExtensionEntry,
+        capability_index: Any,
+        code_worker_module: Any,
+    ) -> None:
+        """Validate source file + hash, then register subprocess-backed capability."""
+        from charlie.capabilities import CapabilityDescriptor, CapabilityOperation
+
+        src_path_str = entry.metadata.get("module_path") or entry.source
+        src_path = Path(src_path_str)
+        if not src_path.exists():
+            raise FileNotFoundError(f"Source file not found: {src_path}")
+
+        content = src_path.read_text(encoding="utf-8").encode("utf-8")
+        actual_hash = hashlib.sha256(content).hexdigest()[:16]
+        if actual_hash != entry.content_hash:
+            raise ValueError(
+                f"Hash mismatch for '{entry.name}': expected {entry.content_hash}, got {actual_hash}"
+            )
+
+        _mp = src_path
+        _fn = entry.name
+        _run = None
+        if code_worker_module is not None:
+            _run = code_worker_module.run_worker
+        else:
+            try:
+                from charlie.self_extension.code_worker import run_worker as _rw
+                _run = _rw
+            except ImportError:
+                pass
+
+        def _dispatch(**kwargs: Any) -> Any:
+            if _run is None:
+                raise RuntimeError("code_worker not available for rehydrated extension")
+            ok, out, err = _run(module_path=_mp, func_name=_fn, test_inputs=kwargs or None)
+            if not ok:
+                raise RuntimeError(err)
+            return out
+
+        desc = CapabilityDescriptor(
+            id=ext_id,
+            name=entry.name,
+            description=entry.metadata.get("description", entry.name),
+            owner="extensions",
+            provenance="extension",
+            operations={
+                entry.name: CapabilityOperation(
+                    id=f"code.{entry.name}",
+                    name=entry.name,
+                    description=entry.metadata.get("description", entry.name),
+                    parameters_schema={"type": "object"},
+                    risk_class="reversible",
+                    func=_dispatch,
+                )
+            },
+            availability_check=lambda: _mp.exists(),
+        )
+        capability_index.register_capability(desc)
+
+    def _rehydrate_skill(
+        self,
+        ext_id: str,
+        entry: "ExtensionEntry",
+        capability_index: Any,
+    ) -> None:
+        from charlie.capabilities import CapabilityDescriptor
+
+        desc = CapabilityDescriptor(
+            id=ext_id,
+            name=entry.name,
+            description=f"Skill: {entry.name}",
+            owner="skills",
+            provenance="extension",  # skills are locally installed extensions
+            operations={},
+            availability_check=lambda: True,
+        )
+        capability_index.register_capability(desc)
+
+    def _rehydrate_mcp(
+        self,
+        ext_id: str,
+        entry: "ExtensionEntry",
+        capability_index: Any,
+        mcp_client: Any,
+        tool_registry: Any,
+    ) -> None:
+        from charlie.capabilities import CapabilityDescriptor, CapabilityOperation
+
+        name = entry.name
+        discovered: list = entry.declared_tools or []
+
+        if mcp_client is not None:
+            try:
+                from charlie.mcp_client import MCPServerConfig
+                meta = entry.metadata or {}
+                config = MCPServerConfig(
+                    name=name,
+                    command=meta.get("command", ""),
+                    args=list(meta.get("args", [])),
+                    env=dict(meta.get("env", {})),
+                )
+                mcp_client.add_server(config)
+                if tool_registry is not None:
+                    mcp_client.enable_server(tool_registry, name)
+                else:
+                    mcp_client.connect_server(name)
+                discovered = [
+                    t.name
+                    for t in mcp_client.list_tools()
+                    if getattr(t, "server_name", "") == name
+                ] or discovered
+            except Exception as exc:
+                logger.warning("MCP rehydration connect failed for '%s': %s — using declared tools", name, exc)
+                # Use declared tools but mark availability as unhealthy
+                if not discovered:
+                    raise
+
+        _client = mcp_client
+        _name = name
+
+        def _avail() -> bool:
+            if _client is None:
+                return False
+            return _client.health_check().get(_name, False)
+
+        ops: Dict[str, Any] = {}
+        for t in discovered:
+            _t = t
+
+            def _invoke(_t: str = _t, **kwargs: Any) -> Any:
+                if _client is None:
+                    raise RuntimeError("No MCP client")
+                res = _client.call_tool(_name, _t, kwargs)
+                if res.get("success"):
+                    return res.get("result", "")
+                raise RuntimeError(res.get("error", "MCP tool error"))
+
+            ops[t] = CapabilityOperation(
+                id=f"mcp.{name}.{t}",
+                name=t,
+                description=f"[{name}] MCP tool",
+                parameters_schema={"type": "object"},
+                risk_class="reversible",
+                func=_invoke,
+            )
+
+        desc = CapabilityDescriptor(
+            id=ext_id,
+            name=name,
+            description=f"MCP server '{name}'",
+            owner="mcp",
+            provenance="mcp",
+            operations=ops,
+            availability_check=_avail,
+        )
+        capability_index.register_capability(desc)
+

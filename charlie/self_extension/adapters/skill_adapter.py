@@ -6,7 +6,7 @@ import hashlib
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from charlie.extensions.skills import parse_skill_md
 from charlie.self_extension.models import ExtensionKind

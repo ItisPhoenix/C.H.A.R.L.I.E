@@ -1,11 +1,7 @@
-"""Configuration extension adapter using SettingsService."""
-
-from __future__ import annotations
-
 import logging
+from dataclasses import fields
 from typing import Any, Dict, List, Optional
 
-from dataclasses import fields
 from charlie.config import Config
 from charlie.settings_service import SettingsService, SettingValidationError
 

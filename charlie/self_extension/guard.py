@@ -21,7 +21,10 @@ class AuthorizationGuard:
             return GuardDecision(
                 is_authorized=False,
                 requires_approval=True,
-                reason="Spontaneous self-modification detected: Charlie cannot modify its own source or architecture without explicit human approval.",
+                reason=(
+                    "Spontaneous self-modification detected: Charlie cannot modify its own source "
+                    "or architecture without explicit human approval."
+                ),
                 risk_class=RiskClass.DANGEROUS,
             )
 
@@ -39,7 +42,10 @@ class AuthorizationGuard:
             return GuardDecision(
                 is_authorized=False,
                 requires_approval=True,
-                reason=f"Adding new external dependencies ({request.required_dependencies}) requires explicit approval.",
+                reason=(
+                    f"Adding new external dependencies ({request.required_dependencies}) "
+                    "requires explicit approval."
+                ),
                 risk_class=RiskClass.DANGEROUS,
             )
 

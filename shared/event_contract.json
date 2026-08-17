@@ -51,6 +51,19 @@
     "presentation_intent": {"category": "snapshot", "replay": true, "required": ["id", "kind"]},
     "presentation_update": {"category": "snapshot", "replay": true, "required": ["id", "kind"]},
     "presentation_dismiss": {"category": "acknowledgement", "replay": false, "required": ["id"]},
-    "surface_action": {"category": "request", "replay": false, "required": ["surface_id", "action_id"]}
+    "surface_action": {"category": "request", "replay": false, "required": ["surface_id", "action_id"]},
+    "self_extension_requested":      {"category": "request",  "replay": false, "required": ["tx_id", "kind"]},
+    "self_extension_classified":     {"category": "progress", "replay": false, "required": ["tx_id", "kind"]},
+    "self_extension_planned":        {"category": "progress", "replay": false, "required": ["tx_id"]},
+    "self_extension_approval_required": {"category": "request", "replay": true,  "required": ["tx_id", "reason"]},
+    "self_extension_applying":       {"category": "progress", "replay": false, "required": ["tx_id"]},
+    "self_extension_testing":        {"category": "progress", "replay": false, "required": ["tx_id"]},
+    "self_extension_health_check":   {"category": "progress", "replay": false, "required": ["tx_id"]},
+    "self_extension_restarting":     {"category": "progress", "replay": true,  "required": ["tx_id"]},
+    "self_extension_verifying":      {"category": "progress", "replay": false, "required": ["tx_id"]},
+    "self_extension_completed":      {"category": "result",   "replay": false, "required": ["tx_id"]},
+    "self_extension_failed":         {"category": "result",   "replay": false, "required": ["tx_id", "reason"]},
+    "self_extension_rollback_started": {"category": "progress", "replay": false, "required": ["tx_id"]},
+    "self_extension_rolled_back":    {"category": "result",   "replay": false, "required": ["tx_id"]}
   }
 }
