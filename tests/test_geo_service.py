@@ -1,20 +1,19 @@
 """Unit and Integration Tests for Charlie Geospatial and Spatial Intelligence Engine."""
 
+
 import pytest
-from pathlib import Path
 from starlette.testclient import TestClient
 
 from charlie.geo import geo_service
 from charlie.geo.geocoding.nominatim import NominatimProvider
-from charlie.geo.routing.osrm import OSRMProvider
 from charlie.geo.intelligence.cyber import (
+    CyberThreatProvider,
     IPGeolocationEnricher,
     NoOpIPGeolocationProvider,
     OfflineIPGeolocationProvider,
-    HttpIPGeolocationProvider,
-    CyberThreatProvider,
 )
-from charlie.geo.tiles.pmtiles import PMTilesManager, PMTILES_MAGIC, PMTILES_VERSION, PMTILES_HEADER_SIZE
+from charlie.geo.routing.osrm import OSRMProvider
+from charlie.geo.tiles.pmtiles import PMTILES_HEADER_SIZE, PMTILES_MAGIC, PMTILES_VERSION, PMTilesManager
 from charlie.web_server import app
 
 

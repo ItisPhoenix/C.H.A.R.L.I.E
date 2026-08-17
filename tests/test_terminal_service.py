@@ -1,9 +1,11 @@
-import pytest
 import asyncio
+
+import pytest
+
 from charlie.terminal_service import (
-    TerminalSession,
-    TerminalManager,
     _HAS_CONPTY,
+    TerminalManager,
+    TerminalSession,
 )
 from charlie.web_server import validate_ws_origin
 
@@ -213,7 +215,7 @@ async def test_terminal_real_windows_non_zero_exit_proof():
 @pytest.mark.asyncio
 async def test_conpty_process_termination_non_zero_exit():
     """Verify real Win32 ConPTY process termination exit code."""
-    from charlie.terminal_service import WindowsConPTY, FallbackPTY, TerminalSession
+    from charlie.terminal_service import WindowsConPTY
 
     if _HAS_CONPTY:
         backend = WindowsConPTY(cols=80, rows=24)

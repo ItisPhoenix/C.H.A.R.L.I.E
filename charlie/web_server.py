@@ -19,11 +19,11 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from charlie.config import Config, config
@@ -42,12 +42,22 @@ from charlie.events import EventValidationError, build_event, normalize_event, r
 from charlie.settings_service import SettingsService, SettingValidationError
 from charlie.memory_service import MemoryService
 from charlie.privacy_service import PrivacyService
+from charlie.code_index import CodeIndex
+from charlie.runtime_introspector import RuntimeIntrospector
+from charlie.self_knowledge import SelfKnowledgeService
+from charlie.doctor import CharlieDoctor
 
 logger = logging.getLogger("charlie.web_server")
 logger.addFilter(SensitiveDataFilter())
 
 _memory_service = MemoryService()
 _privacy_service = PrivacyService()
+_code_index = CodeIndex()
+_runtime_introspector = RuntimeIntrospector()
+_self_knowledge_service = SelfKnowledgeService(
+    runtime_introspector=_runtime_introspector, code_index=_code_index
+)
+_doctor = CharlieDoctor(introspector=_runtime_introspector)
 
 _START_TIME = time.time()
 
@@ -1392,10 +1402,59 @@ async def get_developer_logs(limit: int = 100):
         try:
             with open(log_path, "r", encoding="utf-8", errors="replace") as f:
                 all_lines = f.readlines()
-                lines = [l.strip() for l in all_lines[-limit:]]
+                lines = [line.strip() for line in all_lines[-limit:]]
         except Exception as e:
             logger.warning("Could not read developer logs: %s", e)
     return {"lines": lines, "total_lines": len(lines)}
+
+
+# ---------------------------------------------------------------------------
+# SelfKnowledge, CodeIndex & Charlie Doctor Endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/self/introspect")
+async def get_self_introspection():
+    """Return live runtime introspection snapshot with strict secret masking."""
+    return _runtime_introspector.get_snapshot()
+
+
+@app.post("/api/self/query")
+async def query_self_knowledge(payload: Dict[str, Any]):
+    """Answer a grounded self-question about Charlie's code, capabilities, or runtime."""
+    q = str(payload.get("query", "")).strip()
+    if not q:
+        return JSONResponse(status_code=400, content={"error": "query parameter required"})
+    res = _self_knowledge_service.answer_self_question(q)
+    return res
+
+
+@app.get("/api/code_index/search")
+async def search_code_index(q: str = "", type: str = "symbols", limit: int = 20):
+    """Search repository symbols or files using AST-grounded CodeIndex."""
+    if _code_index.is_stale():
+        _code_index.refresh()
+    if type == "files":
+        return {"files": _code_index.search_files(q, limit=limit)}
+    return {"symbols": _code_index.search_symbols(q, limit=limit)}
+
+
+@app.get("/api/doctor/diagnose")
+async def run_doctor_diagnostics():
+    """Execute full Charlie Doctor diagnostic checks and return structured report."""
+    report = _doctor.diagnose()
+    return report.to_dict()
+
+
+@app.post("/api/doctor/repair")
+async def execute_doctor_repair(payload: Dict[str, Any]):
+    """Execute a safe automated repair or request approval for consequential repairs."""
+    repair_id = str(payload.get("repair_id", "")).strip()
+    approved = bool(payload.get("approved", False))
+    if not repair_id:
+        return JSONResponse(status_code=400, content={"error": "repair_id parameter required"})
+    res = _doctor.execute_repair(repair_id, approved=approved)
+    return res
 
 
 @app.get("/api/mcp/tools")
@@ -2048,7 +2107,7 @@ async def geo_pmtiles_list():
 @app.head("/api/geo/pmtiles/{archive_name}")
 async def geo_pmtiles_serve(archive_name: str, request: Request):
     """Serve PMTiles archives supporting HTTP Range requests for pmtiles.js protocol with streaming."""
-    from fastapi.responses import Response, StreamingResponse
+    from fastapi.responses import StreamingResponse
     from charlie.geo import geo_service
 
     safe_path = geo_service.pmtiles.resolve_safe_path(archive_name)

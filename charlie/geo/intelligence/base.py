@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List
 
-from charlie.geo.models import LayerDataResult, MapFeature
+from charlie.geo.models import LayerDataResult
 
 
 class IntelligenceProvider(ABC):

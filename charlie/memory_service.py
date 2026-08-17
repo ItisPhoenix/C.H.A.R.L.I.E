@@ -45,7 +45,11 @@ class MemoryService:
         graph = self._get_graph()
         now_iso = utc_now_iso()
         item_id = f"mem_{make_id(8)}"
-        node_type = category if category in ("person", "place", "concept", "task", "preference", "fact", "event") else "fact"
+        node_type = (
+            category
+            if category in ("person", "place", "concept", "task", "preference", "fact", "event")
+            else "fact"
+        )
 
         if subject and predicate and obj:
             if not content:
@@ -106,14 +110,18 @@ class MemoryService:
             nid = node["id"]
             if nid in seen_ids:
                 continue
-            
+
             # Fetch node details with metadata
             full_node = graph.get_node(nid) or node
             meta = full_node.get("metadata") or {}
             if not isinstance(meta, dict):
                 meta = {}
-            
-            is_memory_item = nid.startswith("mem_") or bool(meta.get("subject")) or node.get("node_type") in ("preference", "task", "event")
+
+            is_memory_item = (
+                nid.startswith("mem_")
+                or bool(meta.get("subject"))
+                or node.get("node_type") in ("preference", "task", "event")
+            )
             if not is_memory_item:
                 continue
 
@@ -133,7 +141,10 @@ class MemoryService:
         if category in (None, "fact"):
             for s, p, o in graph.get_all_facts(limit=limit):
                 fact_text = f"{s} {p} {o}"
-                if not any(it["content"] == fact_text or (it.get("subject") == s and it.get("object") == o) for it in items):
+                if not any(
+                    it["content"] == fact_text or (it.get("subject") == s and it.get("object") == o)
+                    for it in items
+                ):
                     fact_id = f"fact_{abs(hash((s, p, o)))}"
                     items.append({
                         "id": fact_id,
@@ -178,8 +189,12 @@ class MemoryService:
 
         node = graph.get_node(item_id)
         current_type = category or (node.get("node_type") if node else "fact")
-        node_type = current_type if current_type in ("person", "place", "concept", "task", "preference", "fact", "event") else "fact"
-        
+        node_type = (
+            current_type
+            if current_type in ("person", "place", "concept", "task", "preference", "fact", "event")
+            else "fact"
+        )
+
         existing_meta = (node.get("metadata") if node else None) or {}
         if not isinstance(existing_meta, dict):
             existing_meta = {}

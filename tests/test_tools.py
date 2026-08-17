@@ -72,6 +72,8 @@ def test_registry_registration_and_schema():
         "desktop_window",
         "desktop_move_window",
         "system_control",
+        "charlie_self_query",
+        "charlie_doctor_diagnose",
     }
     assert any(
         d["function"]["parameters"]["required"] == ["query"] for d in definitions

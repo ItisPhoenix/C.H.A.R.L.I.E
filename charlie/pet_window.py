@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 import zmq
+
 try:
     from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
     from PySide6.QtGui import (
@@ -36,7 +37,8 @@ try:
     from PySide6.QtWidgets import QApplication, QMenu, QWidget
 except ImportError:
     try:
-        from PyQt6.QtCore import QPoint, QRectF, Qt, QTimer, pyqtSignal as Signal
+        from PyQt6.QtCore import QPoint, QRectF, Qt, QTimer
+        from PyQt6.QtCore import pyqtSignal as Signal
         from PyQt6.QtGui import (
             QAction,
             QColor,

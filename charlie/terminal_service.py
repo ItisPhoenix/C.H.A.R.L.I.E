@@ -2,7 +2,6 @@
 
 import asyncio
 import ctypes
-from ctypes import wintypes
 import logging
 import os
 import re
@@ -10,9 +9,8 @@ import sys
 import threading
 import time
 import uuid
-from collections import deque
-from dataclasses import dataclass, field
-from typing import Callable, Deque, Dict, Optional, Set
+from ctypes import wintypes
+from typing import Dict, Optional, Set
 
 from charlie.autonomy import RiskClass, classify_action
 from charlie.resource_locks import default_lease_manager

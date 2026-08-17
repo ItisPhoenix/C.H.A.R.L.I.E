@@ -1,11 +1,12 @@
 import os
 import tempfile
 from pathlib import Path
+
 import pytest
 
+import charlie.web_server as web_server
 from charlie.memory_graph import MemoryGraph
 from charlie.memory_service import MemoryService
-import charlie.web_server as web_server
 
 
 def _remove_db(db_path: str) -> None:
@@ -22,7 +23,7 @@ def test_memory_service_crud_and_clear():
         db_path = str(Path(tmpdir) / "test_memory.db")
         graph = MemoryGraph(db_path)
         service = MemoryService(graph=graph)
-        
+
         try:
             # 1. Add items
             item1 = service.add_item(category="fact", subject="User", predicate="likes", obj="Python")
@@ -33,12 +34,12 @@ def test_memory_service_crud_and_clear():
             # 2. List items
             items = service.list_items()
             assert len(items) == 2
-            
+
             # Filter by category
             facts = service.list_items(category="fact")
             assert len(facts) == 1
             assert facts[0]["subject"] == "User"
-            
+
             # 3. Search items
             search_res = service.search_items(query="concise")
             assert len(search_res) == 1
@@ -97,7 +98,10 @@ async def test_web_server_memory_management_endpoints(monkeypatch):
             assert len(search_res["items"]) == 1
 
             # 4. PUT /api/memory/items/{id}
-            put_res = await web_server.update_memory_item(item_id, {"content": "Charlie runs locally on fast hardware", "category": "fact"})
+            put_res = await web_server.update_memory_item(
+                item_id,
+                {"content": "Charlie runs locally on fast hardware", "category": "fact"},
+            )
             assert put_res["status"] == "ok"
 
             # 5. GET /api/memory/export

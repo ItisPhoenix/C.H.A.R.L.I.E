@@ -1,10 +1,10 @@
-import os
 import tempfile
 from pathlib import Path
+
 import pytest
 
-from charlie.config import Config
 import charlie.web_server as web_server
+from charlie.config import Config
 
 
 @pytest.mark.asyncio
@@ -23,7 +23,7 @@ async def test_developer_diagnostics_endpoints(monkeypatch):
     diag_res_enabled = await web_server.get_developer_diagnostics()
     assert diag_res_enabled["developer_mode_enabled"] is True
     diag = diag_res_enabled["diagnostics"]
-    
+
     assert "tasks" in diag
     assert "leases" in diag
     assert "telemetry" in diag
@@ -37,7 +37,8 @@ async def test_developer_logs_endpoint(monkeypatch):
         logs_dir = Path(tmpdir) / "logs"
         logs_dir.mkdir()
         log_file = logs_dir / "charlie.log"
-        log_file.write_text("[2026-08-17 12:00:00] [INFO] System started\n[2026-08-17 12:00:01] [DEBUG] Event emitted\n", encoding="utf-8")
+        log_content = "[2026-08-17 12:00:00] [INFO] System started\n[2026-08-17 12:00:01] [DEBUG] Event emitted\n"
+        log_file.write_text(log_content, encoding="utf-8")
 
         test_config = Config()
         test_config.developer_mode_enabled = True

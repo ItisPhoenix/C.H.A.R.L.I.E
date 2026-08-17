@@ -122,6 +122,9 @@ class CapabilityLeaseManager:
         with _lock:
             return dict(_owners)
 
+    def get_all_leases(self) -> dict[str, str]:
+        return self.snapshot()
+
     async def acquire(
         self,
         capability: str,

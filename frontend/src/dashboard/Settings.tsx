@@ -81,6 +81,31 @@ interface DeveloperDiagnostics {
   };
 }
 
+interface DiagnosticCheck {
+  check_id: string;
+  category: string;
+  status: "ok" | "info" | "warning" | "error";
+  severity: "low" | "medium" | "high" | "critical";
+  summary: string;
+  evidence: string;
+  probable_cause?: string;
+  fix_hint?: string;
+  repair_available: boolean;
+  repair_id?: string;
+  requires_approval: boolean;
+}
+
+interface DoctorReport {
+  timestamp: number;
+  total_checks: number;
+  is_healthy: boolean;
+  warnings_count: number;
+  errors_count: number;
+  checks: DiagnosticCheck[];
+  warnings?: DiagnosticCheck[];
+  errors?: DiagnosticCheck[];
+}
+
 function fieldValue(field: ConfigField, drafts: Record<string, unknown>): unknown {
   return field.key in drafts ? drafts[field.key] : field.value;
 }
@@ -183,6 +208,18 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
   const [devDiagnostics, setDevDiagnostics] = useState<DeveloperDiagnostics | null>(null);
   const [devLogs, setDevLogs] = useState<string[]>([]);
   const [devLoading, setDevLoading] = useState(false);
+
+  // Doctor & Self-Knowledge State
+  const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
+  const [doctorLoading, setDoctorLoading] = useState(false);
+  const [doctorRepairing, setDoctorRepairing] = useState<string | null>(null);
+  const [selfQueryInput, setSelfQueryInput] = useState("");
+  const [selfQueryResult, setSelfQueryResult] = useState<{
+    answer?: string;
+    evidence_sources?: string[];
+    is_self_question?: boolean;
+  } | null>(null);
+  const [selfQueryLoading, setSelfQueryLoading] = useState(false);
 
   // Reactive Map Settings Hooks
   const mapProviderMode = useMapStore((s) => s.providerMode);
@@ -300,6 +337,60 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
     }
   }
 
+  // Fetch Doctor Diagnostics
+  async function fetchDoctorReport(): Promise<void> {
+    setDoctorLoading(true);
+    try {
+      const res = await fetch("/api/doctor/diagnose");
+      if (res.ok) {
+        setDoctorReport((await res.json()) as DoctorReport);
+      }
+    } catch {
+      setDoctorReport(null);
+    } finally {
+      setDoctorLoading(false);
+    }
+  }
+
+  async function handleDoctorRepair(repairId: string): Promise<void> {
+    setDoctorRepairing(repairId);
+    try {
+      const res = await fetch("/api/doctor/repair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repair_id: repairId, approved: true }),
+      });
+      if (res.ok) {
+        void fetchDoctorReport();
+      }
+    } finally {
+      setDoctorRepairing(null);
+    }
+  }
+
+  async function handleSelfQuerySubmit(): Promise<void> {
+    if (!selfQueryInput.trim()) return;
+    setSelfQueryLoading(true);
+    try {
+      const res = await fetch("/api/self/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: selfQueryInput }),
+      });
+      if (res.ok) {
+        setSelfQueryResult((await res.json()) as {
+          answer?: string;
+          evidence_sources?: string[];
+          is_self_question?: boolean;
+        });
+      }
+    } catch {
+      setSelfQueryResult(null);
+    } finally {
+      setSelfQueryLoading(false);
+    }
+  }
+
   useEffect(() => {
     void fetch("/api/capabilities")
       .then(async (response) =>
@@ -325,8 +416,14 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
     if (activeCategory === "Privacy" || activeCategory === "All") {
       void fetchPrivacySummary();
     }
-    if (activeCategory === "Developer" || activeCategory === "All") {
+    if (
+      activeCategory === "Developer" ||
+      activeCategory === "Audit & Diagnostics" ||
+      activeCategory === "System" ||
+      activeCategory === "All"
+    ) {
       void fetchDeveloperDiagnostics();
+      void fetchDoctorReport();
     }
   }, [activeCategory]);
 
@@ -1140,6 +1237,126 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
                     ))
                   )}
                 </div>
+              </div>
+
+              {/* Charlie Doctor Health Diagnostics */}
+              <div className="pt-2 border-t border-cyan-500/10 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-[11px] font-bold text-slate-300 flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                    Charlie Doctor Health Diagnostics
+                    {doctorReport && (
+                      <span
+                        className={`text-[9px] px-1.5 py-0.5 rounded font-mono uppercase ${
+                          doctorReport.is_healthy
+                            ? "bg-emerald-950 text-emerald-300 border border-emerald-500/30"
+                            : "bg-rose-950 text-rose-300 border border-rose-500/30"
+                        }`}
+                      >
+                        {doctorReport.is_healthy ? "Healthy" : `${doctorReport.errors_count} Errors / ${doctorReport.warnings_count} Warnings`}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void fetchDoctorReport()}
+                    disabled={doctorLoading}
+                    className="px-2 py-0.5 text-[10px] rounded bg-cyan-500/20 border border-cyan-400/40 text-cyan-200 hover:bg-cyan-500/30 transition cursor-pointer disabled:opacity-50"
+                  >
+                    {doctorLoading ? "Diagnosing..." : "Run Doctor"}
+                  </button>
+                </div>
+
+                {doctorReport && (
+                  <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                    {doctorReport.checks.map((check) => (
+                      <div
+                        key={check.check_id}
+                        className="p-2 rounded bg-slate-900/80 border border-cyan-500/10 text-[10px] space-y-1 font-mono"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className={`w-2 h-2 rounded-full ${
+                                check.status === "ok"
+                                  ? "bg-emerald-400"
+                                  : check.status === "warning"
+                                  ? "bg-amber-400"
+                                  : check.status === "info"
+                                  ? "bg-cyan-400"
+                                  : "bg-rose-400"
+                              }`}
+                            />
+                            <span className="font-bold text-slate-200">{check.check_id}</span>
+                            <span className="text-slate-500">({check.category})</span>
+                          </div>
+                          {check.repair_available && (
+                            <button
+                              type="button"
+                              onClick={() => check.repair_id && void handleDoctorRepair(check.repair_id)}
+                              disabled={doctorRepairing === check.repair_id}
+                              className="px-2 py-0.5 text-[9px] rounded bg-amber-500/20 border border-amber-400/40 text-amber-200 hover:bg-amber-500/30 transition cursor-pointer disabled:opacity-50 font-sans"
+                            >
+                              {doctorRepairing === check.repair_id ? "Repairing..." : "Safe Repair"}
+                            </button>
+                          )}
+                        </div>
+                        <p className="text-slate-300 font-sans">{check.summary}</p>
+                        <p className="text-slate-500 truncate">Evidence: {check.evidence}</p>
+                        {check.fix_hint && check.status !== "ok" && (
+                          <p className="text-amber-300/90 font-sans">Fix: {check.fix_hint}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Self-Knowledge & Code Index Query */}
+              <div className="pt-2 border-t border-cyan-500/10 space-y-2">
+                <div className="text-[11px] font-bold text-slate-300 flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                  Self-Knowledge & Code Truth Explorer
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={selfQueryInput}
+                    onChange={(e) => setSelfQueryInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void handleSelfQuerySubmit();
+                    }}
+                    placeholder="Ask Charlie about models, capabilities, leases, or code locations..."
+                    className="flex-1 px-2.5 py-1 text-xs rounded bg-slate-900 border border-cyan-500/30 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-400 font-sans"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleSelfQuerySubmit()}
+                    disabled={selfQueryLoading || !selfQueryInput.trim()}
+                    className="px-3 py-1 text-xs rounded bg-cyan-500/20 border border-cyan-400/40 text-cyan-200 hover:bg-cyan-500/30 transition cursor-pointer disabled:opacity-50 font-sans"
+                  >
+                    {selfQueryLoading ? "Querying..." : "Ask"}
+                  </button>
+                </div>
+
+                {selfQueryResult && (
+                  <div className="p-2.5 rounded bg-slate-900/90 border border-cyan-500/20 text-xs space-y-1.5">
+                    <p className="text-slate-200 font-sans">{selfQueryResult.answer}</p>
+                    {selfQueryResult.evidence_sources && selfQueryResult.evidence_sources.length > 0 && (
+                      <div className="flex flex-wrap gap-1 items-center pt-1 border-t border-cyan-500/10 text-[9px] font-mono">
+                        <span className="text-slate-400">Grounded Evidence:</span>
+                        {selfQueryResult.evidence_sources.map((src) => (
+                          <span
+                            key={src}
+                            className="px-1.5 py-0.5 rounded bg-cyan-950/80 text-cyan-300 border border-cyan-500/30"
+                          >
+                            {src}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </section>
           )}

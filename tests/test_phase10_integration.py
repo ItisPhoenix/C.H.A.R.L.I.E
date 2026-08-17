@@ -1,8 +1,10 @@
 import time
+
 import pytest
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
-from charlie.web_server import app, validate_ws_origin
+
+from charlie.web_server import app
 
 
 @pytest.fixture

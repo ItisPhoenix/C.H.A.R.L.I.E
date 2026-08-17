@@ -8,12 +8,11 @@ audit logs, browser cache, camera/screenshot artifacts, and memories.
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger("charlie.privacy_service")
 
@@ -67,14 +66,14 @@ class PrivacyService:
             audit_bytes += self._path_size(Path(extra))
 
         browser_bytes = self._path_size(self.browser_dir_path)
-        
+
         memory_bytes = self._path_size(self.memory_db_path)
         for extra in (f"{self.memory_db_path}-wal", f"{self.memory_db_path}-shm"):
             memory_bytes += self._path_size(Path(extra))
         memory_bytes += self._path_size(Path("charlie_memory_db"))
 
         logs_bytes = self._path_size(self.logs_dir_path)
-        
+
         # Scratchpad / temporary artifacts
         artifacts_bytes = self._path_size(Path("scratchpad.db")) + self._path_size(Path("data"))
 

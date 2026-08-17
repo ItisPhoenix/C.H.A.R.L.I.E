@@ -1,11 +1,10 @@
-import os
 import tempfile
-import time
 from pathlib import Path
+
 import pytest
 
-from charlie.privacy_service import PrivacyService
 import charlie.web_server as web_server
+from charlie.privacy_service import PrivacyService
 
 
 def test_privacy_service_summary_and_purge():
@@ -13,10 +12,10 @@ def test_privacy_service_summary_and_purge():
         base = Path(tmpdir)
         sessions_db = base / "sessions.db"
         sessions_db.write_text("session data dummy", encoding="utf-8")
-        
+
         audit_db = base / "audit.db"
         audit_db.write_text("audit logs dummy", encoding="utf-8")
-        
+
         browser_dir = base / "browser_profile"
         browser_dir.mkdir()
         (browser_dir / "cache.tmp").write_bytes(b"0" * 1024)

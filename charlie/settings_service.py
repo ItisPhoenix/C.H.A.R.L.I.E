@@ -35,7 +35,7 @@ class SettingsService:
         for spec in self.config.editable_field_specs():
             val = getattr(self.config, spec["field"])
             is_secret = bool(spec.get("secret", False))
-            
+
             # Mask secret values completely; never expose them to frontend or logs
             spec_out = {
                 "key": spec["key"],

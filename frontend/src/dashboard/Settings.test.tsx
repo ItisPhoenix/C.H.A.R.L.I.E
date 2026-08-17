@@ -96,6 +96,59 @@ describe("Settings Component", () => {
             json: () => Promise.resolve({ lines: ["[INFO] System ready"], total_lines: 1 }),
           });
         }
+        if (url === "/api/doctor/diagnose") {
+          return Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                timestamp: 1723900000,
+                total_checks: 17,
+                is_healthy: true,
+                warnings_count: 0,
+                errors_count: 0,
+                checks: [
+                  {
+                    check_id: "config_validity",
+                    category: "config",
+                    status: "ok",
+                    severity: "low",
+                    summary: "Configuration valid and loaded",
+                    evidence: "Loaded configuration.",
+                    repair_available: false,
+                    requires_approval: false,
+                  },
+                  {
+                    check_id: "capability_leases",
+                    category: "leases",
+                    status: "warning",
+                    severity: "medium",
+                    summary: "Orphan lease found",
+                    evidence: "Orphan lease on desktop.",
+                    repair_available: true,
+                    repair_id: "repair_stale_leases",
+                    requires_approval: false,
+                  },
+                ],
+              }),
+          });
+        }
+        if (url === "/api/self/query") {
+          return Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                is_self_question: true,
+                answer: "Configured to use gpt-4o via openai.",
+                evidence_sources: ["runtime.model", "capability.registry"],
+              }),
+          });
+        }
+        if (url === "/api/doctor/repair") {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ success: true, message: "Cleared stale capability leases." }),
+          });
+        }
         if (url === "/api/audit") {
           return Promise.resolve({
             ok: true,
@@ -170,5 +223,24 @@ describe("Settings Component", () => {
 
     expect(await screen.findByText("Developer Diagnostics & Live Telemetry")).toBeDefined();
     expect(await screen.findByText("[INFO] System ready")).toBeDefined();
+    expect(await screen.findByText("Charlie Doctor Health Diagnostics")).toBeDefined();
+    expect(await screen.findByText("Self-Knowledge & Code Truth Explorer")).toBeDefined();
+  });
+
+  test("runs self-knowledge query when submitted", async () => {
+    render(<Settings embed={true} />);
+
+    const devBtn = await screen.findByRole("button", { name: /^Developer/i });
+    fireEvent.click(devBtn);
+
+    const input = await screen.findByPlaceholderText("Ask Charlie about models, capabilities, leases, or code locations...");
+    const askBtn = await screen.findByRole("button", { name: /^Ask$/i });
+
+    fireEvent.change(input, { target: { value: "What model are you configured to use?" } });
+    fireEvent.click(askBtn);
+
+    expect(await screen.findByText("Configured to use gpt-4o via openai.")).toBeDefined();
+    expect(await screen.findByText("runtime.model")).toBeDefined();
   });
 });
+

@@ -2099,6 +2099,54 @@ def browser_read(url: str) -> str:
     return f"URL: {result['url']}\n\n{result['content']}"
 
 
+@registry.register_tool(
+    name="charlie_self_query",
+    description=(
+        "Ask a question about Charlie's own identity, configured models, live capabilities, "
+        "codebase implementation, MCP servers, or runtime health."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": "Question about Charlie's runtime, capabilities, or codebase.",
+            },
+        },
+        "required": ["question"],
+    },
+    owner="system",
+    risk_class="safe",
+)
+def charlie_self_query(question: str) -> str:
+    from charlie.self_knowledge import SelfKnowledgeService
+
+    service = SelfKnowledgeService()
+    res = service.answer_self_question(question)
+    return res.get("answer", "No self-knowledge answer available.")
+
+
+@registry.register_tool(
+    name="charlie_doctor_diagnose",
+    description=(
+        "Run structured Charlie Doctor diagnostics across all subsystems, verifying "
+        "health, configuration, models, leases, and MCP."
+    ),
+    schema={
+        "type": "object",
+        "properties": {},
+    },
+    owner="system",
+    risk_class="safe",
+)
+def charlie_doctor_diagnose() -> str:
+    from charlie.doctor import CharlieDoctor
+
+    doctor = CharlieDoctor()
+    report = doctor.diagnose()
+    return doctor.format_cli_report(report)
+
+
 def set_pending_vision_image(url: Optional[str]) -> None:
     """Queue an image data URL for the very next outgoing LLM payload."""
     global _pending_vision_image
