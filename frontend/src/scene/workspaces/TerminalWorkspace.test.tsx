@@ -97,4 +97,17 @@ describe("TerminalWorkspace Component", () => {
     const ws = MockWebSocket.instances[0];
     expect(ws.sentData).toContain(JSON.stringify({ type: "interrupt" }));
   });
+
+  test("arbitrary TerminalWorkspace ID still connects strictly to primary session", async () => {
+    const arbitraryWorkspace: WorkspaceInstance = {
+      ...mockWorkspace,
+      id: "presentation-term-custom-882",
+    };
+
+    render(<TerminalWorkspace workspace={arbitraryWorkspace} />);
+
+    const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    expect(ws.url).toContain("/ws/terminal/primary");
+    expect(ws.url).not.toContain("presentation-term-custom-882");
+  });
 });

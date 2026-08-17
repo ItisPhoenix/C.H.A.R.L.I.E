@@ -12,7 +12,7 @@ from charlie.log_redaction import redact_sensitive_text
 class AuditStore:
     def __init__(self, path: str) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(path)
+        self._connection = sqlite3.connect(path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute(
             "CREATE TABLE IF NOT EXISTS audit_entries ("

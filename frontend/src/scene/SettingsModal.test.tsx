@@ -13,9 +13,36 @@ describe("SettingsModal Component", () => {
     render(<SettingsModal isOpen={true} onClose={onClose} />);
 
     expect(screen.getByText(/C.H.A.R.L.I.E. CONFIGURATION & SYSTEM SETTINGS/i)).toBeDefined();
-    
+
     const closeBtn = screen.getByText("✕ CLOSE");
     fireEvent.click(closeBtn);
     expect(onClose).toHaveBeenCalled();
+  });
+
+  test("renders 15 settings categories in modal sidebar", () => {
+    render(<SettingsModal isOpen={true} onClose={() => {}} />);
+
+    const categories = [
+      "All",
+      "General",
+      "Voice",
+      "Appearance",
+      "HUD",
+      "Map",
+      "Pet",
+      "Models",
+      "Memory",
+      "Automation",
+      "Privacy",
+      "Tools / MCP",
+      "Integrations",
+      "System",
+      "Developer",
+      "Audit & Diagnostics",
+    ];
+
+    for (const cat of categories) {
+      expect(screen.getByRole("button", { name: new RegExp(cat, "i") })).toBeDefined();
+    }
   });
 });

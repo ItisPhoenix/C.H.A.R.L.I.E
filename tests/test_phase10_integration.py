@@ -64,6 +64,7 @@ def test_session_chat_endpoints(client):
     # 1. Active session
     act_res = client.get("/api/session/active")
     assert act_res.status_code == 200
+    assert "active_session" in act_res.json()
 
     # 2. Session messages
     msg_res = client.get("/api/sessions/default/messages")
@@ -71,3 +72,25 @@ def test_session_chat_endpoints(client):
     msg_data = msg_res.json()
     assert "messages" in msg_data
     assert isinstance(msg_data["messages"], list)
+
+
+def test_terminal_ws_rejects_unknown_session(client):
+    # Attempting to connect to an unknown non-primary session must be rejected with 1008
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with client.websocket_connect("/ws/terminal/unknown_random_session_999", headers={"origin": "http://localhost:5173"}):
+            pass
+    assert excinfo.value.code == 1008
+
+
+def test_audit_api_and_export(client):
+    res = client.get("/api/audit")
+    assert res.status_code == 200
+    data = res.json()
+    assert "entries" in data
+    assert isinstance(data["entries"], list)
+
+    exp_res = client.get("/api/audit/export")
+    assert exp_res.status_code == 200
+    exp_data = exp_res.json()
+    assert exp_data.get("format") == "json"
+    assert "entries" in exp_data

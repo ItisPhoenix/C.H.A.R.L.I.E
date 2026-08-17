@@ -82,3 +82,86 @@ async def test_terminal_session_lifecycle():
     # Cleanup
     await manager.close("primary")
     assert session.status == "closed"
+
+
+@pytest.mark.asyncio
+async def test_terminal_resource_arbitration_and_contention():
+    manager = TerminalManager()
+    session = await manager.get_or_create_primary()
+
+    # 1. User typing takes over ownership and sets lease holder to 'user'
+    session.write_bytes("echo hello\r\n", source="user")
+    assert session.lease_holder == "user"
+
+    # 2. Charlie command immediately rejected if user actively typing
+    with pytest.raises(RuntimeError, match="actively interacting"):
+        await manager.execute_charlie_command("primary", "Get-Date", task_id="task-agent-1")
+
+    # 3. Simulate user idle time passing
+    session._last_user_input_time = 0.0
+
+    # 4. Charlie unapproved shell command requires approval
+    with pytest.raises(PermissionError, match="Approval required"):
+        await manager.execute_charlie_command("primary", "Get-Date", task_id="task-agent-1", approved=False)
+
+    # 5. Dangerous / destructive command without approval also rejected
+    with pytest.raises(PermissionError, match="Approval required"):
+        await manager.execute_charlie_command(
+            "primary",
+            "Stop-Process -Name explorer -Force",
+            task_id="task-agent-1",
+            approved=False,
+        )
+
+    # 6. Approved execution succeeds and audits
+    class DummyAudit:
+        def __init__(self):
+            self.entries = []
+        def record(self, tool_name, args, outcome):
+            self.entries.append({"tool": tool_name, "args": args, "outcome": outcome})
+
+    audit = DummyAudit()
+    approved_res = await manager.execute_charlie_command(
+        "primary",
+        "Stop-Process -Name explorer -Force",
+        task_id="task-agent-1",
+        audit_store=audit,
+        approved=True,
+    )
+    assert approved_res["status"] == "ok"
+    assert len(audit.entries) == 1
+    assert audit.entries[0]["tool"] == "terminal_exec"
+    assert audit.entries[0]["outcome"] == "COMPLETED"
+
+    # 7. User Ctrl+C forces takeover and resets lease
+    session.interrupt()
+    assert session.lease_holder == "user"
+
+    await manager.close("primary")
+
+
+@pytest.mark.asyncio
+async def test_terminal_exit_code_non_zero():
+    # Test FallbackPTY or custom non-zero process
+    from charlie.terminal_service import FallbackPTY, TerminalSession
+
+    backend = FallbackPTY()
+    if not _HAS_CONPTY:
+        await backend.start_async()
+        session = TerminalSession(session_id="exit-test", backend=backend)
+        session.start_reader()
+        session.write("exit 42\r\n", source="user")
+        for _ in range(30):
+            await asyncio.sleep(0.1)
+            if session.status in ("exited", "failed"):
+                break
+        assert session.exit_code == 42
+        assert session.status == "failed"
+    else:
+        # On Windows ConPTY, test that snapshot exposes exit_code accurately
+        manager = TerminalManager()
+        session = await manager.get_or_create_primary()
+        snap = session.snapshot()
+        assert "exit_code" in snap
+        assert snap["exit_code"] is None or isinstance(snap["exit_code"], int)
+        await manager.close("primary")

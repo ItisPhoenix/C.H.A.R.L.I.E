@@ -7,10 +7,14 @@ import logging
 import os
 import sys
 import threading
+import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Deque, Dict, Optional, Set
+
+from charlie.autonomy import RiskClass, classify_action
+from charlie.resource_locks import default_lease_manager
 
 logger = logging.getLogger("charlie.terminal_service")
 
@@ -183,6 +187,24 @@ class WindowsConPTY:
             self.rows = max(1, rows)
             kernel32.ResizePseudoConsole(self._hpcon, COORD(self.cols, self.rows))
 
+    def get_exit_code(self) -> Optional[int]:
+        with self._lock:
+            if not self._pi.hProcess:
+                return None
+            code = wintypes.DWORD()
+            if kernel32.GetExitCodeProcess(self._pi.hProcess, ctypes.byref(code)):
+                STILL_ACTIVE = 259
+                if code.value == STILL_ACTIVE:
+                    # Check if process is actually terminated
+                    wait_res = kernel32.WaitForSingleObject(self._pi.hProcess, 0)
+                    WAIT_OBJECT_0 = 0
+                    if wait_res == WAIT_OBJECT_0:
+                        kernel32.GetExitCodeProcess(self._pi.hProcess, ctypes.byref(code))
+                        return int(code.value)
+                    return None
+                return int(code.value)
+            return None
+
     def close(self) -> None:
         with self._lock:
             if self._closed:
@@ -296,6 +318,8 @@ class TerminalSession:
         self.status: str = "running"
         self.exit_code: Optional[int] = None
         self.lease_holder: str = "idle"
+        self._last_user_input_time: float = 0.0
+        self._user_active_timeout: float = 1.5
 
         self._history: str = ""
         self._subscribers: Set[asyncio.Queue[str]] = set()
@@ -327,8 +351,20 @@ class TerminalSession:
         except Exception:
             logger.warning("ConPTY read loop encountered an error", exc_info=True)
         finally:
-            self.status = "closed" if self._closed else "exited"
-            self._broadcast_event({"type": "exit", "exit_code": self.exit_code or 0})
+            if conpty._pi.hProcess:
+                try:
+                    kernel32.WaitForSingleObject(conpty._pi.hProcess, 500)
+                except Exception:
+                    pass
+            code = conpty.get_exit_code()
+            self.exit_code = code
+            if self._closed:
+                self.status = "closed"
+            elif code is not None:
+                self.status = "exited" if code == 0 else "failed"
+            else:
+                self.status = "exited"
+            self._broadcast_event({"type": "exit", "exit_code": self.exit_code})
 
     async def _fallback_read_loop(self) -> None:
         pty = self.backend
@@ -344,10 +380,17 @@ class TerminalSession:
                 text = raw.decode("utf-8", errors="replace")
                 self._append_output(text)
             self.exit_code = await pty._process.wait()
-            self.status = "closed" if self._closed else "exited"
+            if self._closed:
+                self.status = "closed"
+            elif self.exit_code is not None:
+                self.status = "exited" if self.exit_code == 0 else "failed"
+            else:
+                self.status = "exited"
         except Exception:
             logger.warning("Fallback PTY reader encountered an error", exc_info=True)
             self.status = "failed"
+        finally:
+            self._broadcast_event({"type": "exit", "exit_code": self.exit_code})
 
     def _append_output(self, text: str) -> None:
         self._history = (self._history + text)[-_MAX_OUTPUT_CHARS:]
@@ -363,6 +406,14 @@ class TerminalSession:
     def write_bytes(self, data: bytes | str, source: str = "user") -> int:
         if self.status != "running" or self._closed:
             raise RuntimeError("terminal session is not running")
+
+        if source == "user":
+            self._last_user_input_time = time.monotonic()
+            current = default_lease_manager.current_owner("terminal")
+            if current is not None and current != "user":
+                default_lease_manager.manual_takeover(["terminal"])
+            self.lease_holder = "user"
+
         if isinstance(data, str):
             data = data.encode("utf-8")
         return self.backend.write(data)
@@ -378,7 +429,10 @@ class TerminalSession:
 
     def interrupt(self) -> None:
         # Ctrl+C = 0x03
-        self.write_bytes(b"\x03", source="user")
+        default_lease_manager.manual_takeover(["terminal"])
+        self.lease_holder = "user"
+        self._last_user_input_time = time.monotonic()
+        self.backend.write(b"\x03")
 
     def subscribe(self) -> asyncio.Queue[dict]:
         q: asyncio.Queue[dict] = asyncio.Queue()
@@ -464,11 +518,85 @@ class TerminalManager:
             raise KeyError(session_id)
         return session.snapshot()
 
-    async def write(self, session_id: str, line: str, source: str = "charlie") -> None:
+    async def execute_charlie_command(
+        self,
+        session_id: str,
+        command: str,
+        task_id: str = "charlie-agent",
+        audit_store: Optional[object] = None,
+        approved: bool = False,
+    ) -> dict:
+        """Execute a command as Charlie with capability lease arbitration, autonomy policy, and audit."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            if session_id == self._primary_id:
+                session = await self.get_or_create_primary()
+            else:
+                raise KeyError(session_id)
+
+        # 1. User contention check: if user interacted very recently, reject
+        if time.monotonic() - session._last_user_input_time < session._user_active_timeout:
+            raise RuntimeError("Terminal lease conflict: user is actively interacting with terminal")
+
+        # 2. Acquire terminal lease
+        lease = await default_lease_manager.acquire("terminal", owner_id=task_id, timeout=2.0)
+        try:
+            # 3. Autonomy policy evaluation
+            risk_class, reason = classify_action("shell_execute", {"command": command})
+
+            if risk_class == RiskClass.IRREVERSIBLE:
+                if audit_store is not None and hasattr(audit_store, "record"):
+                    audit_store.record(
+                        "terminal_exec",
+                        {"command": command, "task_id": task_id, "source": "charlie"},
+                        f"BLOCKED: {reason}",
+                    )
+                raise PermissionError(f"Command blocked by security policy: {reason}")
+
+            if risk_class in (RiskClass.DESTRUCTIVE, RiskClass.SECURITY_SENSITIVE) and not approved:
+                if audit_store is not None and hasattr(audit_store, "record"):
+                    audit_store.record(
+                        "terminal_exec",
+                        {"command": command, "task_id": task_id, "source": "charlie", "risk_class": str(risk_class)},
+                        "APPROVAL_REQUIRED",
+                    )
+                raise PermissionError(f"Approval required for command execution: {reason or str(risk_class)}")
+
+            # 4. Write command to terminal
+            session.lease_holder = task_id
+            session.write(command, source="charlie")
+
+            # 5. Audit completed execution
+            if audit_store is not None and hasattr(audit_store, "record"):
+                audit_store.record(
+                    "terminal_exec",
+                    {"command": command, "task_id": task_id, "source": "charlie"},
+                    "COMPLETED",
+                )
+
+            return {
+                "status": "ok",
+                "session_id": session.session_id,
+                "task_id": task_id,
+                "command": command,
+                "risk_class": str(risk_class),
+            }
+        finally:
+            await lease.release()
+            session.lease_holder = "idle"
+
+    async def write(self, session_id: str, line: str, source: str = "charlie", task_id: str = "charlie-agent") -> None:
         session = self._sessions.get(session_id)
         if session is None:
             raise KeyError(session_id)
+        if source == "charlie":
+            owner = default_lease_manager.current_owner("terminal")
+            if owner is not None and owner != task_id:
+                raise RuntimeError(f"Terminal lease conflict: owned by {owner}")
+            session.lease_holder = task_id
         session.write(line, source=source)
+        if source == "charlie":
+            session.lease_holder = "idle"
 
     async def write_bytes(self, session_id: str, data: bytes | str, source: str = "user") -> None:
         session = self._sessions.get(session_id)

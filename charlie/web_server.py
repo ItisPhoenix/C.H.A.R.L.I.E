@@ -527,14 +527,15 @@ async def terminal_ws_endpoint(ws: WebSocket, session_id: str = "primary"):
         logger.warning("Blocked Terminal WebSocket connection from unauthorized origin: %s", origin)
         raise WebSocketException(code=1008)
 
-    await ws.accept()
-
-    if session_id == "primary" or not session_id:
-        session = await _terminal_manager.get_or_create_primary()
-    else:
+    if session_id != "primary" and session_id:
         session = _terminal_manager.get_session(session_id)
-        if session is None or session.status != "running":
-            session = await _terminal_manager.create(session_id=session_id)
+        if session is None:
+            logger.warning("Rejected Terminal WebSocket connection for unknown non-primary session: %s", session_id)
+            raise WebSocketException(code=1008)
+    else:
+        session = await _terminal_manager.get_or_create_primary()
+
+    await ws.accept()
 
     # Initial session snapshot for instant hydration
     init_payload = {

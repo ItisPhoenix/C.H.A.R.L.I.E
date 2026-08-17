@@ -3,7 +3,7 @@ import type { WorkspaceInstance } from "../../layout/workspaceStore";
 import { useCharlieStore, type ChatMessage } from "../../store/charlie";
 import { sendCommand } from "../../runtime/bridge";
 
-export function ConversationWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
+export function ConversationWorkspace({ workspace: _workspace }: { workspace?: WorkspaceInstance }): ReactElement {
   const chatMessages = useCharlieStore((s) => s.chatMessages);
   const timeline = Array.isArray(chatMessages) ? chatMessages : [];
   const coreState = useCharlieStore((s) => s.coreState);
@@ -14,17 +14,35 @@ export function ConversationWorkspace({ workspace }: { workspace: WorkspaceInsta
   const isThinking = coreState === "thinking" || coreState === "working";
   const [inputVal, setInputVal] = useState("");
   const [sending, setSending] = useState(false);
+  const [canonicalSessionId, setCanonicalSessionId] = useState<string>("default");
   const endRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const sessionId = workspace.id && workspace.id !== "conversation" ? workspace.id : "default";
-
-  // Hydrate session messages on mount or session change
+  // Resolve canonical session ID from backend on mount
   useEffect(() => {
-    sendCommand("session_active", { session_id: sessionId });
+    let isMounted = true;
+    void fetch("/api/session/active")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!isMounted || !data || !data.active_session) return;
+        setCanonicalSessionId(data.active_session);
+      })
+      .catch(() => {
+        // Fallback default
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Hydrate session messages on mount or canonical session change
+  useEffect(() => {
+    if (!canonicalSessionId) return;
+    sendCommand("session_active", { session_id: canonicalSessionId });
 
     let isMounted = true;
-    void fetch(`/api/sessions/${sessionId}/messages`)
+    void fetch(`/api/sessions/${canonicalSessionId}/messages`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (!isMounted || !data || !Array.isArray(data.messages)) return;
@@ -47,7 +65,7 @@ export function ConversationWorkspace({ workspace }: { workspace: WorkspaceInsta
     return () => {
       isMounted = false;
     };
-  }, [sessionId]);
+  }, [canonicalSessionId]);
 
   useEffect(() => {
     if (typeof endRef.current?.scrollIntoView === "function") {
@@ -67,11 +85,11 @@ export function ConversationWorkspace({ workspace }: { workspace: WorkspaceInsta
 
     try {
       // 1. Send via primary WebSocket command bridge
-      sendCommand("chat", { text, session_id: sessionId });
+      sendCommand("chat", { text, session_id: canonicalSessionId });
 
       // 2. If WS is disconnected, fallback to HTTP endpoint
       if (!connected) {
-        await fetch(`/api/sessions/${sessionId}/chat`, {
+        await fetch(`/api/sessions/${canonicalSessionId}/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text }),
@@ -121,7 +139,7 @@ export function ConversationWorkspace({ workspace }: { workspace: WorkspaceInsta
             CONVERSATION & DIALOGUE LOG
           </span>
           <span className="text-[10px] text-slate-400 font-mono">
-            SESSION: <strong className="text-cyan-200">{sessionId}</strong>
+            SESSION: <strong className="text-cyan-200">{canonicalSessionId}</strong>
           </span>
         </div>
         <div className="flex items-center gap-2">

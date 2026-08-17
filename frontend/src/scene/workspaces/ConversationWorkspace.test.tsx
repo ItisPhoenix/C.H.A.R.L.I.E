@@ -77,4 +77,33 @@ describe("ConversationWorkspace Component", () => {
     const messages = useCharlieStore.getState().chatMessages;
     expect(messages.some((m) => m.text === "Run diagnostic check")).toBe(true);
   });
+
+  test("arbitrary workspace ID does not become chat session ID", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/session/active")) {
+        return {
+          ok: true,
+          json: async () => ({ active_session: "voice_active_canonical" }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({ messages: [] }),
+      } as Response;
+    };
+
+    const arbitraryWorkspace: WorkspaceInstance = {
+      ...mockWorkspace,
+      id: "presentation-conversation-7f83",
+    };
+
+    render(<ConversationWorkspace workspace={arbitraryWorkspace} />);
+
+    expect(await screen.findByText("voice_active_canonical")).toBeDefined();
+    expect(screen.queryByText("presentation-conversation-7f83")).toBeNull();
+
+    global.fetch = originalFetch;
+  });
 });

@@ -30,7 +30,7 @@ type TerminalWsMessage =
   | TerminalExitMessage
   | { type: string; [key: string]: unknown };
 
-export function TerminalWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
+export function TerminalWorkspace({ workspace: _workspace }: { workspace?: WorkspaceInstance }): ReactElement {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -41,7 +41,7 @@ export function TerminalWorkspace({ workspace }: { workspace: WorkspaceInstance 
   const [shellName, setShellName] = useState("powershell.exe");
   const [sessionStatus, setSessionStatus] = useState("connecting");
 
-  const sessionId = workspace.id && workspace.id !== "terminal" ? workspace.id : "primary";
+  const sessionId = "primary";
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -85,6 +85,7 @@ export function TerminalWorkspace({ workspace }: { workspace: WorkspaceInstance 
     term.loadAddon(fitAddon);
 
     term.open(containerRef.current);
+    term.focus();
     terminalRef.current = term;
     fitAddonRef.current = fitAddon;
 

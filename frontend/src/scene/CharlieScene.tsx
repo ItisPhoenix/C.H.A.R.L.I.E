@@ -91,8 +91,12 @@ export function CharlieScene(): ReactElement {
       }
     };
 
+    (window as unknown as { __OPEN_SETTINGS__?: () => void }).__OPEN_SETTINGS__ = () => setSettingsModalOpen(true);
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    return () => {
+      delete (window as unknown as { __OPEN_SETTINGS__?: () => void }).__OPEN_SETTINGS__;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
   }, [projection.activeAttention, projection.activeWorkspace, dismissIntent, minimizeWorkspace, focusedEscapeWidgets]);
 
   const handleClearScreen = () => {
