@@ -396,10 +396,13 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
                         <input
                           aria-label={field.label}
                           type={
-                            field.type === "int" || field.type === "float"
+                            field.secret
+                              ? "password"
+                              : field.type === "int" || field.type === "float"
                               ? "number"
                               : "text"
                           }
+                          placeholder={field.secret && field.is_set ? "•••••••• (configured)" : undefined}
                           className="px-2.5 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono w-52 text-right"
                           value={String(fieldValue(field, drafts) ?? "")}
                           onChange={(event) =>

@@ -1256,23 +1256,26 @@ async def main():
                     terminal_session_id = payload.get("terminal_session_id")
                     command = payload.get("command")
                     if request_id and terminal_session_id and isinstance(command, str):
-                        approved = await brain.request_tool_approval(
-                            "shell_execute",
-                            {"command": command},
-                            "A terminal command needs approval",
-                            platform="web",
-                            risk_class="security_sensitive",
-                        )
-                        await event_bus.emit(
-                            "terminal_command_result",
-                            {
-                                "request_id": request_id,
-                                "terminal_session_id": terminal_session_id,
-                                "command": command,
-                                "approved": approved,
-                            },
-                            meta=EventMeta(source=EventSource.BRAIN, rationale="terminal command approval resolved"),
-                        )
+                        async def _handle_terminal_command_request(req_id: str, term_sid: str, cmd_str: str):
+                            approved = await brain.request_tool_approval(
+                                "shell_execute",
+                                {"command": cmd_str},
+                                "A terminal command needs approval",
+                                platform="web",
+                                risk_class="security_sensitive",
+                            )
+                            await event_bus.emit(
+                                "terminal_command_result",
+                                {
+                                    "request_id": req_id,
+                                    "terminal_session_id": term_sid,
+                                    "command": cmd_str,
+                                    "approved": approved,
+                                },
+                                meta=EventMeta(source=EventSource.BRAIN, rationale="terminal command approval resolved"),
+                            )
+
+                        asyncio.create_task(_handle_terminal_command_request(request_id, terminal_session_id, command))
                 elif cmd_type == "stop":
                     voice.stop_tts()
                     brain.cancel_chat()

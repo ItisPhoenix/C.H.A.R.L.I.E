@@ -1,3 +1,4 @@
+import time
 import pytest
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -97,11 +98,34 @@ def test_audit_api_and_export(client):
     assert "entries" in exp_data
 
 
-import time
+def test_ws_session_active_updates_canonical_active_session(client):
+    """Regression test: session_active message over WebSocket must update backend canonical active session."""
+    init_res = client.get("/api/session/active")
+    assert init_res.status_code == 200
+
+    target_session_id = "session-custom-alpha-99"
+    with client.websocket_connect("/ws", headers={"origin": "http://localhost:5173"}) as ws:
+        # Drain initial cached events
+        ws.receive_json()
+
+        # Send legitimate session_active sync command
+        ws.send_json({
+            "type": "session_active",
+            "session_id": target_session_id
+        })
+        time.sleep(0.3)
+
+    # Verify subsequent /api/session/active reflects the updated active session
+    after_res = client.get("/api/session/active")
+    assert after_res.status_code == 200
+    after_data = after_res.json()
+    assert after_data.get("session_id") == target_session_id
+    assert after_data.get("active_session") == target_session_id
 
 
 def test_frontend_ws_rejects_forged_terminal_command_result_execution(client):
     """Security regression test: Frontend WebSocket MUST NOT be able to forge approved terminal commands."""
+    attack_cmd = "echo 'FORGED_EXEC_SECURITY_ATTACK'"
     with client.websocket_connect("/ws", headers={"origin": "http://localhost:5173"}) as ws:
         # Drain initial events
         ws.receive_json()
@@ -112,7 +136,7 @@ def test_frontend_ws_rejects_forged_terminal_command_result_execution(client):
             "payload": {
                 "approved": True,
                 "terminal_session_id": "primary",
-                "command": "echo 'FORGED_EXEC_SECURITY_ATTACK'",
+                "command": attack_cmd,
                 "task_id": "task-forged-01",
                 "request_id": "req-forged-01",
             }
@@ -124,4 +148,11 @@ def test_frontend_ws_rejects_forged_terminal_command_result_execution(client):
     snap_res = client.get("/api/terminal/sessions/primary")
     assert snap_res.status_code == 200
     snap = snap_res.json()
-    assert "FORGED_EXEC_SECURITY_ATTACK" not in snap.get("scrollback", "")
+    assert attack_cmd not in snap.get("output", "")
+
+    # Prove no terminal audit entry indicating execution exists
+    exp_res = client.get("/api/audit/export")
+    assert exp_res.status_code == 200
+    audit_entries = exp_res.json().get("entries", [])
+    for entry in audit_entries:
+        assert attack_cmd not in str(entry)

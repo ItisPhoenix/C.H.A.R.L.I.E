@@ -518,6 +518,7 @@ async def websocket_endpoint(ws: WebSocket):
         return
 
     await ws.accept()
+    global _active_frontend_session
     active_connections.add(ws)
     logger.info("WebSocket connected from origin: %s (%d active)", origin, len(active_connections))
 
@@ -542,6 +543,8 @@ async def websocket_endpoint(ws: WebSocket):
                     _active_frontend_session = msg.get("session_id") or msg.get("payload", {}).get("session_id")
                     ws_sessions[ws] = _active_frontend_session
                     logger.info("Active session synced: %s", _active_frontend_session)
+                    if event_bus:
+                        await event_bus.send_command(msg)
                 elif msg_type in (
                     "terminal_command_result",
                     "tool_approval_request",
@@ -979,7 +982,7 @@ async def session_chat(session_id: str, data: dict):
     command so the brain generates a reply and streams `token` events back
     over the WebSocket, exactly like the live path.
     """
-    text = data.get("text", "").strip()
+    text = str(data.get("text") or data.get("message") or "").strip()
     if not text:
         return {"status": "error", "detail": "empty message"}
     if event_bus:
