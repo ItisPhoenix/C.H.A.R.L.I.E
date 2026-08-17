@@ -95,7 +95,13 @@ class SelfExtensionOrchestrator:
                 logger.warning("Failed to emit event %s: %s", event_name, e)
 
     def execute_transaction(self, request: ExtensionRequest) -> ExtensionResult:
-        """Process generic extension request through classification, guard, and execution."""
+        """
+        Process a generic extension request through classification, guard evaluation, and type-specific execution.
+
+        CODE_SMALL and MCP_TOOL require a validated ExtensionPlan with the actual structured payload
+        (code/server spec) attached.  Raw user_prompt is never treated as executable code or server config.
+        ARCHITECTURE_LARGE is always gated for explicit user approval.
+        """
         tx_id = f"tx-{uuid.uuid4().hex[:8]}"
         tx = ExtensionTransaction(transaction_id=tx_id, request=request)
         self._transactions[tx_id] = tx
@@ -104,6 +110,8 @@ class SelfExtensionOrchestrator:
         if not request.classification:
             request.classification = self._classifier.classify(request.user_prompt)
         tx.status = TransactionStatus.CLASSIFIED
+
+        kind = request.classification.kind
 
         # 2. Guard evaluation
         guard_decision = self._guard.evaluate(request)
@@ -120,16 +128,71 @@ class SelfExtensionOrchestrator:
             )
 
         # 3. Route according to classification
-        kind = request.classification.kind
         if kind == ExtensionKind.CONFIG:
             return self.execute_config_transaction(request, request.affected_settings, tx_id=tx_id)
+
         elif kind == ExtensionKind.SKILL:
             skill_name = request.affected_capabilities[0] if request.affected_capabilities else "custom_skill"
-            return self.execute_skill_transaction(request, skill_name=skill_name, raw_text=request.user_prompt, tx_id=tx_id)
+            # Skill raw_text must come from the plan, not the user_prompt directly.
+            raw_text = (
+                request.plan.raw_text
+                if request.plan and hasattr(request.plan, "raw_text")
+                else None
+            )
+            if not raw_text:
+                tx.status = TransactionStatus.FAILED
+                return ExtensionResult(
+                    success=False,
+                    transaction_id=tx_id,
+                    status=TransactionStatus.FAILED,
+                    message="SKILL extension requires a validated plan with raw_text content.",
+                )
+            return self.execute_skill_transaction(request, skill_name=skill_name, raw_text=raw_text, tx_id=tx_id)
+
         elif kind == ExtensionKind.MCP_TOOL:
-            return self.execute_mcp_transaction(request, name="mcp_server", command="npx", tx_id=tx_id)
+            # MCP server spec must come from the validated plan — never inferred from prompt.
+            if not request.plan or not hasattr(request.plan, "mcp_name") or not request.plan.mcp_name:
+                tx.status = TransactionStatus.FAILED
+                return ExtensionResult(
+                    success=False,
+                    transaction_id=tx_id,
+                    status=TransactionStatus.FAILED,
+                    message=(
+                        "MCP_TOOL extension requires a validated plan with mcp_name and mcp_command. "
+                        "Provide an ExtensionPlan with the server specification."
+                    ),
+                )
+            return self.execute_mcp_transaction(
+                request,
+                name=request.plan.mcp_name,
+                command=request.plan.mcp_command,
+                args=getattr(request.plan, "mcp_args", None),
+                env=getattr(request.plan, "mcp_env", None),
+                declared_tools=getattr(request.plan, "mcp_declared_tools", None),
+                tx_id=tx_id,
+            )
+
         elif kind == ExtensionKind.CODE_SMALL:
-            return self.execute_code_transaction(request, name="generated_tool", code=request.user_prompt, tx_id=tx_id)
+            # Generated code must come from the validated plan — never from raw user_prompt.
+            if not request.plan or not hasattr(request.plan, "code_source") or not request.plan.code_source:
+                tx.status = TransactionStatus.FAILED
+                return ExtensionResult(
+                    success=False,
+                    transaction_id=tx_id,
+                    status=TransactionStatus.FAILED,
+                    message=(
+                        "CODE_SMALL extension requires a validated plan with code_source and tool_name. "
+                        "Raw user_prompt is never executed as code."
+                    ),
+                )
+            return self.execute_code_transaction(
+                request,
+                name=request.plan.tool_name or "generated_tool",
+                code=request.plan.code_source,
+                test_inputs=getattr(request.plan, "test_inputs", None),
+                expected_output=getattr(request.plan, "expected_output", None),
+                tx_id=tx_id,
+            )
 
         tx.status = TransactionStatus.FAILED
         return ExtensionResult(

@@ -68,6 +68,7 @@ class ExtensionRequest:
     request_id: str = field(default_factory=lambda: f"ext-{uuid.uuid4().hex[:8]}")
     task_id: Optional[str] = None
     classification: Optional[ExtensionClassification] = None
+    plan: Optional["ExtensionPlan"] = None
     explicit_user_request: bool = True
     scope: str = "local"
     affected_capabilities: List[str] = field(default_factory=list)
@@ -84,6 +85,8 @@ class ExtensionRequest:
         d["risk_class"] = self.risk_class.value
         if self.classification:
             d["classification"] = self.classification.to_dict()
+        if self.plan:
+            d["plan"] = self.plan.to_dict()
         return d
 
 
@@ -104,7 +107,14 @@ class GuardDecision:
 
 @dataclass
 class ExtensionPlan:
-    """Execution and verification plan for applying a self-extension."""
+    """
+    Validated execution plan for applying a self-extension.
+
+    Kind-specific payload fields (code_source, mcp_name, raw_text, etc.) carry the
+    actual structured content that will be applied.  These must be explicitly set by
+    the planner/orchestrator — raw user_prompt is never promoted into any payload field
+    automatically.
+    """
 
     plan_id: str
     kind: ExtensionKind
@@ -117,6 +127,32 @@ class ExtensionPlan:
     tests_to_run: List[str] = field(default_factory=list)
     rollback_strategy: str = "restore_preimages"
     requires_restart: bool = False
+
+    # --- CODE_SMALL payload ---
+    code_source: Optional[str] = None
+    """Validated Python source for a CODE_SMALL extension. Never the raw user_prompt."""
+    tool_name: Optional[str] = None
+    """Name of the top-level callable defined in code_source."""
+    test_inputs: Optional[Dict[str, Any]] = None
+    """Keyword arguments to pass to the function during subprocess verification."""
+    expected_output: Optional[Any] = None
+    """Expected return value from the function under test_inputs."""
+
+    # --- SKILL payload ---
+    raw_text: Optional[str] = None
+    """Raw SKILL.md markdown text for a SKILL extension."""
+
+    # --- MCP_TOOL payload ---
+    mcp_name: Optional[str] = None
+    """Canonical name for the MCP server."""
+    mcp_command: Optional[str] = None
+    """Executable command used to launch the MCP server (e.g. 'npx', 'uvx')."""
+    mcp_args: Optional[List[str]] = None
+    """Arguments to pass to the MCP server command."""
+    mcp_env: Optional[Dict[str, str]] = None
+    """Environment variables for the MCP server process."""
+    mcp_declared_tools: Optional[List[str]] = None
+    """Tool names exposed by the MCP server for capability indexing."""
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
