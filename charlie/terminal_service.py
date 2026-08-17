@@ -658,7 +658,7 @@ class TerminalManager:
 
             # Construct wrapped command with transaction completion marker
             if "powershell" in session.shell_name.lower():
-                wrapped = f"{command}; $charlie_code = if ($LASTEXITCODE -ne $null) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }}; [Console]::WriteLine(\"__CHARLIE_TX_END__:{tx_id}:$charlie_code\")"
+                wrapped = f"$global:LASTEXITCODE = 0; try {{ {command}; if ($?) {{ $charlie_code = if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) {{ $LASTEXITCODE }} else {{ 0 }} }} else {{ $charlie_code = if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) {{ $LASTEXITCODE }} else {{ 1 }} }} }} catch {{ $charlie_code = 1 }}; [Console]::WriteLine(\"__CHARLIE_TX_END__:{tx_id}:$charlie_code\")"
             elif "cmd" in session.shell_name.lower():
                 wrapped = f"{command} & (if errorlevel 1 (echo __CHARLIE_TX_END__:{tx_id}:1) else (echo __CHARLIE_TX_END__:{tx_id}:0))"
             else:

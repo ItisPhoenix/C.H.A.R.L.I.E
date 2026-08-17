@@ -380,6 +380,40 @@ async def broadcast(data: dict):
         ws_sessions.pop(ws, None)
 
 
+_background_terminal_tasks: set[asyncio.Task] = set()
+
+
+def _run_terminal_command_task(coro, task_id: str, command: str) -> asyncio.Task:
+    """Schedule background terminal command with robust lifecycle tracking and error handling."""
+    task = asyncio.create_task(coro)
+    _background_terminal_tasks.add(task)
+
+    def _on_done(t: asyncio.Task) -> None:
+        _background_terminal_tasks.discard(t)
+        if t.cancelled():
+            logger.info("Terminal background execution cancelled: task_id=%s", task_id)
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.error(
+                "Terminal background execution failed for task_id=%s, cmd=%s: %s",
+                task_id,
+                command,
+                exc,
+                exc_info=exc,
+            )
+            audit = _get_audit_store()
+            if audit is not None and hasattr(audit, "record"):
+                audit.record(
+                    "terminal_exec",
+                    {"command": command, "task_id": task_id, "source": "charlie"},
+                    f"BACKGROUND_TASK_ERROR: {exc}",
+                )
+
+    task.add_done_callback(_on_done)
+    return task
+
+
 async def _event_bridge():
     """Background task: ZeroMQ events -> WebSocket broadcast."""
     global pipeline_state
@@ -431,18 +465,17 @@ async def _event_bridge():
                 task_id = payload.get("task_id") or payload.get("request_id") or "charlie-agent"
                 cmd = payload.get("command", "")
                 session_id = payload.get("terminal_session_id") or "primary"
-                try:
-                    asyncio.create_task(
-                        _terminal_manager.execute_charlie_command(
-                            session_id=session_id,
-                            command=cmd,
-                            task_id=task_id,
-                            audit_store=_get_audit_store(),
-                            approved=True,
-                        )
-                    )
-                except Exception:
-                    logger.warning("Terminal command could not be scheduled", exc_info=True)
+                _run_terminal_command_task(
+                    _terminal_manager.execute_charlie_command(
+                        session_id=session_id,
+                        command=cmd,
+                        task_id=task_id,
+                        audit_store=_get_audit_store(),
+                        approved=True,
+                    ),
+                    task_id=task_id,
+                    command=cmd,
+                )
         elif etype == "extension_proposed":
             await _stage_proposed_extension(event.get("payload", {}))
             return
@@ -460,9 +493,12 @@ async def _event_bridge():
                 auto_ms = event.get("payload", {}).get("auto_dismiss_ms")
                 if pid and auto_ms:
                     asyncio.create_task(_expire_presentation_intent(pid, event, float(auto_ms) / 1000.0))
-        elif etype in ("tool_approval_request", "tool_approval_resolved"):
+
+        # Capture tool approvals in memory for REST cache
+        if etype in ("tool_approval_request", "tool_approval_resolved"):
             _apply_approval_event(_pending_approvals, event)
 
+        # Broadcast all valid events to connected WebSockets
         await broadcast(event)
 
     try:
@@ -473,21 +509,17 @@ async def _event_bridge():
         logger.error(f"Event bridge error: {e}", exc_info=True)
 
 
-
-
-
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    global _active_frontend_session
     origin = ws.headers.get("origin")
-    if origin and not validate_ws_origin(origin):
-        logger.warning("Blocked WebSocket connection from unauthorized origin: %s", origin)
-        raise WebSocketException(code=1008)
+    if not validate_ws_origin(origin):
+        logger.warning("Rejected WebSocket connection from unauthorized origin: %s", origin)
+        await ws.close(code=1008)
+        return
 
     await ws.accept()
     active_connections.add(ws)
-    ws_sessions[ws] = _active_frontend_session
-    logger.info("WebSocket connected: %d active", len(active_connections))
+    logger.info("WebSocket connected from origin: %s (%d active)", origin, len(active_connections))
 
     # Send initial cached state immediately to prevent empty UI states on connection
     try:
@@ -495,7 +527,6 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_text(json.dumps(event))
     except Exception as e:
         logger.warning("Failed to send initial cached state to WebSocket: %s", e)
-
     if event_bus:
         await event_bus.send_command({"type": "ws_connection_count", "count": len(active_connections)})
     try:
@@ -511,28 +542,8 @@ async def websocket_endpoint(ws: WebSocket):
                     _active_frontend_session = msg.get("session_id") or msg.get("payload", {}).get("session_id")
                     ws_sessions[ws] = _active_frontend_session
                     logger.info("Active session synced: %s", _active_frontend_session)
-                elif msg_type == "terminal_command_result":
-                    payload = msg.get("payload", {})
-                    if payload.get("approved") is True:
-                        task_id = payload.get("task_id") or payload.get("request_id") or "charlie-agent"
-                        cmd = payload.get("command", "")
-                        session_id = payload.get("terminal_session_id") or "primary"
-                        try:
-                            asyncio.create_task(
-                                _terminal_manager.execute_charlie_command(
-                                    session_id=session_id,
-                                    command=cmd,
-                                    task_id=task_id,
-                                    audit_store=_get_audit_store(),
-                                    approved=True,
-                                )
-                            )
-                        except Exception:
-                            logger.warning("Terminal command could not be scheduled", exc_info=True)
-                    if event_bus:
-                        await event_bus.send_command(msg)
-                    await broadcast(msg)
                 elif msg_type in (
+                    "terminal_command_result",
                     "tool_approval_request",
                     "tool_approval_resolved",
                     "activity",
@@ -541,14 +552,11 @@ async def websocket_endpoint(ws: WebSocket):
                     "surface_dismiss",
                     "presentation_intent",
                 ):
-                    if msg_type in ("tool_approval_request", "tool_approval_resolved"):
-                        _apply_approval_event(_pending_approvals, msg)
-                    elif msg_type in ("surface_spawn", "surface_update", "surface_dismiss"):
-                        _apply_surface_event(_active_surfaces, msg)
-                    await broadcast(msg)
-                    if event_bus:
-                        await event_bus.send_command(msg)
+                    # Security: Frontend MUST NOT submit authoritative runtime or approval events.
+                    logger.warning("Rejected unauthorized runtime event from client WebSocket: %s", msg_type)
+                    continue
                 elif event_bus:
+                    # Forward legitimate client request/action commands to EventBus
                     await event_bus.send_command(msg)
                     logger.debug("WS forwarded command: %s", msg)
             except json.JSONDecodeError:

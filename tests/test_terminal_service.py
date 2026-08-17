@@ -191,6 +191,22 @@ async def test_terminal_real_windows_non_zero_exit_proof():
     assert len(audit.entries) == 1
     assert "FAILED (exit code 42)" in audit.entries[0]["outcome"]
 
+    # 2. Subsequent pure PowerShell cmdlet (Get-Date) must succeed with exit code 0
+    # even though previous native command set non-zero exit code
+    audit_cmdlet = DummyAudit()
+    res_cmdlet = await manager.execute_charlie_command(
+        "primary",
+        "Get-Date",
+        task_id="task-cmdlet-after-nonzero",
+        audit_store=audit_cmdlet,
+        approved=True,
+    )
+
+    assert res_cmdlet["status"] == "ok"
+    assert res_cmdlet["exit_code"] == 0
+    assert len(audit_cmdlet.entries) == 1
+    assert audit_cmdlet.entries[0]["outcome"] == "COMPLETED"
+
     await manager.close("primary")
 
 

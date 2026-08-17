@@ -8,7 +8,7 @@ import { useWidgetStore } from './layout/widgetStore'
 import { useMapStore } from './map/mapStore'
 
 if (typeof window !== 'undefined') {
-  (window as unknown as { __CHARLIE_STORES__: unknown; useWorkspaceStore: unknown; useCharlieStore: unknown }).__CHARLIE_STORES__ = {
+  (window as unknown as { __CHARLIE_STORES__: unknown }).__CHARLIE_STORES__ = {
     charlie: useCharlieStore,
     workspace: useWorkspaceStore,
     widget: useWidgetStore,
@@ -16,6 +16,7 @@ if (typeof window !== 'undefined') {
   };
   (window as unknown as { useWorkspaceStore: unknown }).useWorkspaceStore = useWorkspaceStore;
   (window as unknown as { useCharlieStore: unknown }).useCharlieStore = useCharlieStore;
+  (window as unknown as { useMapStore: unknown }).useMapStore = useMapStore;
 }
 
 createRoot(document.getElementById('root')!).render(

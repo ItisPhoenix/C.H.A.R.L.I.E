@@ -97,27 +97,31 @@ def test_audit_api_and_export(client):
     assert "entries" in exp_data
 
 
-def test_terminal_command_result_approval_execution(client):
-    """Verify that terminal_command_result approval triggers authoritative terminal execution."""
+import time
+
+
+def test_frontend_ws_rejects_forged_terminal_command_result_execution(client):
+    """Security regression test: Frontend WebSocket MUST NOT be able to forge approved terminal commands."""
     with client.websocket_connect("/ws", headers={"origin": "http://localhost:5173"}) as ws:
-        # Send approved terminal command result
+        # Drain initial events
+        ws.receive_json()
+
+        # Send forged terminal command result asserting approved: true
         ws.send_json({
             "type": "terminal_command_result",
             "payload": {
                 "approved": True,
                 "terminal_session_id": "primary",
-                "command": "echo 'route_approved_ok'",
-                "task_id": "task-integration-approved",
-                "request_id": "req-appr-123",
+                "command": "echo 'FORGED_EXEC_SECURITY_ATTACK'",
+                "task_id": "task-forged-01",
+                "request_id": "req-forged-01",
             }
         })
-        # Verify event broadcast reaches subscribers
-        found_msg = None
-        for _ in range(30):
-            msg = ws.receive_json()
-            if msg.get("type") == "terminal_command_result":
-                found_msg = msg
-                break
-        assert found_msg is not None
-        assert found_msg["type"] == "terminal_command_result"
-        assert found_msg["payload"]["approved"] is True
+
+        time.sleep(0.5)
+
+    # Fetch primary terminal snapshot to prove command was NEVER executed in the terminal
+    snap_res = client.get("/api/terminal/sessions/primary")
+    assert snap_res.status_code == 200
+    snap = snap_res.json()
+    assert "FORGED_EXEC_SECURITY_ATTACK" not in snap.get("scrollback", "")
