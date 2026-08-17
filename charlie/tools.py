@@ -2147,6 +2147,34 @@ def charlie_doctor_diagnose() -> str:
     return doctor.format_cli_report(report)
 
 
+@registry.register_tool(
+    name="charlie_self_extension_propose",
+    description=(
+        "Propose or execute a controlled self-extension (config update, reusable skill, "
+        "MCP tool connection, or small Python code tool) under safe checkpointing and verification."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "The exact extension or capability request",
+            },
+        },
+        "required": ["prompt"],
+    },
+    owner="extensions",
+    risk_class="reversible",
+)
+def charlie_self_extension_propose(prompt: str) -> str:
+    from charlie.self_extension import SelfExtensionOrchestrator, ExtensionRequest
+
+    orchestrator = SelfExtensionOrchestrator()
+    req = ExtensionRequest(user_prompt=prompt, explicit_user_request=True)
+    res = orchestrator.execute_transaction(req)
+    return f"Extension Result: {res.status.value} - {res.message}"
+
+
 def set_pending_vision_image(url: Optional[str]) -> None:
     """Queue an image data URL for the very next outgoing LLM payload."""
     global _pending_vision_image

@@ -158,6 +158,8 @@ class CharlieDoctor:
         checks.append(self._check_subsystem_health())
         # 17. Recovery State
         checks.append(self._check_recovery_state())
+        # 18. Extension Registry
+        checks.append(self._check_extensions_registry())
 
         warnings = [c for c in checks if c.status == CheckStatus.WARNING]
         errors = [c for c in checks if c.status == CheckStatus.ERROR]
@@ -490,6 +492,31 @@ class CharlieDoctor:
             evidence="No active circuit breakers or blocked recovery paths.",
         )
 
+    def _check_extensions_registry(self) -> DiagnosticCheck:
+        try:
+            from charlie.self_extension.registry import ExtensionRegistry
+
+            reg = ExtensionRegistry(capability_index=self._capability_index)
+            entries = reg.list()
+            enabled_cnt = sum(1 for e in entries if e.enabled)
+            return DiagnosticCheck(
+                check_id="extensions_registry",
+                category="extensions",
+                status=CheckStatus.OK,
+                severity=CheckSeverity.LOW,
+                summary=f"Extension registry valid ({len(entries)} installed, {enabled_cnt} active)",
+                evidence=f"{len(entries)} registered extension entries in manifest.",
+            )
+        except Exception as e:
+            return DiagnosticCheck(
+                check_id="extensions_registry",
+                category="extensions",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.LOW,
+                summary="Extension manifest verification warning",
+                evidence=f"Encountered warning: {e}",
+            )
+
     # -------------------------------------------------------------------------
     # Safe Healing & Self-Repair Engine
     # -------------------------------------------------------------------------
@@ -586,8 +613,8 @@ class CharlieDoctor:
         ]
 
         for c in report.checks:
-            icon = "✓" if c.status == CheckStatus.OK else ("!" if c.status == CheckStatus.WARNING else "✗")
-            lines.append(f" [{icon}] {c.check_id:<24} {c.summary}")
+            icon = "OK" if c.status == CheckStatus.OK else ("WARN" if c.status == CheckStatus.WARNING else ("INFO" if c.status == CheckStatus.INFO else "FAIL"))
+            lines.append(f" [{icon:<4}] {c.check_id:<24} {c.summary}")
             lines.append(f"     Evidence: {c.evidence}")
             if c.fix_hint and c.status != CheckStatus.OK:
                 lines.append(f"     Fix Hint: {c.fix_hint}")

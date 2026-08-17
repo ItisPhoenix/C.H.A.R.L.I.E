@@ -74,6 +74,7 @@ def test_registry_registration_and_schema():
         "system_control",
         "charlie_self_query",
         "charlie_doctor_diagnose",
+        "charlie_self_extension_propose",
     }
     assert any(
         d["function"]["parameters"]["required"] == ["query"] for d in definitions

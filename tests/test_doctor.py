@@ -96,7 +96,7 @@ def test_doctor_healthy_report(mock_doctor_env):
         assert check.category in (
             "config", "secrets", "models", "capabilities", "tasks",
             "leases", "mcp", "memory", "terminal", "browser",
-            "desktop", "vision", "voice", "storage", "health", "recovery"
+            "desktop", "vision", "voice", "storage", "health", "recovery", "extensions"
         )
 
 

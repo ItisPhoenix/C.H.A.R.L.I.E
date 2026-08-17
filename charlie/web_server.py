@@ -46,6 +46,7 @@ from charlie.code_index import CodeIndex
 from charlie.runtime_introspector import RuntimeIntrospector
 from charlie.self_knowledge import SelfKnowledgeService
 from charlie.doctor import CharlieDoctor
+from charlie.self_extension import SelfExtensionOrchestrator
 
 logger = logging.getLogger("charlie.web_server")
 logger.addFilter(SensitiveDataFilter())
@@ -58,6 +59,7 @@ _self_knowledge_service = SelfKnowledgeService(
     runtime_introspector=_runtime_introspector, code_index=_code_index
 )
 _doctor = CharlieDoctor(introspector=_runtime_introspector)
+_self_extension_orchestrator = SelfExtensionOrchestrator(config=config)
 
 _START_TIME = time.time()
 
@@ -1802,6 +1804,49 @@ async def uninstall_extension(name: str):
         "extension_uninstalled", {"kind": ext.kind, "name": name, "tool_names": ext.tool_names}
     )
     return {"status": "ok"}
+
+
+@app.post("/api/extensions/request")
+async def request_self_extension(payload: Dict[str, Any]):
+    """Execute or propose a controlled self-extension transaction."""
+    from charlie.self_extension import ExtensionRequest
+
+    prompt = str(payload.get("prompt", "")).strip()
+    if not prompt:
+        return JSONResponse(status_code=400, content={"error": "prompt parameter required"})
+
+    explicit = bool(payload.get("explicit", True))
+    settings = dict(payload.get("settings") or {})
+
+    req = ExtensionRequest(
+        user_prompt=prompt,
+        explicit_user_request=explicit,
+        affected_settings=settings,
+    )
+    res = _self_extension_orchestrator.execute_transaction(req)
+    return res.to_dict()
+
+
+@app.get("/api/extensions/transactions")
+async def list_extension_transactions():
+    """List recorded extension transaction history."""
+    return {"transactions": _self_extension_orchestrator.list_transactions()}
+
+
+@app.get("/api/extensions/transactions/{tx_id}")
+async def get_extension_transaction(tx_id: str):
+    """Retrieve details for a specific extension transaction."""
+    tx = _self_extension_orchestrator.get_transaction(tx_id)
+    if not tx:
+        raise HTTPException(status_code=404, detail=f"Transaction '{tx_id}' not found")
+    return tx
+
+
+@app.post("/api/extensions/transactions/{tx_id}/rollback")
+async def rollback_extension_transaction(tx_id: str):
+    """Safely roll back an extension transaction."""
+    res = _self_extension_orchestrator.rollback_transaction(tx_id)
+    return res.to_dict()
 
 
 @app.post("/api/session/active")
