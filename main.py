@@ -9,7 +9,7 @@ import re
 import sys
 import time
 import threading
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 # Windows event-loop policy (must precede zmq/asyncio imports)
 from charlie.runtime import configure as _configure_platform
@@ -102,7 +102,6 @@ from charlie.personality import get_emotion_for_context, parse_voice_command, pa
 from charlie.session_store import SessionStore
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus
-from charlie.web_server import active_connections
 from charlie.presentation import (
     AnchorTarget,
     AttentionLevel as PresentationAttention,
@@ -202,6 +201,38 @@ def _surface_request_event(panel_id: str, action: str) -> tuple[str, dict, str]:
             replace_key=surface_id,
         )
     return "presentation_intent", intent.to_dict(), f"opened {panel_id} presentation"
+
+
+hud_visible: bool = False
+hud_client_count: int = 0
+_main_event_bus: Optional[Any] = None
+
+
+async def _summon_conversation_workspace(toggle: bool = False, event_bus: Optional[Any] = None) -> None:
+    """Summon the one React HUD surface; never open a legacy dashboard route."""
+    global hud_visible, hud_client_count
+    from charlie.utils import open_url_in_browser
+
+    if toggle:
+        hud_visible = not hud_visible
+    elif not hud_visible:
+        hud_visible = True
+
+    host = "127.0.0.1" if config.charlie_host == "0.0.0.0" else config.charlie_host
+    # Open HUD only if no browser client is already connected.
+    # If already visible + connected, do NOT open another tab.
+    if hud_visible:
+        if hud_client_count == 0:
+            open_url_in_browser(f"http://{host}:{config.charlie_port}/")
+        # else: hud_client_count > 0 -> browser already connected, do not open another tab
+
+    bus = event_bus or _main_event_bus
+    if bus:
+        await bus.emit(
+            "hud_visibility",
+            {"visible": hud_visible},
+            meta=EventMeta(source=EventSource.SURFACE, rationale="pet or hotkey toggled React HUD"),
+        )
 
 
 async def _publish_subsystem_health(bus: Optional[EventBus] = None) -> None:
@@ -522,29 +553,6 @@ async def main():
 
     _CONVERSATION_SUMMON_RE = re.compile(r"\b(?:show|open) (?:me )?(?:the )?(?:chat|conversation)\b", re.IGNORECASE)
 
-async def _summon_conversation_workspace(toggle: bool = False):
-        """Summon the one React HUD surface; never open a legacy dashboard route."""
-        from charlie.utils import open_url_in_browser
-
-        if toggle:
-            hud_visible = not hud_visible
-        elif not hud_visible:
-            hud_visible = True
-        host = "127.0.0.1" if config.charlie_host == "0.0.0.0" else config.charlie_host
-        # Open HUD only if no browser client is already connected.
-        # If already visible + connected, do NOT open another tab.
-        if hud_visible and active_connections:
-            # already open and connected — skip browser open
-            pass
-        elif hud_visible:
-            open_url_in_browser(f"http://{host}:{config.charlie_port}/")
-        if event_bus:
-            await event_bus.emit(
-                "hud_visibility",
-                {"visible": hud_visible},
-                meta=EventMeta(source=EventSource.SURFACE, rationale="pet or hotkey toggled React HUD"),
-            )
-
     def _resolve_tool_approval_and_notify(request_id: str, approved: bool) -> None:
         """Resolve pending future and dismiss its canonical attention intent."""
         from charlie.core import resolve_tool_approval
@@ -744,7 +752,6 @@ async def _summon_conversation_workspace(toggle: bool = False):
     # Per-launch fallback, not the old shared "default" bucket across all launches.
     current_web_session_id = f"voice_{_LAUNCH_ID}"
     _voice_fallback_session_id = current_web_session_id
-hud_visible = False
 
     def ensure_session_ready(session_id: str):
         if not session_id:
@@ -1284,9 +1291,11 @@ hud_visible = False
                     set_active_session_id(current_web_session_id)
                     logger.info(f"Active session updated to: {current_web_session_id}")
                 elif cmd_type == "ws_connection_count":
+                    global hud_client_count
+                    hud_client_count = cmd.get("count", 0)
                     from charlie.recovery import set_active_ws_count
 
-                    set_active_ws_count(cmd.get("count", 0))
+                    set_active_ws_count(hud_client_count)
                 elif cmd_type == "recovery_approve":
                     payload = cmd.get("payload", {})
                     proposal_id = payload.get("proposal_id")
@@ -1785,6 +1794,8 @@ hud_visible = False
         # Run voice loop + web command consumer concurrently via ZeroMQ
         async with EventBus(pub_port=5555, pull_port=5556, is_producer=True) as bus:
             event_bus = bus
+            global _main_event_bus
+            _main_event_bus = bus
             await _publish_subsystem_health(bus)
             bus.set_state_listener(_on_event_for_state)
             voice.set_event_bus(bus)

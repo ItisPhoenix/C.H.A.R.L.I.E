@@ -14,6 +14,7 @@ beforeEach(() => {
   localStorage.clear();
   useCharlieStore.setState({
     connected: true,
+    hudVisible: true,
     coreState: "idle",
     presentationIntents: {},
     activeCaption: null,

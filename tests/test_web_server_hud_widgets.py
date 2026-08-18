@@ -1,10 +1,11 @@
 """Tests for the React HUD's tools, MCP, and visibility bridge endpoints."""
 
+from unittest.mock import patch
+
 import pytest
 
 import charlie.web_server as web_server
 from charlie.tools import ToolRegistry
-from unittest.mock import patch, AsyncMock
 
 
 @pytest.mark.asyncio
@@ -81,12 +82,15 @@ async def test_hud_visibility_replays_to_late_clients(monkeypatch):
 @pytest.mark.asyncio
 async def test_hud_first_summon_opens_once():
     """First summon = 1 open of open_url_in_browser."""
-    from charlie import main as main_mod
-    from charlie.utils import open_url_in_browser
+    import main as main_mod
+
+    # Explicitly set hud_client_count to 0 (no connected clients)
+    main_mod.hud_client_count = 0
+    main_mod.hud_visible = False
 
     with patch("charlie.utils.open_url_in_browser") as mock_open:
         # First summon: hud_visible should become True and open browser once
-        main_mod._summon_conversation_workspace()
+        await main_mod._summon_conversation_workspace()
         assert main_mod.hud_visible is True
         mock_open.assert_called_once()
 
@@ -94,17 +98,22 @@ async def test_hud_first_summon_opens_once():
 @pytest.mark.asyncio
 async def test_hud_repeated_summon_no_duplicate_while_connected():
     """Repeated summon while connected = still 1 open (no extra calls)."""
-    from charlie import main as main_mod
-    from charlie.utils import open_url_in_browser
+    import main as main_mod
+
+    main_mod.hud_client_count = 0
+    main_mod.hud_visible = False
 
     with patch("charlie.utils.open_url_in_browser") as mock_open:
-        # First summon
-        main_mod._summon_conversation_workspace()
+        # First summon: client count 0 -> opens browser
+        await main_mod._summon_conversation_workspace()
         assert main_mod.hud_visible is True
         mock_open.assert_called_once()
 
+        # Browser client connects (hud_client_count > 0)
+        main_mod.hud_client_count = 1
+
         # Second summon while HUD visible and connected: should remain 1 open
-        main_mod._summon_conversation_workspace()
+        await main_mod._summon_conversation_workspace()
         assert main_mod.hud_visible is True
         mock_open.assert_called_once()  # still only 1 call total
 
@@ -112,56 +121,65 @@ async def test_hud_repeated_summon_no_duplicate_while_connected():
 @pytest.mark.asyncio
 async def test_hud_disconnect_then_summon_opens_again():
     """Disconnect then summon = opens again."""
-    from charlie import main as main_mod
-    import charlie.web_server as web_server
-    from charlie.utils import open_url_in_browser
+    import main as main_mod
 
-    # Simulate disconnect by clearing active connections
-    web_server.active_connections.clear()
+    # First summon: opens browser
+    main_mod.hud_client_count = 0
+    main_mod.hud_visible = False
 
     with patch("charlie.utils.open_url_in_browser") as mock_open:
-        # After disconnect, summon should open the HUD again
-        main_mod._summon_conversation_workspace()
+        await main_mod._summon_conversation_workspace()
         assert main_mod.hud_visible is True
-        mock_open.assert_called_once()
+        assert mock_open.call_count == 1
+
+        # Connected: next summon does not open
+        main_mod.hud_client_count = 1
+        await main_mod._summon_conversation_workspace()
+        assert mock_open.call_count == 1
+
+        # Disconnect occurs (IPC sets hud_client_count = 0)
+        main_mod.hud_client_count = 0
+
+        # After disconnect, summon should open the HUD again
+        await main_mod._summon_conversation_workspace()
+        assert main_mod.hud_visible is True
+        assert mock_open.call_count == 2
 
 
 @pytest.mark.asyncio
 async def test_hud_close_reopen_cycle():
     """Closed/disconnected HUD can reopen."""
-    from charlie import main as main_mod
+    import main as main_mod
 
-    # Start with HUD visible
     main_mod.hud_visible = True
+    main_mod.hud_client_count = 0
 
     # Close HUD
     main_mod.hud_visible = False
 
-    # Reopen HUD
-    main_mod._summon_conversation_workspace()
-    assert main_mod.hud_visible is True
+    with patch("charlie.utils.open_url_in_browser") as mock_open:
+        # Reopen HUD
+        await main_mod._summon_conversation_workspace()
+        assert main_mod.hud_visible is True
+        mock_open.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_hud_ws_disconnect_reconnect():
-    """WS disconnect/reconnect works."""
+async def test_hud_ws_disconnect_reconnect(monkeypatch):
+    """WS disconnect/reconnect preserves initial state event contract."""
     import charlie.web_server as web_server
 
-    # Simulate disconnect by clearing active connections
-    web_server.active_connections.clear()
+    monkeypatch.setattr(web_server, "_hud_visible", True)
 
-    # Reconnect should work
-    # The _initial_state_events should still emit hud_visibility
     events = web_server._initial_state_events()
     hud_event = next(e for e in events if e["type"] == "hud_visibility")
-    assert hud_event["payload"] == {"visible": web_server._hud_visible}
+    assert hud_event["payload"] == {"visible": True}
 
 
 @pytest.mark.asyncio
 async def test_pet_independent_of_hud():
     """Pet remains independent of HUD state."""
-    from charlie import main as main_mod
-    from charlie.pet_window import PetWindow
+    import main as main_mod
 
     # HUD state changes should not affect pet
     main_mod.hud_visible = True
@@ -170,21 +188,23 @@ async def test_pet_independent_of_hud():
     main_mod.hud_visible = False
     assert main_mod.hud_visible is False
 
-    # Pet state should be unchanged (this is tested by the pet window tests)
-
 
 @pytest.mark.asyncio
 async def test_hud_toggle_visibility():
     """Toggle hud_visible works correctly."""
-    from charlie import main as main_mod
+    import main as main_mod
 
     # Start hidden
     main_mod.hud_visible = False
+    main_mod.hud_client_count = 0
 
-    # Toggle to visible
-    main_mod._summon_conversation_workspace(toggle=True)
-    assert main_mod.hud_visible is True
+    with patch("charlie.utils.open_url_in_browser") as mock_open:
+        # Toggle to visible
+        await main_mod._summon_conversation_workspace(toggle=True)
+        assert main_mod.hud_visible is True
+        mock_open.assert_called_once()
 
-    # Toggle back to hidden
-    main_mod._summon_conversation_workspace(toggle=True)
-    assert main_mod.hud_visible is False
+        # Toggle back to hidden
+        await main_mod._summon_conversation_workspace(toggle=True)
+        assert main_mod.hud_visible is False
+        mock_open.assert_called_once()  # no extra call on hide
