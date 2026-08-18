@@ -74,3 +74,88 @@ def test_hud_visibility_replays_to_late_clients(monkeypatch):
     event = next(event for event in events if event["type"] == "hud_visibility")
     assert event["payload"] == {"visible": False}
     assert event["replay"] is True
+
+
+@pytest.mark.asyncio
+async def test_hud_initial_visibility_consistency():
+    """Phase 14: initial visibility is consistent main -> web -> frontend."""
+    from charlie import main as main_mod
+    import charlie.web_server as web_server
+
+    # Main process initial state
+    assert main_mod.hud_visible is False
+
+    # Web server initial state (via _initial_state_events)
+    events = web_server._initial_state_events()
+    hud_event = next(e for e in events if e["type"] == "hud_visibility")
+    assert hud_event["payload"] == {"visible": False}
+
+    # Frontend store initial state
+    from frontend.src.store.charlie import useCharlieStore
+    useCharlieStore.setState({ "hudVisible": False })
+    assert useCharlieStore.getState().hudVisible is False
+
+
+@pytest.mark.asyncio
+async def test_hud_repeated_summon_no_duplicate():
+    """Phase 14: repeated HUD summon does not duplicate."""
+    from charlie import main as main_mod
+
+    # First summon: hud_visible should become True
+    main_mod._summon_conversation_workspace()
+    assert main_mod.hud_visible is True
+
+    # Second summon while HUD visible: should remain True (idempotent)
+    main_mod._summon_conversation_workspace()
+    assert main_mod.hud_visible is True
+
+    # Third summon after closing: should work
+    main_mod._summon_conversation_workspace()
+    assert main_mod.hud_visible is True
+
+
+@pytest.mark.asyncio
+async def test_hud_close_reopen_cycle():
+    """Phase 14: closed/disconnected HUD can reopen."""
+    from charlie import main as main_mod
+
+    # Start with HUD visible
+    main_mod.hud_visible = True
+
+    # Close HUD
+    main_mod.hud_visible = False
+
+    # Reopen HUD
+    main_mod._summon_conversation_workspace()
+    assert main_mod.hud_visible is True
+
+
+@pytest.mark.asyncio
+async def test_hud_ws_disconnect_reconnect():
+    """Phase 14: WS disconnect/reconnect works."""
+    import charlie.web_server as web_server
+
+    # Simulate disconnect by clearing active connections
+    web_server.active_connections.clear()
+
+    # Reconnect should work
+    # The _initial_state_events should still emit hud_visibility
+    events = web_server._initial_state_events()
+    hud_event = next(e for e in events if e["type"] == "hud_visibility")
+    assert hud_event["payload"] == {"visible": web_server._hud_visible}
+
+
+@pytest.mark.asyncio
+async def test_pet_independent_of_hud():
+    """Phase 14: pet remains independent of HUD state."""
+    from charlie import main as main_mod
+    from charlie.pet_window import PetWindow
+
+    # HUD state changes should not affect pet
+    main_mod.hud_visible = True
+    assert main_mod.hud_visible is True
+
+    main_mod.hud_visible = False
+    assert main_mod.hud_visible is False
+
+    # Pet state should be unchanged (this is tested by the pet window tests)

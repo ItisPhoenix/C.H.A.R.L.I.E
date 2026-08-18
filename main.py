@@ -133,7 +133,6 @@ _runtime_health = HealthRegistry(
         "mcp",
         "web",
         "companion",
-        "hud",
         "telegram",
         "voice",
         "watchers",
@@ -522,9 +521,8 @@ async def main():
 
     _CONVERSATION_SUMMON_RE = re.compile(r"\b(?:show|open) (?:me )?(?:the )?(?:chat|conversation)\b", re.IGNORECASE)
 
-    async def _summon_conversation_workspace(toggle: bool = False):
+async def _summon_conversation_workspace(toggle: bool = False):
         """Summon the one React HUD surface; never open a legacy dashboard route."""
-        nonlocal hud_visible, hud_browser_opened
         from charlie.utils import open_url_in_browser
 
         if toggle:
@@ -532,8 +530,8 @@ async def main():
         elif not hud_visible:
             hud_visible = True
         host = "127.0.0.1" if config.charlie_host == "0.0.0.0" else config.charlie_host
-        if hud_visible and not hud_browser_opened:
-            hud_browser_opened = open_url_in_browser(f"http://{host}:{config.charlie_port}/")
+        if hud_visible:
+            open_url_in_browser(f"http://{host}:{config.charlie_port}/")
         if event_bus:
             await event_bus.emit(
                 "hud_visibility",
@@ -740,8 +738,7 @@ async def main():
     # Per-launch fallback, not the old shared "default" bucket across all launches.
     current_web_session_id = f"voice_{_LAUNCH_ID}"
     _voice_fallback_session_id = current_web_session_id
-    hud_visible = False
-    hud_browser_opened = False
+hud_visible = False
 
     def ensure_session_ready(session_id: str):
         if not session_id:

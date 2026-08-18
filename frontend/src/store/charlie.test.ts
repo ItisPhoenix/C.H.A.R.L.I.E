@@ -73,9 +73,38 @@ describe("applyEvent", () => {
     expect(useCharlieStore.getState().audioLevel).toBe(1);
   });
 
-  test("HUD visibility follows the pet toggle event", () => {
+test("HUD visibility follows the pet toggle event", () => {
     useCharlieStore.getState().applyEvent({ type: "hud_visibility", payload: { visible: false } });
     expect(useCharlieStore.getState().hudVisible).toBe(false);
+  });
+
+  test("initial HUD visibility is consistent main web frontend", () => {
+    const store = useCharlieStore.getState();
+    expect(store.hudVisible).toBe(false);
+  });
+
+  test("repeated HUD summon does not duplicate", () => {
+    const store = useCharlieStore.getState();
+    store.applyEvent({ type: "hud_visibility", payload: { visible: true } });
+    expect(store.hudVisible).toBe(true);
+    store.applyEvent({ type: "hud_visibility", payload: { visible: true } });
+    expect(store.hudVisible).toBe(true);
+    store.applyEvent({ type: "hud_visibility", payload: { visible: false } });
+    expect(store.hudVisible).toBe(false);
+    store.applyEvent({ type: "hud_visibility", payload: { visible: true } });
+    expect(store.hudVisible).toBe(true);
+  });
+
+  test("closed/disconnected HUD can reopen", () => {
+    const store = useCharlieStore.getState();
+    store.applyEvent({ type: "hud_visibility", payload: { visible: false } });
+    expect(store.hudVisible).toBe(false);
+    store.applyEvent({ type: "hud_visibility", payload: { visible: true } });
+    expect(store.hudVisible).toBe(true);
+    store.applyEvent({ type: "hud_visibility", payload: { visible: false } });
+    expect(store.hudVisible).toBe(false);
+    store.applyEvent({ type: "hud_visibility", payload: { visible: true } });
+    expect(store.hudVisible).toBe(true);
   });
 
   test("addUserMessage appends a user chat message", () => {

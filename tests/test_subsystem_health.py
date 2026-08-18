@@ -97,7 +97,7 @@ async def test_main_publishes_runtime_health_snapshot() -> None:
 
     assert bus.events[0][0] == "subsystem_health"
     assert set(bus.events[0][1]) == {
-        "brain", "memory", "plugins", "mcp", "web", "companion", "hud", "telegram", "voice", "watchers",
+        "brain", "memory", "plugins", "mcp", "web", "companion", "telegram", "voice", "watchers",
     }
 
 

@@ -155,7 +155,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   audioState: null,
   micMuted: null,
   audioLevel: 0,
-  hudVisible: true,
+  hudVisible: false,
 
   setConnected: (connected) => set({ connected }),
   dismissAlert: () => set({ activeAlert: null }),
