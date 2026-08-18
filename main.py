@@ -102,6 +102,7 @@ from charlie.personality import get_emotion_for_context, parse_voice_command, pa
 from charlie.session_store import SessionStore
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus
+from charlie.web_server import active_connections
 from charlie.presentation import (
     AnchorTarget,
     AttentionLevel as PresentationAttention,
@@ -530,7 +531,12 @@ async def _summon_conversation_workspace(toggle: bool = False):
         elif not hud_visible:
             hud_visible = True
         host = "127.0.0.1" if config.charlie_host == "0.0.0.0" else config.charlie_host
-        if hud_visible:
+        # Open HUD only if no browser client is already connected.
+        # If already visible + connected, do NOT open another tab.
+        if hud_visible and active_connections:
+            # already open and connected — skip browser open
+            pass
+        elif hud_visible:
             open_url_in_browser(f"http://{host}:{config.charlie_port}/")
         if event_bus:
             await event_bus.emit(
