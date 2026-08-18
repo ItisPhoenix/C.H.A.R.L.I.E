@@ -3,29 +3,6 @@ import type { WSEvent } from "../runtime/bridge";
 import { useWorkspaceStore } from "../layout/workspaceStore";
 import { useWidgetStore } from "../layout/widgetStore";
 
-export interface SurfaceAction {
-  id: string;
-  label: string;
-  style: string;
-}
-
-export interface SurfaceSpec {
-  surfaceId: string;
-  presentation: "background" | "notification" | "widget" | "floating" | "modal" | "workspace";
-  persistence: "ephemeral" | "persistent" | "archived";
-  density: number;
-  region: string;
-  taskId: string | null;
-  rationale: string;
-  ttlSeconds: number | null;
-  title: string;
-  body: string;
-  role: string;
-  rect: [number, number, number, number] | null;
-  actions: SurfaceAction[];
-  kind: string;
-}
-
 export interface SystemStatus {
   cpu: number | null;
   ram: number | null;
@@ -130,24 +107,11 @@ export interface AudioState {
   volume: number;
 }
 
-export interface DashboardPanelIntent {
-  action: "show" | "hide";
-  panelId: string;
-}
-
-const _DASHBOARD_PANEL_IDS = new Set(["chat", "tasks", "system", "tools", "terminal", "mcp", "media", "calendar", "settings"]);
-
-type SurfaceMap = Record<string, SurfaceSpec>;
-
 // One primitive per selector (CLAUDE.md sec8.5) -- components read a single field, never the whole store.
 interface CharlieState {
   connected: boolean;
   coreState: string;
   activities: string[];
-  widgets: SurfaceMap;
-  modals: SurfaceMap;
-  workspaces: SurfaceMap;
-  notifications: SurfaceMap;
   presentationIntents: Record<string, PresentationIntent>;
   activeCaption: string | null;
   activeToolApproval: ToolApprovalRequest | null;
@@ -162,8 +126,7 @@ interface CharlieState {
   audioState: AudioState | null;
   micMuted: boolean | null;
   audioLevel: number;
-  dashboardPanelIntent: DashboardPanelIntent | null;
-  dashboardVisible: boolean;
+  hudVisible: boolean;
   setConnected: (connected: boolean) => void;
   setActiveToolApproval: (req: ToolApprovalRequest | null) => void;
   seedMcpStatus: (servers: Record<string, boolean>) => void;
@@ -174,49 +137,10 @@ interface CharlieState {
   applyEvent: (event: WSEvent) => void;
 }
 
-function surfaceMapKey(presentation: string): "widgets" | "modals" | "workspaces" | "notifications" | null {
-  switch (presentation) {
-    case "widget":
-    case "floating":
-      return "widgets";
-    case "modal":
-      return "modals";
-    case "workspace":
-      return "workspaces";
-    case "notification":
-      return "notifications";
-    default:
-      return null;
-  }
-}
-
-function specFromPayload(payload: Record<string, unknown>): SurfaceSpec {
-  return {
-    surfaceId: String(payload.surface_id),
-    presentation: payload.presentation as SurfaceSpec["presentation"],
-    persistence: payload.persistence as SurfaceSpec["persistence"],
-    density: Number(payload.density ?? 0),
-    region: String(payload.region ?? ""),
-    taskId: (payload.task_id as string) ?? null,
-    rationale: String(payload.rationale ?? ""),
-    ttlSeconds: (payload.ttl_seconds as number) ?? null,
-    title: String(payload.title ?? ""),
-    body: String(payload.body ?? ""),
-    role: String(payload.role ?? "info"),
-    rect: (payload.rect as [number, number, number, number]) ?? null,
-    actions: (payload.actions as SurfaceAction[]) ?? [],
-    kind: String(payload.kind ?? "generic"),
-  };
-}
-
 export const useCharlieStore = create<CharlieState>((set) => ({
   connected: false,
   coreState: "idle",
   activities: [],
-  widgets: {},
-  modals: {},
-  workspaces: {},
-  notifications: {},
   presentationIntents: {},
   activeCaption: null,
   activeToolApproval: null,
@@ -231,8 +155,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   audioState: null,
   micMuted: null,
   audioLevel: 0,
-  dashboardPanelIntent: null,
-  dashboardVisible: true,
+  hudVisible: true,
 
   setConnected: (connected) => set({ connected }),
   dismissAlert: () => set({ activeAlert: null }),
@@ -340,16 +263,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
         set({ audioLevel: level === null ? 0 : Math.max(0, Math.min(1, level)) });
         return;
       }
-      case "dashboard_panel": {
-        const action = payload.action;
-        const panelId = payload.panel_id;
-        if ((action === "show" || action === "hide") && typeof panelId === "string" && _DASHBOARD_PANEL_IDS.has(panelId)) {
-          set({ dashboardPanelIntent: { action, panelId } });
-        }
-        return;
-      }
-      case "dashboard_visibility":
-        set({ dashboardVisible: Boolean(payload.visible) });
+      case "hud_visibility":
+        set({ hudVisible: Boolean(payload.visible) });
         return;
       case "token":
         set((s) => {
@@ -373,13 +288,6 @@ export const useCharlieStore = create<CharlieState>((set) => ({
         return;
       case "research_result":
         set({ latestResearchResult: payload as unknown as ResearchResultPayload });
-        return;
-      case "surface_spawn":
-      case "surface_update":
-        applySurfaceUpsert(set, payload);
-        return;
-      case "surface_dismiss":
-        applySurfaceDismiss(set, payload);
         return;
       case "presentation_intent":
       case "presentation_update":
@@ -453,27 +361,6 @@ function subsystemHealthFromPayload(payload: Record<string, unknown>): Record<st
     health[name] = { status: String(value.status ?? "unknown"), detail: String(value.detail ?? "Unknown") };
     return health;
   }, {});
-}
-
-function applySurfaceUpsert(set: (fn: (s: CharlieState) => Partial<CharlieState>) => void, payload: Record<string, unknown>): void {
-  const key = surfaceMapKey(String(payload.presentation));
-  if (!key) return;
-  const spec = specFromPayload(payload);
-  set((s) => ({ [key]: { ...s[key], [spec.surfaceId]: spec } }) as Partial<CharlieState>);
-}
-
-function applySurfaceDismiss(set: (fn: (s: CharlieState) => Partial<CharlieState>) => void, payload: Record<string, unknown>): void {
-  const surfaceId = String(payload.surface_id);
-  set((s) => {
-    const next: Partial<CharlieState> = {};
-    for (const key of ["widgets", "modals", "workspaces", "notifications"] as const) {
-      if (surfaceId in s[key]) {
-        const { [surfaceId]: _removed, ...rest } = s[key];
-        next[key] = rest;
-      }
-    }
-    return next;
-  });
 }
 
 function presentationIntentFromPayload(payload: Record<string, unknown>): PresentationIntent {

@@ -16,62 +16,59 @@ async def main():
     logger.info("Connecting to Charlie EventBus...")
     async with EventBus(is_producer=False) as bus:
 
-        input("\n[1/4] Press Enter to spawn a Watcher Alert widget (role=warning)...")
-        watcher_spec = {
-            "title": "Watcher Alert",
-            "body": "Memory usage is above 90%",
-            "presentation": "widget",
-            "role": "warning",
-            "actions": [],
-            "density": 3,
-            "persistence": "ephemeral",
-            "ttl_seconds": 15
-        }
+        input("\n[1/4] Press Enter to show a Watcher Alert widget (role=warning)...")
         await bus.send_command({
             "type": "test_emit_event",
             "payload": {
-                "event_type": "surface_spawn",
+                "event_type": "presentation_intent",
                 "event_payload": {
-                    "surface_id": make_id(),
-                    "spec": watcher_spec
+                    "id": make_id(),
+                    "kind": "widget",
+                    "title": "Watcher Alert",
+                    "summary": "Memory usage is above 90%",
+                    "attention_level": "high",
+                    "replayable": False,
                 }
             }
         })
 
-        input("\n[2/4] Press Enter to spawn a Background Task notification (role=info)...")
-        task_spec = {
-            "title": "Background Task",
-            "body": "Summarizing 50 documents...",
-            "presentation": "notification",
-            "role": "info",
-            "actions": [],
-            "density": 1,
-            "persistence": "ephemeral",
-            "ttl_seconds": 15
-        }
+        input("\n[2/4] Press Enter to show a Background Task notification (role=info)...")
         await bus.send_command({
             "type": "test_emit_event",
             "payload": {
-                "event_type": "surface_spawn",
+                "event_type": "presentation_intent",
                 "event_payload": {
-                    "surface_id": make_id(),
-                    "spec": task_spec
+                    "id": make_id(),
+                    "kind": "notification",
+                    "title": "Background Task",
+                    "summary": "Summarizing 50 documents...",
+                    "attention_level": "inform",
+                    "replayable": False,
                 }
             }
         })
 
-        input("\n[3/4] Press Enter to trigger a Tool Approval Modal (role=danger)...")
-        # Triggering tool_approval_request so the web_server caches it and hud_shell picks it up to spawn a modal.
+        input("\n[3/4] Press Enter to trigger a Tool Approval Modal (risk=destructive)...")
+        request_id = make_id()
         await bus.send_command({
             "type": "test_emit_event",
             "payload": {
-                "event_type": "tool_approval_request",
+                "event_type": "presentation_intent",
                 "event_payload": {
-                    "request_id": make_id(),
-                    "tool_name": "shell_execute",
-                    "arguments": {"command": "rm -rf /"},
-                    "rationale": "Deleting everything as requested.",
-                    "risk_class": "destructive"
+                    "id": request_id,
+                    "kind": "attention",
+                    "title": "Approval needed: shell_execute",
+                    "summary": "Deleting everything as requested.",
+                    "content": {
+                        "request_id": request_id,
+                        "tool_name": "shell_execute",
+                        "arguments": {"command": "rm -rf /"},
+                        "reason": "Deleting everything as requested.",
+                        "risk_class": "destructive",
+                    },
+                    "attention_level": "critical",
+                    "dismiss_policy": "manual",
+                    "replayable": True,
                 }
             }
         })

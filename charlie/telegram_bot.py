@@ -1,7 +1,7 @@
 """Long-polling Telegram DM bridge -- a presentation channel of the Attention Engine, not a parallel assistant.
 
 DM-only, single-owner gate. Owns no Brain/session/dispatch logic -- on_message/on_approval
-callbacks are wired once from main.py, same shape as pet_entry.py/hud_entry.py's subprocess entries.
+callbacks are wired once from main.py, same shape as pet_entry.py's subprocess entry.
 """
 
 import logging

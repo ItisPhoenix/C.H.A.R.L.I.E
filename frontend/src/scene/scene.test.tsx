@@ -18,10 +18,6 @@ beforeEach(() => {
     presentationIntents: {},
     activeCaption: null,
     audioLevel: 0,
-    widgets: {},
-    modals: {},
-    workspaces: {},
-    notifications: {},
   });
   useWorkspaceStore.setState({
     workspaces: {},

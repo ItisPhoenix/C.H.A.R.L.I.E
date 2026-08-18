@@ -1,4 +1,4 @@
-"""Tests for the two REST endpoints backing the HUD's ToolsGrid and McpConnections widgets."""
+"""Tests for the React HUD's tools, MCP, and visibility bridge endpoints."""
 
 import pytest
 
@@ -66,11 +66,11 @@ async def test_get_mcp_tools_returns_registered_mcp_definitions(monkeypatch):
     assert [tool["function"]["name"] for tool in result["tools"]] == ["mcp_files_read"]
 
 
-def test_dashboard_panel_event_replays_to_late_clients(monkeypatch):
-    monkeypatch.setattr(web_server, "_dashboard_panels", {"terminal": "show"})
+def test_hud_visibility_replays_to_late_clients(monkeypatch):
+    monkeypatch.setattr(web_server, "_hud_visible", False)
 
     events = web_server._initial_state_events()
 
-    event = next(event for event in events if event["type"] == "dashboard_panel")
-    assert event["payload"] == {"action": "show", "panel_id": "terminal"}
+    event = next(event for event in events if event["type"] == "hud_visibility")
+    assert event["payload"] == {"visible": False}
     assert event["replay"] is True

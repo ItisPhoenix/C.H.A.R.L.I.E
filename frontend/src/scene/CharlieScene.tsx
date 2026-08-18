@@ -1,5 +1,4 @@
 import { useEffect, useState, type ReactElement } from "react";
-import { useNavigate } from "react-router-dom";
 import { useCharlieStore } from "../store/charlie";
 import { useWorkspaceStore } from "../layout/workspaceStore";
 import { useWidgetStore } from "../layout/widgetStore";
@@ -15,13 +14,16 @@ import { TaskSwitcher } from "./TaskSwitcher";
 import type { ZoneContext } from "../layout/zones";
 import "./scene.css";
 
-export function CharlieScene(): ReactElement {
-  const navigate = useNavigate();
+export function CharlieScene(): ReactElement | null {
   const projection = useSceneProjection();
 
   // Stores
   const presentationIntents = useCharlieStore((s) => s.presentationIntents);
   const dismissIntent = useCharlieStore((s) => s.dismissPresentationIntent);
+  const hudVisible = useCharlieStore((s) => s.hudVisible);
+  const settingsIntentId = Object.values(presentationIntents).find(
+    (intent) => intent.kind === "workspace" && intent.workspaceType === "settings",
+  )?.id;
 
   const openWorkspace = useWorkspaceStore((s) => s.openWorkspace);
   const minimizeWorkspace = useWorkspaceStore((s) => s.minimizeWorkspace);
@@ -42,7 +44,9 @@ export function CharlieScene(): ReactElement {
 
   // Sync incoming PresentationIntents to WorkspaceManager and WidgetManager
   useEffect(() => {
-    const hasWorkspace = Object.values(presentationIntents).some((i) => i.kind === "workspace");
+    const hasWorkspace = Object.values(presentationIntents).some(
+      (i) => i.kind === "workspace" && i.workspaceType !== "settings",
+    );
     const zoneCtx: ZoneContext = {
       viewport: { width: window.innerWidth, height: window.innerHeight },
       safeMargin: { x: Math.min(Math.max(16, window.innerWidth * 0.035), 48), y: Math.min(Math.max(16, window.innerHeight * 0.035), 48) },
@@ -64,12 +68,16 @@ export function CharlieScene(): ReactElement {
 
     for (const intent of Object.values(presentationIntents)) {
       if (intent.kind === "workspace") {
-        openWorkspace(intent);
+        if (intent.workspaceType !== "settings") openWorkspace(intent);
       } else if (intent.kind === "widget" || intent.kind === "composed_surface") {
         upsertWidget(intent, zoneCtx);
       }
     }
   }, [presentationIntents, openWorkspace, upsertWidget]);
+
+  useEffect(() => {
+    setSettingsModalOpen(Boolean(settingsIntentId));
+  }, [settingsIntentId]);
 
   // Keyboard shortcut listener: Focused Escape & Ctrl+Shift+D debug overlay
   useEffect(() => {
@@ -113,6 +121,8 @@ export function CharlieScene(): ReactElement {
       }
     }
   };
+
+  if (!hudVisible) return null;
 
   return (
     <main
@@ -158,7 +168,6 @@ export function CharlieScene(): ReactElement {
         onClearScreen={handleClearScreen}
         onOpenRecent={() => setRecentModalOpen(true)}
         onOpenSettings={() => setSettingsModalOpen(true)}
-        onOpenLegacyDashboard={() => navigate("/dashboard")}
       />
 
       {/* 7. Recent Workspaces Modal */}
@@ -170,7 +179,10 @@ export function CharlieScene(): ReactElement {
       {/* 8. Settings Modal Overlay */}
       <SettingsModal
         isOpen={settingsModalOpen}
-        onClose={() => setSettingsModalOpen(false)}
+        onClose={() => {
+          setSettingsModalOpen(false);
+          if (settingsIntentId) dismissIntent(settingsIntentId);
+        }}
       />
 
       {/* 7. Developer Debug Mode Overlays */}

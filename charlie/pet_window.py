@@ -579,22 +579,19 @@ class PetActivityModel:
                     str(payload.get("tool_name") or "Approval needed"),
                     str(payload.get("reason") or "A decision is required"),
                 )
-        elif etype == "surface_spawn" and payload.get("actions"):
-            action_ids = {
-                str(action.get("id"))
-                for action in payload.get("actions", [])
-                if isinstance(action, dict)
-            }
-            if {"approve", "decline"} <= action_ids and payload.get("surface_id"):
+        elif etype in {"presentation_intent", "presentation_update"}:
+            content = payload.get("content")
+            if payload.get("kind") == "attention" and isinstance(content, dict) and content.get("request_id"):
                 self.approval = ApprovalState(
-                    str(payload["surface_id"]),
+                    str(content["request_id"]),
                     str(payload.get("title") or "Approval needed"),
-                    str(payload.get("body") or "A decision is required"),
+                    str(payload.get("summary") or content.get("reason") or "A decision is required"),
                 )
-        elif etype in {"tool_approval_resolved", "surface_dismiss"} and payload.get(
-            "request_id", payload.get("surface_id")
+        elif etype in {"tool_approval_resolved", "presentation_dismiss"} and payload.get(
+            "request_id", payload.get("id")
         ):
-            if self.approval and str(payload.get("request_id", payload.get("surface_id"))) == self.approval.request_id:
+            resolved_id = payload.get("request_id", payload.get("id"))
+            if self.approval and str(resolved_id) == self.approval.request_id:
                 self.approval = None
         elif etype == "alert" and payload.get("severity") in {"warning", "error"}:
             self.alert = str(payload.get("message") or "Something needs attention")
@@ -1310,8 +1307,8 @@ class PetWindow(QWidget):
             self._animator.set_ptt(True)
         elif etype in {"ptt_stop", "ptt_cancel"}:
             self._animator.set_ptt(False)
-        elif etype in {"surface_spawn", "surface_dismiss"}:
-            workspace_active = _track_workspace_surface(self._active_workspaces, event)
+        elif etype in {"presentation_intent", "presentation_update", "presentation_dismiss"}:
+            workspace_active = _track_workspace_presentation(self._active_workspaces, event)
             if workspace_active is not None:
                 self.workspace_surface_changed.emit(workspace_active)
         self._refresh_layout()
@@ -1381,16 +1378,20 @@ def _elide_text(text: str, width_fn: Callable[[str], int], max_width: int) -> st
     return text[:lo].rstrip() + "..." if lo else "..."
 
 
-def _track_workspace_surface(active_ids: set, event: dict) -> Optional[bool]:
+def _track_workspace_presentation(active_ids: set, event: dict) -> Optional[bool]:
     etype = event.get("type")
     payload = event.get("payload") or {}
-    sid = payload.get("surface_id")
-    if etype == "surface_spawn" and payload.get("presentation") == "workspace" and sid:
+    presentation_id = payload.get("id")
+    if (
+        etype in {"presentation_intent", "presentation_update"}
+        and payload.get("kind") == "workspace"
+        and presentation_id
+    ):
         was_empty = not active_ids
-        active_ids.add(sid)
+        active_ids.add(presentation_id)
         return True if was_empty else None
-    if etype == "surface_dismiss" and sid in active_ids:
-        active_ids.discard(sid)
+    if etype == "presentation_dismiss" and presentation_id in active_ids:
+        active_ids.discard(presentation_id)
         return False if not active_ids else None
     return None
 
@@ -1408,6 +1409,15 @@ def main() -> None:
     app = QApplication([])
     window = PetWindow()
     window.show()
+    hotkey_listener = None
+    try:
+        # HUD invocation belongs to the always-available pet companion now that
+        # the React HUD has no separate Qt shell process.
+        from charlie.hud.invocation import start_hotkey_listener
+
+        hotkey_listener = start_hotkey_listener(config.hud_invoke_hotkey)
+    except Exception:
+        logger.warning("HUD invocation hotkey unavailable", exc_info=True)
     stop_event = threading.Event()
     bridge = PetEventBridge(window.event_received.emit, window.connection_changed.emit)
     bridge.start()
@@ -1416,3 +1426,5 @@ def main() -> None:
     finally:
         stop_event.set()
         bridge.stop()
+        if hotkey_listener is not None:
+            hotkey_listener.stop()

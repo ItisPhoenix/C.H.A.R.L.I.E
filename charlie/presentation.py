@@ -1000,46 +1000,5 @@ class PresentationResolver:
             replayable=False,
         )
 
-    # -----------------------------------------------------------------------
-    # Legacy SurfaceEngine Adapter
-    # -----------------------------------------------------------------------
-
-    @staticmethod
-    def to_legacy_surface_spec(intent: PresentationIntent) -> Any:
-        """Translate a canonical PresentationIntent into a legacy SurfaceSpec."""
-        from charlie.surfaces import Persistence, PresentationMode, SurfaceSpec
-
-        mode_map = {
-            PresentationKind.SILENT: PresentationMode.BACKGROUND,
-            PresentationKind.CAPTION: PresentationMode.NOTIFICATION,
-            PresentationKind.NOTIFICATION: PresentationMode.NOTIFICATION,
-            PresentationKind.WIDGET: PresentationMode.WIDGET,
-            PresentationKind.COMPOSED_SURFACE: PresentationMode.MODAL,
-            PresentationKind.WORKSPACE: PresentationMode.WORKSPACE,
-            PresentationKind.ATTENTION: PresentationMode.MODAL,
-        }
-        persistence_map = {
-            DismissPolicy.IMMEDIATE: Persistence.EPHEMERAL,
-            DismissPolicy.TIMED: Persistence.EPHEMERAL,
-            DismissPolicy.TASK_LIFETIME: Persistence.EPHEMERAL,
-            DismissPolicy.MANUAL: Persistence.PERSISTENT,
-            DismissPolicy.PERSISTENT: Persistence.PERSISTENT,
-        }
-
-        ttl = float(intent.auto_dismiss_ms) / 1000.0 if intent.auto_dismiss_ms else None
-        return SurfaceSpec(
-            presentation=mode_map.get(intent.kind, PresentationMode.WIDGET),
-            persistence=persistence_map.get(intent.dismiss_policy, Persistence.EPHEMERAL),
-            density=3 if intent.attention_level == AttentionLevel.HIGH else 2,
-            rationale=f"Resolved from {intent.kind}",
-            task_id=intent.task_id,
-            title=intent.title,
-            body=intent.summary,
-            role="danger" if intent.kind == PresentationKind.ATTENTION else "info",
-            ttl_seconds=ttl,
-            kind=intent.widget_type or intent.workspace_type or "generic",
-        )
-
-
 # Global singleton resolver instance
 default_presentation_resolver = PresentationResolver()

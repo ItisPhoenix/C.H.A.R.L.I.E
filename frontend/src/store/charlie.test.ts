@@ -6,10 +6,6 @@ beforeEach(() => {
     connected: false,
     coreState: "idle",
     activities: [],
-    widgets: {},
-    modals: {},
-    workspaces: {},
-    notifications: {},
     activeToolApproval: null,
     systemStatus: null,
     netHistory: [],
@@ -29,21 +25,12 @@ describe("applyEvent", () => {
     expect(useCharlieStore.getState().activities).toEqual(["voice_turn"]);
   });
 
-  test("surface_spawn adds a spec to the matching presentation map", () => {
+  test("presentation intents are the only surface state projection", () => {
     useCharlieStore.getState().applyEvent({
-      type: "surface_spawn",
-      payload: { surface_id: "s1", presentation: "widget", persistence: "ephemeral", density: 2, region: "top_right", rationale: "test" },
+      type: "presentation_intent",
+      payload: { id: "intent-1", kind: "workspace", workspace_type: "terminal", title: "TERMINAL" },
     });
-    expect(useCharlieStore.getState().widgets["s1"]?.rationale).toBe("test");
-  });
-
-  test("surface_dismiss removes the spec from whichever map holds it", () => {
-    useCharlieStore.getState().applyEvent({
-      type: "surface_spawn",
-      payload: { surface_id: "s1", presentation: "modal", persistence: "persistent", density: 4, region: "" },
-    });
-    useCharlieStore.getState().applyEvent({ type: "surface_dismiss", payload: { surface_id: "s1" } });
-    expect(useCharlieStore.getState().modals["s1"]).toBeUndefined();
+    expect(useCharlieStore.getState().presentationIntents["intent-1"]?.workspaceType).toBe("terminal");
   });
 
   test("tool_approval_request sets activeToolApproval", () => {
@@ -86,15 +73,9 @@ describe("applyEvent", () => {
     expect(useCharlieStore.getState().audioLevel).toBe(1);
   });
 
-  test("retains only registered dashboard panel visibility intents", () => {
-    useCharlieStore.getState().applyEvent({ type: "dashboard_panel", payload: { action: "show", panel_id: "terminal" } });
-
-    expect(useCharlieStore.getState().dashboardPanelIntent).toEqual({ action: "show", panelId: "terminal" });
-  });
-
-  test("dashboard visibility follows the pet toggle event", () => {
-    useCharlieStore.getState().applyEvent({ type: "dashboard_visibility", payload: { visible: false } });
-    expect(useCharlieStore.getState().dashboardVisible).toBe(false);
+  test("HUD visibility follows the pet toggle event", () => {
+    useCharlieStore.getState().applyEvent({ type: "hud_visibility", payload: { visible: false } });
+    expect(useCharlieStore.getState().hudVisible).toBe(false);
   });
 
   test("addUserMessage appends a user chat message", () => {

@@ -11,7 +11,6 @@ interface CharlieCoreProps {
   onClearScreen?: () => void;
   onOpenRecent?: () => void;
   onOpenSettings?: () => void;
-  onOpenLegacyDashboard?: () => void;
 }
 
 export function CharlieCore({
@@ -22,7 +21,6 @@ export function CharlieCore({
   onClearScreen,
   onOpenRecent,
   onOpenSettings,
-  onOpenLegacyDashboard,
 }: CharlieCoreProps): ReactElement {
   const [showMenu, setShowMenu] = useState(false);
 
@@ -115,18 +113,6 @@ export function CharlieCore({
                 className="px-3 py-1.5 text-xs text-left text-cyan-200 hover:bg-cyan-900/50 rounded transition cursor-pointer font-mono"
               >
                 Clear Screen
-              </button>
-            )}
-            {onOpenLegacyDashboard && (
-              <button
-                type="button"
-                onClick={() => {
-                  onOpenLegacyDashboard();
-                  setShowMenu(false);
-                }}
-                className="px-3 py-1.5 text-xs text-left text-cyan-200 hover:bg-cyan-900/50 rounded transition cursor-pointer font-mono"
-              >
-                Legacy Dashboard
               </button>
             )}
             <button

@@ -14,7 +14,7 @@ from charlie.pet_window import (
     _map_event_to_caption_desc,
     _map_event_to_state,
     _state_caption_title,
-    _track_workspace_surface,
+    _track_workspace_presentation,
     activity_orientation,
     clamp_position,
     detect_anchor,
@@ -61,28 +61,28 @@ def test_map_event_to_caption_desc_alert_info_is_silent():
     assert _map_event_to_caption_desc(event) is None
 
 
-def test_track_workspace_surface_spawn_then_dismiss():
+def test_track_workspace_presentation_intent_then_dismiss():
     active: set = set()
-    spawn = {"type": "surface_spawn", "payload": {"surface_id": "ws1", "presentation": "workspace"}}
-    dismiss = {"type": "surface_dismiss", "payload": {"surface_id": "ws1"}}
+    spawn = {"type": "presentation_intent", "payload": {"id": "ws1", "kind": "workspace"}}
+    dismiss = {"type": "presentation_dismiss", "payload": {"id": "ws1"}}
 
-    assert _track_workspace_surface(active, spawn) is True
-    assert _track_workspace_surface(active, dismiss) is False
+    assert _track_workspace_presentation(active, spawn) is True
+    assert _track_workspace_presentation(active, dismiss) is False
 
 
-def test_track_workspace_surface_ignores_non_workspace_spawn():
+def test_track_workspace_presentation_ignores_non_workspace_intent():
     active: set = set()
-    spawn = {"type": "surface_spawn", "payload": {"surface_id": "w1", "presentation": "widget"}}
-    assert _track_workspace_surface(active, spawn) is None
+    spawn = {"type": "presentation_intent", "payload": {"id": "w1", "kind": "widget"}}
+    assert _track_workspace_presentation(active, spawn) is None
 
 
-def test_track_workspace_surface_second_spawn_does_not_re_emit():
+def test_track_workspace_presentation_second_intent_does_not_re_emit():
     active: set = set()
-    spawn1 = {"type": "surface_spawn", "payload": {"surface_id": "ws1", "presentation": "workspace"}}
-    spawn2 = {"type": "surface_spawn", "payload": {"surface_id": "ws2", "presentation": "workspace"}}
+    spawn1 = {"type": "presentation_intent", "payload": {"id": "ws1", "kind": "workspace"}}
+    spawn2 = {"type": "presentation_intent", "payload": {"id": "ws2", "kind": "workspace"}}
 
-    assert _track_workspace_surface(active, spawn1) is True
-    assert _track_workspace_surface(active, spawn2) is None
+    assert _track_workspace_presentation(active, spawn1) is True
+    assert _track_workspace_presentation(active, spawn2) is None
 
 
 def test_map_event_to_caption_desc_speaking_stop_clears():
@@ -253,15 +253,16 @@ def test_activity_model_tracks_tasks_and_approval():
     assert model.approval is None
 
 
-def test_activity_model_accepts_approval_surface_when_dashboard_is_absent():
+def test_activity_model_accepts_canonical_approval_presentation():
     model = PetActivityModel()
     model.apply({
-        "type": "surface_spawn",
+        "type": "presentation_intent",
         "payload": {
-            "surface_id": "r2",
+            "id": "r2",
+            "kind": "attention",
             "title": "Approval needed: delete",
-            "body": "Remove temporary file?",
-            "actions": [{"id": "approve"}, {"id": "decline"}],
+            "summary": "Remove temporary file?",
+            "content": {"request_id": "r2", "reason": "Remove temporary file?"},
         },
     })
     assert model.approval is not None

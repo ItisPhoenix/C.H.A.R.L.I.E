@@ -209,7 +209,6 @@ async def capture():
     print("Starting authentic Charlie runtime (main.py)...", flush=True)
     main_env = os.environ.copy()
     main_env["PET_ENABLED"] = "false"
-    main_env["HUD_ENABLED"] = "false"
     main_env["CHARLIE_NO_VOICE"] = "1"
     main_env["TELEGRAM_ENABLED"] = "false"
     main_env["PYTHONUNBUFFERED"] = "1"

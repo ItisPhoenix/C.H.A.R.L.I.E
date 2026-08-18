@@ -1,4 +1,4 @@
-"""Pure, allowlisted show/hide intent matching for dashboard panels."""
+"""Pure, allowlisted voice surface requests for the canonical React HUD."""
 
 import re
 from dataclasses import dataclass
@@ -9,7 +9,7 @@ _ACTION_RE = re.compile(
     r"(?:me\s+)?(?:the\s+)?(.+?)\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
-_PANEL_ALIASES = {
+_SURFACE_ALIASES = {
     "calendar": "calendar",
     "reminders": "calendar",
     "media": "media",
@@ -32,20 +32,20 @@ _PANEL_ALIASES = {
 
 
 @dataclass(frozen=True)
-class DashboardPanelIntent:
-    """One registered dashboard panel visibility instruction."""
+class SurfaceRequest:
+    """One allowlisted request to show or dismiss a React HUD surface."""
 
     action: str
-    panel_id: str
+    surface_id: str
 
 
-def match_dashboard_panel_intent(text: str) -> Optional[DashboardPanelIntent]:
-    """Return a registered panel visibility intent, or None for normal chat."""
+def match_surface_request(text: str) -> Optional[SurfaceRequest]:
+    """Return a registered surface request, or None for normal conversation."""
     match = _ACTION_RE.match(text)
     if match is None:
         return None
     action, target = match.groups()
-    panel_id = _PANEL_ALIASES.get(target.lower().strip())
-    if panel_id is None:
+    surface_id = _SURFACE_ALIASES.get(target.lower().strip())
+    if surface_id is None:
         return None
-    return DashboardPanelIntent("show" if action.lower() in {"show", "open"} else "hide", panel_id)
+    return SurfaceRequest("show" if action.lower() in {"show", "open"} else "hide", surface_id)

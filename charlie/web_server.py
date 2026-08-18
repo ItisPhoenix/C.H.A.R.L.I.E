@@ -1,4 +1,4 @@
-"""FastAPI + WebSocket backend for Charlie web dashboard.
+"""FastAPI + WebSocket bridge for the Charlie React HUD.
 
 Runs in a separate subprocess spawned by main.py.
 Communicates with the voice process via ZeroMQ (EventBus).
@@ -342,7 +342,7 @@ async def lifespan(app: FastAPI):
             logger.debug("EventBus shutdown cleanup issue (non-fatal): %s", exc)
         event_bus = None
 
-app = FastAPI(title="Charlie Dashboard", lifespan=lifespan)
+app = FastAPI(title="Charlie React HUD", lifespan=lifespan)
 
 # SECURITY: This server has no authentication. It is intended for localhost
 # only. Never bind CHARLIE_HOST=0.0.0.0 (or any non-loopback address) without
@@ -367,10 +367,8 @@ if _FRONTEND_DIST.is_dir():
 
 
 @app.get("/")
-@app.get("/dashboard")
-@app.get("/surface/{surface_id}")
-async def serve_surface(surface_id: Optional[str] = None) -> FileResponse:
-    """Single-page app entry -- the Dashboard is a plain web page, no Qt window involved."""
+async def serve_hud() -> FileResponse:
+    """Serve the one React HUD entry point."""
     index_path = _FRONTEND_DIST / "index.html"
     if not index_path.is_file():
         raise HTTPException(status_code=404, detail="frontend not built -- run `npm run build` in frontend/")
@@ -482,15 +480,9 @@ async def _event_bridge():
         elif etype == "mic_state":
             global _mic_state
             _mic_state = event.get("payload", {})
-        elif etype == "dashboard_panel":
-            payload = event.get("payload", {})
-            panel_id = payload.get("panel_id")
-            action = payload.get("action")
-            if isinstance(panel_id, str) and action in ("show", "hide"):
-                _dashboard_panels[panel_id] = action
-        elif etype == "dashboard_visibility":
-            global _dashboard_visible
-            _dashboard_visible = bool(event.get("payload", {}).get("visible", True))
+        elif etype == "hud_visibility":
+            global _hud_visible
+            _hud_visible = bool(event.get("payload", {}).get("visible", True))
         elif etype == "terminal_command_result":
             payload = event.get("payload", {})
             if payload.get("approved") is True:
@@ -511,13 +503,6 @@ async def _event_bridge():
         elif etype == "extension_proposed":
             await _stage_proposed_extension(event.get("payload", {}))
             return
-        elif etype in ("surface_spawn", "surface_update", "surface_dismiss"):
-            _apply_surface_event(_active_surfaces, event)
-            if etype in ("surface_spawn", "surface_update"):
-                sid = event.get("payload", {}).get("surface_id")
-                ttl = event.get("payload", {}).get("ttl_seconds")
-                if sid and ttl:
-                    asyncio.create_task(_expire_surface(sid, event, ttl))
         elif etype in ("presentation_intent", "presentation_update", "presentation_dismiss"):
             _apply_presentation_event(_active_presentation_intents, event)
             if etype in ("presentation_intent", "presentation_update"):
@@ -582,9 +567,6 @@ async def websocket_endpoint(ws: WebSocket):
                     "tool_approval_request",
                     "tool_approval_resolved",
                     "activity",
-                    "surface_spawn",
-                    "surface_update",
-                    "surface_dismiss",
                     "presentation_intent",
                 ):
                     # Security: Frontend MUST NOT submit authoritative runtime or approval events.
@@ -1039,11 +1021,8 @@ _audio_state: dict = {
 _mic_state: dict = {
     "mic_muted": False,
 }
-_dashboard_panels: dict = {}
-_dashboard_visible = True
-# surface_id -> latest spawn/update payload, replayed to webviews that connect after their spawn event fired
-_active_surfaces: dict = {}
-# request_id -> tool_approval_request event, replayed like _active_surfaces so a late-connecting window's store gets it
+_hud_visible = True
+# request_id -> tool_approval_request event, replayed so a late-connecting client can render it
 _pending_approvals: dict = {}
 # presentation_intent_id -> canonical presentation intent event, replayed for persistent workspaces/modals
 _active_presentation_intents: dict = {}
@@ -1068,22 +1047,11 @@ def _initial_state_events() -> List[dict]:
         build_event("task_snapshot", {"tasks": list(_background_tasks.values())}),
         build_event("audio_state", _audio_state),
         build_event("mic_state", _mic_state),
-        build_event("dashboard_visibility", {"visible": _dashboard_visible}),
+        build_event("hud_visibility", {"visible": _hud_visible}),
     ]
-    events.extend(
-        build_event("dashboard_panel", {"action": action, "panel_id": panel_id})
-        for panel_id, action in _dashboard_panels.items()
-    )
-    events.extend(_active_surfaces.values())
     events.extend(_pending_approvals.values())
     events.extend(_active_presentation_intents.values())
     return [replay_event(event, allow_unknown=True) for event in events]
-
-
-async def _expire_surface(surface_id: str, spawned_as: dict, ttl_seconds: float) -> None:
-    await asyncio.sleep(ttl_seconds)
-    if _active_surfaces.get(surface_id) is spawned_as:
-        _active_surfaces.pop(surface_id, None)
 
 
 def _apply_presentation_event(cache: dict, event: dict) -> None:
@@ -1148,17 +1116,6 @@ def _apply_background_task_event(cache: dict, event: dict) -> None:
             if key in payload:
                 safe[key] = payload[key]
         cache[task_id] = safe
-
-
-def _apply_surface_event(cache: dict, event: dict) -> None:
-    """Mutate `cache` (surface_id -> spawn/update event) so it always reflects the currently-live surfaces."""
-    etype = event.get("type", "")
-    payload = event.get("payload", {})
-    sid = payload.get("surface_id")
-    if etype in ("surface_spawn", "surface_update") and sid:
-        cache[sid] = event
-    elif etype == "surface_dismiss":
-        cache.pop(sid, None)
 
 
 @app.get("/api/audio")

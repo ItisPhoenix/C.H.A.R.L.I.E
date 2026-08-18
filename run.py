@@ -1,8 +1,8 @@
-"""Unified entry point for Charlie -- voice + web dashboard in one process.
+"""Unified entry point for Charlie -- voice runtime plus React HUD bridge.
 
 Usage:
-    python run.py              Full mode: voice pipeline + web dashboard
-    python run.py --web-only   Web-only mode: just the web UI (no mic/speaker needed)
+    python run.py              Full mode: voice pipeline + React HUD bridge
+    python run.py --web-only   Web-only mode: just the React HUD (no mic/speaker needed)
 
 In full mode, main.py spawns the web server as a subprocess.
 In web-only mode, only the FastAPI server starts (useful for testing the UI).
@@ -53,7 +53,7 @@ def check_and_build_frontend() -> None:
     dist_dir = frontend_dir / "dist"
 
     if not frontend_dir.exists():
-        raise RuntimeError("Frontend directory not found; refusing to start without the dashboard build.")
+        raise RuntimeError("Frontend directory not found; refusing to start without the React HUD build.")
 
     if not _frontend_build_is_stale(frontend_dir, dist_dir):
         return
@@ -83,19 +83,19 @@ def check_and_build_frontend() -> None:
         print("Frontend built successfully!")
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
-            "Frontend build failed; refusing to start with stale dashboard assets. "
+            "Frontend build failed; refusing to start with stale React HUD assets. "
             "See the npm output above and fix the build before restarting."
         ) from e
 
 
 def run_full():
-    """Run voice pipeline + web dashboard (the default)."""
+    """Run voice pipeline + React HUD bridge (the default)."""
     check_and_build_frontend()
 
     print("=" * 50)
-    print("  Charlie Assistant & Web Dashboard (Full Mode)")
+    print("  Charlie Assistant + React HUD (Full Mode)")
     print("  - Voice Loop: Active (listening to mic)")
-    print("  - Web Dashboard: Active (http://localhost:8000)")
+    print("  - React HUD: Available at http://localhost:8000/")
     print("=" * 50)
 
     from main import main
@@ -121,8 +121,8 @@ def run_web_only():
     from charlie.web_server import app
 
     print("=" * 50)
-    print("  Charlie Web Dashboard (web-only mode)")
-    print(f"  - Web Dashboard: Active (http://{config.charlie_host}:{config.charlie_port})")
+    print("  Charlie React HUD (web-only mode)")
+    print(f"  - React HUD: Active at http://{config.charlie_host}:{config.charlie_port}/")
     print("=" * 50)
 
     # Force-exit safety net: if graceful shutdown hangs >5s, kill immediately.
@@ -174,11 +174,11 @@ def run_web_only():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Charlie: voice assistant + web dashboard")
+    parser = argparse.ArgumentParser(description="Charlie: voice assistant + React HUD")
     parser.add_argument(
         "--web-only",
         action="store_true",
-        help="Start only the web dashboard (no voice pipeline)",
+        help="Start only the React HUD bridge (no voice pipeline)",
     )
     args = parser.parse_args()
 

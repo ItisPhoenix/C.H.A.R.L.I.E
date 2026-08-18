@@ -94,7 +94,7 @@ from charlie import background_task, telemetry
 from charlie.errors import ErrorClass, classify_exception
 from charlie.config import Config, config
 from charlie.core import Brain
-from charlie.dashboard_intent import match_dashboard_panel_intent
+from charlie.surface_intent import match_surface_request
 from charlie.events import EventMeta, EventSource, EventType
 from charlie.ipc import EventBus
 from charlie.memory_store import MemoryStore
@@ -102,7 +102,14 @@ from charlie.personality import get_emotion_for_context, parse_voice_command, pa
 from charlie.session_store import SessionStore
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus
-from charlie.surfaces import SurfaceEngine
+from charlie.presentation import (
+    AnchorTarget,
+    AttentionLevel as PresentationAttention,
+    DismissPolicy,
+    PresentationIntent,
+    PresentationKind,
+    PreferredZone,
+)
 from charlie.voice import VoiceEngine
 from charlie.attention import AttentionLevel
 from charlie.watchers import (
@@ -117,7 +124,6 @@ from charlie.watchers import (
 
 logger = logging.getLogger("charlie.main")
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
-_hud_surface_engine = SurfaceEngine(widget_cap=config.surface_widget_cap, workspace_cap=config.surface_workspace_cap)
 _state_machine = StateMachine()  # single authoritative CoreState instance for this process
 _runtime_health = HealthRegistry(
     (
@@ -133,6 +139,69 @@ _runtime_health = HealthRegistry(
         "watchers",
     )
 )
+
+
+_SURFACE_REQUEST_IDS = {
+    "calendar": "presentation:calendar",
+    "chat": "presentation:chat",
+    "mcp": "presentation:mcp",
+    "media": "presentation:media",
+    "settings": "presentation:settings",
+    "system": "presentation:system",
+    "tasks": "presentation:tasks",
+    "terminal": "presentation:terminal",
+    "tools": "presentation:tools",
+}
+
+
+def _surface_request_event(panel_id: str, action: str) -> tuple[str, dict, str]:
+    """Translate an allowlisted summon request into the canonical surface contract."""
+    surface_id = _SURFACE_REQUEST_IDS[panel_id]
+    if action == "hide":
+        return "presentation_dismiss", {"id": surface_id}, f"dismissed {panel_id} presentation"
+
+    workspace_types = {
+        "chat": "conversation",
+        "settings": "settings",
+        "system": "system",
+        "tasks": "tasks",
+        "terminal": "terminal",
+    }
+    workspace_type = workspace_types.get(panel_id)
+    title = panel_id.replace("mcp", "MCP").upper()
+    if workspace_type:
+        intent = PresentationIntent(
+            id=surface_id,
+            kind=PresentationKind.WORKSPACE,
+            title=title,
+            summary=f"{title} workspace",
+            content={"panel_id": panel_id, "source": "voice_surface_request"},
+            priority=60,
+            attention_level=PresentationAttention.NORMAL,
+            dismiss_policy=DismissPolicy.PERSISTENT,
+            workspace_type=workspace_type,
+            preferred_zone=PreferredZone.CENTER,
+            anchor=AnchorTarget.CORE,
+            replayable=True,
+            replace_key=surface_id,
+        )
+    else:
+        intent = PresentationIntent(
+            id=surface_id,
+            kind=PresentationKind.WIDGET,
+            title=title,
+            summary=f"{title} context",
+            content={"panel_id": panel_id, "source": "voice_surface_request"},
+            priority=50,
+            attention_level=PresentationAttention.NORMAL,
+            dismiss_policy=DismissPolicy.TIMED,
+            auto_dismiss_ms=8000,
+            widget_type=panel_id,
+            preferred_zone=PreferredZone.TOP_RIGHT,
+            anchor=AnchorTarget.CORE,
+            replace_key=surface_id,
+        )
+    return "presentation_intent", intent.to_dict(), f"opened {panel_id} presentation"
 
 
 async def _publish_subsystem_health(bus: Optional[EventBus] = None) -> None:
@@ -374,7 +443,6 @@ async def main():
     _DEDUPE_WINDOW_SEC = 20.0
     web_proc = None
     pet_proc = None
-    hud_proc = None
     telegram_bot = None
     # True while a chat turn's LLM/tool loop runs -- see _dispatch_or_queue.
     turn_active = False
@@ -454,53 +522,27 @@ async def main():
 
     _CONVERSATION_SUMMON_RE = re.compile(r"\b(?:show|open) (?:me )?(?:the )?(?:chat|conversation)\b", re.IGNORECASE)
 
-    async def _emit_surface_dismiss(surface_id: str) -> None:
-        """Shared by every spawn call site so an evicted surface's window actually closes."""
-        if event_bus is None:
-            return
-        dismiss_event = _hud_surface_engine.dismiss_event(surface_id)
-        await event_bus.emit(
-            dismiss_event["type"], dismiss_event["payload"], meta=EventMeta(source=EventSource.SURFACE)
-        )
-
-    def _schedule_surface_expiry(surface_id, spec) -> None:
-        if spec.persistence.value != "ephemeral":
-            return
-        ttl_seconds = spec.ttl_seconds if spec.ttl_seconds is not None else 30.0
-
-        async def _expire() -> None:
-            await asyncio.sleep(ttl_seconds)
-            if _hud_surface_engine.dismiss_if_active(surface_id):
-                await _emit_surface_dismiss(surface_id)
-
-        asyncio.run_coroutine_threadsafe(_expire(), loop)
-
     async def _summon_conversation_workspace(toggle: bool = False):
-        """The Dashboard is a plain web page (chat + tools + system monitor + connections +
-        tasks), not a Qt window -- this just opens it in the user's real browser. Shared by the
-        hud_invoke hotkey and this voice phrase."""
-        nonlocal dashboard_visible
+        """Summon the one React HUD surface; never open a legacy dashboard route."""
+        nonlocal hud_visible, hud_browser_opened
         from charlie.utils import open_url_in_browser
 
         if toggle:
-            dashboard_visible = not dashboard_visible
-        elif not dashboard_visible:
-            dashboard_visible = True
+            hud_visible = not hud_visible
+        elif not hud_visible:
+            hud_visible = True
         host = "127.0.0.1" if config.charlie_host == "0.0.0.0" else config.charlie_host
-        if dashboard_visible:
-            open_url_in_browser(f"http://{host}:{config.charlie_port}/dashboard")
+        if hud_visible and not hud_browser_opened:
+            hud_browser_opened = open_url_in_browser(f"http://{host}:{config.charlie_port}/")
         if event_bus:
             await event_bus.emit(
-                "dashboard_visibility",
-                {"visible": dashboard_visible},
-                meta=EventMeta(source=EventSource.SURFACE, rationale="pet or HUD invocation toggled dashboard"),
+                "hud_visibility",
+                {"visible": hud_visible},
+                meta=EventMeta(source=EventSource.SURFACE, rationale="pet or hotkey toggled React HUD"),
             )
 
     def _resolve_tool_approval_and_notify(request_id: str, approved: bool) -> None:
-        """Resolve the pending future, then tell web_server.py's replay cache the
-        request is gone -- otherwise a webview that connects after resolution
-        still finds the (now-stale) tool_approval_request via replay. Also closes
-        the HUD approval modal, which is spawned with surface_id == request_id."""
+        """Resolve pending future and dismiss its canonical attention intent."""
         from charlie.core import resolve_tool_approval
 
         resolve_tool_approval(request_id, approved)
@@ -513,8 +555,14 @@ async def main():
                 ),
                 loop,
             )
-            _hud_surface_engine.dismiss(request_id)
-            asyncio.run_coroutine_threadsafe(_emit_surface_dismiss(request_id), loop)
+            asyncio.run_coroutine_threadsafe(
+                event_bus.emit(
+                    "presentation_dismiss",
+                    {"id": request_id},
+                    meta=EventMeta(source=EventSource.BRAIN, rationale="approval resolved"),
+                ),
+                loop,
+            )
 
     def on_tool_approval_request(request_id, tool_name, reason, platform, risk_class):
         # telegram_bot is None until its startup block below runs -- read at call time, not def time.
@@ -524,56 +572,64 @@ async def main():
             )
         if event_bus is None:
             return
-        # surface_id == request_id: lets the resolve handler dismiss this exact modal with no extra bookkeeping.
-        surface_id = request_id
-        spec = _hud_surface_engine.decide(
-            {"type": "tool_approval_request", "payload": {"risk_class": risk_class}},
+        intent = PresentationIntent(
+            id=request_id,
+            kind=PresentationKind.ATTENTION,
             title=f"Approval needed: {tool_name}",
-            body=reason,
-            actions=[
-                {"id": "approve", "label": "Approve", "style": "primary"},
-                {"id": "decline", "label": "Decline", "style": "danger"},
-            ],
+            summary=reason,
+            content={
+                "request_id": request_id,
+                "tool_name": tool_name,
+                "reason": reason,
+                "arguments": {},
+                "risk_class": risk_class,
+            },
+            priority=95,
+            attention_level=PresentationAttention.HIGH,
+            dismiss_policy=DismissPolicy.MANUAL,
+            preferred_zone=PreferredZone.CENTER,
+            anchor=AnchorTarget.CORE,
+            replayable=True,
+            replace_key=f"approval:{request_id}",
         )
-        if spec is None:
-            return
-        evicted = _hud_surface_engine.spawn(surface_id, spec)
-        _schedule_surface_expiry(surface_id, spec)
-        spawn_event = _hud_surface_engine.spawn_event(surface_id, spec)
         asyncio.run_coroutine_threadsafe(
-            event_bus.emit(spawn_event["type"], spawn_event["payload"], meta=EventMeta(source=EventSource.SURFACE)),
+            event_bus.emit(
+                "presentation_intent",
+                intent.to_dict(),
+                meta=EventMeta(source=EventSource.BRAIN, rationale="tool approval requires attention"),
+            ),
             loop,
         )
-        for evicted_id in evicted:
-            asyncio.run_coroutine_threadsafe(_emit_surface_dismiss(evicted_id), loop)
 
     def on_result_stored(task_id, summary, attention_level):
         if event_bus is None:
             return
         from charlie.utils import make_id
 
-        surface_id = make_id()
-        spec = _hud_surface_engine.decide(
-            {"type": "result_stored"},
-            attention=AttentionLevel(attention_level),
-            title="Task finished",
-            body=summary,
-        )
-        if spec is None:
+        if AttentionLevel(attention_level) < AttentionLevel.INFORM:
             return
-        evicted = _hud_surface_engine.spawn(surface_id, spec)
-        _schedule_surface_expiry(surface_id, spec)
-        spawn_event = _hud_surface_engine.spawn_event(surface_id, spec)
+        intent = PresentationIntent(
+            id=make_id(),
+            kind=PresentationKind.NOTIFICATION,
+            task_id=task_id,
+            title="Task finished",
+            summary=summary,
+            content={"task_id": task_id},
+            priority=60,
+            attention_level=PresentationAttention.NORMAL,
+            dismiss_policy=DismissPolicy.TIMED,
+            auto_dismiss_ms=60000,
+            preferred_zone=PreferredZone.TOP_RIGHT,
+            anchor=AnchorTarget.CORE,
+        )
         asyncio.run_coroutine_threadsafe(
             event_bus.emit(
-                spawn_event["type"],
-                spawn_event["payload"],
-                meta=EventMeta(source=EventSource.SURFACE, task_id=task_id),
+                "presentation_intent",
+                intent.to_dict(),
+                meta=EventMeta(source=EventSource.TASK, task_id=task_id, rationale="task result ready"),
             ),
             loop,
         )
-        for evicted_id in evicted:
-            asyncio.run_coroutine_threadsafe(_emit_surface_dismiss(evicted_id), loop)
 
     def on_research_result(report):
         """Forward typed research cards; chat remains the text fallback."""
@@ -684,7 +740,8 @@ async def main():
     # Per-launch fallback, not the old shared "default" bucket across all launches.
     current_web_session_id = f"voice_{_LAUNCH_ID}"
     _voice_fallback_session_id = current_web_session_id
-    dashboard_visible = False
+    hud_visible = False
+    hud_browser_opened = False
 
     def ensure_session_ready(session_id: str):
         if not session_id:
@@ -855,14 +912,18 @@ async def main():
             print(f"\n{response_str}", flush=True)
             voice.speak(response_str, last_emotion)
             return
-        panel_intent = match_dashboard_panel_intent(text)
+        panel_intent = match_surface_request(text)
         if panel_intent is not None:
             await _summon_conversation_workspace()
             if event_bus:
+                event_type, payload, rationale = _surface_request_event(
+                    panel_intent.panel_id,
+                    panel_intent.action,
+                )
                 await event_bus.emit(
-                    "dashboard_panel",
-                    {"action": panel_intent.action, "panel_id": panel_intent.panel_id},
-                    meta=EventMeta(source=EventSource.VOICE),
+                    event_type,
+                    payload,
+                    meta=EventMeta(source=EventSource.VOICE, rationale=rationale),
                 )
             voice.speak("Here you go." if panel_intent.action == "show" else "Hidden.", last_emotion)
             return
@@ -1273,7 +1334,10 @@ async def main():
                                     "command": cmd_str,
                                     "approved": approved,
                                 },
-                                meta=EventMeta(source=EventSource.BRAIN, rationale="terminal command approval resolved"),
+                                meta=EventMeta(
+                                    source=EventSource.BRAIN,
+                                    rationale="terminal command approval resolved",
+                                ),
                             )
 
                         asyncio.create_task(_handle_terminal_command_request(request_id, terminal_session_id, command))
@@ -1502,11 +1566,6 @@ async def main():
         pet_entry = os.path.join(os.path.dirname(__file__), "charlie", "pet_entry.py")
         pet_proc = _start_subsystem_process("companion", (sys.executable, pet_entry))
 
-    # Start HUD surface shell subprocess (Windows-only, PySide6 + QtWebEngine)
-    if config.hud_enabled:
-        hud_entry = os.path.join(os.path.dirname(__file__), "charlie", "hud_entry.py")
-        hud_proc = _start_subsystem_process("hud", (sys.executable, hud_entry))
-
     # Telegram runs in-process (needs direct access to _dispatch_or_queue), not a subprocess like web/pet/hud.
     if config.telegram_enabled:
         try:
@@ -1695,32 +1754,24 @@ async def main():
                                     meta=EventMeta(source=EventSource.TASK, rationale="idle-return catch-up"),
                                 )
                                 voice.speak(catchup_msg, "neutral")
-                                from charlie.surfaces import UserIntent
                                 from charlie.utils import make_id
-
-                                catchup_spec = _hud_surface_engine.decide(
-                                    {"type": "alert"},
-                                    user_intent=UserIntent.SHOW,
+                                catchup_intent = PresentationIntent(
+                                    id=make_id(),
+                                    kind=PresentationKind.NOTIFICATION,
                                     title="While you were away",
-                                    body=catchup_msg,
+                                    summary=catchup_msg,
+                                    priority=60,
+                                    attention_level=PresentationAttention.NORMAL,
+                                    dismiss_policy=DismissPolicy.TIMED,
+                                    auto_dismiss_ms=8000,
+                                    preferred_zone=PreferredZone.TOP_RIGHT,
+                                    anchor=AnchorTarget.CORE,
                                 )
-                                if catchup_spec is not None:
-                                    catchup_id = make_id()
-                                    catchup_evicted = _hud_surface_engine.spawn(catchup_id, catchup_spec)
-                                    _schedule_surface_expiry(catchup_id, catchup_spec)
-                                    catchup_event = _hud_surface_engine.spawn_event(catchup_id, catchup_spec)
-                                    await bus.emit(
-                                        catchup_event["type"],
-                                        catchup_event["payload"],
-                                        meta=EventMeta(source=EventSource.SURFACE),
-                                    )
-                                    for evicted_id in catchup_evicted:
-                                        dismiss_event = _hud_surface_engine.dismiss_event(evicted_id)
-                                        await bus.emit(
-                                            dismiss_event["type"],
-                                            dismiss_event["payload"],
-                                            meta=EventMeta(source=EventSource.SURFACE),
-                                        )
+                                await bus.emit(
+                                    "presentation_intent",
+                                    catchup_intent.to_dict(),
+                                    meta=EventMeta(source=EventSource.TASK, rationale="idle-return catch-up"),
+                                )
                         was_idle = is_idle
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:
@@ -1851,34 +1902,24 @@ async def main():
             _watcher_loop = asyncio.get_running_loop()
 
             async def _spawn_watcher_surface(event: dict, message: str, reason: str) -> None:
-                # Runs on the main loop -- _hud_surface_engine is only ever mutated here, never from the watcher thread.
-                from charlie.surfaces import UserIntent
                 from charlie.utils import make_id
-
-                watcher_spec = _hud_surface_engine.decide(
-                    {"type": event.get("type", "alert")},
-                    user_intent=UserIntent.SHOW,
+                watcher_intent = PresentationIntent(
+                    id=make_id(),
+                    kind=PresentationKind.NOTIFICATION,
                     title="Heads up",
-                    body=message,
+                    summary=message,
+                    priority=65,
+                    attention_level=PresentationAttention.HIGH,
+                    dismiss_policy=DismissPolicy.TIMED,
+                    auto_dismiss_ms=8000,
+                    preferred_zone=PreferredZone.TOP_RIGHT,
+                    anchor=AnchorTarget.CORE,
                 )
-                if watcher_spec is None:
-                    return
-                watcher_id = make_id()
-                watcher_evicted = _hud_surface_engine.spawn(watcher_id, watcher_spec)
-                _schedule_surface_expiry(watcher_id, watcher_spec)
-                watcher_event = _hud_surface_engine.spawn_event(watcher_id, watcher_spec)
                 await bus.emit(
-                    watcher_event["type"],
-                    watcher_event["payload"],
-                    meta=EventMeta(source=EventSource.SURFACE, rationale=reason),
+                    "presentation_intent",
+                    watcher_intent.to_dict(),
+                    meta=EventMeta(source=EventSource.WATCHER, rationale=reason),
                 )
-                for evicted_id in watcher_evicted:
-                    dismiss_event = _hud_surface_engine.dismiss_event(evicted_id)
-                    await bus.emit(
-                        dismiss_event["type"],
-                        dismiss_event["payload"],
-                        meta=EventMeta(source=EventSource.SURFACE),
-                    )
 
             def _on_watcher_signal(event: dict, level: AttentionLevel, reason: str) -> None:
                 # Re-emit through the normal alert path -- state.py/pet_window.py already react to it.
@@ -1991,12 +2032,6 @@ async def main():
                 pet_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pet_proc.kill()
-        if hud_proc is not None:
-            hud_proc.terminate()
-            try:
-                hud_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                hud_proc.kill()
         if telegram_bot is not None:
             try:
                 await telegram_bot.stop()

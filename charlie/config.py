@@ -395,20 +395,7 @@ class Config:
         default=int(os.getenv("BACKGROUND_MAX_PARALLEL_TASKS", "1")),
         metadata=_meta("BACKGROUND_MAX_PARALLEL_TASKS", "Desktop Control"),
     )
-    # Surface Engine cap: a surface beyond this evicts the lowest-priority-oldest of its class.
-    surface_widget_cap: int = field(
-        default=int(os.getenv("SURFACE_WIDGET_CAP", "5")),
-        metadata=_meta("SURFACE_WIDGET_CAP", "Surfaces"),
-    )
-    surface_workspace_cap: int = field(
-        default=int(os.getenv("SURFACE_WORKSPACE_CAP", "1")),
-        metadata=_meta("SURFACE_WORKSPACE_CAP", "Surfaces"),
-    )
-    hud_enabled: bool = field(
-        default=os.getenv("HUD_ENABLED", "true").lower() == "true",
-        metadata=_meta("HUD_ENABLED", "Surfaces", restart="process"),
-    )
-    # Read once into a pynput GlobalHotKeys listener at hud process start -- needs a full restart to re-arm.
+    # Read once into the pet's pynput GlobalHotKeys listener; needs a full restart to re-arm.
     hud_invoke_hotkey: str = field(
         default=os.getenv("HUD_INVOKE_HOTKEY", "ctrl+shift+space"),
         metadata=_meta("HUD_INVOKE_HOTKEY", "Surfaces", restart="process"),

@@ -307,42 +307,6 @@ class TestReplayAndDeduplication:
         assert i2.replace_key == "widget:system_metric"
 
 
-class TestLegacySurfaceEngineAdapter:
-    """Test 5: Adapter translation to legacy SurfaceSpec."""
-
-    def test_to_legacy_surface_spec_widget(self):
-        intent = PresentationIntent(
-            id="test_widget",
-            kind=PresentationKind.WIDGET,
-            widget_type="system_metric",
-            title="System Telemetry",
-            summary="CPU is 15%",
-            auto_dismiss_ms=5000,
-            dismiss_policy=DismissPolicy.TIMED,
-        )
-        spec = PresentationResolver.to_legacy_surface_spec(intent)
-        assert spec.presentation.value == "widget"
-        assert spec.persistence.value == "ephemeral"
-        assert spec.ttl_seconds == 5.0
-        assert spec.title == "System Telemetry"
-        assert spec.body == "CPU is 15%"
-
-    def test_to_legacy_surface_spec_workspace(self):
-        intent = PresentationIntent(
-            id="test_ws",
-            kind=PresentationKind.WORKSPACE,
-            workspace_type="research",
-            title="Research Workspace",
-            summary="Deep analysis findings",
-            dismiss_policy=DismissPolicy.PERSISTENT,
-            replayable=True,
-        )
-        spec = PresentationResolver.to_legacy_surface_spec(intent)
-        assert spec.presentation.value == "workspace"
-        assert spec.persistence.value == "persistent"
-        assert spec.ttl_seconds is None
-
-
 class TestEventContractDrift:
     """Test 6: PresentationIntent wire serialization satisfies event contract."""
 
