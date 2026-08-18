@@ -1,15 +1,16 @@
 """Tests for Controlled Self-Extension Classifier and Authorization Guard."""
 
 import pytest
-from charlie.capabilities import CapabilityIndex, CapabilityDescriptor, CapabilityOperation
-from charlie.self_extension.models import (
-    ExtensionKind,
-    ExtensionRequest,
-    ExtensionClassification,
-    RiskClass,
-)
+
+from charlie.capabilities import CapabilityDescriptor, CapabilityIndex, CapabilityOperation
 from charlie.self_extension.classifier import ExtensionClassifier
 from charlie.self_extension.guard import AuthorizationGuard
+from charlie.self_extension.models import (
+    ExtensionClassification,
+    ExtensionKind,
+    ExtensionRequest,
+    RiskClass,
+)
 
 
 @pytest.fixture

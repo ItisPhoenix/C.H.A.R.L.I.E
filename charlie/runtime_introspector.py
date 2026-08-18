@@ -324,7 +324,6 @@ class RuntimeIntrospector:
             conpty = False
 
         # 4. Voice / Wake word
-        voice_avail = False
         wake_word_model = "charlie.onnx"
         wake_word_path = Path(__file__).resolve().parent / wake_word_model
         wake_word_present = wake_word_path.exists()

@@ -2,12 +2,13 @@
 
 import tempfile
 from pathlib import Path
+
 import pytest
 
 from charlie.capabilities import CapabilityIndex
-from charlie.self_extension.registry import ExtensionRegistry
-from charlie.self_extension.checkpoint import CheckpointManager
 from charlie.self_extension.adapters.code_adapter import CodeAdapter, CodeAdapterResult
+from charlie.self_extension.checkpoint import CheckpointManager
+from charlie.self_extension.registry import ExtensionRegistry
 
 
 @pytest.fixture

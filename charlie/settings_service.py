@@ -53,7 +53,7 @@ class SettingsService:
 
     def validate_updates(self, updates: Dict[str, Any]) -> Dict[str, Any]:
         """Validate input updates against declared config field types.
-        
+
         Ignores unknown keys and raises SettingValidationError on type conversion errors.
         """
         by_env = {f.metadata.get("env"): f for f in fields(self.config) if f.metadata.get("env")}
@@ -87,7 +87,7 @@ class SettingsService:
 
     def update_settings(self, updates: Dict[str, Any]) -> Set[str]:
         """Validate, atomically persist to .env, and apply to in-memory config.
-        
+
         Returns the set of restart tiers touched.
         """
         validated = self.validate_updates(updates)

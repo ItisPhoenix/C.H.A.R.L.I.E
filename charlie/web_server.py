@@ -2222,7 +2222,10 @@ async def geo_pmtiles_serve(archive_name: str, request: Request):
                     # Suffix byte range: bytes=-500 (last 500 bytes)
                     suffix_len = int(parts[1])
                     if suffix_len <= 0:
-                        return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}", **common_headers})
+                        return Response(
+                            status_code=416,
+                            headers={"Content-Range": f"bytes */{file_size}", **common_headers},
+                        )
                     start = max(0, file_size - suffix_len)
                     end = file_size - 1
                 elif parts[0] != "" and parts[1] == "":
@@ -2233,7 +2236,10 @@ async def geo_pmtiles_serve(archive_name: str, request: Request):
                     start = int(parts[0])
                     end = int(parts[1])
                 else:
-                    return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}", **common_headers})
+                    return Response(
+                        status_code=416,
+                        headers={"Content-Range": f"bytes */{file_size}", **common_headers},
+                    )
             else:
                 return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}", **common_headers})
 

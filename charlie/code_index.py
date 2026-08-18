@@ -563,7 +563,9 @@ class CodeIndex:
                 score = 90
             elif name_lower.startswith(q_lower):
                 score = 80
-            elif q_lower in name_lower.split("_") or q_lower in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+", name):
+            elif q_lower in name_lower.split("_") or q_lower in re.findall(
+                r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+", name
+            ):
                 score = 60
             elif q_lower in name_lower:
                 score = 40

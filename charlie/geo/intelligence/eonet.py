@@ -80,7 +80,10 @@ class NASAEONETProvider(IntelligenceProvider):
                                 id=f"wildfire_{ev.get('id', int(now))}",
                                 label=title,
                                 category="Wildfire / Thermal Anomaly",
-                                description=f"Active wildfire complex tracked by NASA thermal sensors. Recorded: {ev_date}.",
+                                description=(
+                                    "Active wildfire complex tracked by NASA thermal sensors. "
+                                    f"Recorded: {ev_date}."
+                                ),
                                 coordinates=[lon, lat],
                                 severity="high",
                                 source="NASA EONET",

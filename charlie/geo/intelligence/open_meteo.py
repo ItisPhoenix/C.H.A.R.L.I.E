@@ -68,7 +68,10 @@ class OpenMeteoProvider(IntelligenceProvider):
                                     id=f"weather_{name.lower().replace(' ', '_')}",
                                     label=f"{name}: {temp:.1f}°C",
                                     category="Meteorology",
-                                    description=f"Current conditions at {name}: Temperature {temp:.1f}°C, Wind Speed {wind:.1f} km/h, Humidity {hum}%.",
+                                    description=(
+                                        f"Current conditions at {name}: Temperature {temp:.1f}°C, "
+                                        f"Wind Speed {wind:.1f} km/h, Humidity {hum}%."
+                                    ),
                                     coordinates=[lon, lat],
                                     severity="normal",
                                     source="Open-Meteo",

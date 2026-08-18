@@ -1,7 +1,6 @@
 """Tests for Charlie Doctor & Self-Healing."""
 
 import tempfile
-from pathlib import Path
 
 import pytest
 

@@ -83,7 +83,10 @@ class USGSEarthquakesProvider(IntelligenceProvider):
                                 id=f"usgs_{feat.get('id', int(now))}",
                                 label=f"M{mag:.1f} — {place}",
                                 category="Seismic Event",
-                                description=f"Magnitude {mag:.1f} earthquake at {depth_km:.1f}km depth. Occurred at {time_iso}.",
+                                description=(
+                                    f"Magnitude {mag:.1f} earthquake at {depth_km:.1f}km depth. "
+                                    f"Occurred at {time_iso}."
+                                ),
                                 coordinates=[lon, lat],
                                 severity=severity,
                                 source="USGS Real-Time Feed",

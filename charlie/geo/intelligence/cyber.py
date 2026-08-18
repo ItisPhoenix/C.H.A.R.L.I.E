@@ -191,7 +191,10 @@ class CyberThreatProvider(IntelligenceProvider):
                                     id=f"cyber_{item_id}",
                                     label=f"Threat Host: {host}",
                                     category="Cyber C2 / Malware Host",
-                                    description=f"Active threat indicator '{threat}' (Status: {status}). Logged at {date_added}.",
+                                    description=(
+                                        f"Active threat indicator '{threat}' (Status: {status}). "
+                                        f"Logged at {date_added}."
+                                    ),
                                     coordinates=coords,
                                     severity="critical" if status == "online" else "medium",
                                     source="abuse.ch URLhaus",
@@ -235,5 +238,8 @@ class CyberThreatProvider(IntelligenceProvider):
             features=[],
             attribution=self.attribution,
             timestamp=now,
-            error="Live cyber threat feed is unconfigured or unavailable. Configure CHARLIE_URLHAUS_API_KEY in settings.",
+            error=(
+                "Live cyber threat feed is unconfigured or unavailable. "
+                "Configure CHARLIE_URLHAUS_API_KEY in settings."
+            ),
         )

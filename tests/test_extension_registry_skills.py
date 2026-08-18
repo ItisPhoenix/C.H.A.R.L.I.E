@@ -3,12 +3,13 @@
 import json
 import tempfile
 from pathlib import Path
+
 import pytest
 
 from charlie.capabilities import CapabilityIndex
-from charlie.self_extension.models import ExtensionKind
-from charlie.self_extension.registry import ExtensionRegistry, ExtensionEntry
 from charlie.self_extension.adapters.skill_adapter import SkillAdapter
+from charlie.self_extension.models import ExtensionKind
+from charlie.self_extension.registry import ExtensionEntry, ExtensionRegistry
 
 
 @pytest.fixture

@@ -2,6 +2,7 @@
 
 import tempfile
 from pathlib import Path
+
 import pytest
 
 from charlie.self_extension.checkpoint import CheckpointManager

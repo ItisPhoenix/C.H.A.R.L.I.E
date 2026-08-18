@@ -201,7 +201,10 @@ class CharlieDoctor:
             status=CheckStatus.OK,
             severity=CheckSeverity.LOW,
             summary="Configuration valid and loaded",
-            evidence=f"Loaded configuration: provider={getattr(cfg, 'llm_provider', 'unknown')}, model={getattr(cfg, 'llm_model', 'unknown')}.",
+            evidence=(
+                f"Loaded configuration: provider={getattr(cfg, 'llm_provider', 'unknown')}, "
+                f"model={getattr(cfg, 'llm_model', 'unknown')}."
+            ),
         )
 
     def _check_secrets_configured(self) -> DiagnosticCheck:
@@ -239,7 +242,10 @@ class CharlieDoctor:
             status=CheckStatus.OK,
             severity=CheckSeverity.LOW,
             summary=f"Model configured: {m.get('model', 'unknown')} ({m.get('provider', 'unknown')})",
-            evidence=f"Provider: {m.get('provider')}, Model: {m.get('model')}, Base URL: {m.get('api_base_url') or 'default'}, Vision: {m.get('vision_model')}.",
+            evidence=(
+                f"Provider: {m.get('provider')}, Model: {m.get('model')}, "
+                f"Base URL: {m.get('api_base_url') or 'default'}, Vision: {m.get('vision_model')}."
+            ),
         )
 
     def _check_capability_registry(self) -> DiagnosticCheck:
@@ -545,7 +551,10 @@ class CharlieDoctor:
             return {
                 "success": False,
                 "repair_id": repair_id,
-                "message": f"Circuit breaker tripped for '{repair_id}': too many failed attempts (>=3). Manual intervention required.",
+                "message": (
+                    f"Circuit breaker tripped for '{repair_id}': too many failed attempts (>=3). "
+                    "Manual intervention required."
+                ),
             }
 
         # Consequential / External repairs requiring explicit user approval
@@ -560,7 +569,10 @@ class CharlieDoctor:
             return {
                 "success": False,
                 "repair_id": repair_id,
-                "message": f"Approval required: Repair '{repair_id}' involves consequential changes and requires explicit confirmation.",
+                "message": (
+                    f"Approval required: Repair '{repair_id}' involves consequential changes "
+                    "and requires explicit confirmation."
+                ),
                 "requires_approval": True,
             }
 
@@ -618,7 +630,15 @@ class CharlieDoctor:
         ]
 
         for c in report.checks:
-            icon = "OK" if c.status == CheckStatus.OK else ("WARN" if c.status == CheckStatus.WARNING else ("INFO" if c.status == CheckStatus.INFO else "FAIL"))
+            icon = (
+                "OK"
+                if c.status == CheckStatus.OK
+                else (
+                    "WARN"
+                    if c.status == CheckStatus.WARNING
+                    else ("INFO" if c.status == CheckStatus.INFO else "FAIL")
+                )
+            )
             lines.append(f" [{icon:<4}] {c.check_id:<24} {c.summary}")
             lines.append(f"     Evidence: {c.evidence}")
             if c.fix_hint and c.status != CheckStatus.OK:
@@ -626,7 +646,10 @@ class CharlieDoctor:
 
         lines.append("-" * 64)
         status_text = "HEALTHY" if report.is_healthy else "ISSUES DETECTED"
-        lines.append(f" Status: {status_text} | Total Checks: {report.total_checks} | Warnings: {len(report.warnings)} | Errors: {len(report.errors)}")
+        lines.append(
+            f" Status: {status_text} | Total Checks: {report.total_checks} | "
+            f"Warnings: {len(report.warnings)} | Errors: {len(report.errors)}"
+        )
         lines.append("=" * 64)
         return "\n".join(lines)
 

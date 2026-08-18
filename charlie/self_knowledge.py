@@ -21,13 +21,42 @@ logger = logging.getLogger("charlie.self_knowledge")
 _SELF_PATTERNS = [
     re.compile(r"\b(who are you|what is charlie|what are you)\b", re.IGNORECASE),
     re.compile(r"\b(what|which)\s+(model|llm|provider|ai model|vision model|embedding model)\b", re.IGNORECASE),
-    re.compile(r"\b(can you|are you able to|do you have access to)\s+(control|click|type|browse|search|run|execute|see|watch|hear|remember)\b", re.IGNORECASE),
-    re.compile(r"\b(what|which)\s+(tools|capabilities|skills|commands)\s+(do you have|are available|exist)\b", re.IGNORECASE),
-    re.compile(r"\b(is|are)\s+(mcp|mcp servers?|eventbus|terminal|browser|desktop|vision|pet)\s+(running|connected|available|healthy|working)\b", re.IGNORECASE),
-    re.compile(r"\b(where is|which file|which module|what file|which code|how is)\b.*?\b(implemented|implements|defined|defines|located|coded|built|lives|handles)\b", re.IGNORECASE),
-    re.compile(r"\b(which file|which module|what file|which function|which class)\s+(implements?|defines?|contains?|handles?)\b", re.IGNORECASE),
-    re.compile(r"\b(how does|how do you)\s+(your\s+)?(browser|desktop|memory|vision|voice|map|terminal|subagent|task|planner)\s+(work|function|operate)\b", re.IGNORECASE),
-    re.compile(r"\b(are you healthy|how are you running|health check|diagnose yourself|what are you currently doing|active tasks|current tasks)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(can you|are you able to|do you have access to)\s+"
+        r"(control|click|type|browse|search|run|execute|see|watch|hear|remember)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(what|which)\s+(tools|capabilities|skills|commands)\s+"
+        r"(do you have|are available|exist)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(is|are)\s+(mcp|mcp servers?|eventbus|terminal|browser|desktop|vision|pet)\s+"
+        r"(running|connected|available|healthy|working)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(where is|which file|which module|what file|which code|how is)\b.*?"
+        r"\b(implemented|implements|defined|defines|located|coded|built|lives|handles)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(which file|which module|what file|which function|which class)\s+"
+        r"(implements?|defines?|contains?|handles?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(how does|how do you)\s+(your\s+)?"
+        r"(browser|desktop|memory|vision|voice|map|terminal|subagent|task|planner)\s+"
+        r"(work|function|operate)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(are you healthy|how are you running|health check|diagnose yourself|"
+        r"what are you currently doing|active tasks|current tasks)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\b(what memory|how does memory|where is memory|memory systems?)\b", re.IGNORECASE),
     re.compile(r"\b(what tasks|any running tasks|what are you doing)\b", re.IGNORECASE),
 ]
@@ -93,7 +122,10 @@ class SelfKnowledgeService:
                 return True
 
         q_lower = q.lower()
-        if any(term in q_lower for term in ("your code", "your implementation", "your capabilities", "your model", "your tools")):
+        if any(
+            term in q_lower
+            for term in ("your code", "your implementation", "your capabilities", "your model", "your tools")
+        ):
             return True
 
         return False
@@ -120,7 +152,10 @@ class SelfKnowledgeService:
             sources.append("runtime.model")
 
         # 2. Capability & Tool queries
-        if any(k in q_lower for k in ("tool", "capability", "capabilities", "can you", "control", "browse", "click", "search")):
+        if any(
+            k in q_lower
+            for k in ("tool", "capability", "capabilities", "can you", "control", "browse", "click", "search")
+        ):
             caps_info = self._introspector.get_capabilities_info()
             cap_facts = caps_info.get("by_id", {})
             sources.append("capability.registry")
@@ -157,11 +192,22 @@ class SelfKnowledgeService:
         # 7. Code Index symbol / file search
         code_idx = self._get_code_index()
         # Extract keywords
-        cleaned_words = [w for w in re.findall(r"[A-Za-z0-9_]+", q_lower) if w not in ("what", "which", "how", "where", "is", "the", "are", "you", "your", "does", "implemented", "implements", "file", "module", "can", "work", "do")]
+        cleaned_words = [
+            w
+            for w in re.findall(r"[A-Za-z0-9_]+", q_lower)
+            if w
+            not in (
+                "what", "which", "how", "where", "is", "the", "are", "you", "your", "does",
+                "implemented", "implements", "file", "module", "can", "work", "do",
+            )
+        ]
         for word in cleaned_words[:3]:
             found_syms = code_idx.search_symbols(word, limit=5)
             for s in found_syms:
-                if not any(existing["name"] == s["name"] and existing["file_path"] == s["file_path"] for existing in symbols):
+                if not any(
+                    existing["name"] == s["name"] and existing["file_path"] == s["file_path"]
+                    for existing in symbols
+                ):
                     symbols.append(s)
             found_files = code_idx.search_files(word, limit=3)
             for f in found_files:
@@ -198,7 +244,8 @@ class SelfKnowledgeService:
             model = m.get("model", "gpt-4o")
             api_set = "configured" if m.get("api_key_configured") else "not configured"
             parts.append(
-                f"I am currently configured to use the **{model}** model via provider **{provider}** (API key is {api_set})."
+                f"I am currently configured to use the **{model}** model via provider **{provider}** "
+                f"(API key is {api_set})."
             )
 
         # 2. Implementation Location Query (checked before generic action terms)
@@ -265,7 +312,8 @@ class SelfKnowledgeService:
             status = mem.get("status", "available")
             total = mem.get("total_items", 0)
             parts.append(
-                f"Memory system is **{status}** with SQLite knowledge graph and vector stores containing **{total}** items."
+                f"Memory system is **{status}** with SQLite knowledge graph and vector stores "
+                f"containing **{total}** items."
             )
 
         # 8. Tasks Query
@@ -281,7 +329,8 @@ class SelfKnowledgeService:
         # Default fallback synthesis
         if not parts:
             parts.append(
-                "Based on live runtime introspection, all registered Charlie subsystems are operating within defined parameters."
+                "Based on live runtime introspection, all registered Charlie subsystems are operating "
+                "within defined parameters."
             )
 
         final_answer = " ".join(parts)

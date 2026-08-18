@@ -29,7 +29,7 @@ def calculate_haversine_distance(lon1: float, lat1: float, lon2: float, lat2: fl
 
 class OSRMProvider(RoutingProvider):
     """OSRM Routing provider supporting both public demo and self-hosted instances.
-    
+
     Zero-fabrication invariant: If real routing fails or is unavailable, this provider
     returns None (or an explicit geodesic measurement if requested). It NEVER generates
     fake road geometry, fake driving duration, or fake turn-by-turn road instructions.
@@ -129,7 +129,7 @@ class OSRMProvider(RoutingProvider):
         destination_label: str = "Point B",
     ) -> Optional[RouteResult]:
         """Expose an explicit, clearly typed geodesic distance measurement.
-        
+
         Never presents as driving navigation. No turn instructions or fake road curvature.
         """
         if len(start) < 2 or len(destination) < 2:

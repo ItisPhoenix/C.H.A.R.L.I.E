@@ -304,7 +304,11 @@ DEFAULT_NOTIFICATION_MS = 5000
 
 _EXPLICIT_SHOW_RE = re.compile(r"\b(show|open|display|bring up|view|inspect)\b", re.IGNORECASE)
 _EXPLICIT_TELL_RE = re.compile(r"\b(tell|say|read|speak|just tell|only tell)\b", re.IGNORECASE)
-_MAP_QUERY_RE = re.compile(r"\b(where is|where's|route from|take me to|fly to|show earthquakes|show conflicts|show map|open map|spatial map)\b", re.IGNORECASE)
+_MAP_QUERY_RE = re.compile(
+    r"\b(where is|where's|route from|take me to|fly to|show earthquakes|"
+    r"show conflicts|show map|open map|spatial map)\b",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
