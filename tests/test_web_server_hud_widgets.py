@@ -191,7 +191,7 @@ async def test_pet_independent_of_hud():
 
 @pytest.mark.asyncio
 async def test_hud_toggle_visibility():
-    """Toggle hud_visible works correctly."""
+    """Toggle hud_visible works correctly when clients are connected."""
     import main as main_mod
 
     # Start hidden
@@ -204,7 +204,31 @@ async def test_hud_toggle_visibility():
         assert main_mod.hud_visible is True
         mock_open.assert_called_once()
 
-        # Toggle back to hidden
+        # Browser client connects
+        main_mod.hud_client_count = 1
+
+        # Toggle while connected hides HUD normally
         await main_mod._summon_conversation_workspace(toggle=True)
         assert main_mod.hud_visible is False
         mock_open.assert_called_once()  # no extra call on hide
+
+        # Next toggle after hidden shows HUD again
+        main_mod.hud_client_count = 0
+        await main_mod._summon_conversation_workspace(toggle=True)
+        assert main_mod.hud_visible is True
+        assert mock_open.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_hud_toggle_with_zero_clients_reopens_after_manual_browser_close():
+    """Regression test: hud_visible=True, hud_client_count=0, toggle=True reopens browser."""
+    import main as main_mod
+
+    # State after manual browser close: stale hud_visible=True, but hud_client_count=0
+    main_mod.hud_visible = True
+    main_mod.hud_client_count = 0
+
+    with patch("charlie.utils.open_url_in_browser") as mock_open:
+        await main_mod._summon_conversation_workspace(toggle=True)
+        assert main_mod.hud_visible is True
+        mock_open.assert_called_once()

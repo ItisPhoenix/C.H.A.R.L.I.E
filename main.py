@@ -214,7 +214,12 @@ async def _summon_conversation_workspace(toggle: bool = False, event_bus: Option
     from charlie.utils import open_url_in_browser
 
     if toggle:
-        hud_visible = not hud_visible
+        if hud_client_count == 0:
+            # No actual HUD client exists.
+            # Treat this as SUMMON, not hide.
+            hud_visible = True
+        else:
+            hud_visible = not hud_visible
     elif not hud_visible:
         hud_visible = True
 
