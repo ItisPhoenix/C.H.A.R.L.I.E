@@ -612,10 +612,9 @@ class TerminalManager:
         approved: bool = False,
         timeout: float = 30.0,
     ) -> dict:
-        (
-            "Execute a command as Charlie with capability lease arbitration, "
-            "autonomy policy, transaction tracking, and audit."
-        )
+        """Execute a command as Charlie with capability lease arbitration,
+        autonomy policy, transaction tracking, and audit.
+        """
         session = self._sessions.get(session_id)
         if session is None:
             if session_id == self._primary_id:
