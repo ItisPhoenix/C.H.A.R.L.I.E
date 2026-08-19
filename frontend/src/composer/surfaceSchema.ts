@@ -4,7 +4,13 @@
  * Enforces schema versioning, strict typing, complexity bounds, and sanitization.
  */
 
-export const SCHEMA_VERSION = 1;
+import {
+  SURFACE_SCHEMA_VERSION,
+  type PrimitiveType,
+  type LayoutType,
+} from "../presentation/presentationContract.generated";
+
+export const SCHEMA_VERSION = SURFACE_SCHEMA_VERSION;
 
 export const MAX_DEPTH = 5;
 export const MAX_PRIMITIVES = 100;
@@ -13,29 +19,7 @@ export const MAX_CHART_POINTS = 60;
 export const MAX_TEXT_LEN = 4000;
 export const MAX_ACTIONS = 10;
 
-export type PrimitiveType =
-  | "heading"
-  | "text"
-  | "metric"
-  | "progress"
-  | "list"
-  | "table"
-  | "chart"
-  | "timeline"
-  | "image"
-  | "source"
-  | "status"
-  | "badge"
-  | "divider"
-  | "action"
-  | "layout"
-  | "spatial_map"
-  | "density_heatmap"
-  | "telemetry_gauges"
-  | "process_telemetry"
-  | "map_placeholder";
-
-export type LayoutType = "stack" | "row" | "grid" | "columns" | "section";
+export type { PrimitiveType, LayoutType };
 export type TargetSurface = "widget" | "workspace";
 
 export interface ActionSpec {

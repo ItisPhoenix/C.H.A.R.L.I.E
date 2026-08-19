@@ -18,33 +18,17 @@ from enum import StrEnum
 from typing import Any, Dict, Optional, Set
 
 from charlie.events import EventMeta, EventSource, EventType, build_event
+from charlie.presentation_contract_generated import (
+    AnchorTarget,
+    DismissPolicy,
+    PreferredZone,
+    PresentationKind,
+)
 from charlie.utils import utc_now_iso
 
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
-
-
-class PresentationKind(StrEnum):
-    """Canonical presentation modalities."""
-
-    SILENT = "silent"
-    CAPTION = "caption"
-    NOTIFICATION = "notification"
-    WIDGET = "widget"
-    COMPOSED_SURFACE = "composed_surface"
-    WORKSPACE = "workspace"
-    ATTENTION = "attention"
-
-
-class DismissPolicy(StrEnum):
-    """Semantic lifecycle and auto-dismiss policy."""
-
-    IMMEDIATE = "immediate"
-    TIMED = "timed"
-    MANUAL = "manual"
-    PERSISTENT = "persistent"
-    TASK_LIFETIME = "task_lifetime"
 
 
 class AttentionLevel(StrEnum):
@@ -55,26 +39,6 @@ class AttentionLevel(StrEnum):
     NORMAL = "normal"
     HIGH = "high"
     CRITICAL = "critical"
-
-
-class PreferredZone(StrEnum):
-    """Abstract spatial placement zone hint (no pixel coordinates)."""
-
-    CONTEXTUAL = "contextual"
-    TOP_RIGHT = "top_right"
-    BOTTOM_RIGHT = "bottom_right"
-    TOP_LEFT = "top_left"
-    BOTTOM_LEFT = "bottom_left"
-    CENTER = "center"
-
-
-class AnchorTarget(StrEnum):
-    """Visual anchor target."""
-
-    CORE = "core"
-    WORKSPACE = "workspace"
-    SCREEN = "screen"
-    WIDGET = "widget"
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +402,13 @@ class PresentationResolver:
         ):
             return self._resolve_desktop_action(outcome, ctx, result_text, effective_user_intent, is_verified)
 
+        # Daily Briefing / News -> WORKSPACE (briefing)
+        if outcome.operation in ("news_briefing", "daily_summary") or (
+            outcome.request
+            and any(k in outcome.request.lower() for k in ("what's happening today", "daily briefing", "news"))
+        ):
+            return self._resolve_briefing_workspace(outcome, ctx, result_text)
+
         # Research & Deep Analysis -> WORKSPACE (research)
         if outcome.capability in ("research", "charlie.research") or (
             outcome.operation and outcome.operation in ("research.web.execute", "research_task", "deep_research")
@@ -462,13 +433,6 @@ class PresentationResolver:
             or (outcome.request and _MAP_QUERY_RE.search(outcome.request))
         ):
             return self._resolve_map_workspace(outcome, ctx, result_text)
-
-        # Daily Briefing / News -> WORKSPACE (briefing)
-        if outcome.operation in ("news_briefing", "daily_summary") or (
-            outcome.request
-            and any(k in outcome.request.lower() for k in ("what's happening today", "daily briefing", "news"))
-        ):
-            return self._resolve_briefing_workspace(outcome, ctx, result_text)
 
         # Terminal Session -> WORKSPACE (terminal)
         if outcome.capability in ("terminal", "charlie.terminal") or (
@@ -720,6 +684,18 @@ class PresentationResolver:
         ctx: PresentationContext,
         result_text: str,
     ) -> PresentationIntent:
+        content_dict: Dict[str, Any] = {
+            "briefing": result_text,
+            "data": outcome.data,
+            "headline": outcome.request.upper() if outcome.request else "DAILY INTELLIGENCE BRIEFING",
+            "summary": result_text[:200] if result_text else "Today's briefing.",
+            "summaries": outcome.data.get("evidence", []) if (outcome.data and isinstance(outcome.data.get("evidence"), list) and outcome.data.get("evidence")) else ([result_text] if result_text else []),
+            "sources": outcome.data.get("sources", []) if (outcome.data and isinstance(outcome.data.get("sources"), list)) else [],
+        }
+        if outcome.data:
+            for k, v in outcome.data.items():
+                if k not in content_dict:
+                    content_dict[k] = v
         return PresentationIntent(
             kind=PresentationKind.WORKSPACE,
             task_id=outcome.task_id,
@@ -728,7 +704,7 @@ class PresentationResolver:
             operation=outcome.operation or "news_briefing",
             title="Daily Briefing",
             summary=result_text[:120] if result_text else "Today's briefing.",
-            content={"briefing": result_text, "data": outcome.data},
+            content=content_dict,
             priority=60,
             attention_level=AttentionLevel.NORMAL,
             dismiss_policy=DismissPolicy.PERSISTENT,

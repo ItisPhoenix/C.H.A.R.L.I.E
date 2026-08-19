@@ -14,7 +14,13 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
-SCHEMA_VERSION: int = 1
+from charlie.presentation_contract_generated import (
+    LayoutType,
+    PrimitiveType,
+    SURFACE_SCHEMA_VERSION,
+)
+
+SCHEMA_VERSION: int = SURFACE_SCHEMA_VERSION
 
 # Complexity limits
 MAX_DEPTH: int = 5
@@ -23,37 +29,6 @@ MAX_TABLE_ROWS: int = 50
 MAX_CHART_POINTS: int = 60
 MAX_TEXT_LEN: int = 4000
 MAX_ACTIONS: int = 10
-
-
-class PrimitiveType(str, Enum):
-    HEADING = "heading"
-    TEXT = "text"
-    METRIC = "metric"
-    PROGRESS = "progress"
-    LIST = "list"
-    TABLE = "table"
-    CHART = "chart"
-    TIMELINE = "timeline"
-    IMAGE = "image"
-    SOURCE = "source"
-    STATUS = "status"
-    BADGE = "badge"
-    DIVIDER = "divider"
-    ACTION = "action"
-    LAYOUT = "layout"
-    SPATIAL_MAP = "spatial_map"
-    DENSITY_HEATMAP = "density_heatmap"
-    TELEMETRY_GAUGES = "telemetry_gauges"
-    PROCESS_TELEMETRY = "process_telemetry"
-    MAP_PLACEHOLDER = "map_placeholder"
-
-
-class LayoutType(str, Enum):
-    STACK = "stack"
-    ROW = "row"
-    GRID = "grid"
-    COLUMNS = "columns"
-    SECTION = "section"
 
 
 class TargetSurface(str, Enum):
