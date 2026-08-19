@@ -426,19 +426,17 @@ function drawFrame(
 export function Ring(): ReactElement {
   const coreState = useCharlieStore((state) => state.coreState);
   const connected = useCharlieStore((state) => state.connected);
-  const audioLevel = useCharlieStore((state) => state.audioLevel);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<CoreVisualState>(normalizeState(coreState, connected));
   const lastStateRef = useRef<CoreVisualState>(stateRef.current);
-  const audioLevelRef = useRef(audioLevel);
+  const audioLevelRef = useRef(0);
   const pulseStartedAtRef = useRef(0);
   const clickPulseStartedAtRef = useRef(0);
   const reduceMotionRef = useRef(false);
 
   const state = normalizeState(coreState, connected);
-  audioLevelRef.current = audioLevel;
 
   useEffect(() => {
     const previousState = lastStateRef.current;
@@ -448,6 +446,20 @@ export function Ring(): ReactElement {
       pulseStartedAtRef.current = performance.now();
     }
   }, [state]);
+
+  // Transient subscription: audio levels update ref for canvas loop and DOM attribute directly without React component re-renders
+  useEffect(() => {
+    if (containerRef.current) {
+      containerRef.current.setAttribute("data-audio-level", String(useCharlieStore.getState().audioLevel));
+    }
+    const unsub = useCharlieStore.subscribe((state) => {
+      audioLevelRef.current = state.audioLevel;
+      if (containerRef.current) {
+        containerRef.current.setAttribute("data-audio-level", String(state.audioLevel));
+      }
+    });
+    return unsub;
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -522,7 +534,7 @@ export function Ring(): ReactElement {
       ref={containerRef}
       className="hud-ring"
       data-state={state}
-      data-audio-level={audioLevel}
+      data-audio-level={useCharlieStore.getState().audioLevel}
       role="img"
       aria-label={`Charlie ${label}`}
       onClick={handleClick}

@@ -192,7 +192,7 @@ export function CharlieScene(): ReactElement | null {
           <div>Mode: {projection.sceneMode}</div>
           <div>Core Pos: {projection.corePosition}</div>
           <div>Core State: {projection.coreState}</div>
-          <div>Audio Level: {projection.audioLevel.toFixed(2)}</div>
+          <div>Audio Level: {useCharlieStore.getState().audioLevel.toFixed(2)}</div>
           <div>Active WS: {projection.activeWorkspace?.type || "none"}</div>
           <div>Widgets ({projection.activeWidgets.length}): {projection.activeWidgets.map((w) => `${w.widgetType}(${w.pinned ? "P" : "T"})`).join(", ") || "none"}</div>
           <div className="mt-2 text-slate-400">Press Ctrl+Shift+D to hide</div>

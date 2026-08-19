@@ -14,13 +14,18 @@ export function WidgetLayer(): ReactElement | null {
   const dismissWidget = useWidgetStore((s) => s.dismissWidget);
   const tickAutoDismiss = useWidgetStore((s) => s.tickAutoDismiss);
 
-  // Auto-dismiss countdown ticker
+  // Auto-dismiss countdown ticker: only runs interval when expiring widgets are present
+  const hasExpiringWidgets = Object.values(widgets).some(
+    (w) => !w.pinned && !w.pausedExpiry && Boolean(w.expiresAt)
+  );
+
   useEffect(() => {
+    if (!hasExpiringWidgets) return;
     const interval = setInterval(() => {
       tickAutoDismiss(Date.now());
     }, 500);
     return () => clearInterval(interval);
-  }, [tickAutoDismiss]);
+  }, [hasExpiringWidgets, tickAutoDismiss]);
 
   const widgetList = Object.values(widgets);
   if (!widgetList.length) return null;

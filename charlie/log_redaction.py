@@ -3,10 +3,10 @@
 import logging
 import re
 
-_AUTHORIZATION_RE = re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)([^\s,]+)")
+_AUTHORIZATION_RE = re.compile(r"(?i)((?:authorization\s*[:=]\s*)?bearer\s+)([^\s,]+)")
 _BOT_TOKEN_RE = re.compile(r"(?i)(/bot)([^/\s]+)")
-_QUERY_SECRET_RE = re.compile(r"(?i)([?&](?:api[_-]?key|token|key|secret)=)([^&\s]+)")
-_ASSIGNED_SECRET_RE = re.compile(r'(?i)(\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*)([^\s,}\]"]+)')
+_QUERY_SECRET_RE = re.compile(r"(?i)([?&](?:api[_-]?key|token|key|secret|password|auth[_-]?token|access[_-]?token)=)([^&\s]+)")
+_ASSIGNED_SECRET_RE = re.compile(r'(?i)(\b(?:api[_-]?key|token|secret|password|private[_-]?key|auth[_-]?token|access[_-]?token|client[_-]?secret|session[_-]?token)\s*[:=]\s*)([^\s,}\]"]+)')
 _REDACTED = "[REDACTED]"
 
 

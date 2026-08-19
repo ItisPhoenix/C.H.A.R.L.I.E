@@ -15,14 +15,12 @@ export interface SceneProjection {
   activeNotifications: PresentationIntent[];
   activeCaption: string | null;
   coreState: string;
-  audioLevel: number;
 }
 
 export function useSceneProjection(): SceneProjection {
   const presentationIntents = useCharlieStore((s) => s.presentationIntents);
   const activeCaption = useCharlieStore((s) => s.activeCaption);
   const coreState = useCharlieStore((s) => s.coreState);
-  const audioLevel = useCharlieStore((s) => s.audioLevel);
 
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
@@ -93,13 +91,11 @@ export function useSceneProjection(): SceneProjection {
       activeNotifications,
       activeCaption,
       coreState,
-      audioLevel,
     };
   }, [
     presentationIntents,
     activeCaption,
     coreState,
-    audioLevel,
     workspaces,
     activeWorkspaceId,
     widgets,

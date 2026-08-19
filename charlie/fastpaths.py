@@ -66,6 +66,37 @@ _PROCESSES_RE = re.compile(
 
 
 def _handle_system_diagnostics(check: str) -> str:
+    try:
+        import psutil
+        if check == "cpu":
+            pct = psutil.cpu_percent(interval=None)
+            cores = psutil.cpu_count(logical=True) or 1
+            return f"CPU Utilization: {pct:.1f}% ({cores} logical cores)."
+        if check == "memory":
+            vm = psutil.virtual_memory()
+            used_gb = (vm.total - vm.available) / (1024 ** 3)
+            total_gb = vm.total / (1024 ** 3)
+            return f"Memory Utilization: {vm.percent:.1f}% ({used_gb:.1f} GB / {total_gb:.1f} GB used)."
+        if check == "disk":
+            disk = psutil.disk_usage("C:\\" if sys.platform == "win32" else "/")
+            free_gb = disk.free / (1024 ** 3)
+            total_gb = disk.total / (1024 ** 3)
+            return f"Primary Disk Utilization: {disk.percent:.1f}% ({free_gb:.1f} GB free of {total_gb:.1f} GB)."
+        if check == "processes":
+            procs = []
+            for p in sorted(
+                psutil.process_iter(["name", "cpu_percent", "memory_percent"]),
+                key=lambda x: x.info.get("cpu_percent") or 0,
+                reverse=True,
+            )[:5]:
+                name = p.info.get("name") or "Unknown"
+                cpu = p.info.get("cpu_percent") or 0.0
+                mem = p.info.get("memory_percent") or 0.0
+                procs.append(f"- {name}: CPU {cpu:.1f}%, RAM {mem:.1f}%")
+            return "Top Running Processes:\n" + "\n".join(procs)
+    except Exception as e:
+        logger.debug("Fastpath psutil telemetry failed, falling back to system_diagnostics tool: %s", e)
+
     from charlie.tools import registry
 
     return registry.execute_tool("system_diagnostics", {"check": check})

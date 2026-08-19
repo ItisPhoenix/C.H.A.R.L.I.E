@@ -10,6 +10,22 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    chunkSizeWarningLimit: 1800,
+    rollupOptions: {
+      output: {
+        manualChunks(id: string) {
+          if (id.includes('node_modules/react') || id.includes('node_modules/zustand')) {
+            return 'vendor';
+          }
+          if (id.includes('node_modules/@xterm')) {
+            return 'xterm';
+          }
+          if (id.includes('node_modules/@phosphor-icons')) {
+            return 'icons';
+          }
+        },
+      },
+    },
   },
   server: {
     proxy: {

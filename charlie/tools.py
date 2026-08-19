@@ -784,12 +784,17 @@ _WORKSPACE_DIR = Path(__file__).parent.parent.resolve()
 _GATED_PATH_SUBSTRINGS = (
     ".env",
     "sessions.db",
+    "id_rsa",
+    "id_ed25519",
     os.path.sep + "etc" + os.path.sep,
     os.path.sep + "proc" + os.path.sep,
     os.path.sep + "sys" + os.path.sep,
     os.path.sep + "registry" + os.path.sep,
     os.path.sep + ".ssh" + os.path.sep,
     os.path.sep + ".aws" + os.path.sep,
+    os.path.sep + ".kube" + os.path.sep,
+    os.path.sep + ".gnupg" + os.path.sep,
+    os.path.sep + "credentials",
 )
 
 
