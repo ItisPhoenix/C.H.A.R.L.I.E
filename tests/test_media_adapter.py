@@ -43,3 +43,10 @@ async def test_thumbnail_is_encoded_for_the_dashboard():
     monkeypatch.setattr("charlie.media_adapter.DataReader", Reader)
     assert (await _thumbnail_data_uri(Reference())).endswith("YWJj")
     monkeypatch.undo()
+
+
+def test_volume_snapshot_degrades_without_windows_audio_endpoint(monkeypatch):
+    from charlie.media_adapter import _volume_snapshot
+    monkeypatch.setattr("charlie.media_adapter._audio_endpoint", None)
+    assert _volume_snapshot() == {"volume_percent": None, "muted": None}
+

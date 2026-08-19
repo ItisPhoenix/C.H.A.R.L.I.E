@@ -260,4 +260,27 @@ test("HUD visibility follows the pet toggle event", () => {
     });
     expect(useCharlieStore.getState().presentationIntents["pi_dismiss"]).toBeUndefined();
   });
+
+  test("presentation_intent maps both camelCase and snake_case payload properties", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_intent",
+      payload: {
+        id: "pi_camel",
+        kind: "workspace",
+        workspaceType: "research",
+        dismissPolicy: "manual",
+        attentionLevel: "high",
+        autoDismissMs: 10000,
+        createdAt: "2026-08-19T20:00:00.000Z",
+      },
+    });
+
+    const intent = useCharlieStore.getState().presentationIntents["pi_camel"];
+    expect(intent).toBeDefined();
+    expect(intent?.workspaceType).toBe("research");
+    expect(intent?.dismissPolicy).toBe("manual");
+    expect(intent?.attentionLevel).toBe("high");
+    expect(intent?.autoDismissMs).toBe(10000);
+    expect(intent?.createdAt).toBe("2026-08-19T20:00:00.000Z");
+  });
 });

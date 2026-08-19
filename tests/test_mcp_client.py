@@ -4,6 +4,7 @@ import logging
 import sys
 from typing import Any, Callable, Dict, List
 from unittest.mock import MagicMock, patch
+import pytest
 
 from charlie.mcp_client import (
     MCPClient,
@@ -412,3 +413,4 @@ class TestManagedServerSingleReader:
             assert resp2["result"]["pong"] is True
         finally:
             server.stop()
+

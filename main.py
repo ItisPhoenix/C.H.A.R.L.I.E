@@ -51,16 +51,19 @@ class SafeStreamWrapper:
         return getattr(self.stream, name)
 
 
-if sys.platform == "win32":
-    sys.stdout = SafeStreamWrapper(
-        io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", line_buffering=True, write_through=True)
-    )
-    sys.stderr = SafeStreamWrapper(
-        io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", line_buffering=True, write_through=True)
-    )
-else:
-    sys.stdout = SafeStreamWrapper(sys.stdout)
-    sys.stderr = SafeStreamWrapper(sys.stderr)
+if "pytest" not in sys.modules:
+    if sys.platform == "win32":
+        if hasattr(sys.stdout, "buffer"):
+            sys.stdout = SafeStreamWrapper(
+                io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", line_buffering=True, write_through=True)
+            )
+        if hasattr(sys.stderr, "buffer"):
+            sys.stderr = SafeStreamWrapper(
+                io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", line_buffering=True, write_through=True)
+            )
+    else:
+        sys.stdout = SafeStreamWrapper(sys.stdout)
+        sys.stderr = SafeStreamWrapper(sys.stderr)
 
 os.makedirs("logs", exist_ok=True)
 LOG_FILE = "logs/charlie.log"

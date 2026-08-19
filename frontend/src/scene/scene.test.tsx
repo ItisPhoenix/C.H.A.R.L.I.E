@@ -326,4 +326,66 @@ describe("CharlieScene spatial projection & layers", () => {
     expect(screen.getByRole("main")).toBeInTheDocument();
     unmount();
   });
+
+  test("listening state keeps core centered and renders LISTENING and AWAITING INPUT typography", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "charlie_state",
+      payload: { state: "listening", activities: ["Awaiting voice input"] },
+    });
+
+    render(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>
+    );
+
+    const main = screen.getByRole("main");
+    expect(main.getAttribute("data-core-position")).toBe("center");
+    expect(main.getAttribute("data-core-state")).toBe("listening");
+    expect(screen.getByText("LISTENING")).toBeInTheDocument();
+    expect(screen.getByText("AWAITING INPUT")).toBeInTheDocument();
+  });
+
+  test("docked core in active workspace renders core-only with no status bar", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_intent",
+      payload: {
+        id: "ws-research-docked-test",
+        kind: "workspace",
+        title: "RESEARCH // AGENTIC OS",
+        summary: "Testing core only docking",
+        workspace_type: "research",
+      },
+    });
+
+    const { container } = render(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>
+    );
+
+    const coreWrapper = container.querySelector(".charlie-core-wrapper");
+    expect(coreWrapper).toHaveClass("charlie-core-docked");
+
+    // Docked mode must contain NO status bar, subtitle, or dots
+    expect(container.querySelector(".charlie-core-status-bar")).toBeNull();
+    expect(screen.queryByText("IDLE")).toBeNull();
+    expect(screen.queryByText("I'M HERE WHEN YOU NEED ME.")).toBeNull();
+  });
+
+  test("clicking core opens contextual menu with Recent Workspaces, Settings, and Clear Screen", () => {
+    render(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>
+    );
+
+    const coreButton = screen.getByRole("button", { name: /Charlie core in idle state/i });
+    fireEvent.click(coreButton);
+
+    expect(screen.getByText("Recent Workspaces")).toBeInTheDocument();
+    expect(screen.getByText("Settings")).toBeInTheDocument();
+    expect(screen.getByText("Clear Screen")).toBeInTheDocument();
+    expect(screen.getByText("Close Menu")).toBeInTheDocument();
+  });
 });

@@ -93,7 +93,12 @@ async def test_main_publishes_runtime_health_snapshot() -> None:
             self.events.append((event_type, payload, meta))
 
     bus = FakeBus()
-    await main._publish_subsystem_health(bus)
+    old = main._runtime_health
+    main._runtime_health = HealthRegistry(("brain", "memory", "plugins", "mcp", "web", "companion", "telegram", "voice", "watchers"))
+    try:
+        await main._publish_subsystem_health(bus)
+    finally:
+        main._runtime_health = old
 
     assert bus.events[0][0] == "subsystem_health"
     assert set(bus.events[0][1]) == {
@@ -162,3 +167,9 @@ def test_main_keeps_core_alive_when_voice_start_fails(monkeypatch) -> None:
         }
     finally:
         main._runtime_health = old
+
+
+def test_system_status_starts_empty_until_real_telemetry_arrives() -> None:
+    from charlie import web_server
+    assert web_server._system_status == {}
+

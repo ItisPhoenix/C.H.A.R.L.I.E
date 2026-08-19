@@ -27,4 +27,18 @@ describe("Ring", () => {
     expect(container.querySelector(".hud-outer-svg")).toBeInTheDocument();
     expect(container.querySelectorAll(".hud-vector-ticks circle").length).toBeGreaterThan(0);
   });
+
+  test("maintains absolute containment structure with hud-ring, canvas, and svg", () => {
+    const { container } = render(<Ring />);
+
+    const ring = container.querySelector(".hud-ring");
+    const canvas = container.querySelector("canvas.hud-core-canvas");
+    const svg = container.querySelector("svg.hud-outer-svg");
+
+    expect(ring).toBeInTheDocument();
+    expect(canvas).toBeInTheDocument();
+    expect(svg).toBeInTheDocument();
+    expect(ring?.contains(canvas)).toBe(true);
+    expect(ring?.contains(svg)).toBe(true);
+  });
 });

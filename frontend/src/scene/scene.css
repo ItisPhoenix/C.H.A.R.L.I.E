@@ -286,6 +286,51 @@
   z-index: 1;
 }
 
+/* Core HUD Ring & Canvas Containment */
+.hud-ring {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.hud-core-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+  pointer-events: none;
+}
+
+.hud-outer-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+@keyframes hud-drift-slow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.hud-vector-drift {
+  transform-origin: 500px 500px;
+  animation: hud-drift-slow 120s linear infinite;
+}
+
 /* Inner Center Branding */
 .charlie-core-brand-center {
   position: absolute;

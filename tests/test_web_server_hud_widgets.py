@@ -240,3 +240,27 @@ async def test_hud_toggle_with_zero_clients_reopens_after_manual_browser_close()
         await main_mod._summon_conversation_workspace(toggle=True)
         assert main_mod.hud_visible is True
         mock_open.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_terminal_input_routes_through_main_approval_channel(monkeypatch):
+    class Manager:
+        def snapshot(self, session_id):
+            return {"session_id": session_id, "status": "running", "output": ""}
+
+    class Bus:
+        def __init__(self):
+            self.commands = []
+
+        async def send_command(self, command):
+            self.commands.append(command)
+
+    bus = Bus()
+    monkeypatch.setattr(web_server, "_terminal_manager", Manager())
+    monkeypatch.setattr(web_server, "event_bus", bus)
+
+    result = await web_server.terminal_input("s1", {"line": "echo hi", "confirmed": True})
+
+    assert result["status"] == "approval_pending"
+    assert bus.commands[0]["type"] == "terminal_command_request"
+
