@@ -4,8 +4,11 @@ import { useCharlieStore } from "./charlie";
 beforeEach(() => {
   useCharlieStore.setState({
     connected: false,
+    hudVisible: true,
     coreState: "idle",
     activities: [],
+    presentationIntents: {},
+    activeCaption: null,
     activeToolApproval: null,
     systemStatus: null,
     netHistory: [],
@@ -79,7 +82,7 @@ test("HUD visibility follows the pet toggle event", () => {
   });
 
   test("initial HUD visibility is consistent main web frontend", () => {
-    expect(useCharlieStore.getState().hudVisible).toBe(false);
+    expect(useCharlieStore.getState().hudVisible).toBe(true);
   });
 
   test("repeated HUD summon does not duplicate", () => {

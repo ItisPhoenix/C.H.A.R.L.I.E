@@ -203,7 +203,7 @@ def _surface_request_event(panel_id: str, action: str) -> tuple[str, dict, str]:
     return "presentation_intent", intent.to_dict(), f"opened {panel_id} presentation"
 
 
-hud_visible: bool = False
+hud_visible: bool = True
 hud_client_count: int = 0
 _main_event_bus: Optional[Any] = None
 

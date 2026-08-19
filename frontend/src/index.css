@@ -5,10 +5,12 @@
 html, body, #root {
   margin: 0;
   height: 100%;
-  background: transparent;
+  background-color: #01060d;
+  color-scheme: dark;
 }
 
 body {
+  background-color: #01060d;
   font: 14px/1.5 system-ui, "Segoe UI", Roboto, sans-serif;
   color: var(--color-text-primary);
 }

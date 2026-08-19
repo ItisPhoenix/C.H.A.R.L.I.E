@@ -1021,7 +1021,7 @@ _audio_state: dict = {
 _mic_state: dict = {
     "mic_muted": False,
 }
-_hud_visible = False
+_hud_visible = True
 # request_id -> tool_approval_request event, replayed so a late-connecting client can render it
 _pending_approvals: dict = {}
 # presentation_intent_id -> canonical presentation intent event, replayed for persistent workspaces/modals

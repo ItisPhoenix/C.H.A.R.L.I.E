@@ -274,4 +274,56 @@ describe("CharlieScene spatial projection & layers", () => {
     fireEvent.click(closeBtn);
     expect(dismissedId).toBe("ws-direct-1");
   });
+
+  test("fresh startup renders idle spatial HUD immediately before any events", () => {
+    // Fresh store instance with default initial values
+    useCharlieStore.setState({
+      connected: false,
+      hudVisible: true,
+      coreState: "idle",
+      presentationIntents: {},
+      activeCaption: null,
+      audioLevel: 0,
+    });
+
+    render(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>
+    );
+
+    const main = screen.getByRole("main");
+    expect(main).toBeInTheDocument();
+    expect(main.getAttribute("data-scene-mode")).toBe("idle");
+    expect(main.getAttribute("data-core-position")).toBe("center");
+  });
+
+  test("HUD hide and summon lifecycle preserves visibility state", () => {
+    const { unmount, rerender } = render(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByRole("main")).toBeInTheDocument();
+
+    // Pet or voice hides HUD
+    useCharlieStore.getState().applyEvent({ type: "hud_visibility", payload: { visible: false } });
+    rerender(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>
+    );
+    expect(screen.queryByRole("main")).toBeNull();
+
+    // User summons HUD again
+    useCharlieStore.getState().applyEvent({ type: "hud_visibility", payload: { visible: true } });
+    rerender(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>
+    );
+    expect(screen.getByRole("main")).toBeInTheDocument();
+    unmount();
+  });
 });

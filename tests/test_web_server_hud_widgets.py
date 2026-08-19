@@ -69,6 +69,14 @@ async def test_get_mcp_tools_returns_registered_mcp_definitions(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_hud_visibility_defaults_visible_and_replays():
+    events = web_server._initial_state_events()
+    event = next(event for event in events if event["type"] == "hud_visibility")
+    assert event["payload"] == {"visible": True}
+    assert event["replay"] is True
+
+
+@pytest.mark.asyncio
 async def test_hud_visibility_replays_to_late_clients(monkeypatch):
     monkeypatch.setattr(web_server, "_hud_visible", False)
 
