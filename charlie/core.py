@@ -20,6 +20,7 @@ from charlie.autonomy import evaluate as autonomy_evaluate
 from charlie.budget import IterationBudget
 from charlie.capabilities import build_capability_roster, capability_index
 from charlie.events import EventMeta, EventSource
+from charlie.presentation_registry import get_presentation_registry
 from charlie.research.citations import strip_invalid_citations
 from charlie.research.engine import ResearchEngine
 from charlie.research.models import ResearchProgress, ResearchReport, SearchResult, SourceDocument
@@ -897,8 +898,12 @@ class Brain:
 
         # --- Frozen tiers (cached once at init for prompt cache stability) ---
         soul_text = config.soul or "You are Charlie. Be concise and warm."
+        presentation_block = get_presentation_registry().build_model_awareness_block()
         self._stable_tier: str = prompt_builder.build_stable_tier(
-            soul_text, build_capability_roster(tool_registry, config), self._use_native_tools
+            soul_text,
+            build_capability_roster(tool_registry, config),
+            self._use_native_tools,
+            presentation_block=presentation_block,
         )
 
         # --- Frozen context tier (read once, reloaded only on explicit request) ---
@@ -969,8 +974,12 @@ class Brain:
         dashboard's system_restart reload flow) so capability claims reflect
         the new config instead of what was true at process start."""
         soul_text = self.config.soul or "You are Charlie. Be concise and warm."
+        presentation_block = get_presentation_registry().build_model_awareness_block()
         self._stable_tier = prompt_builder.build_stable_tier(
-            soul_text, build_capability_roster(tool_registry, self.config), self._use_native_tools
+            soul_text,
+            build_capability_roster(tool_registry, self.config),
+            self._use_native_tools,
+            presentation_block=presentation_block,
         )
 
     def add_installed_skill_block(self, name: str, block: str) -> None:

@@ -354,6 +354,34 @@ class PresentationRegistry:
         """Return authoritative core positioning and visibility rules."""
         return dict(self._core.get("rules", {}))
 
+    def build_model_awareness_block(self) -> str:
+        """Build compact, deterministic semantic presentation knowledge for Brain prompts.
+
+        This intentionally excludes renderer metadata, aliases, runtime state, and
+        implementation details. PresentationResolver remains authoritative for the
+        final modality and layout.
+        """
+        rules = self.get_core_rules()
+        no_workspace = rules.get("no_workspace", {})
+        active_workspace = rules.get("active_workspace", {})
+        no_workspace_position = no_workspace.get("position", "unknown")
+        active_workspace_position = active_workspace.get("position", "unknown")
+
+        return (
+            "[PRESENTATION CAPABILITIES]\n"
+            "Semantic HUD presentation available. PresentationResolver selects modality/layout; "
+            "describe intent semantically, never UI code or pixels.\n"
+            f"Workspaces: {', '.join(self.list_workspaces())}\n"
+            f"Widgets: {', '.join(self.list_widgets())}\n"
+            f"Overlays: {', '.join(self.list_overlays())}\n"
+            f"SurfaceComposer primitives: {', '.join(self.list_surface_primitives())}\n"
+            f"Core: no workspace -> {no_workspace_position}; active workspace -> {active_workspace_position}\n"
+            "Presentation lifecycle and layout are system-managed.\n"
+            "Approved primitives only; never emit React/JSX/HTML/CSS/JavaScript "
+           "or pixels. Show may be visual; tell remains conversational. "
+            "Never claim open without runtime evidence."
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         """Return the full validated contract dictionary."""
         return dict(self._raw_contract)

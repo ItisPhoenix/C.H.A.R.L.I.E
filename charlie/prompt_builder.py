@@ -131,12 +131,19 @@ _HELM_PERSONA_TEXT = (
 )
 
 
-def build_stable_tier(soul_text: str, capabilities_block: str = "", use_native_tools: bool = False) -> str:
-    """Build the stable tier: identity, security, tool rules, capability roster.
+def build_stable_tier(
+    soul_text: str,
+    capabilities_block: str = "",
+    use_native_tools: bool = False,
+    presentation_block: str = "",
+) -> str:
+    """Build stable identity, security, tool, capability, and presentation knowledge.
     This tier is byte-identical across turns for maximum cache hits."""
     parts = [soul_text, _SECURITY_DIRECTIVES]
     if capabilities_block:
         parts.append(capabilities_block)
+    if presentation_block:
+        parts.append(presentation_block)
     if not use_native_tools:
         parts.append(_TEXT_TOOL_INSTRUCTIONS)
     parts.append(_TOOL_RULES)
