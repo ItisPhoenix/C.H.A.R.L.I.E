@@ -358,6 +358,7 @@ def test_widget_behavior_is_derived_from_registry_supports():
             "description": "Custom registry widget",
         }
     }
+    contract["semantic_targets"] = {}
     registry = PresentationRegistry.from_dict(contract)
     service = SelfKnowledgeService(
         runtime_introspector=RuntimeIntrospector(presentation_registry=registry),
@@ -405,6 +406,7 @@ def test_dynamic_extensibility_hypothetical_workspace():
         "presentation_kinds": ["workspace"],
         "core": {"states": ["idle"], "positions": ["center"], "rules": {}},
         "widgets": {},
+        "semantic_targets": {},
         "workspaces": {
             "quantum_telemetry": {
                 "aliases": ["quantum_spatial"],

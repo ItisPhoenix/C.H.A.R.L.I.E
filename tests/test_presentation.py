@@ -1,4 +1,6 @@
-"""Unit and integration tests for Charlie V1 Phase 5 PresentationResolver."""
+"""Unit and integration tests for Charlie V1 PresentationResolver."""
+
+from copy import deepcopy
 
 from charlie.events import EventType
 from charlie.presentation import (
@@ -12,6 +14,7 @@ from charlie.presentation import (
     PresentationKind,
     PresentationResolver,
 )
+from charlie.presentation_registry import PresentationRegistry, get_presentation_registry
 
 
 class TestPresentationKindSelection:
@@ -33,6 +36,18 @@ class TestPresentationKindSelection:
         assert intent.dismiss_policy == DismissPolicy.TIMED
         assert intent.replace_key == "widget:system_metric"
         assert intent.anchor == AnchorTarget.CORE
+
+    def test_system_widget_uses_registry_defaults(self):
+        contract = deepcopy(get_presentation_registry().to_dict())
+        contract["widgets"]["system_metric"]["default_auto_dismiss_ms"] = 1777
+        contract["widgets"]["system_metric"]["default_zone"] = "bottom_left"
+        resolver = PresentationResolver(PresentationRegistry.from_dict(contract))
+        intent = resolver.resolve(
+            ExecutionOutcome(capability="system", operation="system.metrics.read", result="CPU 10%")
+        )
+        assert intent.widget_type == "system_metric"
+        assert intent.auto_dismiss_ms == 1777
+        assert intent.preferred_zone == PreferredZone.BOTTOM_LEFT
 
     def test_volume_mutation_resolves_to_caption(self):
         resolver = PresentationResolver()
@@ -82,6 +97,30 @@ class TestPresentationKindSelection:
         assert intent.dismiss_policy == DismissPolicy.PERSISTENT
         assert intent.replayable is True
         assert intent.anchor == AnchorTarget.SCREEN
+
+    def test_semantic_target_mutation_redirects_resolver_without_source_change(self):
+        contract = deepcopy(get_presentation_registry().to_dict())
+        contract["workspaces"]["future_research"] = {
+            "aliases": [],
+            "implemented": True,
+            "renderer": "FutureResearch",
+            "renderer_module": "frontend/src/scene/workspaces/ResearchWorkspace.tsx",
+            "renderer_export": "FutureResearch",
+            "spatial": False,
+            "core_position": "dock_bottom_right",
+            "dismiss_policy": "manual",
+            "description": "Test research workspace",
+        }
+        contract["semantic_targets"]["research_result"] = {
+            "taxonomy": "workspace",
+            "surface": "future_research",
+        }
+        resolver = PresentationResolver(PresentationRegistry.from_dict(contract))
+        intent = resolver.resolve(
+            ExecutionOutcome(capability="research", operation="research.web.execute", result="findings")
+        )
+        assert intent.workspace_type == "future_research"
+        assert intent.dismiss_policy == DismissPolicy.MANUAL
 
     def test_daily_briefing_resolves_to_workspace(self):
         resolver = PresentationResolver()
@@ -188,6 +227,27 @@ class TestPresentationContextOverrides:
         assert intent.kind == PresentationKind.WIDGET
         assert intent.widget_type == "media_control"
         assert intent.auto_dismiss_ms == 6000
+
+    def test_media_widget_uses_registry_defaults(self):
+        contract = deepcopy(get_presentation_registry().to_dict())
+        contract["widgets"]["media_control"]["default_auto_dismiss_ms"] = 2444
+        resolver = PresentationResolver(PresentationRegistry.from_dict(contract))
+        intent = resolver.resolve(
+            ExecutionOutcome(capability="media", operation="media.volume.set", result="Volume 50%"),
+            PresentationContext(user_intent="show"),
+        )
+        assert intent.widget_type == "media_control"
+        assert intent.auto_dismiss_ms == 2444
+
+    def test_missing_runtime_target_uses_safe_notification(self):
+        registry = PresentationRegistry.from_dict(deepcopy(get_presentation_registry().to_dict()))
+        registry._semantic_targets["research_result"] = ("workspace", "removed_research")
+        intent = PresentationResolver(registry).resolve(
+            ExecutionOutcome(capability="research", operation="research.web.execute", result="findings")
+        )
+        assert intent.kind == PresentationKind.NOTIFICATION
+        assert intent.workspace_type is None
+        assert "unavailable" in intent.summary.lower()
 
     def test_explicit_hide_forces_silent(self):
         resolver = PresentationResolver()

@@ -261,8 +261,6 @@ class ExecutionOutcome:
 # ---------------------------------------------------------------------------
 
 DEFAULT_CAPTION_MS = 3000
-DEFAULT_SYSTEM_METRIC_WIDGET_MS = 5000
-DEFAULT_MEDIA_WIDGET_MS = 6000
 DEFAULT_NOTIFICATION_MS = 5000
 
 
@@ -303,6 +301,136 @@ class PresentationResolver:
             presentation_registry = get_presentation_registry()
         self._presentation_registry = presentation_registry
 
+    def _build_surface_intent(
+        self,
+        outcome: ExecutionOutcome,
+        *,
+        semantic_role: Optional[str] = None,
+        taxonomy: Optional[str] = None,
+        canonical_surface: Optional[str] = None,
+        content: Optional[Dict[str, Any]] = None,
+        capability: Optional[str] = None,
+        operation: Optional[str] = None,
+        title: Optional[str] = None,
+        summary: str = "",
+        priority: int = 60,
+        spoken_text: Optional[str] = None,
+        caption_text: Optional[str] = None,
+        replace_key: Optional[str] = None,
+        replayable: Optional[bool] = None,
+    ) -> PresentationIntent:
+        """Construct and validate one registry-backed canonical surface intent."""
+        if semantic_role is not None:
+            resolution = self._presentation_registry.resolve_semantic_target(semantic_role)
+        elif taxonomy is not None and canonical_surface is not None:
+            resolution = self._presentation_registry.resolve_typed_surface(taxonomy, canonical_surface)
+        else:
+            resolution = None
+
+        if resolution is None or not resolution.resolved:
+            return self._build_unavailable_surface(outcome, semantic_role or canonical_surface or "unknown")
+
+        resolved_taxonomy = resolution.taxonomy
+        resolved_surface = resolution.canonical
+        descriptor = resolution.descriptor
+        if not resolved_taxonomy or not resolved_surface or not getattr(descriptor, "implemented", True):
+            return self._build_unavailable_surface(outcome, semantic_role or canonical_surface or "unknown")
+
+        if resolved_taxonomy == "workspace":
+            kind = PresentationKind.WORKSPACE
+            dismiss_policy = DismissPolicy(descriptor.dismiss_policy)
+            auto_dismiss_ms = None
+            preferred_zone = PreferredZone.CENTER
+            anchor = AnchorTarget.SCREEN
+            default_replayable = True
+        elif resolved_taxonomy == "widget":
+            kind = PresentationKind.WIDGET
+            dismiss_policy = DismissPolicy(descriptor.default_dismiss_policy)
+            auto_dismiss_ms = descriptor.default_auto_dismiss_ms
+            preferred_zone = _preferred_zone(descriptor.default_zone)
+            anchor = AnchorTarget.CORE
+            default_replayable = False
+        else:
+            kind = PresentationKind.OVERLAY
+            dismiss_policy = DismissPolicy(descriptor.dismiss_policy)
+            auto_dismiss_ms = None
+            preferred_zone = PreferredZone.CENTER
+            try:
+                anchor = AnchorTarget(descriptor.anchor)
+            except ValueError:
+                anchor = AnchorTarget.SCREEN
+            default_replayable = False
+
+        surface_label = resolved_surface.replace("_", " ")
+        intent = PresentationIntent(
+            id=f"presentation:{resolved_taxonomy}:{resolved_surface}",
+            kind=kind,
+            task_id=outcome.task_id,
+            session_id=outcome.session_id,
+            capability=capability or outcome.capability,
+            operation=operation or outcome.operation,
+            title=title or surface_label.upper(),
+            summary=summary,
+            content=(
+                content
+                if content is not None
+                else {
+                    "surface": resolved_surface,
+                    "taxonomy": resolved_taxonomy,
+                    "source": outcome.source,
+                }
+            ),
+            priority=priority,
+            attention_level=AttentionLevel.NORMAL,
+            dismiss_policy=dismiss_policy,
+            auto_dismiss_ms=auto_dismiss_ms,
+            workspace_type=resolved_surface if resolved_taxonomy == "workspace" else None,
+            widget_type=resolved_surface if resolved_taxonomy == "widget" else None,
+            overlay_type=resolved_surface if resolved_taxonomy == "overlay" else None,
+            preferred_zone=preferred_zone,
+            anchor=anchor,
+            spoken_text=spoken_text,
+            caption_text=caption_text,
+            replace_key=replace_key or f"{resolved_taxonomy}:{resolved_surface}",
+            replayable=default_replayable if replayable is None else replayable,
+        )
+        self._validate_surface_intent(intent)
+        return intent
+
+    def _validate_surface_intent(self, intent: PresentationIntent) -> None:
+        """Reject unknown canonical surfaces before they reach EventBus/HUD."""
+        checks = (
+            ("workspace", intent.workspace_type),
+            ("widget", intent.widget_type),
+            ("overlay", intent.overlay_type),
+        )
+        for taxonomy, surface in checks:
+            if surface is not None:
+                resolution = self._presentation_registry.resolve_typed_surface(taxonomy, surface)
+                if not resolution.resolved or not getattr(resolution.descriptor, "implemented", True):
+                    raise ValueError(f"Unregistered presentation surface: {taxonomy}/{surface}")
+
+    def _build_unavailable_surface(self, outcome: ExecutionOutcome, target: str) -> PresentationIntent:
+        """Safe fallback for contract drift; never fabricate an unknown surface."""
+        return PresentationIntent(
+            kind=PresentationKind.NOTIFICATION,
+            task_id=outcome.task_id,
+            session_id=outcome.session_id,
+            capability=outcome.capability,
+            operation=outcome.operation,
+            title="Presentation Unavailable",
+            summary=f"Presentation surface '{target}' is unavailable.",
+            priority=60,
+            attention_level=AttentionLevel.NORMAL,
+            dismiss_policy=DismissPolicy.TIMED,
+            auto_dismiss_ms=DEFAULT_NOTIFICATION_MS,
+            preferred_zone=PreferredZone.TOP_RIGHT,
+            spoken_text=f"I couldn't open the requested presentation surface: {target}.",
+            caption_text=f"Presentation unavailable: {target}",
+            replace_key=f"presentation:unavailable:{target}",
+            replayable=False,
+        )
+
     def resolve_explicit(
         self,
         outcome: ExecutionOutcome,
@@ -311,47 +439,18 @@ class PresentationResolver:
         descriptor: Any,
         context: Optional[PresentationContext] = None,
     ) -> PresentationIntent:
-        """Resolve an explicit semantic target using registry descriptor metadata."""
-        if taxonomy == "workspace":
-            kind = PresentationKind.WORKSPACE
-            dismiss_policy = DismissPolicy(getattr(descriptor, "dismiss_policy", "persistent"))
-            preferred_zone = PreferredZone.CENTER
-        elif taxonomy == "widget":
-            kind = PresentationKind.WIDGET
-            dismiss_policy = DismissPolicy(getattr(descriptor, "default_dismiss_policy", "timed"))
-            preferred_zone = _preferred_zone(getattr(descriptor, "default_zone", "contextual"))
-        elif taxonomy == "overlay":
-            kind = PresentationKind.OVERLAY
-            dismiss_policy = DismissPolicy(getattr(descriptor, "dismiss_policy", "manual"))
-            preferred_zone = PreferredZone.CENTER
-        else:
-            raise ValueError(f"Unsupported presentation taxonomy: {taxonomy}")
-
-        intent = PresentationIntent(
-            id=f"presentation:{taxonomy}:{canonical_surface}",
-            kind=kind,
-            task_id=outcome.task_id,
-            session_id=outcome.session_id,
-            capability="presentation",
-            operation=f"presentation.{outcome.data.get('action', 'show')}",
-            title=canonical_surface.replace("_", " ").upper(),
-            summary=f"{canonical_surface.replace('_', ' ')} {taxonomy}",
+        """Resolve explicit semantic target through the same registry path as automatic routing."""
+        intent = self._build_surface_intent(
+            outcome,
+            taxonomy=taxonomy,
+            canonical_surface=canonical_surface,
             content={"surface": canonical_surface, "taxonomy": taxonomy, "source": outcome.source},
-            priority=60,
-            attention_level=AttentionLevel.NORMAL,
-            dismiss_policy=dismiss_policy,
-            auto_dismiss_ms=(
-                getattr(descriptor, "default_auto_dismiss_ms", None) if taxonomy == "widget" else None
-            ),
-            workspace_type=canonical_surface if taxonomy == "workspace" else None,
-            widget_type=canonical_surface if taxonomy == "widget" else None,
-            overlay_type=canonical_surface if taxonomy == "overlay" else None,
-            preferred_zone=preferred_zone,
-            anchor=AnchorTarget.SCREEN if taxonomy == "overlay" else AnchorTarget.CORE,
+            summary=f"{canonical_surface.replace('_', ' ')} {taxonomy}",
+            capability="presentation",
             spoken_text=f"Showing {canonical_surface.replace('_', ' ')}.",
             replace_key=f"presentation:{taxonomy}:{canonical_surface}",
-            replayable=taxonomy == "workspace",
         )
+        intent.operation = f"presentation.{outcome.data.get('action', 'show')}"
         self._active_intents[intent.replace_key or intent.id] = intent
         return intent
 
@@ -620,10 +719,9 @@ class PresentationResolver:
             )
 
         # Default query/show: Emit WIDGET (system_metric)
-        return PresentationIntent(
-            kind=PresentationKind.WIDGET,
-            task_id=outcome.task_id,
-            session_id=outcome.session_id,
+        return self._build_surface_intent(
+            outcome,
+            semantic_role="system_metrics",
             capability="system",
             operation=outcome.operation or "system.metrics.read",
             title="System Telemetry",
@@ -632,17 +730,9 @@ class PresentationResolver:
                 "metrics": outcome.data.get("metrics", {}),
                 "text": result_text,
             },
-            priority=50,
-            attention_level=AttentionLevel.NORMAL,
-            dismiss_policy=DismissPolicy.TIMED,
-            auto_dismiss_ms=DEFAULT_SYSTEM_METRIC_WIDGET_MS,
-            widget_type="system_metric",
-            preferred_zone=PreferredZone.TOP_RIGHT,
-            anchor=AnchorTarget.CORE,
             spoken_text=result_text,
             caption_text=result_text,
             replace_key="widget:system_metric",
-            replayable=False,
         )
 
     def _resolve_media_control(
@@ -653,23 +743,16 @@ class PresentationResolver:
         user_intent: Optional[str],
     ) -> PresentationIntent:
         if user_intent == "show":
-            return PresentationIntent(
-                kind=PresentationKind.WIDGET,
-                task_id=outcome.task_id,
-                session_id=outcome.session_id,
+            return self._build_surface_intent(
+                outcome,
+                semantic_role="media_control",
                 capability="media",
-                operation=outcome.operation,
                 title="Media Player",
                 summary=result_text,
                 content=outcome.data,
-                dismiss_policy=DismissPolicy.TIMED,
-                auto_dismiss_ms=DEFAULT_MEDIA_WIDGET_MS,
-                widget_type="media_control",
-                preferred_zone=PreferredZone.BOTTOM_RIGHT,
                 spoken_text=result_text,
                 caption_text=result_text,
                 replace_key="widget:media_control",
-                replayable=False,
             )
 
         return PresentationIntent(
@@ -722,12 +805,10 @@ class PresentationResolver:
         ctx: PresentationContext,
         result_text: str,
     ) -> PresentationIntent:
-        return PresentationIntent(
-            kind=PresentationKind.WORKSPACE,
-            task_id=outcome.task_id,
-            session_id=outcome.session_id,
+        return self._build_surface_intent(
+            outcome,
+            semantic_role="research_result",
             capability="research",
-            operation=outcome.operation,
             title="Research Findings",
             summary=result_text[:120] if result_text else "Research completed.",
             content={
@@ -735,16 +816,9 @@ class PresentationResolver:
                 "sources": outcome.data.get("sources", []),
                 "findings": outcome.data.get("findings", []),
             },
-            priority=65,
-            attention_level=AttentionLevel.NORMAL,
-            dismiss_policy=DismissPolicy.PERSISTENT,
-            workspace_type="research",
-            preferred_zone=PreferredZone.CENTER,
-            anchor=AnchorTarget.SCREEN,
             spoken_text="I've compiled the research findings on your canvas.",
             caption_text="Research Workspace opened",
             replace_key=f"workspace:research:{outcome.task_id or 'main'}",
-            replayable=True,
         )
 
     def _resolve_briefing_workspace(
@@ -777,25 +851,17 @@ class PresentationResolver:
             for k, v in outcome.data.items():
                 if k not in content_dict:
                     content_dict[k] = v
-        return PresentationIntent(
-            kind=PresentationKind.WORKSPACE,
-            task_id=outcome.task_id,
-            session_id=outcome.session_id,
+        return self._build_surface_intent(
+            outcome,
+            semantic_role="daily_briefing",
             capability="system",
             operation=outcome.operation or "news_briefing",
             title="Daily Briefing",
             summary=result_text[:120] if result_text else "Today's briefing.",
             content=content_dict,
-            priority=60,
-            attention_level=AttentionLevel.NORMAL,
-            dismiss_policy=DismissPolicy.PERSISTENT,
-            workspace_type="briefing",
-            preferred_zone=PreferredZone.CENTER,
-            anchor=AnchorTarget.SCREEN,
             spoken_text="Here is your daily briefing.",
             caption_text="Daily Briefing opened",
             replace_key="workspace:briefing",
-            replayable=True,
         )
 
     def _resolve_terminal_workspace(
@@ -804,24 +870,15 @@ class PresentationResolver:
         ctx: PresentationContext,
         result_text: str,
     ) -> PresentationIntent:
-        return PresentationIntent(
-            kind=PresentationKind.WORKSPACE,
-            task_id=outcome.task_id,
-            session_id=outcome.session_id,
+        return self._build_surface_intent(
+            outcome,
+            semantic_role="terminal",
             capability="terminal",
-            operation=outcome.operation,
             title="Terminal",
             summary="Terminal Session Active",
             content={"output": result_text, "cwd": outcome.data.get("cwd", "")},
-            priority=60,
-            attention_level=AttentionLevel.NORMAL,
-            dismiss_policy=DismissPolicy.PERSISTENT,
-            workspace_type="terminal",
-            preferred_zone=PreferredZone.CENTER,
-            anchor=AnchorTarget.SCREEN,
             caption_text="Terminal Workspace active",
             replace_key="workspace:terminal",
-            replayable=True,
         )
 
     def _resolve_map_workspace(
@@ -843,25 +900,17 @@ class PresentationResolver:
             or f"Navigating to {title} on the spatial map."
         )
 
-        return PresentationIntent(
-            kind=PresentationKind.WORKSPACE,
-            task_id=outcome.task_id,
-            session_id=outcome.session_id,
-            capability=outcome.capability or "map",
+        return self._build_surface_intent(
+            outcome,
+            semantic_role="geospatial",
             operation=outcome.operation or "map.view",
             title=title,
             summary=result_text[:120] if result_text else "Spatial map navigation active.",
             content=content_dict,
             priority=65,
-            attention_level=AttentionLevel.NORMAL,
-            dismiss_policy=DismissPolicy.PERSISTENT,
-            workspace_type="map",
-            preferred_zone=PreferredZone.CENTER,
-            anchor=AnchorTarget.SCREEN,
             spoken_text=spoken,
             caption_text=f"Map: {title}",
             replace_key=f"workspace:map:{outcome.task_id or 'main'}",
-            replayable=True,
         )
 
     def _resolve_file_operation(
@@ -872,23 +921,16 @@ class PresentationResolver:
         user_intent: Optional[str],
     ) -> PresentationIntent:
         if user_intent == "show" or (outcome.request and "show" in outcome.request.lower()):
-            return PresentationIntent(
-                kind=PresentationKind.WIDGET,
-                task_id=outcome.task_id,
-                session_id=outcome.session_id,
+            return self._build_surface_intent(
+                outcome,
+                semantic_role="file_viewer",
                 capability="file",
-                operation=outcome.operation,
                 title="Directory Listing",
                 summary=result_text,
                 content={"listing": result_text, "path": outcome.data.get("path")},
-                dismiss_policy=DismissPolicy.TIMED,
-                auto_dismiss_ms=DEFAULT_SYSTEM_METRIC_WIDGET_MS,
-                widget_type="file_viewer",
-                preferred_zone=PreferredZone.TOP_RIGHT,
                 spoken_text=result_text[:100],
                 caption_text=result_text[:80],
                 replace_key=f"file:{outcome.data.get('path', 'current')}",
-                replayable=False,
             )
 
         return PresentationIntent(
@@ -1010,30 +1052,22 @@ class PresentationResolver:
         surface_type = data.get("surface_type", "comparison")
         target = data.get("target", "workspace")
         is_workspace = target == "workspace"
-
-        return PresentationIntent(
-            kind=PresentationKind.COMPOSED_SURFACE,
-            task_id=outcome.task_id,
-            session_id=outcome.session_id,
-            capability=outcome.capability,
-            operation=outcome.operation,
+        intent = self._build_surface_intent(
+            outcome,
+            semantic_role="composed_workspace" if is_workspace else "composed_widget",
             title=data.get("title", "Composed Surface"),
             summary=data.get("summary", ""),
             content=data.get("data", data),
-            surface_spec=data,
             priority=55,
-            attention_level=AttentionLevel.NORMAL,
-            dismiss_policy=DismissPolicy.PERSISTENT if is_workspace else DismissPolicy.TIMED,
-            auto_dismiss_ms=None if is_workspace else 8000,
-            workspace_type="composed_surface" if is_workspace else None,
-            widget_type="composed_surface" if not is_workspace else None,
-            preferred_zone=PreferredZone.CENTER if is_workspace else PreferredZone.TOP_RIGHT,
-            anchor=AnchorTarget.SCREEN if is_workspace else AnchorTarget.CORE,
             spoken_text=data.get("spoken_summary"),
             caption_text=data.get("caption_summary"),
             replace_key=f"surface:{data.get('surface_id', surface_type)}",
-            replayable=True,
         )
+        if intent.kind in (PresentationKind.WORKSPACE, PresentationKind.WIDGET):
+            intent.kind = PresentationKind.COMPOSED_SURFACE
+            intent.surface_spec = data
+            self._validate_surface_intent(intent)
+        return intent
 
     def _resolve_generic_caption(
         self,

@@ -105,6 +105,7 @@ class PresentationRegistry:
         "widgets",
         "workspaces",
         "overlays",
+        "semantic_targets",
         "surface_primitives",
         "layout_types",
         "dismiss_policies",
@@ -194,6 +195,11 @@ class PresentationRegistry:
             for alias in aliases:
                 self._overlay_alias_map[alias.lower()] = o_name
 
+        self._semantic_targets: Dict[str, tuple[str, str]] = {
+            role: (str(target["taxonomy"]), str(target["surface"]))
+            for role, target in contract_data.get("semantic_targets", {}).items()
+        }
+
     @classmethod
     def from_file(cls, path: Optional[Path | str] = None) -> PresentationRegistry:
         """Load and instantiate a registry from the JSON contract file."""
@@ -243,6 +249,34 @@ class PresentationRegistry:
 
         if not isinstance(data.get("overlays"), dict):
             raise PresentationContractError("overlays must be a dictionary.")
+
+        semantic_targets = data.get("semantic_targets", {})
+        if not isinstance(semantic_targets, dict):
+            raise PresentationContractError("semantic_targets must be a dictionary.")
+        surfaces = {
+            "widget": data["widgets"],
+            "workspace": data["workspaces"],
+            "overlay": data["overlays"],
+        }
+        for role, target in semantic_targets.items():
+            if not isinstance(role, str) or not role.strip():
+                raise PresentationContractError("semantic target roles must be non-empty strings.")
+            if not isinstance(target, dict):
+                raise PresentationContractError(f"Semantic target '{role}' must be an object.")
+            taxonomy = target.get("taxonomy")
+            surface = target.get("surface")
+            if taxonomy not in surfaces:
+                raise PresentationContractError(
+                    f"Semantic target '{role}' has unsupported taxonomy: {taxonomy}"
+                )
+            if not isinstance(surface, str) or surface not in surfaces[taxonomy]:
+                raise PresentationContractError(
+                    f"Semantic target '{role}' must reference canonical {taxonomy}: {surface}"
+                )
+            if not bool(surfaces[taxonomy][surface].get("implemented", True)):
+                raise PresentationContractError(
+                    f"Semantic target '{role}' references unimplemented {taxonomy}: {surface}"
+                )
 
     # -------------------------------------------------------------------------
     # Properties
@@ -403,6 +437,36 @@ class PresentationRegistry:
                 "ambiguous", tuple((taxonomy, canonical) for taxonomy, canonical, _ in alias_matches)
             )
         return SurfaceResolution("unknown")
+
+    def list_semantic_targets(self) -> List[str]:
+        """Return declarative semantic presentation roles."""
+        return list(self._semantic_targets.keys())
+
+    def resolve_semantic_target(self, role: str) -> SurfaceResolution:
+        """Resolve semantic role to its typed canonical registry surface."""
+        target = self._semantic_targets.get(role)
+        if target is None:
+            return SurfaceResolution("unknown")
+        taxonomy, canonical = target
+        descriptor = {
+            "workspace": self._workspaces,
+            "widget": self._widgets,
+            "overlay": self._overlays,
+        }[taxonomy].get(canonical)
+        if descriptor is None:
+            return SurfaceResolution("unknown")
+        return SurfaceResolution("resolved", ((taxonomy, canonical),), descriptor)
+
+    def resolve_typed_surface(self, taxonomy: str, canonical: str) -> SurfaceResolution:
+        """Resolve a canonical surface when taxonomy is already known."""
+        descriptors = {
+            "workspace": self._workspaces,
+            "widget": self._widgets,
+            "overlay": self._overlays,
+        }.get(taxonomy)
+        if descriptors is None or canonical not in descriptors:
+            return SurfaceResolution("unknown")
+        return SurfaceResolution("resolved", ((taxonomy, canonical),), descriptors[canonical])
 
     # -------------------------------------------------------------------------
     # Core Invariants

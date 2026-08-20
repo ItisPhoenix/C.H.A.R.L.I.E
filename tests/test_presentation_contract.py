@@ -3,7 +3,8 @@
 Verifies:
 1. Canonical contract schema and independence of contract_version and surface_schema_version
 2. Codegen consistency: python tools/codegen/generate_presentation_contract.py --check
-3. Zero drift between contract, generated types, and charlie.presentation (PresentationKind, DismissPolicy, PreferredZone, AnchorTarget)
+3. Zero drift between contract, generated types, and charlie.presentation
+   (PresentationKind, DismissPolicy, PreferredZone, AnchorTarget)
 4. Zero drift between contract, generated types, and charlie.surface_spec (PrimitiveType, LayoutType, SCHEMA_VERSION)
 5. Workspace, Widget, and Overlay registry resolution, aliases, uniqueness, and collision avoidance
 6. Renderer metadata paths exist on disk for all implemented surfaces
@@ -15,6 +16,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+
 import pytest
 
 from charlie.presentation import (
@@ -26,11 +28,23 @@ from charlie.presentation import (
 from charlie.presentation_contract_generated import (
     CONTRACT_VERSION,
     SURFACE_SCHEMA_VERSION,
+)
+from charlie.presentation_contract_generated import (
     AnchorTarget as GenAnchorTarget,
+)
+from charlie.presentation_contract_generated import (
     DismissPolicy as GenDismissPolicy,
+)
+from charlie.presentation_contract_generated import (
     LayoutType as GenLayoutType,
+)
+from charlie.presentation_contract_generated import (
     PreferredZone as GenPreferredZone,
+)
+from charlie.presentation_contract_generated import (
     PresentationKind as GenPresentationKind,
+)
+from charlie.presentation_contract_generated import (
     PrimitiveType as GenPrimitiveType,
 )
 from charlie.presentation_registry import (
@@ -65,6 +79,22 @@ def test_shared_presentation_contract_loads_valid():
     assert isinstance(data.get("preferred_zones"), list)
     assert isinstance(data.get("anchors"), list)
     assert isinstance(data.get("actions"), list)
+    assert isinstance(data.get("semantic_targets"), dict)
+
+
+def test_every_semantic_target_resolves_to_typed_canonical_surface():
+    registry = get_presentation_registry()
+    for role in registry.list_semantic_targets():
+        resolution = registry.resolve_semantic_target(role)
+        assert resolution.resolved
+        assert resolution.descriptor.implemented is True
+
+
+def test_semantic_target_contract_drift_fails_validation():
+    contract = json.loads(json.dumps(get_presentation_registry().to_dict()))
+    contract["semantic_targets"]["research_result"]["surface"] = "removed_research"
+    with pytest.raises(PresentationContractError, match="research_result"):
+        PresentationRegistry.from_dict(contract)
 
 
 def test_codegen_check_clean():
@@ -138,8 +168,8 @@ def test_drift_surface_primitives():
 def test_drift_layout_types():
     registry = get_presentation_registry()
     contract_layouts = set(registry.list_layout_types())
-    code_layouts = {l.value for l in LayoutType}
-    gen_layouts = {l.value for l in GenLayoutType}
+    code_layouts = {layout.value for layout in LayoutType}
+    gen_layouts = {layout.value for layout in GenLayoutType}
 
     assert code_layouts == contract_layouts
     assert gen_layouts == contract_layouts

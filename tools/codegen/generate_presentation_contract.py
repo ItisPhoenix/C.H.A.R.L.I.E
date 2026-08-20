@@ -112,6 +112,7 @@ def generate_python(contract: Dict[str, Any]) -> str:
         f"WORKSPACES_METADATA: Dict[str, Any] = {contract['workspaces']!r}",
         f"WIDGETS_METADATA: Dict[str, Any] = {contract['widgets']!r}",
         f"OVERLAYS_METADATA: Dict[str, Any] = {contract.get('overlays', {})!r}",
+        f"SEMANTIC_TARGETS: Dict[str, Any] = {contract.get('semantic_targets', {})!r}",
         "",
     ])
 
@@ -164,6 +165,7 @@ def generate_typescript(contract: Dict[str, Any]) -> str:
         f"export const OVERLAYS_METADATA = {json.dumps(contract.get('overlays', {}), indent=2)} as const;",
         "export type OverlayType = keyof typeof OVERLAYS_METADATA;",
         "",
+        f"export const SEMANTIC_TARGETS = {json.dumps(contract.get('semantic_targets', {}), indent=2)} as const;",
     ]
 
     return "\n".join(lines) + "\n"

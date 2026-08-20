@@ -62,6 +62,7 @@ def test_model_awareness_tracks_added_and_removed_registry_workspaces():
     assert "Future.tsx" not in added_block
 
     del contract["workspaces"]["research"]
+    del contract["semantic_targets"]["research_result"]
     removed_block = PresentationRegistry.from_dict(contract).build_model_awareness_block()
     assert "research" not in removed_block
 

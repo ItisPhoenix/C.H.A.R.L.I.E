@@ -353,3 +353,41 @@ export const OVERLAYS_METADATA = {
 } as const;
 export type OverlayType = keyof typeof OVERLAYS_METADATA;
 
+export const SEMANTIC_TARGETS = {
+  "system_metrics": {
+    "taxonomy": "widget",
+    "surface": "system_metric"
+  },
+  "media_control": {
+    "taxonomy": "widget",
+    "surface": "media_control"
+  },
+  "research_result": {
+    "taxonomy": "workspace",
+    "surface": "research"
+  },
+  "daily_briefing": {
+    "taxonomy": "workspace",
+    "surface": "briefing"
+  },
+  "geospatial": {
+    "taxonomy": "workspace",
+    "surface": "map"
+  },
+  "terminal": {
+    "taxonomy": "workspace",
+    "surface": "terminal"
+  },
+  "file_viewer": {
+    "taxonomy": "widget",
+    "surface": "file_viewer"
+  },
+  "composed_widget": {
+    "taxonomy": "widget",
+    "surface": "composed_surface"
+  },
+  "composed_workspace": {
+    "taxonomy": "workspace",
+    "surface": "composed_surface"
+  }
+} as const;
