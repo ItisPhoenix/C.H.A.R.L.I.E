@@ -3,46 +3,38 @@ import type { WorkspaceInstance } from "../../layout/workspaceStore";
 import { SpatialMapPrimitive, type SpatialMapData } from "../../composer/primitives/SpatialMapPrimitive";
 import { SourceEvidencePrimitive, type SourceCardItem } from "../../composer/primitives/SourceEvidencePrimitive";
 import type { TimelineItem } from "../../composer/primitives/TimelinePrimitive";
+import { normalizeBriefingWorkspacePayload } from "../../presentation/workspacePayloads";
 
 export function BriefingWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
   const content = workspace.contentState || {};
+  const payload = normalizeBriefingWorkspacePayload(content);
   const [activeStoryPage, setActiveStoryPage] = useState(0);
 
   const headline = String(
-    content.headline ||
-    content.title ||
+    payload.headline ||
+    payload.title ||
     workspace.title ||
     "DAILY INTELLIGENCE BRIEFING"
   ).replace(/^WORKSPACE\s*\/\/\s*/i, "");
 
-  const summaries: string[] = Array.isArray(content.summaries) && content.summaries.length > 0
-    ? (content.summaries as string[])
-    : content.summary
-      ? [String(content.summary)]
+  const summaries: string[] = payload.summaries.length > 0
+    ? payload.summaries
+    : payload.summary
+      ? [payload.summary]
       : workspace.summary
         ? [workspace.summary]
         : ["No briefing text recorded for active operational window."];
 
   const currentSummary = summaries[activeStoryPage] || summaries[0];
 
-  const rawTimeline = Array.isArray(content.timeline_items)
-    ? content.timeline_items
-    : Array.isArray(content.timeline)
-      ? content.timeline
-      : [];
-
-  const timelineItems: TimelineItem[] = rawTimeline.map((it: any, idx: number) => ({
-    time: it.time || it.timestamp || `STEP 0${idx + 1}`,
-    title: it.title || it.event || it.description || "",
-    summary: it.summary,
-    status: it.status,
+  const timelineItems: TimelineItem[] = payload.timeline_items.map((item, idx) => ({
+    time: item.time || item.timestamp || `STEP 0${idx + 1}`,
+    title: item.title,
+    summary: item.summary,
+    status: item.status as TimelineItem["status"],
   }));
 
-  const sourceItems: SourceCardItem[] = Array.isArray(content.sources)
-    ? (content.sources as SourceCardItem[])
-    : Array.isArray(content.evidence)
-      ? (content.evidence as SourceCardItem[])
-      : [];
+  const sourceItems: SourceCardItem[] = payload.sources as SourceCardItem[];
 
   // Support geographic map data conventions
   const geoMapData = (content.geo_data || content.map_data || content.map || content.spatial_map) as SpatialMapData | undefined;

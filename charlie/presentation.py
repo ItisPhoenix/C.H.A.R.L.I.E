@@ -809,18 +809,27 @@ class PresentationResolver:
         ctx: PresentationContext,
         result_text: str,
     ) -> PresentationIntent:
+        payload = outcome.data if outcome.data.get("schema") == "charlie.research_workspace" else {
+            "schema": "charlie.research_workspace",
+            "version": 1,
+            "query": outcome.request,
+            "mode": "standard",
+            "title": "Research & Synthesis",
+            "summary": result_text[:1200],
+            "status": "partial",
+            "confidence": 0.0,
+            "findings": [],
+            "sources": [],
+            "timeline_items": [],
+        }
         return self._build_surface_intent(
             outcome,
             semantic_role="research_result",
             capability="research",
             priority=65,
-            title="Research Findings",
-            summary=result_text[:120] if result_text else "Research completed.",
-            content={
-                "report": result_text,
-                "sources": outcome.data.get("sources", []),
-                "findings": outcome.data.get("findings", []),
-            },
+            title=payload.get("title", "Research & Synthesis"),
+            summary=payload.get("summary", "Research completed."),
+            content=payload,
             spoken_text="I've compiled the research findings on your canvas.",
             caption_text="Research Workspace opened",
             replace_key=f"workspace:research:{outcome.task_id or 'main'}",
@@ -832,37 +841,30 @@ class PresentationResolver:
         ctx: PresentationContext,
         result_text: str,
     ) -> PresentationIntent:
-        content_dict: Dict[str, Any] = {
-            "briefing": result_text,
-            "data": outcome.data,
-            "headline": outcome.request.upper() if outcome.request else "DAILY INTELLIGENCE BRIEFING",
-            "summary": result_text[:200] if result_text else "Today's briefing.",
-            "summaries": (
-                outcome.data.get("evidence", [])
-                if (
-                    outcome.data
-                    and isinstance(outcome.data.get("evidence"), list)
-                    and outcome.data.get("evidence")
-                )
-                else ([result_text] if result_text else [])
-            ),
-            "sources": (
-                outcome.data.get("sources", [])
-                if (outcome.data and isinstance(outcome.data.get("sources"), list))
-                else []
-            ),
-        }
-        if outcome.data:
-            for k, v in outcome.data.items():
-                if k not in content_dict:
-                    content_dict[k] = v
+        if outcome.data.get("schema") == "charlie.briefing_workspace":
+            payload = outcome.data
+        else:
+            payload = {
+                "schema": "charlie.briefing_workspace",
+                "version": 1,
+                "title": "Daily Briefing",
+                "headline": "Daily Intelligence Briefing",
+                "summary": result_text[:1200],
+                "stories": [],
+                "summaries": [],
+                "timeline_items": [],
+                "sources": [],
+                "status": "partial",
+                "confidence": 0.0,
+            }
+        content_dict: Dict[str, Any] = dict(payload)
         return self._build_surface_intent(
             outcome,
             semantic_role="daily_briefing",
             capability="system",
             operation=outcome.operation or "news_briefing",
-            title="Daily Briefing",
-            summary=result_text[:120] if result_text else "Today's briefing.",
+            title=payload.get("title", "Daily Briefing"),
+            summary=payload.get("summary", "Today's briefing."),
             priority=60,
             content=content_dict,
             spoken_text="Here is your daily briefing.",

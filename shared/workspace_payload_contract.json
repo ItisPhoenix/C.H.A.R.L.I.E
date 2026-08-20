@@ -1,0 +1,23 @@
+{
+  "contract_version": 1,
+  "payloads": {
+    "research": {
+      "schema": "charlie.research_workspace",
+      "version": 1,
+      "required": ["query", "mode", "summary", "status", "confidence", "findings", "sources"],
+      "optional": ["title", "timeline_items", "spatial_map", "heatmap", "chart", "stop_reason"]
+    },
+    "briefing": {
+      "schema": "charlie.briefing_workspace",
+      "version": 1,
+      "required": ["headline", "summary", "stories", "summaries", "sources", "status", "confidence"],
+      "optional": ["title", "timeline_items", "geo_data"]
+    }
+  },
+  "limits": {
+    "max_serialized_bytes": 48000,
+    "max_sources": 12,
+    "max_findings": 40,
+    "max_stories": 12
+  }
+}

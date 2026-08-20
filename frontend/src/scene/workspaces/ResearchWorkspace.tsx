@@ -5,6 +5,7 @@ import { DensityHeatmapPrimitive, type DensityHeatmapData } from "../../composer
 import { SourceEvidencePrimitive, type SourceCardItem } from "../../composer/primitives/SourceEvidencePrimitive";
 import { TimelinePrimitive, type TimelineItem } from "../../composer/primitives/TimelinePrimitive";
 import { ChartPrimitive } from "../../composer/primitives/ChartPrimitive";
+import { normalizeResearchWorkspacePayload, type ResearchFinding } from "../../presentation/workspacePayloads";
 
 export interface FindingItem {
   id?: string;
@@ -17,31 +18,21 @@ export interface FindingItem {
 
 export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
   const content = workspace.contentState || {};
+  const payload = normalizeResearchWorkspacePayload(content);
   const [disclosureLevel, setDisclosureLevel] = useState<1 | 2 | 3>(2);
 
-  const title = String(content.title || workspace.title || "RESEARCH & SYNTHESIS").replace(/^WORKSPACE\s*\/\/\s*/i, "");
-  const subtitle = String(content.subtitle || content.category || content.query || "");
+  const title = String(payload.title || workspace.title || "RESEARCH & SYNTHESIS").replace(/^WORKSPACE\s*\/\/\s*/i, "");
+  const subtitle = String(payload.query || "");
   const summary = String(
-    content.summary ||
-    content.objective ||
+    payload.summary ||
     workspace.summary ||
     "Synthesizing active research streams and correlating contextual intelligence."
   );
 
   // Dynamic Findings from payload (supporting multiple payload formats)
-  const rawFindings = Array.isArray(content.findings)
-    ? content.findings
-    : Array.isArray(content.keyFindings)
-      ? content.keyFindings
-      : Array.isArray(content.insights)
-        ? content.insights
-        : [];
-
-  const findings: FindingItem[] = rawFindings.map((f: any, idx: number) => ({
-    id: f.id || `f_${idx}`,
-    title: f.title || f.label || `Key Finding #${idx + 1}`,
-    detail: f.detail || f.text || f.summary || "",
-    iconType: f.iconType || "signal",
+  const findings: (ResearchFinding & FindingItem)[] = payload.findings.map((finding) => ({
+    ...finding,
+    iconType: "signal",
   }));
 
   // Resolve analytical visuals from payload
@@ -54,23 +45,20 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
   const chartData = (content.chart || content.chart_data || content.activity_history) as Record<string, unknown> | undefined;
   const hasChart = Boolean(chartData);
 
-  const timelineItems: TimelineItem[] = Array.isArray(content.timeline_items)
-    ? (content.timeline_items as TimelineItem[])
-    : Array.isArray(content.timeline)
-      ? (content.timeline as TimelineItem[])
-      : [];
+  const timelineItems: TimelineItem[] = payload.timeline_items.map((item) => ({
+    time: item.time || item.timestamp || "",
+    title: item.title,
+    summary: item.summary,
+    status: item.status as TimelineItem["status"],
+  }));
   const hasTimeline = timelineItems.length > 0;
 
-  const sourceItems: SourceCardItem[] = Array.isArray(content.sources)
-    ? (content.sources as SourceCardItem[])
-    : Array.isArray(content.evidence)
-      ? (content.evidence as SourceCardItem[])
-      : [];
+  const sourceItems: SourceCardItem[] = payload.sources as SourceCardItem[];
   const hasSources = sourceItems.length > 0;
 
   // Real payload confidence / status (never fabricated)
-  const payloadConfidence = typeof content.confidence === "number" ? content.confidence : null;
-  const payloadStatus = typeof content.status === "string" ? content.status : null;
+  const payloadConfidence = payload.confidence;
+  const payloadStatus = payload.status;
 
   return (
     <div className="w-full h-full flex flex-col justify-start space-y-6 font-mono select-none text-left p-2 sm:p-4 overflow-y-auto pr-4 pb-16">

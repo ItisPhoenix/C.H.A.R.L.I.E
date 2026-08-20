@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -79,6 +80,15 @@ _NEWS_KEYWORDS = ("news", "headline", "story", "stories")
 _DECOMPOSE_KEYWORDS = ("compare", "versus", "vs", "or", "and")
 _DECOMPOSE_MIN_WORDS = 10
 _DECOMPOSE_MAX_QUERIES = 3
+
+
+@dataclass(frozen=True)
+class ToolExecutionResult:
+    """Structured tool result bridge; ordinary ToolRegistry callers still receive strings."""
+
+    model_text: str
+    structured_data: Any = None
+    result_kind: Optional[str] = None
 
 
 # Pre-compiled regex for stripping conversational fluff from search queries.
@@ -285,6 +295,16 @@ class ToolRegistry:
             logger.exception("Error executing tool '%s': %s", name, e)
             return f"Error executing tool '{name}': {e}"
 
+    def execute_tool_structured(self, name: str, arguments: Dict[str, Any]) -> ToolExecutionResult:
+        """Return model text plus structured metadata for structured-capable tools."""
+        # Preserve test/integration adapters that monkeypatch execute_tool directly.
+        if getattr(self.execute_tool, "__func__", None) is not ToolRegistry.execute_tool:
+            return ToolExecutionResult(str(self.execute_tool(name, arguments)))
+        if name in {"web_search", "web_research"}:
+            report = _run_research_report(name, arguments)
+            return ToolExecutionResult(report.legacy_text(), report, "research_report")
+        return ToolExecutionResult(self.execute_tool(name, arguments))
+
     def set_memory_store(self, store: Any) -> None:
         """Inject vector memory store for vector_memory tool."""
         global _memory_store
@@ -451,9 +471,7 @@ def _merge_search_results(results: List[str]) -> str:
 )
 def web_search(query: str) -> str:
     """Backward-compatible quick-search wrapper over ResearchEngine."""
-    from charlie.research.engine import ResearchEngine
-
-    return ResearchEngine(config).run_sync(query, "quick").legacy_text()
+    return _run_research_report("web_search", {"query": query}).legacy_text()
 
 
 @registry.register_tool(
@@ -478,11 +496,19 @@ def web_search(query: str) -> str:
 )
 def web_research(query: str, mode: str = "auto", domain: str = "") -> str:
     """Run bounded structured research while retaining string tool compatibility."""
+    return _run_research_report(
+        "web_research", {"query": query, "mode": mode, "domain": domain}
+    ).legacy_text()
+
+
+def _run_research_report(name: str, arguments: Dict[str, Any]):
     from charlie.research.engine import ResearchEngine
 
+    query = str(arguments.get("query", ""))
+    mode = "quick" if name == "web_search" else str(arguments.get("mode", "auto"))
+    domain = str(arguments.get("domain", ""))
     effective_query = f"{query} site:{domain.strip()}" if domain.strip() else query
-    report = ResearchEngine(config).run_sync(effective_query, mode)
-    return report.legacy_text()
+    return ResearchEngine(config).run_sync(effective_query, mode)
 
 
 def _single_search(query: str) -> str:

@@ -149,35 +149,23 @@ class ResearchReport:
         return bool(self.search_results or self.sources or self.evidence)
 
     def structured_payload(self, max_items: int = 8) -> dict:
-        """Return bounded JSON-safe data for Charlie surfaces and clients."""
-        return {
-            "query": self.query,
-            "mode": self.mode.value,
-            "confidence": round(self.confidence, 3),
-            "stop_reason": self.stop_reason,
-            "citations": [
-                {
-                    "source_id": item.source_id,
-                    "title": item.title,
-                    "domain": item.domain,
-                    "url": item.url,
-                }
-                for item in self.citations[:max_items]
-            ],
-            "sources": [
-                {
-                    "source_id": item.source_id,
-                    "title": item.title,
-                    "domain": item.domain,
-                    "url": item.url,
-                    "excerpt": item.content[:360],
-                    "published_at": item.published_at,
-                }
-                for item in self.sources[:max_items]
-            ],
-            "products": [item.__dict__ for item in self.products[:max_items]],
-            "media": [item.__dict__ for item in self.media[:max_items]],
-        }
+        """Return canonical bounded presentation data; prompt text stays model-only."""
+        from charlie.research.presentation import build_research_workspace_payload
+
+        payload = build_research_workspace_payload(self)
+        if max_items < 12:
+            payload["sources"] = payload["sources"][:max_items]
+            valid = {item["id"] for item in payload["sources"]}
+            payload["findings"] = [
+                item for item in payload["findings"] if set(item["source_ids"]).issubset(valid)
+            ][: max_items * 4]
+        return payload
+
+    def presentation_payload(self) -> dict:
+        """Explicit name for the presentation-safe research representation."""
+        from charlie.research.presentation import build_research_workspace_payload
+
+        return build_research_workspace_payload(self)
 
     def prompt_context(self, max_chars: int = 12000) -> str:
         """Build bounded, clearly untrusted evidence for the synthesis model."""

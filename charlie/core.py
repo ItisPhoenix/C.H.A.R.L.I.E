@@ -33,7 +33,7 @@ from charlie.streaming import (
     parse_sse_stream,
     stream_followup_content,
 )
-from charlie.tools import pop_pending_vision_image
+from charlie.tools import ToolExecutionResult, pop_pending_vision_image
 from charlie.tools import registry as tool_registry
 from charlie.utils import build_auth_headers, make_id, parse_json_object
 
@@ -56,6 +56,23 @@ except ImportError:  # pragma: no cover - guard mirrors charlie/browser/__init__
     _BROWSER_AVAILABLE = False
 
 logger = logging.getLogger("charlie.core")
+
+
+def publish_turn_research_reports(
+    reports: List[ResearchReport],
+    answer: str,
+    callback: Optional[callable],
+) -> None:
+    """Emit each report once within one turn; retain no cross-turn state."""
+    if not callback:
+        return
+    seen: set[int] = set()
+    for report in reports:
+        if id(report) in seen:
+            continue
+        seen.add(id(report))
+        report.answer = answer
+        callback(report)
 if TYPE_CHECKING:
     from charlie.config import Config
 
@@ -1227,8 +1244,6 @@ class Brain:
             browser_fetch=self._research_browser_fetch,
         )
         report = await engine.run(query, getattr(self.config, "research_default_mode", "auto"))
-        if report.successful and self.on_research_result:
-            self.on_research_result(report)
         return report if report.successful else None
 
     async def _browser_task_bounded(self, task: str, platform: str) -> str:
@@ -1914,11 +1929,16 @@ class Brain:
                     return
 
         research_report: Optional[ResearchReport] = None
+        turn_research_reports: List[ResearchReport] = []
         search_results = ""
         if not skip_pre_search:
             research_report = await self._run_research(user_input, session_id)
             if research_report is not None:
+                turn_research_reports.append(research_report)
                 search_results = research_report.prompt_context()
+
+        def publish_research_reports(answer: str) -> None:
+            publish_turn_research_reports(turn_research_reports, answer, self.on_research_result)
 
         # --- Force a fresh screen observation for screen-content questions ---
         # Injected the same way as web search results (below) so the model is
@@ -2064,6 +2084,7 @@ class Brain:
                 filtered = stream_filter.push(accumulated) + stream_filter.flush()
                 if research_report is not None:
                     filtered = strip_invalid_citations(filtered, research_report.citations)
+                publish_research_reports(filtered)
                 # Save assistant response to history
                 self.history.append({"role": "assistant", "content": filtered})
                 # Trim history to max turns (keep pairs: user + assistant)
@@ -2092,6 +2113,7 @@ class Brain:
         _turn_external_texts: List[str] = []  # tool_external results, fed to security_policy's injected-command check
 
         async def _exec_one(call: Dict[str, Any]) -> str:
+            nonlocal research_report
             tool_name = call["name"]
             ck = f"{call['name']}({json.dumps(call['arguments'], sort_keys=True)})"
             if tool_name not in _DESKTOP_COM_TOOLS and ck in _seen_tool_calls:
@@ -2106,8 +2128,13 @@ class Brain:
 
             async def _run() -> str:
                 executor = _UIA_EXECUTOR if is_com else None
+                execute = (
+                    tool_registry.execute_tool_structured
+                    if tool_name in {"web_search", "web_research"}
+                    else tool_registry.execute_tool
+                )
                 return await asyncio.get_running_loop().run_in_executor(
-                    executor, tool_registry.execute_tool, call["name"], call["arguments"]
+                    executor, execute, call["name"], call["arguments"]
                 )
 
             if self.on_thinking_update:
@@ -2161,7 +2188,14 @@ class Brain:
                         else:
                             return await _run()
 
-                    r = await asyncio.wait_for(_run_with_leases(), timeout=timeout)
+                    raw_result = await asyncio.wait_for(_run_with_leases(), timeout=timeout)
+                    if isinstance(raw_result, ToolExecutionResult):
+                        if isinstance(raw_result.structured_data, ResearchReport):
+                            research_report = raw_result.structured_data
+                            turn_research_reports.append(research_report)
+                        r = raw_result.model_text
+                    else:
+                        r = str(raw_result)
 
                     # Check for standard returned shell/file failures to attempt recovery
                     if tool_name == "shell_execute" and r.startswith("Error"):

@@ -593,7 +593,16 @@ async def main():
         """Forward typed research cards; chat remains the text fallback."""
         if event_bus is None:
             return
-        payload = report.structured_payload()
+        from charlie.research.presentation import (
+            build_briefing_workspace_payload,
+            build_research_workspace_payload,
+        )
+
+        payload = (
+            build_briefing_workspace_payload(report)
+            if any(k in report.query.lower() for k in ("what's happening today", "daily briefing", "news"))
+            else build_research_workspace_payload(report)
+        )
         payload["session_id"] = current_web_session_id
 
         from charlie.presentation import ExecutionOutcome, default_presentation_resolver
@@ -606,7 +615,7 @@ async def main():
             request=report.query,
             capability="research",
             operation="news_briefing" if is_briefing else "research.web.execute",
-            result=report.prompt_context(),
+            result=payload.get("summary", ""),
             status="completed",
             data=payload,
             session_id=current_web_session_id,

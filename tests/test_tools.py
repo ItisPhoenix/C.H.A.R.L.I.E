@@ -40,6 +40,7 @@ def test_registry_registration_and_schema():
     assert names == {
         "web_search",
         "web_research",
+        "presentation_request",
         "shell_execute",
         "system_diagnostics",
         "file_read",
