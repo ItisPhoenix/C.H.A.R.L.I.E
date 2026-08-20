@@ -66,6 +66,21 @@ def test_replay_event_preserves_identity_but_marks_event_as_replay():
     assert live["replay"] is False
 
 
+def test_presentation_command_contract_allows_only_clear_screen_and_is_not_replayable():
+    event = build_event("presentation_command", {"action": "clear_screen"})
+    assert event["replay"] is False
+
+    with pytest.raises(EventValidationError):
+        build_event("presentation_command", {"action": "arbitrary_frontend_command"})
+    with pytest.raises(EventValidationError):
+        normalize_event(
+            {
+                "type": "presentation_command",
+                "payload": {"action": "arbitrary_frontend_command"},
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "event",
     [

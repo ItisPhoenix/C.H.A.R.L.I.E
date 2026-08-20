@@ -97,6 +97,7 @@ from charlie import background_task, telemetry
 from charlie.errors import ErrorClass, classify_exception
 from charlie.config import Config, config
 from charlie.core import Brain
+from charlie.presentation_control import PresentationRequest, get_presentation_controller
 from charlie.surface_intent import match_surface_request
 from charlie.events import EventMeta, EventSource, EventType
 from charlie.ipc import EventBus
@@ -141,69 +142,6 @@ _runtime_health = HealthRegistry(
         "watchers",
     )
 )
-
-
-_SURFACE_REQUEST_IDS = {
-    "calendar": "presentation:calendar",
-    "chat": "presentation:chat",
-    "mcp": "presentation:mcp",
-    "media": "presentation:media",
-    "settings": "presentation:settings",
-    "system": "presentation:system",
-    "tasks": "presentation:tasks",
-    "terminal": "presentation:terminal",
-    "tools": "presentation:tools",
-}
-
-
-def _surface_request_event(panel_id: str, action: str) -> tuple[str, dict, str]:
-    """Translate an allowlisted summon request into the canonical surface contract."""
-    surface_id = _SURFACE_REQUEST_IDS[panel_id]
-    if action == "hide":
-        return "presentation_dismiss", {"id": surface_id}, f"dismissed {panel_id} presentation"
-
-    workspace_types = {
-        "chat": "conversation",
-        "settings": "settings",
-        "system": "system",
-        "tasks": "tasks",
-        "terminal": "terminal",
-    }
-    workspace_type = workspace_types.get(panel_id)
-    title = panel_id.replace("mcp", "MCP").upper()
-    if workspace_type:
-        intent = PresentationIntent(
-            id=surface_id,
-            kind=PresentationKind.WORKSPACE,
-            title=title,
-            summary=f"{title} workspace",
-            content={"panel_id": panel_id, "source": "voice_surface_request"},
-            priority=60,
-            attention_level=PresentationAttention.NORMAL,
-            dismiss_policy=DismissPolicy.PERSISTENT,
-            workspace_type=workspace_type,
-            preferred_zone=PreferredZone.CENTER,
-            anchor=AnchorTarget.CORE,
-            replayable=True,
-            replace_key=surface_id,
-        )
-    else:
-        intent = PresentationIntent(
-            id=surface_id,
-            kind=PresentationKind.WIDGET,
-            title=title,
-            summary=f"{title} context",
-            content={"panel_id": panel_id, "source": "voice_surface_request"},
-            priority=50,
-            attention_level=PresentationAttention.NORMAL,
-            dismiss_policy=DismissPolicy.TIMED,
-            auto_dismiss_ms=8000,
-            widget_type=panel_id,
-            preferred_zone=PreferredZone.TOP_RIGHT,
-            anchor=AnchorTarget.CORE,
-            replace_key=surface_id,
-        )
-    return "presentation_intent", intent.to_dict(), f"opened {panel_id} presentation"
 
 
 hud_visible: bool = True
@@ -985,18 +923,14 @@ async def main():
             return
         panel_intent = match_surface_request(text)
         if panel_intent is not None:
-            await _summon_conversation_workspace()
-            if event_bus:
-                event_type, payload, rationale = _surface_request_event(
-                    panel_intent.panel_id,
-                    panel_intent.action,
+            result = get_presentation_controller().execute(
+                PresentationRequest(
+                    action=panel_intent.action,
+                    surface=panel_intent.surface_id,
+                    source=EventSource.VOICE,
                 )
-                await event_bus.emit(
-                    event_type,
-                    payload,
-                    meta=EventMeta(source=EventSource.VOICE, rationale=rationale),
-                )
-            voice.speak("Here you go." if panel_intent.action == "show" else "Hidden.", last_emotion)
+            )
+            voice.speak(result.message, last_emotion)
             return
 
         # Route conversation-only phrase to the normal HUD summon path.

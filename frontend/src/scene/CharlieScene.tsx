@@ -22,7 +22,7 @@ export function CharlieScene(): ReactElement | null {
   const dismissIntent = useCharlieStore((s) => s.dismissPresentationIntent);
   const hudVisible = useCharlieStore((s) => s.hudVisible);
   const settingsIntentId = Object.values(presentationIntents).find(
-    (intent) => intent.kind === "workspace" && intent.workspaceType === "settings",
+    (intent) => intent.kind === "overlay" && intent.overlayType === "settings",
   )?.id;
 
   const openWorkspace = useWorkspaceStore((s) => s.openWorkspace);
@@ -45,7 +45,7 @@ export function CharlieScene(): ReactElement | null {
   // Sync incoming PresentationIntents to WorkspaceManager and WidgetManager
   useEffect(() => {
     const hasWorkspace = Object.values(presentationIntents).some(
-      (i) => i.kind === "workspace" && i.workspaceType !== "settings",
+      (i) => i.kind === "workspace",
     );
     const zoneCtx: ZoneContext = {
       viewport: { width: window.innerWidth, height: window.innerHeight },
@@ -68,7 +68,7 @@ export function CharlieScene(): ReactElement | null {
 
     for (const intent of Object.values(presentationIntents)) {
       if (intent.kind === "workspace") {
-        if (intent.workspaceType !== "settings") openWorkspace(intent);
+        openWorkspace(intent);
       } else if (intent.kind === "widget" || intent.kind === "composed_surface") {
         upsertWidget(intent, zoneCtx);
       }

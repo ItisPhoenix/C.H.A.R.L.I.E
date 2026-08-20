@@ -45,6 +45,15 @@ def test_unrelated_event_type_ignored():
     assert cache == {}
 
 
+def test_clear_screen_command_is_transient_and_not_replayed():
+    cache: dict = {}
+    web_server._apply_presentation_event(
+        cache,
+        {"type": "presentation_command", "payload": {"action": "clear_screen"}},
+    )
+    assert cache == {}
+
+
 def test_approval_request_then_resolved():
     cache: dict = {}
     request = {"type": "tool_approval_request", "payload": {"request_id": "r1", "tool_name": "shell_execute"}}

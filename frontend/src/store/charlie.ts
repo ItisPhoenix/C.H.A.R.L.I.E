@@ -75,7 +75,7 @@ export interface RuntimeTask {
 
 export interface PresentationIntent {
   id: string;
-  kind: "silent" | "caption" | "notification" | "widget" | "composed_surface" | "workspace" | "attention";
+  kind: "silent" | "caption" | "notification" | "widget" | "composed_surface" | "workspace" | "overlay" | "attention";
   sourceEventId?: string;
   taskId?: string | null;
   sessionId?: string | null;
@@ -90,6 +90,7 @@ export interface PresentationIntent {
   autoDismissMs?: number | null;
   workspaceType?: string | null;
   widgetType?: string | null;
+  overlayType?: string | null;
   surfaceSpec?: Record<string, unknown> | null;
   preferredZone: "contextual" | "top_right" | "bottom_right" | "top_left" | "bottom_left" | "center";
   anchor: "core" | "workspace" | "screen" | "widget";
@@ -296,6 +297,17 @@ export const useCharlieStore = create<CharlieState>((set) => ({
       case "presentation_dismiss":
         applyPresentationIntentDismiss(set, payload);
         return;
+      case "presentation_command":
+        if (payload.action === "clear_screen") {
+          useWidgetStore.getState().clearScreen();
+          useWorkspaceStore.getState().clearWorkspaces();
+          set((s) => ({
+            presentationIntents: Object.fromEntries(
+              Object.entries(s.presentationIntents).filter(([, intent]) => intent.kind === "attention"),
+            ),
+          }));
+        }
+        return;
       default:
         return;
     }
@@ -381,6 +393,7 @@ function presentationIntentFromPayload(payload: Record<string, unknown>): Presen
     autoDismissMs: typeof payload.auto_dismiss_ms === "number" ? payload.auto_dismiss_ms : typeof payload.autoDismissMs === "number" ? payload.autoDismissMs : null,
     workspaceType: (payload.workspace_type as string) ?? (payload.workspaceType as string) ?? null,
     widgetType: (payload.widget_type as string) ?? (payload.widgetType as string) ?? null,
+    overlayType: (payload.overlay_type as string) ?? (payload.overlayType as string) ?? null,
     surfaceSpec: (payload.surface_spec as Record<string, unknown>) ?? (payload.surfaceSpec as Record<string, unknown>) ?? null,
     preferredZone: (payload.preferred_zone as PresentationIntent["preferredZone"]) ?? (payload.preferredZone as PresentationIntent["preferredZone"]) ?? "contextual",
     anchor: (payload.anchor as PresentationIntent["anchor"]) ?? "core",

@@ -65,6 +65,7 @@ class EventType(StrEnum):
     PRESENTATION_INTENT = "presentation_intent"
     PRESENTATION_UPDATE = "presentation_update"
     PRESENTATION_DISMISS = "presentation_dismiss"
+    PRESENTATION_COMMAND = "presentation_command"
     SURFACE_ACTION = "surface_action"
     SELF_EXTENSION_REQUESTED = "self_extension_requested"
     SELF_EXTENSION_CLASSIFIED = "self_extension_classified"
@@ -110,6 +111,7 @@ class EventSpec:
     version: int = CONTRACT_VERSION
     replay: bool = False
     required_payload: tuple[str, ...] = ()
+    allowed_payload_values: dict[str, tuple[Any, ...]] = field(default_factory=dict)
 
 
 EVENT_REGISTRY: dict[str, EventSpec] = {
@@ -118,6 +120,9 @@ EVENT_REGISTRY: dict[str, EventSpec] = {
         category=EventCategory(definition["category"]),
         replay=bool(definition["replay"]),
         required_payload=tuple(definition.get("required", ())),
+        allowed_payload_values={
+            key: tuple(values) for key, values in definition.get("allowed_values", {}).items()
+        },
     )
     for name, definition in EVENT_CONTRACT["event_types"].items()
 }
@@ -155,6 +160,10 @@ def _require_payload(payload: Any, spec: EventSpec) -> dict[str, Any]:
     missing = [key for key in spec.required_payload if key not in payload]
     if missing:
         raise EventValidationError(f"event {spec.name} missing payload fields: {', '.join(missing)}")
+    for key, allowed in spec.allowed_payload_values.items():
+        if key in payload and payload[key] not in allowed:
+            allowed_text = ", ".join(repr(value) for value in allowed)
+            raise EventValidationError(f"event {spec.name} payload {key} must be one of: {allowed_text}")
     return payload
 
 

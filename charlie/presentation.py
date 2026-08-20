@@ -70,6 +70,7 @@ class PresentationIntent:
 
     workspace_type: Optional[str] = None
     widget_type: Optional[str] = None
+    overlay_type: Optional[str] = None
     surface_spec: Optional[Dict[str, Any]] = None
 
     preferred_zone: PreferredZone = PreferredZone.CONTEXTUAL
@@ -126,6 +127,8 @@ class PresentationIntent:
             data["workspace_type"] = self.workspace_type
         if self.widget_type is not None:
             data["widget_type"] = self.widget_type
+        if self.overlay_type is not None:
+            data["overlay_type"] = self.overlay_type
         if self.surface_spec is not None:
             data["surface_spec"] = self.surface_spec
         if self.spoken_text is not None:
@@ -205,6 +208,7 @@ class PresentationIntent:
             auto_dismiss_ms=data.get("auto_dismiss_ms"),
             workspace_type=data.get("workspace_type"),
             widget_type=data.get("widget_type"),
+            overlay_type=data.get("overlay_type"),
             surface_spec=data.get("surface_spec"),
             preferred_zone=preferred_zone,
             anchor=anchor,
@@ -275,6 +279,14 @@ _MAP_QUERY_RE = re.compile(
 )
 
 
+def _preferred_zone(value: str) -> PreferredZone:
+    """Convert registry zone metadata to the canonical enum with safe fallback."""
+    try:
+        return PreferredZone(value)
+    except ValueError:
+        return PreferredZone.CONTEXTUAL
+
+
 # ---------------------------------------------------------------------------
 # Canonical PresentationResolver
 # ---------------------------------------------------------------------------
@@ -283,8 +295,65 @@ _MAP_QUERY_RE = re.compile(
 class PresentationResolver:
     """Authoritative decision engine for all Charlie presentation intent."""
 
-    def __init__(self):
+    def __init__(self, presentation_registry: Optional[Any] = None):
         self._active_intents: Dict[str, PresentationIntent] = {}
+        if presentation_registry is None:
+            from charlie.presentation_registry import get_presentation_registry
+
+            presentation_registry = get_presentation_registry()
+        self._presentation_registry = presentation_registry
+
+    def resolve_explicit(
+        self,
+        outcome: ExecutionOutcome,
+        taxonomy: str,
+        canonical_surface: str,
+        descriptor: Any,
+        context: Optional[PresentationContext] = None,
+    ) -> PresentationIntent:
+        """Resolve an explicit semantic target using registry descriptor metadata."""
+        if taxonomy == "workspace":
+            kind = PresentationKind.WORKSPACE
+            dismiss_policy = DismissPolicy(getattr(descriptor, "dismiss_policy", "persistent"))
+            preferred_zone = PreferredZone.CENTER
+        elif taxonomy == "widget":
+            kind = PresentationKind.WIDGET
+            dismiss_policy = DismissPolicy(getattr(descriptor, "default_dismiss_policy", "timed"))
+            preferred_zone = _preferred_zone(getattr(descriptor, "default_zone", "contextual"))
+        elif taxonomy == "overlay":
+            kind = PresentationKind.OVERLAY
+            dismiss_policy = DismissPolicy(getattr(descriptor, "dismiss_policy", "manual"))
+            preferred_zone = PreferredZone.CENTER
+        else:
+            raise ValueError(f"Unsupported presentation taxonomy: {taxonomy}")
+
+        intent = PresentationIntent(
+            id=f"presentation:{taxonomy}:{canonical_surface}",
+            kind=kind,
+            task_id=outcome.task_id,
+            session_id=outcome.session_id,
+            capability="presentation",
+            operation=f"presentation.{outcome.data.get('action', 'show')}",
+            title=canonical_surface.replace("_", " ").upper(),
+            summary=f"{canonical_surface.replace('_', ' ')} {taxonomy}",
+            content={"surface": canonical_surface, "taxonomy": taxonomy, "source": outcome.source},
+            priority=60,
+            attention_level=AttentionLevel.NORMAL,
+            dismiss_policy=dismiss_policy,
+            auto_dismiss_ms=(
+                getattr(descriptor, "default_auto_dismiss_ms", None) if taxonomy == "widget" else None
+            ),
+            workspace_type=canonical_surface if taxonomy == "workspace" else None,
+            widget_type=canonical_surface if taxonomy == "widget" else None,
+            overlay_type=canonical_surface if taxonomy == "overlay" else None,
+            preferred_zone=preferred_zone,
+            anchor=AnchorTarget.SCREEN if taxonomy == "overlay" else AnchorTarget.CORE,
+            spoken_text=f"Showing {canonical_surface.replace('_', ' ')}.",
+            replace_key=f"presentation:{taxonomy}:{canonical_surface}",
+            replayable=taxonomy == "workspace",
+        )
+        self._active_intents[intent.replace_key or intent.id] = intent
+        return intent
 
     def resolve(
         self,
@@ -689,8 +758,20 @@ class PresentationResolver:
             "data": outcome.data,
             "headline": outcome.request.upper() if outcome.request else "DAILY INTELLIGENCE BRIEFING",
             "summary": result_text[:200] if result_text else "Today's briefing.",
-            "summaries": outcome.data.get("evidence", []) if (outcome.data and isinstance(outcome.data.get("evidence"), list) and outcome.data.get("evidence")) else ([result_text] if result_text else []),
-            "sources": outcome.data.get("sources", []) if (outcome.data and isinstance(outcome.data.get("sources"), list)) else [],
+            "summaries": (
+                outcome.data.get("evidence", [])
+                if (
+                    outcome.data
+                    and isinstance(outcome.data.get("evidence"), list)
+                    and outcome.data.get("evidence")
+                )
+                else ([result_text] if result_text else [])
+            ),
+            "sources": (
+                outcome.data.get("sources", [])
+                if (outcome.data and isinstance(outcome.data.get("sources"), list))
+                else []
+            ),
         }
         if outcome.data:
             for k, v in outcome.data.items():

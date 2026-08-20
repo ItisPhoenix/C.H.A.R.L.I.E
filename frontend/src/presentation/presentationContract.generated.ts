@@ -11,6 +11,7 @@ export const PRESENTATION_KINDS = [
   "widget",
   "composed_surface",
   "workspace",
+  "overlay",
   "attention"
 ] as const;
 export type PresentationKind = (typeof PRESENTATION_KINDS)[number];
@@ -299,7 +300,10 @@ export const WIDGETS_METADATA = {
   },
   "media_control": {
     "aliases": [
-      "media"
+      "media",
+      "media player",
+      "music",
+      "music player"
     ],
     "implemented": true,
     "renderer": "WidgetContainer.generic_fallback",

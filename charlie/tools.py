@@ -22,6 +22,7 @@ from charlie import recovery
 from charlie.config import config
 from charlie.events import EventMeta, EventSource
 from charlie.known_apps import APP_REGISTRY
+from charlie.presentation_control import PresentationRequest, get_presentation_controller
 from charlie.results import ResultsStore
 from charlie.session_store import SessionStore
 from charlie.utils import is_process_running
@@ -296,6 +297,40 @@ class ToolRegistry:
 
 # Global tool registry
 registry = ToolRegistry()
+
+
+@registry.register_tool(
+    name="presentation_request",
+    description=(
+        "Request a semantic Charlie HUD presentation change. Use only show, hide, or clear_screen; "
+        "the presentation registry resolves valid surfaces and the resolver chooses the final modality."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["show", "hide", "clear_screen"],
+                "description": "Semantic presentation action.",
+            },
+            "surface": {
+                "type": "string",
+                "description": "Canonical presentation surface or registry alias; omit for clear_screen.",
+            },
+        },
+        "required": ["action"],
+        "additionalProperties": False,
+    },
+    owner="presentation",
+    risk_class="safe",
+    is_interactive=True,
+)
+def presentation_request(action: str, surface: Optional[str] = None) -> str:
+    """Thin ToolRegistry adapter for the canonical PresentationController."""
+    result = get_presentation_controller().execute(
+        PresentationRequest(action=action, surface=surface, source=EventSource.BRAIN)
+    )
+    return result.message if result.accepted else f"Error: {result.message}"
 
 
 # ---------------------------------------------------------------------------
@@ -1532,6 +1567,25 @@ def set_event_bus(bus: Any, loop: Any) -> None:
     global _event_bus, _event_loop
     _event_bus = bus
     _event_loop = loop
+
+    def _emit_presentation_event(event: dict[str, Any]) -> None:
+        if _event_bus is None or _event_loop is None:
+            return
+        try:
+            source = EventSource(event.get("source", EventSource.BRAIN.value))
+        except ValueError:
+            source = EventSource.BRAIN
+        meta = EventMeta(
+            source=source,
+            session_id=event.get("session_id"),
+            task_id=event.get("task_id"),
+            rationale=event.get("rationale"),
+        )
+        asyncio.run_coroutine_threadsafe(
+            _event_bus.emit(event["type"], event["payload"], meta=meta), _event_loop
+        )
+
+    get_presentation_controller().set_event_sink(_emit_presentation_event)
 
 
 def configure_runtime_services(

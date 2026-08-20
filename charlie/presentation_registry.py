@@ -73,6 +73,27 @@ class OverlayDescriptor:
     description: str = ""
 
 
+@dataclass(frozen=True)
+class SurfaceResolution:
+    """Structured registry result distinguishing resolved, unknown, and ambiguous targets."""
+
+    status: str
+    matches: tuple[tuple[str, str], ...] = ()
+    descriptor: Any = None
+
+    @property
+    def resolved(self) -> bool:
+        return self.status == "resolved"
+
+    @property
+    def taxonomy(self) -> Optional[str]:
+        return self.matches[0][0] if self.resolved else None
+
+    @property
+    def canonical(self) -> Optional[str]:
+        return self.matches[0][1] if self.resolved else None
+
+
 class PresentationRegistry:
     """Authoritative reader and validation service for Charlie presentation contracts."""
 
@@ -337,6 +358,51 @@ class PresentationRegistry:
         if not canonical:
             return None
         return self._overlays.get(canonical)
+
+    def resolve_surface(self, name: Optional[str]) -> SurfaceResolution:
+        """Resolve a target using canonical-name precedence, then aliases.
+
+        Category order never breaks ties: multiple canonical names or aliases
+        produce ``ambiguous`` instead of silently choosing a surface.
+        """
+        if not name:
+            return SurfaceResolution("unknown")
+
+        normalized = name.strip().lower()
+        canonical_matches = []
+        for taxonomy, descriptors in (
+            ("overlay", self._overlays),
+            ("workspace", self._workspaces),
+            ("widget", self._widgets),
+        ):
+            for canonical, descriptor in descriptors.items():
+                if canonical.lower() == normalized:
+                    canonical_matches.append((taxonomy, canonical, descriptor))
+        if len(canonical_matches) == 1:
+            taxonomy, canonical, descriptor = canonical_matches[0]
+            return SurfaceResolution("resolved", ((taxonomy, canonical),), descriptor)
+        if len(canonical_matches) > 1:
+            return SurfaceResolution(
+                "ambiguous", tuple((taxonomy, canonical) for taxonomy, canonical, _ in canonical_matches)
+            )
+
+        alias_matches = []
+        for taxonomy, descriptors, aliases_for in (
+            ("overlay", self._overlays, self._overlay_alias_map),
+            ("workspace", self._workspaces, self._workspace_alias_map),
+            ("widget", self._widgets, self._widget_alias_map),
+        ):
+            canonical = aliases_for.get(normalized)
+            if canonical is not None:
+                alias_matches.append((taxonomy, canonical, descriptors[canonical]))
+        if len(alias_matches) == 1:
+            taxonomy, canonical, descriptor = alias_matches[0]
+            return SurfaceResolution("resolved", ((taxonomy, canonical),), descriptor)
+        if len(alias_matches) > 1:
+            return SurfaceResolution(
+                "ambiguous", tuple((taxonomy, canonical) for taxonomy, canonical, _ in alias_matches)
+            )
+        return SurfaceResolution("unknown")
 
     # -------------------------------------------------------------------------
     # Core Invariants

@@ -232,6 +232,18 @@ test("HUD visibility follows the pet toggle event", () => {
     expect(stored?.autoDismissMs).toBe(5000);
   });
 
+  test("settings presentation intent remains an overlay, not a workspace", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_intent",
+      payload: { id: "settings-1", kind: "overlay", overlay_type: "settings", title: "SETTINGS" },
+    });
+
+    const intent = useCharlieStore.getState().presentationIntents["settings-1"];
+    expect(intent?.kind).toBe("overlay");
+    expect(intent?.overlayType).toBe("settings");
+    expect(intent?.workspaceType).toBeNull();
+  });
+
   test("presentation_intent with replace_key replaces old intent with same key", () => {
     useCharlieStore.getState().applyEvent({
       type: "presentation_intent",
@@ -259,6 +271,25 @@ test("HUD visibility follows the pet toggle event", () => {
       payload: { id: "pi_dismiss" },
     });
     expect(useCharlieStore.getState().presentationIntents["pi_dismiss"]).toBeUndefined();
+  });
+
+  test("presentation_command clear_screen clears temporary presentation intents", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_intent",
+      payload: { id: "settings-2", kind: "overlay", overlay_type: "settings" },
+    });
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_intent",
+      payload: { id: "attention-1", kind: "attention" },
+    });
+
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_command",
+      payload: { action: "clear_screen" },
+    });
+
+    expect(useCharlieStore.getState().presentationIntents["settings-2"]).toBeUndefined();
+    expect(useCharlieStore.getState().presentationIntents["attention-1"]).toBeDefined();
   });
 
   test("presentation_intent maps both camelCase and snake_case payload properties", () => {
