@@ -43,6 +43,14 @@ export const CHARLIE_DARK_MAP_STYLE: StyleSpecification = {
       tileSize: 256,
       attribution: "© OpenStreetMap contributors, © CARTO",
     },
+    // Independent country geometry fallback. This is a real, low-resolution
+    // GeoJSON geography layer so the map remains recognizable if a vector or
+    // raster tile provider is unavailable.
+    world_countries_fallback: {
+      type: "geojson",
+      data: "https://raw.githubusercontent.com/johan/world.geo.json/master/countries.geo.json",
+      attribution: "© Natural Earth / world.geo.json contributors",
+    },
   },
   glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
   layers: [
@@ -64,6 +72,27 @@ export const CHARLIE_DARK_MAP_STYLE: StyleSpecification = {
       maxzoom: 19,
       paint: {
         "raster-opacity": 0.95,
+      },
+    },
+
+    // Real country silhouettes and borders, intentionally restrained so they
+    // read as geography rather than a fabricated intelligence overlay.
+    {
+      id: "world-countries-fallback-fill",
+      type: "fill",
+      source: "world_countries_fallback",
+      paint: {
+        "fill-color": "#0a1b2c",
+        "fill-opacity": 0.9,
+      },
+    },
+    {
+      id: "world-countries-fallback-border",
+      type: "line",
+      source: "world_countries_fallback",
+      paint: {
+        "line-color": "rgba(77, 183, 226, 0.42)",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 0, 0.45, 5, 0.8, 10, 1.1],
       },
     },
 

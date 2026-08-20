@@ -1,31 +1,36 @@
 import type { ReactElement } from "react";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
-import { useCharlieStore, type RuntimeTask } from "../../store/charlie";
+import { useCharlieStore } from "../../store/charlie";
 
 export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
-  const content = workspace.contentState || {};
   const tasks = useCharlieStore((s) => s.tasks);
   const taskList = Object.values(tasks);
 
   // Identify current focused task or fallback to workspace payload
-  const currentTask: RuntimeTask = (workspace.taskId && tasks[workspace.taskId])
+  const currentTask = (workspace.taskId && tasks[workspace.taskId])
     ? tasks[workspace.taskId]
-    : taskList.find((t) => t.status === "running") || taskList[0] || {
-        id: "task_01",
-        title: String(content.title || workspace.title || "Autonomous Task Execution").replace(/^WORKSPACE\s*\/\/\s*/i, ""),
-        status: "running",
-        currentStep: 3,
-        totalSteps: 5,
-        progress: 0.6,
-      };
+    : taskList.find((t) => t.status === "running") || taskList[0];
 
-  const steps = [
-    { num: 1, title: "Initialize environment & load telemetry parameters", capability: "SystemCapability", status: "completed" },
-    { num: 2, title: "Query regional maritime radar and transponder logs", capability: "ResearchCapability", status: "completed" },
-    { num: 3, title: "Process spatial cluster anomaly vectors", capability: "ResearchCapability", status: "running" },
-    { num: 4, title: "Validate cross-correlations with open source advisories", capability: "BrowserCapability", status: "pending" },
-    { num: 5, title: "Render synthesized spatial intelligence workspace", capability: "PresentationResolver", status: "pending" },
-  ];
+  if (!currentTask) {
+    return (
+      <div className="charlie-empty-state" role="status">
+        <span className="charlie-empty-kicker">TASK JOURNAL</span>
+        <span>No active tasks reported.</span>
+      </div>
+    );
+  }
+
+  const currentAction = typeof currentTask.currentAction === "string"
+    ? currentTask.currentAction.trim()
+    : "";
+  const capabilities = currentTask.capabilityRequirements?.filter(Boolean) ?? [];
+  const hasExecutionDetails = Boolean(
+    currentAction ||
+      capabilities.length ||
+      currentTask.approvalReference ||
+      currentTask.waitingReason ||
+      currentTask.resultReference,
+  );
 
   const statusColor = (st: string) => {
     switch (st) {
@@ -43,7 +48,7 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
   };
 
   return (
-    <div className="w-full h-full flex flex-col justify-between font-mono select-none text-left p-2 overflow-y-auto space-y-6">
+    <div className="w-full h-full flex flex-col justify-start font-mono select-none text-left p-2 overflow-y-auto space-y-6">
       {/* 1. Header */}
       <div className="flex items-start justify-between border-b border-cyan-500/20 pb-4">
         <div>
@@ -54,8 +59,10 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
           <h1 className="text-xl sm:text-2xl font-bold text-slate-100 uppercase tracking-tight font-sans">
             {currentTask.title}
           </h1>
-          <div className="text-xs text-slate-400 tracking-wider mt-1">
-            TASK ID: <span className="text-cyan-300">{currentTask.id}</span>
+          <div className="text-xs text-slate-400 tracking-wider mt-1 flex flex-wrap gap-x-4 gap-y-1">
+            <span>TASK ID: <span className="text-cyan-300">{currentTask.id}</span></span>
+            {currentTask.origin && <span>ORIGIN: <span className="text-slate-200">{currentTask.origin}</span></span>}
+            {currentTask.priority && <span>PRIORITY: <span className="text-slate-200">{currentTask.priority}</span></span>}
           </div>
         </div>
 
@@ -76,33 +83,35 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
                 Progress: Step {currentTask.currentStep} of {currentTask.totalSteps || 5}
               </span>
               <span className="text-slate-200 font-bold">
-                {Math.round((currentTask.progress ?? 0.6) * 100)}%
+                {typeof currentTask.progress === "number" ? `${Math.round(currentTask.progress * 100)}%` : "—"}
               </span>
             </div>
 
             {/* Glowing progress track */}
-            <div className="w-full h-2 rounded-full bg-slate-900 border border-cyan-500/30 overflow-hidden">
-              <div
-                className="h-full bg-gradient-to-r from-cyan-600 via-cyan-400 to-sky-300 transition-all duration-500 shadow-lg shadow-cyan-400/50"
-                style={{ width: `${Math.round((currentTask.progress ?? 0.6) * 100)}%` }}
-              />
-            </div>
+              <div className="w-full h-2 rounded-full bg-slate-900 border border-cyan-500/30 overflow-hidden">
+                {typeof currentTask.progress === "number" && (
+                  <div
+                    className="h-full bg-gradient-to-r from-cyan-600 via-cyan-400 to-sky-300 transition-all duration-500 shadow-lg shadow-cyan-400/50"
+                    style={{ width: `${Math.round(Math.max(0, Math.min(1, currentTask.progress)) * 100)}%` }}
+                  />
+                )}
+              </div>
           </div>
 
           {/* Step-by-Step Task Journal */}
-          <div className="p-4 rounded-xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md space-y-3">
+          {hasExecutionDetails && <div className="p-4 rounded-xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md space-y-3">
             <div className="text-xs font-semibold text-cyan-200 uppercase tracking-wider">
               EXECUTION PLAN & STATUS
             </div>
 
             <div className="space-y-2.5">
-              {steps.map((step) => {
-                const isRunning = step.status === "running";
-                const isCompleted = step.status === "completed";
+              {currentAction && [currentTask].map((task) => {
+                const isRunning = task.status === "running";
+                const isCompleted = task.status === "completed";
 
                 return (
                   <div
-                    key={step.num}
+                    key={task.id}
                     className={`p-3 rounded-lg border flex items-center justify-between gap-4 transition ${
                       isRunning
                         ? "bg-cyan-950/50 border-cyan-400/50 text-slate-100"
@@ -121,15 +130,15 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
                               : "bg-slate-800 text-slate-400"
                         }`}
                       >
-                        {isCompleted ? "✓" : step.num}
+                          {isCompleted ? "✓" : task.currentStep || "—"}
                       </div>
 
                       <div className="text-left">
                         <div className="text-xs font-medium font-sans">
-                          {step.title}
+                          {task.currentAction}
                         </div>
                         <div className="text-[10px] text-cyan-400/70 font-mono mt-0.5">
-                          OWNER: {step.capability}
+                          {capabilities.length ? `REQUIRES: ${capabilities.join(", ")}` : "CURRENT ACTION"}
                         </div>
                       </div>
                     </div>
@@ -147,7 +156,14 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
                 );
               })}
             </div>
-          </div>
+            {(currentTask.waitingReason || currentTask.resultReference || currentTask.approvalReference) && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px] text-slate-400">
+                {currentTask.waitingReason && <div><span className="text-cyan-400">WAITING REASON:</span> {currentTask.waitingReason}</div>}
+                {currentTask.resultReference && <div><span className="text-cyan-400">RESULT:</span> {currentTask.resultReference}</div>}
+                {currentTask.approvalReference && <div><span className="text-amber-300">APPROVAL:</span> {currentTask.approvalReference}</div>}
+              </div>
+            )}
+          </div>}
         </div>
 
         {/* Secondary / Concurrent Tasks List */}
@@ -185,8 +201,8 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
                     </span>
                   </div>
                   <div className="text-[10px] text-slate-400 flex justify-between">
-                    <span>Steps: {t.currentStep} / {t.totalSteps || 1}</span>
-                    <span className="text-cyan-400">{Math.round((t.progress || 0) * 100)}%</span>
+                    <span>Steps: {t.currentStep} / {t.totalSteps || "—"}</span>
+                    <span className="text-cyan-400">{typeof t.progress === "number" ? `${Math.round(t.progress * 100)}%` : "—"}</span>
                   </div>
                 </div>
               ))

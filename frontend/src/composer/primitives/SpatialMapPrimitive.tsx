@@ -23,7 +23,7 @@ export function SpatialMapPrimitive({
   // In production geo mode with no explicit override, lazy-mount the real MapEngine
   if (mode === "geo" && mapData.useRealEngine !== false) {
     return (
-      <div className="w-full h-full min-h-[300px] relative rounded-xl overflow-hidden border border-cyan-500/20 shadow-xl">
+      <div className="charlie-spatial-map w-full h-full min-h-[300px] relative overflow-hidden">
         <Suspense
           fallback={
             <div className="w-full h-full min-h-[300px] flex items-center justify-center bg-[#020710] font-mono text-cyan-400 text-xs">

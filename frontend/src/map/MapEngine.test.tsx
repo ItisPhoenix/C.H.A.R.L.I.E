@@ -100,21 +100,21 @@ describe("MapEngine Component-Level Initialization & Renderer Exclusivity", () =
     cleanup();
   });
 
-  it("initializes in Tier A (interleaved Deck.gl) by default when MapboxOverlay interleaved succeeds", () => {
+  it("initializes in the safe non-interleaved Deck.gl overlay path by default", () => {
     const { container } = render(<MapEngine />);
     expect(maplibregl.Map).toHaveBeenCalled();
-    expect(MapboxOverlay).toHaveBeenCalledWith({ interleaved: true });
+    expect(MapboxOverlay).toHaveBeenCalledWith({ interleaved: false });
 
     // Verify NO duplicate projected SVG elements exist in DOM for Tier A
     const svgOverlays = container.querySelectorAll("svg.pointer-events-none");
     expect(svgOverlays.length).toBe(0);
   });
 
-  it("falls back to Tier B (overlay non-interleaved) if Tier A constructor throws", () => {
+  it("falls back to the native MapLibre tier if the safe Deck overlay constructor throws", () => {
     let callCount = 0;
     (MapboxOverlay as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (opts: { interleaved?: boolean }) {
       callCount++;
-      if (opts.interleaved === true) {
+      if (opts.interleaved === false) {
         throw new Error("WebGL2 interleaved not supported");
       }
       return {
@@ -125,7 +125,7 @@ describe("MapEngine Component-Level Initialization & Renderer Exclusivity", () =
 
     render(<MapEngine />);
     expect(callCount).toBe(2);
-    expect(MapboxOverlay).toHaveBeenNthCalledWith(1, { interleaved: true });
+    expect(MapboxOverlay).toHaveBeenNthCalledWith(1, { interleaved: false });
     expect(MapboxOverlay).toHaveBeenNthCalledWith(2, { interleaved: false });
   });
 

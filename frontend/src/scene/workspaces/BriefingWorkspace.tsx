@@ -38,7 +38,6 @@ export function BriefingWorkspace({ workspace }: { workspace: WorkspaceInstance 
 
   // Support geographic map data conventions
   const geoMapData = (content.geo_data || content.map_data || content.map || content.spatial_map) as SpatialMapData | undefined;
-  const hasGeoData = Boolean(geoMapData && typeof geoMapData === "object");
   const hasTimeline = timelineItems.length > 0;
   const hasSources = sourceItems.length > 0;
 
@@ -55,29 +54,26 @@ export function BriefingWorkspace({ workspace }: { workspace: WorkspaceInstance 
         <div className="text-[10px] text-slate-400 font-mono">
           {new Date().toISOString().slice(0, 10)} // CHARLIE V1
         </div>
-      </div>
 
-      {/* 2. Primary Layout: Map-Centric or Editorial Narrative */}
-      {hasGeoData ? (
-        /* Geographic Briefing: Dominant Visual Map Left (~65%), Synthesis & Signals Right (~35%) */
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+      {/* 2. Primary Layout: the world map is context even without geo events. */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Dominant World Map Surface (Expanding to full visual anchor) */}
-          <div className="lg:col-span-8 h-[440px] sm:h-[500px] flex flex-col rounded-lg overflow-hidden border border-cyan-500/15 bg-transparent relative">
+          <div className="lg:col-span-8 h-[440px] sm:h-[500px] flex flex-col overflow-hidden bg-transparent relative charlie-map-immersive">
             <SpatialMapPrimitive
               data={{
                 mode: "geo",
                 title: "GLOBAL OPERATIONS THEATER",
                 subtitle: "REAL-TIME GEOGRAPHIC CORRELATION",
-                ...geoMapData,
+                ...(geoMapData && typeof geoMapData === "object" ? geoMapData : {}),
               }}
             />
           </div>
 
           {/* Right Rail: Editorial Headline & Key Developments */}
           <div className="lg:col-span-4 flex flex-col gap-4">
-            <div className="p-4 rounded-lg border border-cyan-500/15 bg-slate-950/50 backdrop-blur-sm space-y-2">
+            <div className="briefing-rail-section space-y-2">
               <div className="text-[10px] font-bold text-cyan-400 uppercase tracking-widest">
-                KEY DEVELOPMENT
+                TOP HEADLINE
               </div>
               <h2 className="text-sm sm:text-base font-bold text-slate-100 font-sans leading-snug">
                 {headline}
@@ -108,9 +104,9 @@ export function BriefingWorkspace({ workspace }: { workspace: WorkspaceInstance 
 
             {/* Vertical Timeline Signal Feed */}
             {hasTimeline && (
-              <div className="p-3.5 rounded-lg border border-cyan-500/10 bg-slate-950/30 space-y-2">
+              <div className="briefing-rail-section space-y-2">
                 <div className="text-[10px] font-bold text-cyan-400/80 uppercase tracking-widest">
-                  INCIDENT TIMELINE
+                  KEY TIMELINE
                 </div>
                 <div className="space-y-2">
                   {timelineItems.slice(0, 4).map((item, idx) => (
@@ -128,49 +124,7 @@ export function BriefingWorkspace({ workspace }: { workspace: WorkspaceInstance 
             )}
           </div>
         </div>
-      ) : (
-        /* Non-Map Editorial Briefing: High-Impact Editorial Synthesis */
-        <div className="space-y-6 max-w-5xl">
-          {/* Large Headline & Executive Synthesis (Typography-driven) */}
-          <div className="space-y-3 border-b border-cyan-500/15 pb-5">
-            <div className="text-[10px] font-bold text-cyan-400 uppercase tracking-widest">
-              EXECUTIVE SYNTHESIS
-            </div>
-            <h1 className="text-xl sm:text-2xl font-bold text-slate-100 font-sans tracking-tight leading-tight">
-              {headline}
-            </h1>
-            <div className="space-y-2 pt-2">
-              {summaries.map((summary, idx) => (
-                <div key={idx} className="flex items-start gap-3 text-sm text-slate-200 font-sans leading-relaxed">
-                  <span className="text-cyan-400 font-mono mt-0.5 text-xs font-bold">0{idx + 1} //</span>
-                  <span>{summary}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Sequence of Events as sparse rows with hairlines */}
-          {hasTimeline && (
-            <div className="space-y-3">
-              <div className="text-[10px] font-bold text-cyan-400/80 uppercase tracking-widest">
-                SEQUENCE OF EVENTS
-              </div>
-              <div className="divide-y divide-cyan-500/10 border-y border-cyan-500/10 py-1">
-                {timelineItems.map((item, idx) => (
-                  <div key={idx} className="py-2.5 px-1 flex items-baseline gap-4 hover:bg-cyan-950/20 transition rounded">
-                    <span className="text-xs text-cyan-400 font-mono flex-shrink-0 w-24">
-                      {item.time}
-                    </span>
-                    <span className="text-xs text-slate-200 font-sans">
-                      {item.title}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      </div>
 
       {/* 3. Bottom Evidence & Sources Strip (Safe Margins from Docked Core) */}
       {hasSources && (

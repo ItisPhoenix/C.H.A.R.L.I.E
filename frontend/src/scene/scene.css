@@ -24,6 +24,7 @@
 
   --core-center-size: clamp(280px, 36vw, 460px);
   --core-docked-size: 200px;
+  --workspace-core-safe: clamp(190px, 16vw, 250px);
 
   --ease-spatial: cubic-bezier(0.16, 1, 0.3, 1);
   --duration-fast: 150ms;
@@ -145,6 +146,92 @@
   width: 100%;
   height: 100%;
   pointer-events: auto;
+  padding: clamp(10px, 1.5vw, 24px) var(--workspace-core-safe) clamp(14px, 2vh, 28px) clamp(10px, 2vw, 32px);
+}
+
+.charlie-workspace-content {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(34,211,238,.18) transparent;
+}
+
+.charlie-workspace-controls {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 4;
+  display: flex;
+  gap: 4px;
+  opacity: .55;
+}
+.charlie-workspace-controls:hover { opacity: 1; }
+.charlie-control {
+  min-width: 22px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid rgba(34,211,238,.18);
+  background: rgba(2,7,14,.55);
+  color: rgba(159,196,214,.75);
+  font: 11px/1 "JetBrains Mono", monospace;
+  cursor: pointer;
+}
+.charlie-control:hover { color: var(--scene-cyan); border-color: rgba(34,211,238,.55); }
+
+.charlie-workspace-research > .charlie-mask-container,
+.charlie-workspace-briefing > .charlie-mask-container,
+.charlie-workspace-system > .charlie-mask-container,
+.charlie-workspace-tasks > .charlie-mask-container {
+  background: linear-gradient(90deg, rgba(2,8,15,.12), transparent 70%);
+}
+
+.charlie-empty-state {
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 8px;
+  color: var(--scene-text-muted);
+  font: 12px/1.5 Geist, system-ui, sans-serif;
+}
+.charlie-empty-kicker {
+  color: var(--scene-cyan-dim);
+  font: 10px/1 "JetBrains Mono", monospace;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+
+/* Spatial workspaces are open compositions. Keep primitive panels as signal
+   groupings, not nested dashboard cards. */
+.charlie-workspace-research .rounded-lg,
+.charlie-workspace-briefing .rounded-lg,
+.charlie-workspace-system .rounded-lg,
+.charlie-workspace-tasks .rounded-xl {
+  border-radius: 3px;
+  background-color: rgba(2, 7, 14, .22);
+  box-shadow: none;
+}
+.charlie-workspace-research .backdrop-blur-sm,
+.charlie-workspace-briefing .backdrop-blur-sm,
+.charlie-workspace-system .backdrop-blur-sm,
+.charlie-workspace-tasks .backdrop-blur-md { backdrop-filter: none; }
+
+.charlie-spatial-map,
+.charlie-map-immersive {
+  border-radius: 0;
+  box-shadow: none;
+  border: 0;
+  mask-image: radial-gradient(ellipse 98% 94% at 48% 48%, black 72%, rgba(0,0,0,.78) 88%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 98% 94% at 48% 48%, black 72%, rgba(0,0,0,.78) 88%, transparent 100%);
+}
+
+.briefing-rail-section {
+  border-top: 1px solid rgba(34,211,238,.17);
+  padding-top: 10px;
 }
 
 /* Content Mask Layer */
@@ -183,6 +270,21 @@
               border-color var(--duration-fast) var(--ease-spatial);
 }
 
+.charlie-widget-card {
+  border-radius: 3px;
+  backdrop-filter: none;
+  box-shadow: none;
+}
+.charlie-widget-card::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  pointer-events: none;
+  border-top: 1px solid rgba(34,211,238,.22);
+  border-bottom: 1px solid rgba(34,211,238,.10);
+  clip-path: polygon(0 0, 28px 0, 28px 1px, calc(100% - 28px) 1px, calc(100% - 28px) 0, 100% 0, 100% 100%, 72% 100%, 72% calc(100% - 1px), 28% calc(100% - 1px), 28% 100%, 0 100%);
+}
+
 /* Context Layer */
 .charlie-context-layer {
   position: absolute;
@@ -203,7 +305,7 @@
 
 .charlie-caption-box {
   display: inline-block;
-  padding: 10px 24px;
+  padding: 6px 14px;
   border-radius: var(--radius-md, 12px);
   background: rgba(6, 18, 28, 0.85);
   border: 1px solid rgba(34, 211, 238, 0.35);
@@ -211,7 +313,7 @@
   -webkit-backdrop-filter: blur(16px);
   color: var(--scene-cyan, #22d3ee);
   font-family: var(--font-mono, "JetBrains Mono", monospace);
-  font-size: clamp(13px, 1vw, 15px);
+  font-size: clamp(11px, 0.8vw, 13px);
   line-height: 1.45;
   letter-spacing: 0.05em;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 20px rgba(34, 211, 238, 0.15);

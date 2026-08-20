@@ -38,6 +38,10 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
   // Resolve analytical visuals from payload
   const spatialMapData = (content.radar || content.spatial_map || content.map_data || content.map) as SpatialMapData | undefined;
   const hasSpatial = Boolean(spatialMapData && typeof spatialMapData === "object");
+  const isGeographicSpatial = Boolean(
+    spatialMapData &&
+      (spatialMapData.mode === "geo" || content.geo_data || content.geography || content.geoData),
+  );
 
   const heatmapData = (content.heatmap || content.heatmap_data || content.density) as DensityHeatmapData | undefined;
   const hasHeatmap = Boolean(heatmapData && typeof heatmapData === "object");
@@ -119,11 +123,11 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
         /* Rich Spatial Research: Dominant Visual Left/Center (~65%), Asymmetric Synthesis Rail (~35%) */
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Dominant Analytical Visual Surface (Merging into dark environment) */}
-          <div className="lg:col-span-8 h-[400px] sm:h-[460px] flex flex-col rounded-lg overflow-hidden border border-cyan-500/15 bg-transparent relative">
+          <div className="lg:col-span-8 h-[420px] sm:h-[500px] flex flex-col overflow-hidden bg-transparent relative charlie-map-immersive">
             <SpatialMapPrimitive
               data={{
-                mode: "radar",
                 ...spatialMapData,
+                mode: isGeographicSpatial ? "geo" : "radar",
               }}
             />
           </div>
@@ -178,7 +182,7 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
         </div>
       ) : (
         /* Non-Spatial Research: Editorial Typography-Driven Synthesis */
-        <div className="space-y-6 max-w-5xl">
+        <div className="space-y-6 max-w-none">
           {/* Dominant Executive Conclusion / Synthesis (Typography-driven, minimal chrome) */}
           <div className="space-y-2 border-b border-cyan-500/15 pb-5">
             <div className="text-[10px] font-bold text-cyan-400 uppercase tracking-widest flex items-center justify-between">
@@ -230,16 +234,30 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
           )}
 
           {/* Optional Heatmap or Chart embedded cleanly if present in deep dive */}
-          {(hasHeatmap || hasChart) && disclosureLevel >= 3 && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-              {hasHeatmap && <DensityHeatmapPrimitive data={heatmapData!} />}
+          {(hasHeatmap || hasChart || hasTimeline) && disclosureLevel >= 2 && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 pt-2 max-w-6xl">
               {hasChart && (
-                <div className="p-3 rounded-xl border border-cyan-500/20 bg-slate-950/50 h-52">
+                <div className="border-t border-cyan-500/15 pt-3">
+                  <div className="text-[10px] font-bold text-cyan-400/80 uppercase tracking-widest mb-1">
+                    ANALYTICAL SIGNALS
+                  </div>
                   <ChartPrimitive
                     primitive={{
                       id: "chart_activity",
                       type: "chart",
                       data: chartData,
+                    }}
+                  />
+                </div>
+              )}
+              {hasHeatmap && <DensityHeatmapPrimitive data={heatmapData!} />}
+              {hasTimeline && (
+                <div className="border-t border-cyan-500/15 pt-3">
+                  <TimelinePrimitive
+                    data={{
+                      title: "EVIDENCE TIMELINE",
+                      layout: "vertical",
+                      items: timelineItems,
                     }}
                   />
                 </div>

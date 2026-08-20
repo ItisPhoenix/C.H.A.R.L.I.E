@@ -59,6 +59,20 @@ export function ProcessTelemetryPrimitive({
     );
   };
 
+  if (processes.length === 0) {
+    return (
+      <div className="w-full font-mono select-none flex flex-col gap-2 text-left">
+        <div>
+          <div className="text-xs font-semibold text-cyan-200 tracking-wider uppercase">{title}</div>
+          <div className="text-[10px] text-cyan-400/60 uppercase">{subtitle}</div>
+        </div>
+        <div className="border-y border-cyan-500/10 py-3 text-[11px] text-slate-500 italic">
+          NO ACTIVE PROCESSES REPORTED
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="w-full font-mono select-none flex flex-col gap-2">
       {/* Header */}
@@ -83,14 +97,7 @@ export function ProcessTelemetryPrimitive({
             </tr>
           </thead>
           <tbody className="divide-y divide-cyan-500/10">
-            {processes.length === 0 ? (
-              <tr>
-                <td colSpan={4} className="py-4 text-center text-slate-500 italic">
-                  No active processes recorded.
-                </td>
-              </tr>
-            ) : (
-              processes.map((p, idx) => (
+            {processes.map((p, idx) => (
                 <tr key={idx} className="hover:bg-cyan-950/20 transition-colors">
                   <td className="py-1.5 pr-4 text-cyan-200 font-medium truncate max-w-[160px]">
                     {p.name}
@@ -99,8 +106,7 @@ export function ProcessTelemetryPrimitive({
                   <td className="py-1.5 pr-4">{statusBadge(p.status)}</td>
                   <td className="py-1.5 text-slate-300">{p.uptime || "—"}</td>
                 </tr>
-              ))
-            )}
+              ))}
           </tbody>
         </table>
       </div>

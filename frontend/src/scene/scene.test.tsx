@@ -60,7 +60,7 @@ describe("CharlieScene spatial projection & layers", () => {
       },
     });
 
-    render(
+    const { container } = render(
       <MemoryRouter>
         <CharlieScene />
       </MemoryRouter>
@@ -72,7 +72,10 @@ describe("CharlieScene spatial projection & layers", () => {
 
     const ws = screen.getByRole("region", { name: /primary workspace/i });
     expect(ws).toBeDefined();
-    expect(screen.getAllByText(/Deep Research: Quantum Computing/i).length).toBeGreaterThan(0);
+    expect(ws).toHaveClass("charlie-workspace-research");
+    expect(screen.getByText("RESEARCH & SYNTHESIS")).toBeInTheDocument();
+    expect(screen.queryByText("Deep Research: Quantum Computing")).toBeNull();
+    expect(container.querySelector(".charlie-panel")).toBeNull();
   });
 
   test("removing workspace intent restores core to center", () => {
@@ -265,11 +268,14 @@ describe("CharlieScene spatial projection & layers", () => {
       contentState: {},
     };
 
-    render(
+    const { container } = render(
       <WorkspaceLayer activeWorkspace={mockWs} onDismiss={(id) => { dismissedId = id; }} />
     );
 
-    expect(screen.getByText("Direct Workspace Test")).toBeDefined();
+    expect(screen.getByRole("region", { name: "Primary Workspace Direct Workspace Test" })).toBeDefined();
+    expect(screen.getByText("CHARLIE HOST TERMINAL // CONPTY")).toBeDefined();
+    expect(screen.queryByText("Direct Workspace Test")).toBeNull();
+    expect(container.querySelector(".charlie-panel")).toBeNull();
     const closeBtn = screen.getByRole("button", { name: /close/i });
     fireEvent.click(closeBtn);
     expect(dismissedId).toBe("ws-direct-1");

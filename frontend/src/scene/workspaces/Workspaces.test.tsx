@@ -10,6 +10,7 @@ import { DocumentWorkspace } from "./DocumentWorkspace";
 import { TerminalWorkspace } from "./TerminalWorkspace";
 import { ConversationWorkspace } from "./ConversationWorkspace";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
+import { useCharlieStore } from "../../store/charlie";
 
 describe("Phase 9 Workspaces Suite", () => {
   const mockWorkspace: WorkspaceInstance = {
@@ -58,7 +59,7 @@ describe("Phase 9 Workspaces Suite", () => {
       />
     );
     expect(screen.getByText("OPERATIONAL INTELLIGENCE BRIEFING")).toBeDefined();
-    expect(screen.getByText("EXECUTIVE SYNTHESIS")).toBeDefined();
+    expect(screen.getByText("TOP HEADLINE")).toBeDefined();
     expect(screen.getByText("GLOBAL BRIEFING UPDATE")).toBeDefined();
     expect(screen.getByText("VERIFIED SOURCES")).toBeDefined();
   });
@@ -87,11 +88,25 @@ describe("Phase 9 Workspaces Suite", () => {
     expect(screen.getByText("INGESTION")).toBeDefined();
   });
 
-  test("TasksWorkspace renders execution plan, current progress step, and concurrent queue", () => {
+  test("TasksWorkspace collapses absent execution details while keeping progress and queue", () => {
+    useCharlieStore.setState({
+      tasks: {
+        "task-test-1": {
+          id: "task-test-1",
+          title: "Verified task",
+          status: "running",
+          currentStep: 1,
+          totalSteps: 1,
+          progress: 0.5,
+        },
+      },
+    });
     render(<TasksWorkspace workspace={{ ...mockWorkspace, type: "tasks" }} />);
     expect(screen.getByText("TASK EXECUTION WORKSPACE")).toBeDefined();
-    expect(screen.getByText("EXECUTION PLAN & STATUS")).toBeDefined();
+    expect(screen.queryByText("EXECUTION PLAN & STATUS")).toBeNull();
     expect(screen.getByText(/CONCURRENT TASKS/)).toBeDefined();
+    expect(screen.queryByText(/No current action reported/i)).toBeNull();
+    expect(screen.queryByText(/maritime|radar|anomaly|cross-correlation/i)).toBeNull();
   });
 
   test("MapWorkspace renders interactive spatial engine", () => {

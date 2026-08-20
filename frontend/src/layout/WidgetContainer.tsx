@@ -121,7 +121,7 @@ export function WidgetContainer({
 
   return (
     <div
-      className={`charlie-widget-card group absolute rounded-xl border backdrop-blur-md shadow-2xl transition-shadow select-none ${
+      className={`charlie-widget-card group absolute border transition-shadow select-none ${
         widget.focused
           ? "border-cyan-400/50 bg-slate-950/90 shadow-cyan-500/10"
           : "border-cyan-500/20 bg-slate-950/80 hover:border-cyan-500/35"
@@ -148,7 +148,7 @@ export function WidgetContainer({
       <span className="absolute -bottom-[1px] -right-[1px] w-2.5 h-2.5 border-b border-r border-cyan-400/70 pointer-events-none" />
       {/* Header bar (Drag Handle) */}
       <div
-        className="flex items-center justify-between px-3 py-2 cursor-grab active:cursor-grabbing border-b border-cyan-500/15"
+        className="flex items-center justify-between px-3 py-1 cursor-grab active:cursor-grabbing border-b border-cyan-500/15"
         onPointerDown={handlePointerDownHeader}
         onPointerMove={handlePointerMoveHeader}
         onPointerUp={handlePointerUpHeader}

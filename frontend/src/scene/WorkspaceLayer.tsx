@@ -168,21 +168,17 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
     );
   }
 
-  // Standard Framed Workspace Card Mode
+  // Spatial workspace mode: the workspace owns its composition; this host only
+  // provides safe-area geometry and the two global controls.
   return (
-    <div className="charlie-workspace-layer" role="region" aria-label={`Primary Workspace ${wsTitle}`}>
+    <div className={`charlie-workspace-layer charlie-workspace-${wsType}`} role="region" aria-label={`Primary Workspace ${wsTitle}`}>
       <ContentMaskLayer>
-        <div className="charlie-panel p-6 flex flex-col justify-between h-full pointer-events-auto relative">
-          <div className="flex items-center justify-between pb-2.5 border-b border-cyan-500/10 text-[11px] font-mono text-cyan-400/80 select-none">
-            <div className="flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-              <span className="tracking-wider uppercase font-medium">{wsTitle}</span>
-            </div>
-            <div className="flex items-center gap-1 opacity-60 hover:opacity-100 transition-opacity">
+        <div className="charlie-workspace-host pointer-events-auto relative">
+          <div className="charlie-workspace-controls" aria-label="Workspace controls">
               <button
                 type="button"
                 onClick={handleMinimize}
-                className="px-2 py-0.5 text-[11px] rounded bg-slate-900/40 border border-cyan-500/15 text-slate-400 hover:text-cyan-300 hover:border-cyan-400/30 transition cursor-pointer"
+                className="charlie-control"
                 title="Minimize [_]"
                 aria-label="Minimize workspace"
               >
@@ -191,18 +187,14 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
               <button
                 type="button"
                 onClick={handleClose}
-                className="px-2 py-0.5 text-[11px] rounded bg-slate-900/40 border border-cyan-500/15 text-slate-400 hover:text-rose-400 hover:border-rose-500/30 transition cursor-pointer"
+                className="charlie-control"
                 title="Close [ESC]"
                 aria-label="Close workspace"
               >
                 ×
               </button>
             </div>
-          </div>
-
-          <div className="flex-1 w-full min-h-0 pt-4 overflow-y-auto custom-scrollbar flex flex-col">
-            {renderWorkspaceContent()}
-          </div>
+          <div className="charlie-workspace-content custom-scrollbar">{renderWorkspaceContent()}</div>
         </div>
       </ContentMaskLayer>
     </div>

@@ -112,14 +112,16 @@ export function MapEngine(): ReactElement {
       // Render Mode Progression (Tier A -> Tier B -> Tier C)
       let tierInitialized = false;
 
-      // Tier A: MapLibre + Deck.gl interleaved
+      // Tier A: MapLibre + Deck.gl overlay.
+      // The non-interleaved path avoids MapLibre custom-layer frames racing
+      // with map disposal while preserving the same Deck-owned layers.
       try {
         const overlayA = new MapboxOverlay({
-          interleaved: true,
+          interleaved: false,
         });
         map.addControl(overlayA as unknown as maplibregl.IControl);
         overlayRef.current = overlayA;
-        setRenderMode("interleaved");
+        setRenderMode("overlay");
         tierInitialized = true;
       } catch (tierAErr) {
         console.warn("[MapEngine] Tier A (interleaved) failed, falling back to Tier B:", tierAErr);
@@ -150,10 +152,30 @@ export function MapEngine(): ReactElement {
       const handleLoad = () => {
         setReady(true);
         map.resize();
+        (window as any).__CHARLIE_MAP_PROOF__ = {
+          initialized: true,
+          styleLoaded: typeof map.isStyleLoaded === "function" ? map.isStyleLoaded() : false,
+          sourceCount: Object.keys(map.getStyle()?.sources || {}).length,
+          layerCount: map.getStyle()?.layers?.length || 0,
+          canvas: { width: map.getCanvas().width, height: map.getCanvas().height },
+          center: { latitude: map.getCenter().lat, longitude: map.getCenter().lng },
+          zoom: map.getZoom(),
+        };
         syncLayersAndRouteRef.current();
       };
 
       const handleStyleData = () => {
+        const style = map.getStyle();
+        (window as any).__CHARLIE_MAP_PROOF__ = {
+          ...((window as any).__CHARLIE_MAP_PROOF__ || {}),
+          initialized: true,
+          styleLoaded: typeof map.isStyleLoaded === "function" ? map.isStyleLoaded() : false,
+          sourceCount: Object.keys(style?.sources || {}).length,
+          layerCount: style?.layers?.length || 0,
+          canvas: { width: map.getCanvas().width, height: map.getCanvas().height },
+          center: { latitude: map.getCenter().lat, longitude: map.getCenter().lng },
+          zoom: map.getZoom(),
+        };
         syncLayersAndRouteRef.current();
       };
 
@@ -253,13 +275,33 @@ export function MapEngine(): ReactElement {
           map.off("pitchend", handleUserInteractionEnd);
           map.off("moveend", handleMoveEnd);
 
+          // Stop pending map frames and clear Deck's custom layer groups before
+          // detaching the interleaved control. MapLibre can otherwise render one
+          // queued custom-layer frame after the map transform has been disposed.
+          map.stop();
           if (overlayRef.current) {
-            map.removeControl(overlayRef.current as unknown as maplibregl.IControl);
+            const overlay = overlayRef.current;
+            // If MapLibre has already marked its style unavailable, Deck cannot
+            // remove its custom layer groups through resolveLayerGroups. Remove
+            // those groups directly while the map transform is still valid.
+            for (const layer of map.getStyle()?.layers || []) {
+              if (layer.id.startsWith("deck-layer-group-") && map.getLayer(layer.id)) {
+                map.removeLayer(layer.id);
+              }
+            }
+            try {
+              overlay.setProps({ layers: [] });
+            } catch {
+              // The map may already be tearing down; removeControl remains the
+              // authoritative cleanup path below.
+            }
+            map.removeControl(overlay as unknown as maplibregl.IControl);
             overlayRef.current = null;
           }
           map.remove();
           mapRef.current = null;
           (window as any).__CHARLIE_MAP_INSTANCE__ = null;
+          (window as any).__CHARLIE_MAP_PROOF__ = null;
         } catch {
           // Cleanup ignore
         }
