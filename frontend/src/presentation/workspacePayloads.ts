@@ -67,6 +67,60 @@ export interface BriefingWorkspacePayload {
   [key: string]: unknown;
 }
 
+const RESEARCH_SCHEMA = "charlie.research_workspace" as const;
+const RESEARCH_VERSION = 1 as const;
+const BRIEFING_SCHEMA = "charlie.briefing_workspace" as const;
+const BRIEFING_VERSION = 1 as const;
+
+function hasOwn(content: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(content, key);
+}
+
+function isLegacyPayload(content: Record<string, unknown>): boolean {
+  return !hasOwn(content, "schema") && !hasOwn(content, "version");
+}
+
+function isCanonicalPayload(
+  content: Record<string, unknown>,
+  schema: string,
+  version: number,
+  required: string[],
+): boolean {
+  return content.schema === schema && content.version === version && required.every((key) => hasOwn(content, key));
+}
+
+function unsupportedResearchPayload(): ResearchWorkspacePayload {
+  return {
+    schema: RESEARCH_SCHEMA,
+    version: RESEARCH_VERSION,
+    query: "",
+    mode: "standard",
+    title: "RESEARCH & SYNTHESIS",
+    summary: "Unsupported research workspace payload.",
+    status: "unsupported",
+    confidence: 0,
+    findings: [],
+    sources: [],
+    timeline_items: [],
+  };
+}
+
+function unsupportedBriefingPayload(): BriefingWorkspacePayload {
+  return {
+    schema: BRIEFING_SCHEMA,
+    version: BRIEFING_VERSION,
+    title: "Daily Briefing",
+    headline: "Daily Intelligence Briefing",
+    summary: "Unsupported briefing workspace payload.",
+    stories: [],
+    summaries: [],
+    timeline_items: [],
+    sources: [],
+    status: "unsupported",
+    confidence: 0,
+  };
+}
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -119,6 +173,14 @@ function timelineItems(value: unknown): TimelinePayloadItem[] {
 
 export function normalizeResearchWorkspacePayload(input: unknown): ResearchWorkspacePayload {
   const content = record(input);
+  if (
+    !isLegacyPayload(content) &&
+    !isCanonicalPayload(content, RESEARCH_SCHEMA, RESEARCH_VERSION, [
+      "query", "mode", "summary", "status", "confidence", "findings", "sources",
+    ])
+  ) {
+    return unsupportedResearchPayload();
+  }
   const sources = sourceItems(content.sources ?? content.evidence);
   const rawFindings = Array.isArray(content.findings)
     ? content.findings
@@ -136,8 +198,8 @@ export function normalizeResearchWorkspacePayload(input: unknown): ResearchWorks
   });
   return {
     ...content,
-    schema: "charlie.research_workspace",
-    version: 1,
+    schema: RESEARCH_SCHEMA,
+    version: RESEARCH_VERSION,
     query: text(content.query ?? content.subtitle),
     mode: text(content.mode, "standard"),
     title: text(content.title, "RESEARCH & SYNTHESIS"),
@@ -152,6 +214,14 @@ export function normalizeResearchWorkspacePayload(input: unknown): ResearchWorks
 
 export function normalizeBriefingWorkspacePayload(input: unknown): BriefingWorkspacePayload {
   const content = record(input);
+  if (
+    !isLegacyPayload(content) &&
+    !isCanonicalPayload(content, BRIEFING_SCHEMA, BRIEFING_VERSION, [
+      "headline", "summary", "stories", "summaries", "sources", "status", "confidence",
+    ])
+  ) {
+    return unsupportedBriefingPayload();
+  }
   const sources = sourceItems(content.sources ?? content.evidence);
   const rawStories = Array.isArray(content.stories) ? content.stories : [];
   const stories: BriefingStory[] = rawStories.map((item, index) => {
@@ -170,8 +240,8 @@ export function normalizeBriefingWorkspacePayload(input: unknown): BriefingWorks
     : stories.map((story) => story.summary).filter(Boolean);
   return {
     ...content,
-    schema: "charlie.briefing_workspace",
-    version: 1,
+    schema: BRIEFING_SCHEMA,
+    version: BRIEFING_VERSION,
     title: text(content.title, "Daily Briefing"),
     headline: text(content.headline ?? content.title, "Daily Intelligence Briefing"),
     summary: text(content.summary, "No grounded briefing stories were returned."),

@@ -589,8 +589,8 @@ async def main():
             loop,
         )
 
-    def on_research_result(report):
-        """Forward typed research cards; chat remains the text fallback."""
+    def on_research_result(report, *, session_id, task_id=None):
+        """Forward typed research cards with identity from owning chat turn."""
         if event_bus is None:
             return
         from charlie.research.presentation import (
@@ -603,7 +603,7 @@ async def main():
             if any(k in report.query.lower() for k in ("what's happening today", "daily briefing", "news"))
             else build_research_workspace_payload(report)
         )
-        payload["session_id"] = current_web_session_id
+        payload["session_id"] = session_id
 
         from charlie.presentation import ExecutionOutcome, default_presentation_resolver
 
@@ -618,7 +618,8 @@ async def main():
             result=payload.get("summary", ""),
             status="completed",
             data=payload,
-            session_id=current_web_session_id,
+            session_id=session_id,
+            task_id=task_id,
         )
         intent = default_presentation_resolver.resolve(outcome)
         logger.info(
@@ -636,14 +637,19 @@ async def main():
                     event_bus.emit(
                         "research_result",
                         payload,
-                        meta=EventMeta(source=EventSource.TASK),
+                        meta=EventMeta(source=EventSource.TASK, task_id=task_id, session_id=session_id),
                     )
                 )
                 cur_loop.create_task(
                     event_bus.emit(
                         "presentation_intent",
                         intent.to_dict(),
-                        meta=EventMeta(source=EventSource.TASK, rationale="research presentation intent"),
+                        meta=EventMeta(
+                            source=EventSource.TASK,
+                            task_id=task_id,
+                            session_id=session_id,
+                            rationale="research presentation intent",
+                        ),
                     )
                 )
             except RuntimeError:
@@ -651,7 +657,7 @@ async def main():
                     event_bus.emit(
                         "research_result",
                         payload,
-                        meta=EventMeta(source=EventSource.TASK),
+                        meta=EventMeta(source=EventSource.TASK, task_id=task_id, session_id=session_id),
                     ),
                     loop,
                 )
@@ -659,7 +665,12 @@ async def main():
                     event_bus.emit(
                         "presentation_intent",
                         intent.to_dict(),
-                        meta=EventMeta(source=EventSource.TASK, rationale="research presentation intent"),
+                        meta=EventMeta(
+                            source=EventSource.TASK,
+                            task_id=task_id,
+                            session_id=session_id,
+                            rationale="research presentation intent",
+                        ),
                     ),
                     loop,
                 )

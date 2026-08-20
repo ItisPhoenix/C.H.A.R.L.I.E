@@ -9,6 +9,7 @@ from charlie.research.presentation import (
     MAX_PAYLOAD_BYTES,
     build_briefing_workspace_payload,
     build_research_workspace_payload,
+    validate_workspace_payload,
 )
 
 
@@ -135,6 +136,23 @@ def test_payload_constants_and_required_fields_follow_shared_contract():
     assert all(field in briefing for field in _CONTRACT["payloads"]["briefing"]["required"])
 
 
+def test_workspace_payload_validator_enforces_schema_version_and_required_fields():
+    research = build_research_workspace_payload(_report())
+    briefing = build_briefing_workspace_payload(_report())
+
+    assert validate_workspace_payload(research, "research")
+    assert validate_workspace_payload(briefing, "briefing")
+
+    future = dict(research, version=99)
+    wrong_schema = dict(research, schema="charlie.briefing_workspace")
+    missing_required = dict(research)
+    del missing_required["findings"]
+    assert not validate_workspace_payload(future, "research")
+    assert not validate_workspace_payload(wrong_schema, "research")
+    assert not validate_workspace_payload(missing_required, "research")
+    assert not validate_workspace_payload({"summary": "legacy"}, "research")
+
+
 def test_resolver_consumes_canonical_payload_not_legacy_report_text():
     report = _report()
     payload = build_research_workspace_payload(report)
@@ -151,6 +169,51 @@ def test_resolver_consumes_canonical_payload_not_legacy_report_text():
     assert intent.content == payload
     assert "report" not in intent.content
     assert "UNTRUSTED" not in json.dumps(intent.content)
+
+
+def test_resolver_fails_safe_for_future_wrong_and_incomplete_research_payloads():
+    payload = build_research_workspace_payload(_report())
+    for invalid in (
+        dict(payload, version=99),
+        dict(payload, schema="charlie.briefing_workspace"),
+        {key: value for key, value in payload.items() if key != "findings"},
+    ):
+        intent = PresentationResolver().resolve(
+            ExecutionOutcome(
+                request="research topic",
+                capability="research",
+                operation="research.web.execute",
+                result="safe resolver fallback",
+                data=invalid,
+            )
+        )
+        assert intent.kind == PresentationKind.WORKSPACE
+        assert intent.content["findings"] == []
+        assert intent.content["sources"] == []
+        assert intent.content["status"] == "partial"
+        assert intent.content["summary"] == "safe resolver fallback"
+
+
+def test_resolver_fails_safe_for_future_wrong_and_incomplete_briefing_payloads():
+    payload = build_briefing_workspace_payload(_report())
+    for invalid in (
+        dict(payload, version=99),
+        dict(payload, schema="charlie.research_workspace"),
+        {key: value for key, value in payload.items() if key != "stories"},
+    ):
+        intent = PresentationResolver().resolve(
+            ExecutionOutcome(
+                request="daily briefing",
+                operation="news_briefing",
+                result="safe briefing fallback",
+                data=invalid,
+            )
+        )
+        assert intent.kind == PresentationKind.WORKSPACE
+        assert intent.content["stories"] == []
+        assert intent.content["sources"] == []
+        assert intent.content["status"] == "partial"
+        assert intent.content["summary"] == "safe briefing fallback"
 
 
 def test_structured_tool_result_preserves_string_compatibility(monkeypatch):
@@ -233,6 +296,46 @@ def test_research_callback_dedupe_is_turn_local_and_same_object_safe():
     assert emitted_a == [report]
     assert emitted_b == [report]
     assert report.answer == "answer-b"
+
+
+def test_concurrent_publication_boundary_preserves_turn_session_and_provenance():
+    reports = {
+        "session-a": _isolated_report("alpha research", "A1", "alpha finding"),
+        "session-b": _isolated_report("beta research", "B1", "beta finding"),
+    }
+    emitted = []
+
+    def callback(report, *, session_id, task_id=None):
+        emitted.append(
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "payload": build_research_workspace_payload(report),
+            }
+        )
+
+    async def publish(session_id):
+        await asyncio.sleep(0)
+        publish_turn_research_reports(
+            [reports[session_id]],
+            f"final answer for {session_id}",
+            callback,
+            session_id=session_id,
+            task_id=f"turn-{session_id}",
+        )
+
+    async def scenario():
+        await asyncio.gather(publish("session-a"), publish("session-b"))
+
+    asyncio.run(scenario())
+
+    by_session = {item["session_id"]: item for item in emitted}
+    assert by_session["session-a"]["task_id"] == "turn-session-a"
+    assert by_session["session-a"]["payload"]["findings"][0]["detail"] == "alpha finding"
+    assert by_session["session-b"]["task_id"] == "turn-session-b"
+    assert by_session["session-b"]["payload"]["findings"][0]["detail"] == "beta finding"
+    assert "beta" not in json.dumps(by_session["session-a"])
+    assert "alpha" not in json.dumps(by_session["session-b"])
 
 
 def test_failed_turn_does_not_mutate_successful_turn_payload():

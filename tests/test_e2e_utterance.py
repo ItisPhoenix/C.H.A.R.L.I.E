@@ -13,6 +13,8 @@ import pytest
 
 from charlie.config import Config
 from charlie.core import Brain
+from charlie.research.citations import assign_citations
+from charlie.research.models import EvidenceItem, ResearchMode, ResearchReport, SearchResult, SourceDocument
 
 
 @pytest.fixture
@@ -65,11 +67,33 @@ def _sse_text_response(text: str):
     return MockResponse()
 
 
-async def _collect(brain, utterance):
+async def _collect(brain, utterance, **kwargs):
     chunks = []
-    async for chunk in brain.chat_stream(utterance, platform="web"):
+    async for chunk in brain.chat_stream(utterance, platform="web", **kwargs):
         chunks.append(chunk)
     return "".join(chunks)
+
+
+def _structured_research_report(query: str = "explicit research") -> ResearchReport:
+    source = SourceDocument(
+        source_id="S1",
+        url="https://example.com/explicit",
+        canonical_url="https://example.com/explicit",
+        title="Explicit source",
+        domain="example.com",
+        content="Grounded explicit evidence.",
+    )
+    report = ResearchReport(
+        query=query,
+        mode=ResearchMode.QUICK,
+        search_results=[SearchResult("Explicit source", source.url, "Grounded explicit evidence.")],
+        sources=[source],
+        evidence=[EvidenceItem("S1", "Grounded explicit evidence.", confidence=0.9)],
+        confidence=0.9,
+        stop_reason="evidence-sufficient",
+    )
+    report.citations = assign_citations(report.sources)
+    return report
 
 
 class TestFastPathsBypassLlm:
@@ -180,6 +204,104 @@ class TestNormalRoundTrips:
         result = await _collect(brain, "what's the weather")
         assert "sunny" in result.lower()
         assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool_name", ["web_research", "web_search"])
+    async def test_explicit_structured_research_publishes_final_followup_once(
+        self, monkeypatch, brain_config, tool_name
+    ):
+        brain = Brain(brain_config)
+        calls = {"llm": 0, "research": 0}
+        report = _structured_research_report("explicit research")
+        published = []
+        final_answer = "Final synthesized answer from explicit research."
+
+        def mock_stream(*args, **kwargs):
+            calls["llm"] += 1
+            if calls["llm"] == 1:
+                return _sse_tool_call_response(tool_name, {"query": "explicit research"})
+            return _sse_text_response(final_answer)
+
+        def run_research(name, arguments):
+            calls["research"] += 1
+            assert name == tool_name
+            return report
+
+        monkeypatch.setattr(brain.client, "stream", mock_stream)
+        monkeypatch.setattr("charlie.tools._run_research_report", run_research)
+        brain.on_research_result = lambda item, *, session_id, task_id=None: published.append(
+            (item, session_id, task_id)
+        )
+
+        result = await _collect(brain, "explicitly research this", skip_pre_search=True, session_id="session-explicit")
+
+        assert final_answer in result
+        assert calls["research"] == 1
+        assert len(published) == 1
+        assert published[0][0] is report
+        assert published[0][0].answer == final_answer
+        assert published[0][1] == "session-explicit"
+        assert published[0][2]
+
+    @pytest.mark.asyncio
+    async def test_failed_research_followup_does_not_publish_error_as_synthesis(self, monkeypatch, brain_config):
+        brain = Brain(brain_config)
+        report = _structured_research_report()
+        published = []
+
+        async def initial_tool_call(*args, **kwargs):
+            return "", [{"id": "call-1", "name": "web_research", "arguments": {"query": "explicit research"}}]
+
+        monkeypatch.setattr(brain, "_stream_completion", initial_tool_call)
+        monkeypatch.setattr(
+            "charlie.tools._run_research_report",
+            lambda name, arguments: report,
+        )
+
+        async def failed_followup(*args, **kwargs):
+            raise RuntimeError("follow-up unavailable")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(brain, "_stream_followup_once", failed_followup)
+        brain.on_research_result = lambda item, *, session_id, task_id=None: published.append(item)
+
+        result = await _collect(brain, "explicitly research this", skip_pre_search=True, session_id="session-failed")
+
+        assert "follow-up model call failed" in result
+        assert published == []
+        assert report.answer == ""
+
+    @pytest.mark.asyncio
+    async def test_automatic_pre_search_publishes_one_report_after_final_answer(self, monkeypatch, brain_config):
+        brain = Brain(brain_config)
+        report = _structured_research_report("fresh web question")
+        research_calls = []
+        prompt_payloads = []
+        published = []
+
+        async def run_research(query, session_id):
+            research_calls.append((query, session_id))
+            return report
+
+        async def final_completion(payload, generation):
+            prompt_payloads.append(payload)
+            return "Final answer grounded in fresh evidence.", []
+
+        monkeypatch.setattr(brain, "_run_research", run_research)
+        monkeypatch.setattr(brain, "_stream_completion", final_completion)
+        brain.on_research_result = lambda item, *, session_id, task_id=None: published.append(
+            (item, session_id, task_id)
+        )
+
+        result = await _collect(brain, "fresh web question",)
+
+        assert "Final answer grounded" in result
+        assert research_calls == [("fresh web question", "default")]
+        assert len(prompt_payloads) == 1
+        assert "UNTRUSTED SOURCE CONTENT" in json.dumps(prompt_payloads[0])
+        assert len(published) == 1
+        assert published[0][0] is report
+        assert report.answer == "Final answer grounded in fresh evidence."
 
     @pytest.mark.asyncio
     async def test_desktop_click_sequence_round_trip(self, monkeypatch, brain_config):

@@ -62,9 +62,17 @@ def publish_turn_research_reports(
     reports: List[ResearchReport],
     answer: str,
     callback: Optional[callable],
+    *,
+    session_id: Optional[str] = None,
+    task_id: Optional[str] = None,
 ) -> None:
-    """Emit each report once within one turn; retain no cross-turn state."""
-    if not callback:
+    """Emit each report once after a useful final synthesis exists.
+
+    Session/task identity belongs to the turn that collected the report. The
+    legacy one-argument callback form remains available for callers that do
+    not have turn identity, but Brain always supplies it.
+    """
+    if not callback or not answer or not answer.strip():
         return
     seen: set[int] = set()
     for report in reports:
@@ -72,7 +80,10 @@ def publish_turn_research_reports(
             continue
         seen.add(id(report))
         report.answer = answer
-        callback(report)
+        if session_id is None and task_id is None:
+            callback(report)
+        else:
+            callback(report, session_id=session_id, task_id=task_id)
 if TYPE_CHECKING:
     from charlie.config import Config
 
@@ -1938,7 +1949,13 @@ class Brain:
                 search_results = research_report.prompt_context()
 
         def publish_research_reports(answer: str) -> None:
-            publish_turn_research_reports(turn_research_reports, answer, self.on_research_result)
+            publish_turn_research_reports(
+                turn_research_reports,
+                answer,
+                self.on_research_result,
+                session_id=session_id,
+                task_id=turn_id,
+            )
 
         # --- Force a fresh screen observation for screen-content questions ---
         # Injected the same way as web search results (below) so the model is
@@ -2395,6 +2412,7 @@ class Brain:
                 hist_filter = TextStreamFilter()
                 clean_accumulated = hist_filter.push(accumulated) + hist_filter.flush()
                 if not tool_calls and clean_accumulated:
+                    publish_research_reports(clean_accumulated)
                     yield clean_accumulated
                 self.history.append({"role": "assistant", "content": clean_accumulated})
                 # Save to vector memory (fire-and-forget)

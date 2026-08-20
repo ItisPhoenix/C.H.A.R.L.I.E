@@ -62,4 +62,60 @@ describe("workspace payload normalization", () => {
     });
     expect(payload.findings[0]?.source_ids).toEqual([]);
   });
+
+  it.each([
+    ["future version", { schema: "charlie.research_workspace", version: 99, findings: [{ detail: "future" }] }],
+    ["wrong schema", { schema: "charlie.briefing_workspace", version: 1, stories: [{ title: "briefing" }] }],
+    ["missing canonical field", {
+      schema: "charlie.research_workspace",
+      version: 1,
+      query: "q",
+      mode: "quick",
+      summary: "summary",
+      status: "complete",
+      confidence: 0,
+      sources: [],
+    }],
+  ])("fails safe for %s instead of interpreting unknown research content", (_label, input) => {
+    const payload = normalizeResearchWorkspacePayload(input);
+
+    expect(payload.status).toBe("unsupported");
+    expect(payload.findings).toEqual([]);
+    expect(payload.sources).toEqual([]);
+    expect(payload.summary).toContain("Unsupported");
+  });
+
+  it.each([
+    ["future version", { schema: "charlie.briefing_workspace", version: 99, stories: [{ title: "future" }] }],
+    ["wrong schema", { schema: "charlie.research_workspace", version: 1, findings: [{ title: "research" }] }],
+    ["missing canonical field", {
+      schema: "charlie.briefing_workspace",
+      version: 1,
+      headline: "Headline",
+      summary: "Summary",
+      stories: [],
+      sources: [],
+      status: "complete",
+      confidence: 0,
+    }],
+  ])("fails safe for %s instead of interpreting unknown briefing content", (_label, input) => {
+    const payload = normalizeBriefingWorkspacePayload(input);
+
+    expect(payload.status).toBe("unsupported");
+    expect(payload.stories).toEqual([]);
+    expect(payload.sources).toEqual([]);
+    expect(payload.summary).toContain("Unsupported");
+  });
+
+  it("keeps unversioned legacy briefing payloads bounded and compatible", () => {
+    const payload = normalizeBriefingWorkspacePayload({
+      title: "Legacy briefing",
+      summary: "Legacy summary",
+      stories: [{ title: "Legacy story", summary: "Legacy detail" }],
+    });
+
+    expect(payload.version).toBe(1);
+    expect(payload.stories).toHaveLength(1);
+    expect(payload.status).toBe("partial");
+  });
 });

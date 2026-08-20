@@ -809,9 +809,12 @@ class PresentationResolver:
         ctx: PresentationContext,
         result_text: str,
     ) -> PresentationIntent:
-        payload = outcome.data if outcome.data.get("schema") == "charlie.research_workspace" else {
-            "schema": "charlie.research_workspace",
-            "version": 1,
+        from charlie.research.presentation import validate_workspace_payload, workspace_payload_spec
+
+        spec = workspace_payload_spec("research")
+        payload = dict(outcome.data) if validate_workspace_payload(outcome.data, "research") else {
+            "schema": spec["schema"],
+            "version": spec["version"],
             "query": outcome.request,
             "mode": "standard",
             "title": "Research & Synthesis",
@@ -841,12 +844,15 @@ class PresentationResolver:
         ctx: PresentationContext,
         result_text: str,
     ) -> PresentationIntent:
-        if outcome.data.get("schema") == "charlie.briefing_workspace":
-            payload = outcome.data
+        from charlie.research.presentation import validate_workspace_payload, workspace_payload_spec
+
+        spec = workspace_payload_spec("briefing")
+        if validate_workspace_payload(outcome.data, "briefing"):
+            payload = dict(outcome.data)
         else:
             payload = {
-                "schema": "charlie.briefing_workspace",
-                "version": 1,
+                "schema": spec["schema"],
+                "version": spec["version"],
                 "title": "Daily Briefing",
                 "headline": "Daily Intelligence Briefing",
                 "summary": result_text[:1200],

@@ -12,7 +12,29 @@ from charlie.research.models import Citation, ResearchReport, SearchResult, Sour
 
 _CONTRACT_PATH = Path(__file__).resolve().parents[2] / "shared" / "workspace_payload_contract.json"
 _CONTRACT = json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
-PAYLOAD_SCHEMA_VERSION = int(_CONTRACT["payloads"]["research"]["version"])
+
+
+def workspace_payload_spec(kind: str) -> dict[str, Any]:
+    """Return canonical schema metadata directly from shared contract."""
+    try:
+        return _CONTRACT["payloads"][kind]
+    except KeyError as exc:
+        raise ValueError(f"Unknown workspace payload kind: {kind}") from exc
+
+
+def validate_workspace_payload(payload: Any, kind: str) -> bool:
+    """Validate canonical schema, supported version, and required fields."""
+    if not isinstance(payload, dict):
+        return False
+    spec = workspace_payload_spec(kind)
+    return (
+        payload.get("schema") == spec["schema"]
+        and payload.get("version") == spec["version"]
+        and all(field in payload for field in spec.get("required", []))
+    )
+
+
+PAYLOAD_SCHEMA_VERSION = int(workspace_payload_spec("research")["version"])
 MAX_PAYLOAD_BYTES = int(_CONTRACT["limits"]["max_serialized_bytes"])
 MAX_SOURCES = int(_CONTRACT["limits"]["max_sources"])
 MAX_FINDINGS = int(_CONTRACT["limits"]["max_findings"])
@@ -153,8 +175,8 @@ def build_research_workspace_payload(report: ResearchReport) -> dict[str, Any]:
     sources = _source_records(report)
     findings = _finding_records(report, sources)
     payload = {
-        "schema": "charlie.research_workspace",
-        "version": PAYLOAD_SCHEMA_VERSION,
+        "schema": workspace_payload_spec("research")["schema"],
+        "version": workspace_payload_spec("research")["version"],
         "query": _clean_text(report.query, 500),
         "mode": report.mode.value,
         "title": "Research & Synthesis",
@@ -203,8 +225,8 @@ def build_briefing_workspace_payload(report: ResearchReport) -> dict[str, Any]:
         " ".join(story["summary"] for story in stories[:2]), MAX_TEXT
     )
     payload = {
-        "schema": "charlie.briefing_workspace",
-        "version": PAYLOAD_SCHEMA_VERSION,
+        "schema": workspace_payload_spec("briefing")["schema"],
+        "version": workspace_payload_spec("briefing")["version"],
         "title": "Daily Briefing",
         "headline": headline,
         "summary": summary or "No grounded briefing stories were returned.",
