@@ -17,6 +17,12 @@ from charlie.runtime_introspector import RuntimeIntrospector
 
 logger = logging.getLogger("charlie.self_knowledge")
 
+_SUBSYSTEM_STATUS_PATTERN = re.compile(
+    r"\b(is|are)\s+(mcp(?: servers?)?|eventbus|terminal|browser|desktop|vision|pet)\s+"
+    r"(running|connected|available|healthy|working)\b",
+    re.IGNORECASE,
+)
+
 # Self-question detection patterns. Presentation entity names stay in
 # PresentationRegistry; these patterns only describe semantic query shapes.
 _SELF_PATTERNS = [
@@ -28,10 +34,7 @@ _SELF_PATTERNS = [
         re.IGNORECASE,
     ),
     re.compile(r"\b(what|which)\s+(tools|capabilities|skills|commands)\b", re.IGNORECASE),
-    re.compile(
-        r"\b(is|are)\s+(mcp|mcp servers?|eventbus)\s+(running|connected|available|healthy|working)\b",
-        re.IGNORECASE,
-    ),
+    _SUBSYSTEM_STATUS_PATTERN,
     re.compile(
         r"\b(what|which|how|where)\b.*\b(hud|ui|workspace|widget|overlay|presentation|visual|surface|core|ring|surfacecomposer)\b",
         re.IGNORECASE,
@@ -144,6 +147,18 @@ class SelfKnowledgeService:
             self._code_index.refresh()
         return self._code_index
 
+    def _get_runtime_config(self) -> Any:
+        """Return config through RuntimeIntrospector without exposing secrets."""
+        if self._config is not None:
+            return self._config
+        getter = getattr(self._introspector, "_get_config", None)
+        if getter is not None:
+            try:
+                return getter()
+            except Exception:
+                return None
+        return None
+
     @staticmethod
     def _query_tokens(query: str) -> List[str]:
         """Return safe natural-language tokens used for registry lookup."""
@@ -171,6 +186,8 @@ class SelfKnowledgeService:
     def _is_presentation_query(self, query: str) -> bool:
         """Recognize presentation questions without owning presentation names."""
         q_lower = query.lower()
+        if _SUBSYSTEM_STATUS_PATTERN.search(q_lower):
+            return False
         if any(re.search(rf"\b{re.escape(term)}s?\b", q_lower) for term in _PRESENTATION_TERMS):
             return True
         has_surface_context = bool(
@@ -251,7 +268,9 @@ class SelfKnowledgeService:
             sources.append("capability.registry")
 
         # 3. Tasks & Leases queries
-        if any(k in q_lower for k in ("task", "doing", "leases", "running")):
+        if not _SUBSYSTEM_STATUS_PATTERN.search(q_lower) and any(
+            k in q_lower for k in ("task", "doing", "leases", "running")
+        ):
             tasks_info = self._introspector.get_tasks_info()
             leases_info = self._introspector.get_leases_info()
             runtime_facts["tasks"] = tasks_info
@@ -279,7 +298,24 @@ class SelfKnowledgeService:
             runtime_facts["subsystems"] = subsys_info
             sources.append("runtime.health")
 
-        # 7. Presentation & HUD surfaces queries. RuntimeIntrospector owns the
+        # 7. Direct subsystem-status queries. These are semantic SelfKnowledge
+        # domains, not presentation entities.
+        if _SUBSYSTEM_STATUS_PATTERN.search(q_lower):
+            if not re.search(r"\b(mcp|eventbus|pet)\b", q_lower):
+                runtime_facts["subsystems"] = self._introspector.get_subsystem_info()
+                sources.append("runtime.subsystems")
+            if "vision" in q_lower:
+                vision_caps = self._introspector.get_capabilities_info()
+                cap_facts = vision_caps.get("by_id", {})
+                sources.append("capability.registry")
+            if "pet" in q_lower:
+                config = self._get_runtime_config()
+                runtime_facts["config"] = {
+                    "pet_enabled": getattr(config, "pet_enabled", "unknown") if config else "unknown"
+                }
+                sources.append("runtime.config")
+
+        # 8. Presentation & HUD surfaces queries. RuntimeIntrospector owns the
         # inventory; SelfKnowledge only decides when to request that evidence.
         if self._is_presentation_query(query):
             pres_info = self._introspector.get_presentation_info()
@@ -507,6 +543,50 @@ class SelfKnowledgeService:
 
         return None
 
+    def _answer_subsystem_status(self, query: str, evidence: SelfKnowledgeEvidence) -> Optional[str]:
+        """Answer semantic subsystem status without confusing it with presentation."""
+        if not _SUBSYSTEM_STATUS_PATTERN.search(query):
+            return None
+        q_lower = query.lower()
+
+        if "mcp" in q_lower:
+            mcp = evidence.runtime_facts.get("mcp", self._introspector.get_mcp_info())
+            return (
+                f"MCP subsystem: **{mcp.get('configured_servers', 0)}** servers configured, "
+                f"**{mcp.get('connected_servers', 0)}** currently connected."
+            )
+
+        if "pet" in q_lower:
+            configured = evidence.runtime_facts.get("config", {}).get("pet_enabled", "unknown")
+            if configured is True:
+                config_text = "configured enabled"
+            elif configured is False:
+                config_text = "configured disabled"
+            else:
+                config_text = "configuration unknown"
+            return (
+                f"The native Pet companion is implemented and {config_text}; "
+                "active process/window status is unknown."
+            )
+
+        subsystem = next(
+            (name for name in ("browser", "desktop", "terminal", "vision") if name in q_lower),
+            None,
+        )
+        if subsystem is None:
+            return None
+        facts = evidence.runtime_facts.get("subsystems", {}).get(subsystem, {})
+        if subsystem == "vision":
+            facts = evidence.capability_facts.get("vision", facts)
+        available = facts.get("available") if isinstance(facts, dict) else None
+        availability = "available" if available is True else "unavailable" if available is False else "unknown"
+        if "available" in q_lower:
+            return f"{subsystem.capitalize()} subsystem is currently **{availability}**."
+        return (
+            f"{subsystem.capitalize()} subsystem availability is **{availability}**; "
+            "active working state is not directly tracked by this runtime."
+        )
+
     def answer_self_question(self, query: str) -> Dict[str, Any]:
         """Generate an evidence-grounded truthful answer for self-questions."""
         evidence = self.get_evidence_for_query(query)
@@ -515,10 +595,15 @@ class SelfKnowledgeService:
 
         # 1. Presentation & HUD Questions (checked early for specialized presentation queries)
         pres_ans = self._answer_presentation_question(query, evidence)
+        subsystem_ans = self._answer_subsystem_status(query, evidence)
         if pres_ans:
             parts.append(pres_ans)
 
-        # 2. Model Query
+        # 2. Semantic subsystem status query
+        elif subsystem_ans:
+            parts.append(subsystem_ans)
+
+        # 3. Model Query
         elif any(k in q_lower for k in ("what model", "which model", "llm provider", "configured model")):
             m = evidence.runtime_facts.get("model", self._introspector.get_model_info())
             provider = m.get("provider", "openai")

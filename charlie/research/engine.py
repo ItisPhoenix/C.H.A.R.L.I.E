@@ -25,7 +25,7 @@ from charlie.research.models import (
 from charlie.research.ranking import rank_documents, rank_search_results
 from charlie.research.router import ResearchDecision, route
 from charlie.research.search import build_plan, search_plan
-from charlie.research.shopping import extract_products
+from charlie.research.shopping import extract_products, is_shopping_query
 
 logger = logging.getLogger("charlie.research.engine")
 
@@ -251,7 +251,22 @@ class ResearchEngine:
             report.citations = assign_citations(report.sources)
             report.evidence = build_evidence(report.sources, query)
 
-        report.products = extract_products(report.sources, query, str(getattr(self.config, "research_currency", "INR")))
+        report.products = []
+        if is_shopping_query(query, plan):
+            try:
+                report.products = extract_products(
+                    report.sources,
+                    query,
+                    str(getattr(self.config, "research_currency", "INR")),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Product enrichment failed: query=%r error=%s",
+                    query,
+                    exc,
+                    exc_info=True,
+                )
+                report.products = []
         report.media = media_results(report.search_results)
         report.confidence = min(
             1.0,

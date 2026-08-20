@@ -657,14 +657,67 @@ async def main():
             return
         payload = report.structured_payload()
         payload["session_id"] = current_web_session_id
-        asyncio.run_coroutine_threadsafe(
-            event_bus.emit(
-                "research_result",
-                payload,
-                meta=EventMeta(source=EventSource.TASK),
-            ),
-            loop,
+
+        from charlie.presentation import ExecutionOutcome, default_presentation_resolver
+
+        is_briefing = any(
+            k in report.query.lower()
+            for k in ("what's happening today", "daily briefing", "news")
         )
+        outcome = ExecutionOutcome(
+            request=report.query,
+            capability="research",
+            operation="news_briefing" if is_briefing else "research.web.execute",
+            result=report.prompt_context(),
+            status="completed",
+            data=payload,
+            session_id=current_web_session_id,
+        )
+        intent = default_presentation_resolver.resolve(outcome)
+        logger.info(
+            "Research result resolved presentation intent: id=%s kind=%s ws_type=%s is_briefing=%s",
+            intent.id,
+            intent.kind,
+            intent.workspace_type,
+            is_briefing,
+        )
+
+        def _emit_events():
+            try:
+                cur_loop = asyncio.get_running_loop()
+                cur_loop.create_task(
+                    event_bus.emit(
+                        "research_result",
+                        payload,
+                        meta=EventMeta(source=EventSource.TASK),
+                    )
+                )
+                cur_loop.create_task(
+                    event_bus.emit(
+                        "presentation_intent",
+                        intent.to_dict(),
+                        meta=EventMeta(source=EventSource.TASK, rationale="research presentation intent"),
+                    )
+                )
+            except RuntimeError:
+                asyncio.run_coroutine_threadsafe(
+                    event_bus.emit(
+                        "research_result",
+                        payload,
+                        meta=EventMeta(source=EventSource.TASK),
+                    ),
+                    loop,
+                )
+                asyncio.run_coroutine_threadsafe(
+                    event_bus.emit(
+                        "presentation_intent",
+                        intent.to_dict(),
+                        meta=EventMeta(source=EventSource.TASK, rationale="research presentation intent"),
+                    ),
+                    loop,
+                )
+
+        _emit_events()
 
     try:
         brain = Brain(

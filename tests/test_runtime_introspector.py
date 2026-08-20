@@ -185,4 +185,93 @@ def test_runtime_default_introspector_sanity():
     assert snapshot["process"]["pid"] == os.getpid()
     assert "capabilities" in snapshot
     assert "model" in snapshot
+    assert "presentation" in snapshot
+
+
+def test_presentation_info_structure_and_provenance():
+    """Verify get_presentation_info() derives full inventory from PresentationRegistry."""
+    from charlie.presentation_registry import get_presentation_registry
+
+    registry = get_presentation_registry()
+    introspector = RuntimeIntrospector()
+    pres = introspector.get_presentation_info()
+
+    assert pres["status"] == "available"
+
+    # Contract version & surface schema version
+    assert pres["contract"]["contract_version"] == registry.contract_version
+    assert pres["contract"]["surface_schema_version"] == registry.surface_schema_version
+
+    # Runtime activity checks
+    assert "hud_enabled" in pres["runtime"]
+    assert "hud_runtime_active" in pres["runtime"]
+
+    # Core states and positions
+    assert pres["core"]["states"] == registry.get_core_states()
+    assert pres["core"]["positions"] == registry.get_core_positions()
+    assert pres["core"]["rules"] == registry.get_core_rules()
+
+    # Workspaces
+    assert pres["workspaces"]["count"] == len(registry.list_workspaces())
+    assert pres["workspaces"]["canonical"] == registry.list_workspaces()
+    for ws_name in registry.list_workspaces():
+        assert ws_name in pres["workspaces"]["definitions"]
+        assert pres["workspaces"]["definitions"][ws_name]["name"] == ws_name
+    assert "settings" not in pres["workspaces"]["canonical"]
+
+    # Widgets
+    assert pres["widgets"]["count"] == len(registry.list_widgets())
+    assert pres["widgets"]["canonical"] == registry.list_widgets()
+    for w_name in registry.list_widgets():
+        assert w_name in pres["widgets"]["definitions"]
+        assert pres["widgets"]["definitions"][w_name]["name"] == w_name
+
+    # Overlays
+    assert pres["overlays"]["count"] == len(registry.list_overlays())
+    assert pres["overlays"]["canonical"] == registry.list_overlays()
+    assert "settings" in pres["overlays"]["canonical"]
+    assert "settings" in pres["overlays"]["definitions"]
+
+    # Primitives, layouts, actions
+    assert pres["surface_primitives"] == registry.list_surface_primitives()
+    assert pres["layout_types"] == registry.list_layout_types()
+    assert pres["presentation_kinds"] == registry.list_presentation_kinds()
+    assert pres["dismiss_policies"] == registry.list_dismiss_policies()
+    assert pres["preferred_zones"] == registry.list_preferred_zones()
+    assert pres["anchors"] == registry.list_anchors()
+    assert pres["actions"] == registry.list_actions()
+
+
+def test_presentation_info_no_secrets():
+    """Verify presentation introspection output contains no secrets."""
+    introspector = RuntimeIntrospector()
+    pres = introspector.get_presentation_info()
+    dumped = str(pres).lower()
+    assert "sk-" not in dumped
+    assert "secret" not in dumped
+    assert "password" not in dumped
+    assert "api_key" not in dumped
+
+
+def test_presentation_error_isolation():
+    """Verify that failure in presentation registry does not crash get_snapshot()."""
+
+    class BrokenRegistry:
+        def list_widgets(self):
+            raise RuntimeError("Database/contract corrupted")
+
+    broken_introspector = RuntimeIntrospector(presentation_registry=BrokenRegistry())
+    pres = broken_introspector.get_presentation_info()
+
+    assert pres["status"] == "error"
+    assert pres["error_type"] == "RuntimeError"
+    assert "Database/contract corrupted" in pres["message"]
+
+    # Snapshot still works cleanly despite presentation error
+    snapshot = broken_introspector.get_snapshot()
+    assert isinstance(snapshot, dict)
+    assert snapshot["presentation"]["status"] == "error"
+    assert "process" in snapshot
+    assert "capabilities" in snapshot
+
 

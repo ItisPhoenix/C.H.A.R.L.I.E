@@ -441,3 +441,45 @@ def test_dynamic_extensibility_hypothetical_workspace():
     assert "quantum_telemetry" in alias_ans["answer"]
     assert "quantum_spatial" in alias_ans["answer"]
 
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Is browser available?",
+        "Is desktop available?",
+        "Is terminal available?",
+        "Is vision available?",
+        "Is pet running?",
+        "Is MCP connected?",
+    ],
+)
+def test_subsystem_status_questions_remain_self_questions(query):
+    """Subsystem status categories must not regress into presentation lookup."""
+    service = SelfKnowledgeService()
+
+    result = service.answer_self_question(query)
+
+    assert service.is_self_question(query) is True
+    assert result["is_self_question"] is True
+    assert "runtime.presentation" not in result["evidence_sources"]
+
+
+def test_subsystem_status_answers_are_truthful_and_grounded():
+    """Status answers use runtime/config evidence and never fabricate Pet activity."""
+    service = SelfKnowledgeService()
+
+    browser = service.answer_self_question("Is browser available?")
+    assert "browser" in browser["answer"].lower()
+    assert "available" in browser["answer"].lower() or "unavailable" in browser["answer"].lower()
+    assert "runtime.subsystems" in browser["evidence_sources"]
+
+    pet = service.answer_self_question("Is pet running?")
+    assert "implemented" in pet["answer"].lower()
+    assert "configured" in pet["answer"].lower()
+    assert "unknown" in pet["answer"].lower()
+    assert "runtime.config" in pet["evidence_sources"]
+    assert "currently running" not in pet["answer"].lower()
+
+    mcp = service.answer_self_question("Is MCP connected?")
+    assert "mcp subsystem" in mcp["answer"].lower()
+    assert "runtime.mcp" in mcp["evidence_sources"]
