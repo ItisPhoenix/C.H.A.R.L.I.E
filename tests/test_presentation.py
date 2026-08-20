@@ -195,6 +195,95 @@ class TestPresentationKindSelection:
         assert intent.kind == PresentationKind.SILENT
         assert intent.dismiss_policy == DismissPolicy.IMMEDIATE
 
+    def test_migrated_surface_policy_matches_pre_prompt6_values(self):
+        resolver = PresentationResolver()
+        cases = [
+            (
+                "system_metric",
+                ExecutionOutcome(capability="system", operation="system.metrics.read", result="CPU 10%"),
+                PresentationContext(),
+                {"priority": 50, "anchor": AnchorTarget.CORE, "replayable": False},
+            ),
+            (
+                "media_control",
+                ExecutionOutcome(capability="media", operation="media.volume.set", result="Volume 50%"),
+                PresentationContext(user_intent="show"),
+                {"priority": 50, "anchor": AnchorTarget.CORE, "replayable": False},
+            ),
+            (
+                "research",
+                ExecutionOutcome(capability="research", operation="research.web.execute", result="Findings"),
+                PresentationContext(),
+                {"priority": 65, "anchor": AnchorTarget.SCREEN, "replayable": True},
+            ),
+            (
+                "briefing",
+                ExecutionOutcome(operation="news_briefing", result="Briefing"),
+                PresentationContext(),
+                {"priority": 60, "anchor": AnchorTarget.SCREEN, "replayable": True},
+            ),
+            (
+                "map",
+                ExecutionOutcome(capability="map", operation="map.navigate", result="Map"),
+                PresentationContext(),
+                {"priority": 65, "anchor": AnchorTarget.SCREEN, "replayable": True},
+            ),
+            (
+                "terminal",
+                ExecutionOutcome(capability="terminal", operation="terminal.command.execute", result="PS>"),
+                PresentationContext(),
+                {"priority": 60, "anchor": AnchorTarget.SCREEN, "replayable": True},
+            ),
+            (
+                "file_viewer",
+                ExecutionOutcome(
+                    request="show files",
+                    capability="file",
+                    operation="file.system.read",
+                    result="listing",
+                ),
+                PresentationContext(),
+                {"priority": 50, "anchor": AnchorTarget.CORE, "replayable": False},
+            ),
+            (
+                "composed_widget",
+                ExecutionOutcome(
+                    capability="composer",
+                    operation="compose",
+                    result={"type": "composed_surface", "target": "widget", "surface_id": "cw"},
+                ),
+                PresentationContext(),
+                {"priority": 55, "anchor": AnchorTarget.CORE, "replayable": True},
+            ),
+            (
+                "composed_workspace",
+                ExecutionOutcome(
+                    capability="composer",
+                    operation="compose",
+                    result={"type": "composed_surface", "target": "workspace", "surface_id": "cs"},
+                ),
+                PresentationContext(),
+                {"priority": 55, "anchor": AnchorTarget.SCREEN, "replayable": True},
+            ),
+        ]
+        for surface, outcome, context, expected in cases:
+            intent = resolver.resolve(outcome, context)
+            assert intent.priority == expected["priority"], surface
+            assert intent.anchor == expected["anchor"], surface
+            assert intent.replayable is expected["replayable"], surface
+
+    def test_migrated_surface_non_registry_policy_fields_remain_explicit(self):
+        resolver = PresentationResolver()
+        intent = resolver.resolve(
+            ExecutionOutcome(capability="research", operation="research.web.execute", result="Findings")
+        )
+        assert intent.attention_level == AttentionLevel.NORMAL
+        assert intent.capability == "research"
+        assert intent.operation == "research.web.execute"
+        assert intent.spoken_text == "I've compiled the research findings on your canvas."
+        assert intent.caption_text == "Research Workspace opened"
+        assert intent.replace_key == "workspace:research:main"
+
 
 class TestPresentationContextOverrides:
     """Test 2: Contextual overrides (explicit show, tell, hide)."""

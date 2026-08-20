@@ -40,6 +40,26 @@ def test_explicit_requests_resolve_through_registry_taxonomy_and_emit_typed_even
     assert events[-1]["type"] == "presentation_dismiss"
 
 
+def test_explicit_prompt5_policy_parity_for_map_settings_and_media():
+    controller, _ = _controller_with_events()
+    expected = {
+        "map": ("workspace", "core", True),
+        "settings": ("overlay", "screen", False),
+        "media": ("widget", "core", False),
+    }
+    for raw, (taxonomy, anchor, replayable) in expected.items():
+        result = controller.resolve(PresentationRequest("show", raw))
+        assert result.accepted is True
+        payload = result.event["payload"]
+        assert payload["priority"] == 60
+        assert payload["anchor"] == anchor
+        assert payload["replayable"] is replayable
+        assert payload["capability"] == "presentation"
+        assert payload["operation"] == "presentation.show"
+        assert payload["spoken_text"] == f"Showing {result.canonical_surface.replace('_', ' ')}."
+        assert payload["replace_key"] == f"presentation:{taxonomy}:{result.canonical_surface}"
+
+
 def test_registry_resolution_precedence_and_ambiguity_are_explicit():
     registry = get_presentation_registry()
 

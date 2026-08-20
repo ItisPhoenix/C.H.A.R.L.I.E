@@ -314,6 +314,7 @@ class PresentationResolver:
         title: Optional[str] = None,
         summary: str = "",
         priority: int = 60,
+        anchor_override: Optional[AnchorTarget] = None,
         spoken_text: Optional[str] = None,
         caption_text: Optional[str] = None,
         replace_key: Optional[str] = None,
@@ -388,7 +389,7 @@ class PresentationResolver:
             widget_type=resolved_surface if resolved_taxonomy == "widget" else None,
             overlay_type=resolved_surface if resolved_taxonomy == "overlay" else None,
             preferred_zone=preferred_zone,
-            anchor=anchor,
+            anchor=anchor_override or anchor,
             spoken_text=spoken_text,
             caption_text=caption_text,
             replace_key=replace_key or f"{resolved_taxonomy}:{resolved_surface}",
@@ -447,6 +448,7 @@ class PresentationResolver:
             content={"surface": canonical_surface, "taxonomy": taxonomy, "source": outcome.source},
             summary=f"{canonical_surface.replace('_', ' ')} {taxonomy}",
             capability="presentation",
+            anchor_override=AnchorTarget.CORE if taxonomy == "workspace" else None,
             spoken_text=f"Showing {canonical_surface.replace('_', ' ')}.",
             replace_key=f"presentation:{taxonomy}:{canonical_surface}",
         )
@@ -726,6 +728,7 @@ class PresentationResolver:
             operation=outcome.operation or "system.metrics.read",
             title="System Telemetry",
             summary=result_text,
+            priority=50,
             content={
                 "metrics": outcome.data.get("metrics", {}),
                 "text": result_text,
@@ -747,6 +750,7 @@ class PresentationResolver:
                 outcome,
                 semantic_role="media_control",
                 capability="media",
+                priority=50,
                 title="Media Player",
                 summary=result_text,
                 content=outcome.data,
@@ -809,6 +813,7 @@ class PresentationResolver:
             outcome,
             semantic_role="research_result",
             capability="research",
+            priority=65,
             title="Research Findings",
             summary=result_text[:120] if result_text else "Research completed.",
             content={
@@ -858,6 +863,7 @@ class PresentationResolver:
             operation=outcome.operation or "news_briefing",
             title="Daily Briefing",
             summary=result_text[:120] if result_text else "Today's briefing.",
+            priority=60,
             content=content_dict,
             spoken_text="Here is your daily briefing.",
             caption_text="Daily Briefing opened",
@@ -876,6 +882,7 @@ class PresentationResolver:
             capability="terminal",
             title="Terminal",
             summary="Terminal Session Active",
+            priority=60,
             content={"output": result_text, "cwd": outcome.data.get("cwd", "")},
             caption_text="Terminal Workspace active",
             replace_key="workspace:terminal",
@@ -927,6 +934,7 @@ class PresentationResolver:
                 capability="file",
                 title="Directory Listing",
                 summary=result_text,
+                priority=50,
                 content={"listing": result_text, "path": outcome.data.get("path")},
                 spoken_text=result_text[:100],
                 caption_text=result_text[:80],
@@ -1062,6 +1070,7 @@ class PresentationResolver:
             spoken_text=data.get("spoken_summary"),
             caption_text=data.get("caption_summary"),
             replace_key=f"surface:{data.get('surface_id', surface_type)}",
+            replayable=True,
         )
         if intent.kind in (PresentationKind.WORKSPACE, PresentationKind.WIDGET):
             intent.kind = PresentationKind.COMPOSED_SURFACE
