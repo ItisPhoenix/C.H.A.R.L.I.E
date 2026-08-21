@@ -1,0 +1,16 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Reply with exactly: CHARLIE_RUNTIME_OK"
+    },
+    {
+      "role": "assistant",
+      "content": "CHARLIE_RUNTIME_OK"
+    },
+    {
+      "role": "user",
+      "content": "What Python version is this system using?"
+    }
+  ]
+}

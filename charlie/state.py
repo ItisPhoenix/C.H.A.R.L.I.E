@@ -37,7 +37,10 @@ _DIRECT_TRANSITIONS = {
     EventType.TOOL_CALL: CoreState.WORKING,
     EventType.TOOL_RESULT: CoreState.THINKING,
     EventType.TOOL_APPROVAL_REQUEST: CoreState.WAITING,
-    EventType.SPEAKING_STOP: CoreState.COMPLETED,
+    # TTS completion is the end of the active voice turn.  Returning through
+    # COMPLETED would preserve SPEAKING as the transient state's prior stable
+    # state and leave the core speaking indefinitely after expiry.
+    EventType.SPEAKING_STOP: CoreState.IDLE,
     EventType.RESPONSE_DONE: CoreState.COMPLETED,
 }
 

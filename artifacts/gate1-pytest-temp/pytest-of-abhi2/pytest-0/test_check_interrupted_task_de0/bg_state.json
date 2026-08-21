@@ -1,0 +1,1 @@
+{"id": "t1", "text": "open notepad and calculator", "steps": ["Open notepad", "Open calculator"], "current_step": 0, "status": "failed", "flagged_steps": [], "error": "Charlie restarted while this task was still running.", "session_id": ""}

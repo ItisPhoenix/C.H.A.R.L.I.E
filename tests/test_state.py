@@ -105,10 +105,11 @@ def test_alert_success_severity_does_not_transition():
     assert sm.state == CoreState.THINKING
 
 
-def test_speaking_stop_transitions_to_completed():
+def test_speaking_stop_returns_to_idle():
     sm = StateMachine()
     sm.apply(_event(EventType.SPEAKING_START))
-    assert sm.apply(_event(EventType.SPEAKING_STOP)) == CoreState.COMPLETED
+    assert sm.apply(_event(EventType.SPEAKING_STOP)) == CoreState.IDLE
+    assert sm.state == CoreState.IDLE
 
 
 def test_response_done_transitions_to_completed():

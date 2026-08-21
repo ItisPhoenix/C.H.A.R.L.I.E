@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Reply with exactly: CHARLIE_RUNTIME_OK"
+    },
+    {
+      "role": "assistant",
+      "content": "CHARLIE_RUNTIME_OK"
+    }
+  ]
+}
