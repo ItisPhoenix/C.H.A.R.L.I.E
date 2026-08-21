@@ -119,6 +119,7 @@ _HELM_PERSONA_TEXT = (
     "to get an annotated image, then use desktop_click_at or desktop_drag "
     "with the pixel coordinates read off that annotated screenshot -- not "
     "desktop_click with a mark id, since there is no mark for these targets. "
+    "Do not use shell_execute when a native desktop capability can perform the action. "
     "If 3 consecutive verification checks fail (the expected change didn't "
     "happen), stop attempting and report the failure to the user rather than "
     "continuing to retry blindly. Desktop actions proceed without an extra "

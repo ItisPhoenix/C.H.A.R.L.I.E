@@ -160,6 +160,40 @@ _ROUTER_CLASSIFIER_TIMEOUT_S = 0.6
 # as declined (matches charlie.recovery.request_recovery_approval's 30s, plus
 # headroom for the voice fallback's speak-prompt-then-listen round trip).
 _TOOL_APPROVAL_TIMEOUT_SEC = 45.0
+_REPEATED_TOOL_RESULT = (
+    "Repeated identical tool call suppressed. Choose another valid capability or finish the response."
+)
+_REPEATED_TOOL_FAILURE = (
+    "I couldn't complete that because the model kept requesting an invalid or repeated action."
+)
+
+
+class _RepeatToolCallGuard:
+    """Suppress same-turn repeats after a tool failure without caching success."""
+
+    def __init__(self, escape_after: int = 2):
+        self._blocked: set[str] = set()
+        self._suppressed = 0
+        self._escape_after = escape_after
+
+    def before(self, signature: str) -> bool:
+        if signature in self._blocked:
+            self._suppressed += 1
+            return True
+        self._suppressed = 0
+        return False
+
+    def record(self, signature: str, *, failed: bool, state_changed: bool = False) -> None:
+        if failed:
+            self._blocked.add(signature)
+            return
+        self._suppressed = 0
+        if state_changed:
+            self._blocked.clear()
+
+    @property
+    def should_escape(self) -> bool:
+        return self._suppressed >= self._escape_after
 
 # request_id -> Future[bool], resolved by main.py:consume_web_commands (web
 # "tool_approve"/"tool_reject" commands) or by the voice yes/no fallback in
@@ -2118,6 +2152,7 @@ class Brain:
 
         # --- Tool execution loop ---
         _seen_tool_calls: Dict[str, str] = {}
+        _repeat_guard = _RepeatToolCallGuard()
         # Desktop clicks/types are not idempotent -- two identical calls are
         # two real actions, not a cache hit. Desktop perception (observe/
         # read_screen/screenshot) isn't cacheable either -- the screen can
@@ -2133,6 +2168,9 @@ class Brain:
             nonlocal research_report
             tool_name = call["name"]
             ck = f"{call['name']}({json.dumps(call['arguments'], sort_keys=True)})"
+            if _repeat_guard.before(ck):
+                logger.warning("Suppressing repeated failed tool call: %s", ck)
+                return _REPEATED_TOOL_RESULT
             if tool_name not in _DESKTOP_COM_TOOLS and ck in _seen_tool_calls:
                 logger.info("Tool %s already executed, reusing result", call["name"])
                 return _seen_tool_calls[ck]
@@ -2258,6 +2296,16 @@ class Brain:
             if tool_name == "memory" and not r.startswith("Error"):
                 self.reload_context()
 
+            _repeat_guard.record(
+                ck,
+                failed=bool((gate_reason and not approved) or r.startswith("Error")),
+                state_changed=(
+                    not r.startswith("Error")
+                    and tool_name
+                    not in {"desktop_observe", "desktop_read_screen", "desktop_screenshot", "desktop_windows"}
+                ),
+            )
+
             # Anomaly auto-halt: repeated failure of the same call means looping, not progress.
             if tool_name in _DESKTOP_CONTROL_TOOLS:
                 if r.startswith("Error"):
@@ -2337,6 +2385,13 @@ class Brain:
                     results_map[idx] = await _exec_one(call)
 
             exec_results = [results_map[i] for i in range(len(tool_calls))]
+            if _repeat_guard.should_escape:
+                if any(c["name"] in _DESKTOP_CONTROL_TOOLS for c in tool_calls):
+                    self._turn_halted = True
+                yield _REPEATED_TOOL_FAILURE
+                if self._turn_halted:
+                    yield " Desktop control halted for this turn."
+                return
             # Step 3: Post-tool confidence gate - replace low-quality results
             exec_results = [
                 r if _assess_tool_result_relevance(c["name"], r)

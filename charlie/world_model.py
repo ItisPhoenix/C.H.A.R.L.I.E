@@ -2,6 +2,7 @@
 state, same boundary shape as charlie/session_store.py.
 """
 
+import json
 import logging
 import re
 import sqlite3
@@ -153,6 +154,8 @@ class WorldModel:
     # --- Writers: machine events ---
 
     def record_event(self, event_type: str, detail: str) -> None:
+        if not isinstance(detail, str):
+            detail = json.dumps(detail, ensure_ascii=False, sort_keys=True)
         def _op():
             with self.conn:
                 self.conn.execute(

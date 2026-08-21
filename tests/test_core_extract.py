@@ -6,7 +6,27 @@ Text-mode (local models) must still match bare patterns.
 
 from unittest.mock import MagicMock, patch
 
-from charlie.core import Brain
+from charlie.core import Brain, _RepeatToolCallGuard
+
+
+class TestRepeatToolCallGuard:
+    def test_repeated_failed_call_is_suppressed(self):
+        guard = _RepeatToolCallGuard()
+        guard.record("shell_execute({})", failed=True)
+        assert guard.before("shell_execute({})") is True
+
+    def test_state_change_clears_blocked_signature(self):
+        guard = _RepeatToolCallGuard()
+        guard.record("desktop_type({})", failed=True)
+        guard.record("desktop_key({})", failed=False, state_changed=True)
+        assert guard.before("desktop_type({})") is False
+
+    def test_two_suppressed_calls_escape(self):
+        guard = _RepeatToolCallGuard()
+        guard.record("shell_execute({})", failed=True)
+        assert guard.before("shell_execute({})") is True
+        assert guard.before("shell_execute({})") is True
+        assert guard.should_escape is True
 
 
 def _make_brain(use_native_tools: bool) -> Brain:

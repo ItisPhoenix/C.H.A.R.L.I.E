@@ -399,7 +399,7 @@ async def test_auto_halt_threshold_is_two_for_regular_desktop_call(monkeypatch, 
         results.append(chunk)
 
     assert any("halted" in str(r).lower() for r in results)
-    assert exec_count == 2  # took 2 identical failures before halting
+    assert exec_count == 1  # repeated identical failure was suppressed before re-execution
 
 
 @pytest.mark.asyncio

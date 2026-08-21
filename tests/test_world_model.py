@@ -206,6 +206,11 @@ class TestProposedRules:
 
 
 class TestMachineEvents:
+    def test_record_event_serializes_structured_detail(self, wm):
+        wm.record_event("presentation", {"kind": "caption", "text": "ready"})
+        events = wm.recent_events(event_type="presentation")
+        assert events[0][1] == '{"kind": "caption", "text": "ready"}'
+
     def test_record_and_recall_event(self, wm):
         wm.record_event("tool_error", "shell_execute: boom")
         events = wm.recent_events()
