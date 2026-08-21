@@ -79,6 +79,7 @@ temp/
 *.cert
 
 # === Non-codebase tooling & artifacts (kept on disk, not in git) ===
+artifacts/
 docs/
 .commandcode/
 voicedock-preview.html

@@ -1,9 +1,0 @@
-{
-  "session_id": "voice_1b40611a-a297-4139-b3bb-285febec1f86",
-  "messages": [
-    {
-      "role": "user",
-      "content": "What Python version is this system using?"
-    }
-  ]
-}
