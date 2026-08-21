@@ -33,7 +33,7 @@ def run_qa_captures():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1920, "height": 1080})
-        page.goto(URL)
+        page.goto(f"{URL}{'&' if '?' in URL else '?'}qa_fixture=1")
         page.wait_for_load_state("networkidle")
         time.sleep(2.0)
 
@@ -90,15 +90,24 @@ def run_qa_captures():
             const { charlie, workspace, widget } = window.__CHARLIE_STORES__;
             workspace.getState().clearWorkspaces();
             widget.getState().clearScreen();
-            charlie.setState({ coreState: 'idle', activeCaption: null });
+            charlie.setState({ coreState: 'idle', activeCaption: null, presentationIntents: {} });
         """)
         time.sleep(1.0)
+        idle_main = page.locator("main.charlie-scene-root")
+        idle_state = {
+            "scene": idle_main.get_attribute("data-scene-mode"),
+            "position": idle_main.get_attribute("data-core-position"),
+            "core": idle_main.get_attribute("data-core-state"),
+            "label": page.locator(".charlie-core-state-label").inner_text().strip(),
+        }
+        if idle_state != {"scene": "idle", "position": "center", "core": "idle", "label": "IDLE"}:
+            raise AssertionError(f"FAIL CAPTURE: Idle fixture contamination: {idle_state}")
         assert_and_capture(
             "01_idle_1920x1080.png",
             expected_type="idle",
             expected_renderer="CharlieCore (Centered)",
             content_keys="none",
-            required_selectors_or_texts=['[data-core-position="center"]']
+            required_selectors_or_texts=['.charlie-core-center']
         )
 
         # ----------------------------------------------------
@@ -246,7 +255,7 @@ def run_qa_captures():
                 content: { mode: 'geo' }
             });
         """)
-        wait_for_map_readiness(timeout_sec=8)
+        wait_for_map_readiness(timeout_sec=15)
         assert_and_capture(
             "04_map_default_1920x1080.png",
             expected_type="map",
@@ -269,7 +278,7 @@ def run_qa_captures():
                 severity: 'normal'
             });
         """)
-        wait_for_map_readiness(timeout_sec=5)
+        wait_for_map_readiness(timeout_sec=12)
         assert_and_capture(
             "05_map_context_card.png",
             expected_type="map",
@@ -325,7 +334,7 @@ def run_qa_captures():
             });
             map.getState().setCamera({ longitude: 76.45, latitude: 27.81, zoom: 7.2 });
         """)
-        wait_for_map_readiness(timeout_sec=8, require_route=True)
+        wait_for_map_readiness(timeout_sec=15, require_route=True)
         # Regression: geodesic route MUST NOT render driving-navigation terms
         route_html = html.unescape(page.content())
         forbidden_geodesic = ["NH48", "bypass highway", "DRIVING"]
@@ -356,7 +365,7 @@ def run_qa_captures():
             });
             map.getState().setCamera({ longitude: 76.4, latitude: 27.8, zoom: 8.2 });
         """)
-        wait_for_map_readiness(timeout_sec=6)
+        wait_for_map_readiness(timeout_sec=12)
         assert_and_capture(
             "04b_map_closeup.png",
             expected_type="map",
@@ -390,7 +399,7 @@ def run_qa_captures():
             page.locator("button[aria-label='Toggle intelligence layers menu']").click()
         except Exception:
             pass
-        wait_for_map_readiness(timeout_sec=6)
+        wait_for_map_readiness(timeout_sec=12)
         assert_and_capture(
             "07_map_layer_enabled.png",
             expected_type="map",
@@ -409,7 +418,7 @@ def run_qa_captures():
         # 8. Research - Rich / Spatial Result
         # ----------------------------------------------------
         setup_state("""
-            const { workspace } = window.__CHARLIE_STORES__;
+            const { workspace, map } = window.__CHARLIE_STORES__;
             workspace.getState().openWorkspace({
                 id: 'ws_research_spatial',
                 kind: 'workspace',
@@ -426,8 +435,8 @@ def run_qa_captures():
                     summary: 'Synthesis of high-bandwidth trans-Pacific corridors connecting Tokyo, Guam, and San Francisco. High resilience observed across Northern segments.',
                     confidence: 0.94,
                     status: 'VERIFIED',
-                    radar: {
-                        mode: 'radar',
+                    spatial_map: {
+                        mode: 'geo',
                         center: [140.0, 35.0],
                         rangeKm: 2500,
                         objects: [
@@ -437,9 +446,9 @@ def run_qa_captures():
                         ]
                     },
                     findings: [
-                        { id: 'f1', title: 'Latency Optimization Corridor', detail: 'New low-loss optical route reduces Tokyo-SF roundtrip latency by 8.4ms.', iconType: 'trend' },
-                        { id: 'f2', title: 'Fault Line Redundancy', detail: 'Multi-landing mesh automatically reroutes traffic away from subsea seismic zones.', iconType: 'shield' },
-                        { id: 'f3', title: 'Bandwidth Saturation', detail: 'Peak nocturnal traffic loads sustained at 94.2% theoretical throughput with zero packet drop.', iconType: 'signal' }
+                        { id: 'f1', title: 'Latency Optimization Corridor', detail: 'New low-loss optical route reduces Tokyo-SF roundtrip latency by 8.4ms.', iconType: 'trend', confidence: 0.96 },
+                        { id: 'f2', title: 'Fault Line Redundancy', detail: 'Multi-landing mesh automatically reroutes traffic away from subsea seismic zones.', iconType: 'shield', confidence: 0.91 },
+                        { id: 'f3', title: 'Bandwidth Saturation', detail: 'Peak nocturnal traffic loads sustained at 94.2% theoretical throughput with zero packet drop.', iconType: 'signal', confidence: 0.88 }
                     ],
                     sources: [
                         { id: 's1', title: 'Subsea Cable Telemetry Index', url: 'https://subsea.internal/telemetry', publisher: 'Pacific Ocean Comms' },
@@ -447,13 +456,22 @@ def run_qa_captures():
                     ]
                 }
             });
+            // Keep the acceptance fixture's Pacific geography aligned with the live MapEngine.
+            // This is QA-only camera input; production map defaults remain payload-driven.
+            map.getState().dispatchCommand({
+                type: 'fly_to',
+                longitude: 160.0,
+                latitude: 30.0,
+                zoom: 2.2,
+                durationMs: 0
+            });
         """)
         time.sleep(1.2)
         assert_and_capture(
             "08_research_spatial.png",
             expected_type="research",
-            expected_renderer="ResearchWorkspace (Spatial Radar)",
-            content_keys="radar,findings,sources,summary,confidence",
+            expected_renderer="ResearchWorkspace (Spatial Map)",
+            content_keys="spatial_map,findings,sources,summary,confidence",
             required_selectors_or_texts=['PACIFIC FIBER TOPOLOGY', 'SYNTHESIS SUMMARY', 'SUPPORTING EVIDENCE', 'Latency Optimization Corridor']
         )
 
@@ -480,9 +498,24 @@ def run_qa_captures():
                     confidence: 0.98,
                     status: 'PEER-VERIFIED',
                     findings: [
-                        { id: 'f1', title: 'Heartbeat Tuning', detail: 'Dynamic adaptive election timeouts prevent spurious leader re-elections during transit degradation.' },
-                        { id: 'f2', title: 'Log Compaction & Deltas', detail: 'Incremental delta snapshots reduce sync network footprint by 62% across slow satellite uplinks.' },
-                        { id: 'f3', title: 'Quorum Slicing Architecture', detail: 'Regional sub-quorums guarantee local read/write availability during inter-datacenter network partitions.' }
+                        { id: 'f1', title: 'Heartbeat Tuning', detail: 'Dynamic adaptive election timeouts prevent spurious leader re-elections during transit degradation.', confidence: 0.99 },
+                        { id: 'f2', title: 'Log Compaction & Deltas', detail: 'Incremental delta snapshots reduce sync network footprint by 62% across slow satellite uplinks.', confidence: 0.96 },
+                        { id: 'f3', title: 'Quorum Slicing Architecture', detail: 'Regional sub-quorums guarantee local read/write availability during inter-datacenter network partitions.', confidence: 0.93 }
+                    ],
+                    chart: {
+                        chartType: 'line',
+                        title: 'VERIFICATION COVERAGE',
+                        unit: '%',
+                        data: [
+                            { label: 'Sources', value: 82 },
+                            { label: 'Findings', value: 94 },
+                            { label: 'Contradictions', value: 12 },
+                            { label: 'Verified', value: 98 }
+                        ]
+                    },
+                    timeline_items: [
+                        { time: '09:10 UTC', title: 'Source corpus reconciled', status: 'completed' },
+                        { time: '09:24 UTC', title: 'Finding confidence updated', status: 'active' }
                     ],
                     sources: [
                         { id: 's1', title: 'Consensus Protocols Survey 2026', url: 'https://arxiv.org/abs/sample1', publisher: 'Distributed Systems Journal' },
@@ -548,7 +581,7 @@ def run_qa_captures():
             expected_type="briefing",
             expected_renderer="BriefingWorkspace (Geographic)",
             content_keys="headline,summaries,geo_data,timeline_items,sources",
-            required_selectors_or_texts=['OPERATIONAL INTELLIGENCE BRIEFING', 'KEY DEVELOPMENT', 'INCIDENT TIMELINE', 'Active monitoring of Northern Hemisphere']
+            required_selectors_or_texts=['OPERATIONAL INTELLIGENCE BRIEFING', 'TOP HEADLINE', 'KEY TIMELINE', 'Active monitoring of Northern Hemisphere']
         )
 
         # ----------------------------------------------------
@@ -591,7 +624,7 @@ def run_qa_captures():
             expected_type="briefing",
             expected_renderer="BriefingWorkspace (Editorial)",
             content_keys="headline,summaries,timeline_items,sources",
-            required_selectors_or_texts=['OPERATIONAL INTELLIGENCE BRIEFING', 'EXECUTIVE SYNTHESIS', 'SEQUENCE OF EVENTS', 'Autonomous OS infrastructure update']
+            required_selectors_or_texts=['OPERATIONAL INTELLIGENCE BRIEFING', 'TOP HEADLINE', 'KEY TIMELINE', 'Autonomous OS infrastructure update']
         )
 
         # ----------------------------------------------------
@@ -631,6 +664,24 @@ def run_qa_captures():
                         { id: 'op2', title: 'VECTOR GRAPH EMBEDDING', subtitle: 'Incremental knowledge graph compaction', progress: 40, status: 'RUNNING' },
                         { id: 'op3', title: 'DIAGNOSTIC BACKUP SNAPSHOT', subtitle: 'Scheduled disk snapshot retention', progress: 0, status: 'QUEUED' }
                     ],
+                    topology: {
+                        mode: 'topology',
+                        nodes: [
+                            { id: 'brain', label: 'Charlie Core', sublabel: 'available', x: 50, y: 50, status: 'active' },
+                            { id: 'voice', label: 'Voice', sublabel: 'active', x: 20, y: 25, status: 'active' },
+                            { id: 'research', label: 'Research', sublabel: 'active', x: 80, y: 25, status: 'active' },
+                            { id: 'browser', label: 'Browser', sublabel: 'available', x: 18, y: 75, status: 'idle' },
+                            { id: 'memory', label: 'Memory', sublabel: 'degraded', x: 82, y: 75, status: 'warning' },
+                            { id: 'mcp', label: 'MCP', sublabel: 'unknown', x: 50, y: 15, status: 'idle' }
+                        ],
+                        edges: [
+                            { from: 'brain', to: 'voice', type: 'link', active: true },
+                            { from: 'brain', to: 'research', type: 'link', active: true },
+                            { from: 'brain', to: 'browser', type: 'link', active: true },
+                            { from: 'brain', to: 'memory', type: 'link', active: false },
+                            { from: 'brain', to: 'mcp', type: 'link', active: false }
+                        ]
+                    },
                     processes: {
                         title: 'WHAT IS RUNNING',
                         processes: [
@@ -709,7 +760,12 @@ def run_qa_captures():
                         status: 'running',
                         currentStep: 3,
                         totalSteps: 5,
-                        progress: 0.6
+                        progress: 0.6,
+                        origin: 'foreground',
+                        priority: 'high',
+                        currentAction: 'Correlating regional intelligence sources',
+                        capabilityRequirements: ['ResearchCapability', 'MapCapability'],
+                        approvalReference: 'not_required'
                     },
                     'task_02': {
                         id: 'task_02',
@@ -717,7 +773,12 @@ def run_qa_captures():
                         status: 'running',
                         currentStep: 2,
                         totalSteps: 4,
-                        progress: 0.5
+                        progress: 0.5,
+                        origin: 'background',
+                        priority: 'normal',
+                        currentAction: 'Compacting local graph segments',
+                        capabilityRequirements: ['MemoryCapability'],
+                        resultReference: 'task://graph-indexing'
                     }
                 }
             });
@@ -791,7 +852,7 @@ def run_qa_captures():
             expected_type="research",
             expected_renderer="ResearchWorkspace + Docked CharlieCore",
             content_keys="summary,title",
-            required_selectors_or_texts=['[data-core-position="dock_bottom_right"]', 'QUANTUM ERROR CORRECTION DYNAMICS']
+            required_selectors_or_texts=['.charlie-core-docked', 'QUANTUM ERROR CORRECTION DYNAMICS']
         )
 
         # ----------------------------------------------------

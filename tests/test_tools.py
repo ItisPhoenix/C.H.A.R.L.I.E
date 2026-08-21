@@ -378,6 +378,46 @@ def test_shell_execute_blocks_metacharacters_and_keywords():
     )
 
 
+def test_shell_tool_contract_requires_one_command_per_call():
+    definition = next(
+        item for item in registry.get_tool_definitions() if item["function"]["name"] == "shell_execute"
+    )
+    description = definition["function"]["description"]
+    command_description = definition["function"]["parameters"]["properties"]["command"]["description"]
+    combined = f"{description} {command_description}"
+    assert "one shell command" in combined.lower()
+    assert "one command per call" in combined.lower()
+    assert "do not chain" in combined.lower()
+    assert "separate tool calls" in combined.lower()
+
+
+def test_text_tool_prompt_inherits_shell_contract():
+    prompt = registry.build_tool_prompt()
+    shell_line = next(line for line in prompt.splitlines() if line.startswith("- shell_execute("))
+    assert "one command per call" in shell_line.lower()
+    assert "do not chain" in shell_line.lower()
+
+
+def test_shell_execute_accepts_one_harmless_command():
+    output = shell_execute("python --version")
+    assert "Python" in output
+
+
+def test_shell_execute_rejects_compound_commands_and_pipes():
+    blocked = "Error: Shell metacharacters (;, |, &, `, $, (, )) are not allowed."
+    assert shell_execute("python --version && where python") == blocked
+    assert shell_execute("python --version | findstr Python") == blocked
+    assert shell_execute("python --version; where python") == blocked
+
+
+def test_approval_cannot_override_shell_metacharacter_block():
+    from charlie.autonomy import Requirement, evaluate
+
+    requirement, _, reason = evaluate("shell_execute", {"command": "python --version && where python"})
+    assert requirement == Requirement.BLOCK
+    assert "metacharacters" in reason.lower()
+
+
 # ---------------------------------------------------------------------------
 # Phase 3 dashboard "desktop_frame" event -- downscale + throttle + emit bridge
 # ---------------------------------------------------------------------------

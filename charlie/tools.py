@@ -638,13 +638,20 @@ def _detect_app_launch(command: str):
 
 @registry.register_tool(
     name="shell_execute",
-    description="Run a shell command and get output. Risky commands are blocked.",
+    description=(
+        "Run one shell command and return its output. Submit exactly one command per call; "
+        "do not chain commands or use shell metacharacters such as ;, |, &, `, $, (, or ). "
+        "If multiple commands are needed, call this tool multiple times. Risky/destructive commands remain blocked."
+    ),
     schema={
         "type": "object",
         "properties": {
             "command": {
                 "type": "string",
-                "description": "The shell command to execute.",
+                "description": (
+                    "Exactly one shell command. Do not chain commands or use ;, |, &, `, $, (, or ); "
+                    "make separate tool calls for separate commands."
+                ),
             },
         },
         "required": ["command"],

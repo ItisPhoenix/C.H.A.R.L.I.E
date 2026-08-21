@@ -11,6 +11,7 @@ import { CharlieCore } from "./CharlieCore";
 import { RecentWorkspacesModal } from "../layout/RecentWorkspacesModal";
 import { SettingsModal } from "./SettingsModal";
 import { TaskSwitcher } from "./TaskSwitcher";
+import { ToolApprovalDialog } from "../components/ToolApprovalDialog";
 import type { ZoneContext } from "../layout/zones";
 import "./scene.css";
 
@@ -21,6 +22,7 @@ export function CharlieScene(): ReactElement | null {
   const presentationIntents = useCharlieStore((s) => s.presentationIntents);
   const dismissIntent = useCharlieStore((s) => s.dismissPresentationIntent);
   const hudVisible = useCharlieStore((s) => s.hudVisible);
+  const activeToolApproval = useCharlieStore((s) => s.activeToolApproval);
   const settingsIntentId = Object.values(presentationIntents).find(
     (intent) => intent.kind === "overlay" && intent.overlayType === "settings",
   )?.id;
@@ -153,9 +155,21 @@ export function CharlieScene(): ReactElement | null {
       <ContextLayer
         captionText={projection.activeCaption}
         notifications={projection.activeNotifications}
-        activeAttention={projection.activeAttention}
+        activeAttention={activeToolApproval ? null : projection.activeAttention}
         onDismissIntent={dismissIntent}
       />
+
+      {/* Tool approval is the authoritative live approval surface. The matching
+          presentation intent is suppressed above so one request cannot render
+          two competing dialogs. */}
+      {activeToolApproval ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          data-testid="tool-approval-overlay"
+        >
+          <ToolApprovalDialog />
+        </div>
+      ) : null}
 
       {/* 5. Contextual Task Switcher (Only visible when >1 tasks or active) */}
       <TaskSwitcher />

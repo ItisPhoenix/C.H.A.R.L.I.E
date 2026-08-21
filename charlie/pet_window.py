@@ -19,6 +19,10 @@ from typing import Callable, Iterable, Optional
 
 import zmq
 
+QT_AVAILABLE = False
+QT_IMPORT_ERROR: ImportError | None = None
+_QT_IMPORT_ERRORS: list[ImportError] = []
+
 try:
     from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
     from PySide6.QtGui import (
@@ -35,7 +39,9 @@ try:
         QRegion,
     )
     from PySide6.QtWidgets import QApplication, QMenu, QWidget
-except ImportError:
+    QT_AVAILABLE = True
+except ImportError as exc:
+    _QT_IMPORT_ERRORS.append(exc)
     try:
         from PyQt6.QtCore import QPoint, QRectF, Qt, QTimer
         from PyQt6.QtCore import pyqtSignal as Signal
@@ -53,8 +59,67 @@ except ImportError:
             QRegion,
         )
         from PyQt6.QtWidgets import QApplication, QMenu, QWidget
-    except ImportError:
-        pass
+        QT_AVAILABLE = True
+    except ImportError as exc:
+        _QT_IMPORT_ERRORS.append(exc)
+        QT_IMPORT_ERROR = ImportError(
+            "Neither PySide6 nor PyQt6 is available: "
+            + "; ".join(str(error) for error in _QT_IMPORT_ERRORS)
+        )
+
+if not QT_AVAILABLE:
+    # Keep this module importable on installations without the optional HUD
+    # extra.  The entrypoint exits before constructing a window; these two
+    # placeholders only prevent class declarations from masking the real
+    # dependency error with ``NameError: QWidget is not defined``.
+    QWidget = object
+
+    class _FallbackPoint:
+        def __init__(self, x: float, y: float) -> None:
+            self._x = x
+            self._y = y
+
+        def x(self) -> float:
+            return self._x
+
+        def y(self) -> float:
+            return self._y
+
+    class QRectF:
+        """Small geometry fallback so pure layout helpers remain testable without Qt."""
+
+        def __init__(self, x: float = 0, y: float = 0, width: float = 0, height: float = 0) -> None:
+            self._x = x
+            self._y = y
+            self._width = width
+            self._height = height
+
+        def left(self) -> float:
+            return self._x
+
+        def top(self) -> float:
+            return self._y
+
+        def right(self) -> float:
+            return self._x + self._width
+
+        def bottom(self) -> float:
+            return self._y + self._height
+
+        def width(self) -> float:
+            return self._width
+
+        def height(self) -> float:
+            return self._height
+
+        def center(self) -> _FallbackPoint:
+            return _FallbackPoint(self._x + self._width / 2, self._y + self._height / 2)
+
+        def isNull(self) -> bool:
+            return self._width == 0 and self._height == 0
+
+    def Signal(*_args: object, **_kwargs: object) -> None:
+        return None
 
 from charlie.config import config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT
@@ -1406,6 +1471,11 @@ def _sub_loop(window: PetWindow, stop_event: threading.Event) -> None:
 
 
 def main() -> None:
+    if not QT_AVAILABLE:
+        reason = str(QT_IMPORT_ERROR) if QT_IMPORT_ERROR else "Qt binding unavailable"
+        logger.warning("Pet companion unavailable: install the optional HUD dependency (%s)", reason)
+        return
+
     app = QApplication([])
     window = PetWindow()
     window.show()

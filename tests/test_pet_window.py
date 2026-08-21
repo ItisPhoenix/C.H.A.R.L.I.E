@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import charlie.pet_window as pet_window
 from charlie.pet_window import (
     ANIMATION_CLIPS,
     CHARLIE_ATLAS_PATH,
@@ -294,3 +295,17 @@ def test_activity_model_terminal_task_is_bounded():
     model._updated["t1"] -= 5
     model.prune()
     assert "t1" not in model.tasks
+
+
+def test_pet_qt_dependency_state_is_explicit():
+    assert isinstance(pet_window.QT_AVAILABLE, bool)
+    if pet_window.QT_AVAILABLE:
+        assert pet_window.QWidget is not object
+    else:
+        assert pet_window.QT_IMPORT_ERROR is not None
+
+
+def test_pet_main_degrades_without_qt(monkeypatch):
+    monkeypatch.setattr(pet_window, "QT_AVAILABLE", False)
+    monkeypatch.setattr(pet_window, "QT_IMPORT_ERROR", ImportError("Qt unavailable"))
+    pet_window.main()

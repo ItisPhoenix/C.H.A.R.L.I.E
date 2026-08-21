@@ -18,6 +18,7 @@ beforeEach(() => {
     coreState: "idle",
     presentationIntents: {},
     activeCaption: null,
+    activeToolApproval: null,
     audioLevel: 0,
   });
   useWorkspaceStore.setState({
@@ -158,6 +159,39 @@ describe("CharlieScene spatial projection & layers", () => {
     expect(dialog).toBeDefined();
     expect(screen.getByText(/CONFIRM DELETION/i)).toBeDefined();
     expect(screen.getByText(/Delete \/tmp\/build directory\?/i)).toBeDefined();
+  });
+
+  test("live tool approval renders one authoritative dialog", () => {
+    useCharlieStore.setState({
+      activeToolApproval: {
+        request_id: "approval-scene-1",
+        tool_name: "shell_execute",
+        reason: "Run the requested command.",
+        arguments: { command: "python --version" },
+        risk_class: "security_sensitive",
+      },
+    });
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_intent",
+      payload: {
+        id: "approval-scene-1",
+        kind: "attention",
+        title: "Approval needed: shell_execute",
+        summary: "Run the requested command.",
+        attention_level: "high",
+        content: { request_id: "approval-scene-1" },
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId("tool-approval-overlay")).toBeInTheDocument();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
   test("minimize and restore workspace recenters then re-docks core", () => {
