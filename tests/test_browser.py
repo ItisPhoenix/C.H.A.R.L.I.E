@@ -9,16 +9,18 @@ import pytest
 if "scrapling" not in sys.modules:
     _m_scrapling = ModuleType("scrapling")
     _m_fetchers = ModuleType("scrapling.fetchers")
+
     class _Fetcher:
         @staticmethod
         def get(*args, **kwargs):
             raise NotImplementedError
+
     _m_fetchers.Fetcher = _Fetcher
     _m_scrapling.fetchers = _m_fetchers
     sys.modules["scrapling"] = _m_scrapling
     sys.modules["scrapling.fetchers"] = _m_fetchers
 
-from charlie.browser import intent, session, task
+from charlie.browser import intent, recipes, session, task
 from charlie.browser.agent import run_task
 from charlie.browser.observation import Mark, is_blocked, parse_snapshot, rank_and_cap
 from charlie.browser.recipes import BrowserResult
@@ -28,22 +30,21 @@ from charlie.browser.recipes import BrowserResult
 def _reset_session():
     session.reset_session()
     session._task_cache.clear()
+    recipes._FLIPKART_STATE.clear()
     yield
     session.reset_session()
     session._task_cache.clear()
+    recipes._FLIPKART_STATE.clear()
 
 
 # --- fastpath (tier 0) -------------------------------------------------------
+
 
 def _yt_html(items):
     data = {
         "contents": {
             "twoColumnSearchResultsRenderer": {
-                "primaryContents": {
-                    "sectionListRenderer": {
-                        "contents": [{"itemSectionRenderer": {"contents": items}}]
-                    }
-                }
+                "primaryContents": {"sectionListRenderer": {"contents": [{"itemSectionRenderer": {"contents": items}}]}}
             }
         }
     }
@@ -108,6 +109,96 @@ def test_fastpath_youtube_play_http_error_returns_none(monkeypatch):
     assert fastpath.youtube_play("anything") is None
 
 
+def test_youtube_duration_parser_accepts_minute_and_hour_formats():
+    assert recipes._duration_text_to_seconds("05:23") == 323
+    assert recipes._duration_text_to_seconds("1:02:03") == 3723
+    assert recipes._duration_text_to_seconds("12 minutes, 4 seconds") == 724
+
+
+def test_youtube_visible_candidates_groups_duration_title_and_rejects_shorts_and_promos():
+    class FakeLink:
+        def __init__(self, href, text, card_text=""):
+            self.href = href
+            self.text = text
+            self.card_text = card_text
+
+        def is_visible(self):
+            return True
+
+        def get_attribute(self, name):
+            return self.href if name == "href" else None
+
+        def inner_text(self, timeout=None):
+            return self.text
+
+        def evaluate(self, script):
+            return self.card_text
+
+    class FakeLinks:
+        def __init__(self, links):
+            self.links = links
+
+        def count(self):
+            return len(self.links)
+
+        def nth(self, index):
+            return self.links[index]
+
+    class FakePage:
+        def __init__(self, links):
+            self.links = FakeLinks(links)
+
+        def locator(self, selector):
+            assert selector == 'a[href*="/watch?v="]'
+            return self.links
+
+    page = FakePage(
+        [
+            FakeLink("/watch?v=good", "24:59\nNow playing"),
+            FakeLink("/watch?v=good", "Asyncio in Python - Full Tutorial"),
+            FakeLink("/watch?v=short", "Python asyncio shorts"),
+            FakeLink("/shorts/nope", "Python asyncio short"),
+            FakeLink("/watch?v=playlist&list=abc", "Python asyncio playlist"),
+            FakeLink("/watch?v=promo", "45:00\nNow playing", "Sponsored"),
+            FakeLink("/watch?v=promo", "Python asyncio promoted course", "Sponsored"),
+        ]
+    )
+
+    candidates = recipes._youtube_visible_candidates(page, "Python asyncio tutorial")
+
+    assert [(item["title"], item["duration"]) for item in candidates] == [
+        ("Asyncio in Python - Full Tutorial", 1499),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_current_youtube_open_never_falls_to_tier3(monkeypatch):
+    from charlie.browser import controller
+
+    session.record_navigation("https://www.youtube.com/results?search_query=Python+asyncio+tutorial")
+    monkeypatch.setattr(
+        controller,
+        "run",
+        lambda fn, timeout=None: "https://www.youtube.com/results?search_query=Python+asyncio+tutorial",
+    )
+    calls = {"open": 0}
+
+    def fake_open(task_text):
+        calls["open"] += 1
+        return BrowserResult(url="https://www.youtube.com/watch?v=abc", success=True)
+
+    monkeypatch.setattr(task.recipes, "youtube_open_current", fake_open)
+
+    async def fail_tier3(*args, **kwargs):
+        raise AssertionError("recognized YouTube open must not reach tier 3")
+
+    monkeypatch.setattr(task.agent, "run_task", fail_tier3)
+    result = await task.resolve("Open a relevant normal video longer than 5 minutes.", lambda prompt: "")
+
+    assert result.success is True
+    assert calls["open"] == 1
+
+
 # --- observation --------------------------------------------------------------
 
 _SNAPSHOT = """
@@ -134,7 +225,9 @@ def test_rank_and_cap_dedupes_and_orders_inputs_first():
     ranked = rank_and_cap(marks)
     # duplicate (link, "First Result") and (button, "More actions") collapse to one each
     assert [(m.role, m.name) for m in ranked] == [
-        ("textbox", "Search"), ("link", "First Result"), ("button", "More actions"),
+        ("textbox", "Search"),
+        ("link", "First Result"),
+        ("button", "More actions"),
     ]
     assert [m.mark_id for m in ranked] == [1, 2, 3]
 
@@ -161,6 +254,7 @@ def test_is_blocked_false_for_sparse_legitimate_page():
 
 
 # --- session -------------------------------------------------------------------
+
 
 def test_resolve_mark_raises_with_message_for_unknown_id():
     from charlie.browser.errors import MarkNotFound
@@ -191,6 +285,7 @@ def test_cache_expires_after_ttl(monkeypatch):
 
 # --- intent ----------------------------------------------------------------
 
+
 def test_has_open_intent_on_verbs_and_phrases():
     assert intent.has_open_intent("play DL91 on youtube") is True
     assert intent.has_open_intent("show me the results") is True
@@ -207,20 +302,43 @@ def test_is_freshness_sensitive():
     assert intent.is_freshness_sensitive("play DL91 on youtube") is False
 
 
+def test_is_search_intent_separates_results_search_from_play():
+    assert intent.is_search_intent("Search YouTube for Python asyncio tutorial") is True
+    assert intent.is_search_intent("Play a Python asyncio tutorial on YouTube") is False
+
+
 def test_parse_site_intent_removes_command_words_and_site_name():
     assert intent.parse_site_intent("search for Ada Lovelace on wikipedia", "wikipedia").query == "Ada Lovelace"
     assert intent.parse_site_intent("search for lo-fi music on youtube", "youtube").query == "lo-fi music"
     assert intent.parse_site_intent("open youtube and search for synthwave", "youtube").query == "synthwave"
 
 
+@pytest.mark.parametrize(
+    ("task_text", "site", "query"),
+    [
+        ("search Wikipedia for Alan Turing", "wikipedia", "Alan Turing"),
+        ("find Wikipedia for Apollo 11", "wikipedia", "Apollo 11"),
+        ("look up Alan Turing on Wikipedia", "wikipedia", "Alan Turing"),
+        ("search YouTube for Python asyncio tutorial", "youtube", "Python asyncio tutorial"),
+        ("search Amazon for laptops", "amazon", "laptops"),
+        ("search Amazon India for laptops", "amazon", "laptops"),
+        ("search Flipkart for laptops", "flipkart", "laptops"),
+    ],
+)
+def test_parse_site_intent_supports_site_first_and_site_last_forms(task_text, site, query):
+    assert intent.parse_site_intent(task_text, site).query == query
+
+
 # --- agent (tier 3) ----------------------------------------------------------
+
 
 def test_parse_action_accepts_common_structured_variants():
     from charlie.browser.agent import _parse_action
 
-    assert _parse_action('Action: CLICK 2').kind == "click"
+    assert _parse_action("Action: CLICK 2").kind == "click"
     assert _parse_action('```json\n{"action":"TYPE","mark_id":3,"text":"hello","submit":true}\n```').submit is True
     assert _parse_action('{"action":"DONE","url":"https://x.com","answer":"ready"}').answer == "ready"
+    assert _parse_action("BACK").kind == "back"
 
 
 def _fake_observation(marks=None):
@@ -239,9 +357,7 @@ async def test_run_task_done_action_returns_result(monkeypatch):
         return 'DONE url="https://x.com" answer="found it"'
 
     result = await run_task("do something", complete)
-    assert result == BrowserResult(
-        url="https://x.com", answer="found it", success=True, verification="agent-confirmed"
-    )
+    assert result == BrowserResult(url="https://x.com", answer="found it", success=True, verification="agent-confirmed")
 
 
 @pytest.mark.asyncio
@@ -269,7 +385,7 @@ async def test_run_task_blocked_after_first_step_stops(monkeypatch):
     from charlie.browser import controller
 
     def fake_run(fn, timeout=None):
-        return "URL: x\nTITLE: t\n[1] link \"a\"", [], "verify you are human"
+        return 'URL: x\nTITLE: t\n[1] link "a"', [], "verify you are human"
 
     monkeypatch.setattr(controller, "run", fake_run)
 
@@ -299,6 +415,20 @@ async def test_run_task_purchase_click_declined_stops_without_clicking(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_run_task_blocks_off_site_navigation_for_current_site_continuation(monkeypatch):
+    from charlie.browser import controller
+
+    session.record_navigation("https://www.amazon.in/s?k=laptops")
+    monkeypatch.setattr(controller, "run", lambda fn, timeout=None: _fake_observation())
+
+    async def complete(prompt):
+        return "NAVIGATE https://www.google.com/search?q=laptops"
+
+    result = await run_task("Filter these results on Amazon.", complete, max_steps=1, deadline_s=100)
+    assert result.verification == "site-containment"
+
+
+@pytest.mark.asyncio
 async def test_run_task_click_without_purchase_keyword_skips_gate(monkeypatch):
     from charlie.browser import actions, controller
 
@@ -322,6 +452,7 @@ async def test_run_task_click_without_purchase_keyword_skips_gate(monkeypatch):
 
 # --- tier-cascade orchestration (task.py) -------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_resolve_uses_cache_when_available(monkeypatch):
     cached = BrowserResult(url="https://cached.example")
@@ -332,6 +463,22 @@ async def test_resolve_uses_cache_when_available(monkeypatch):
 
     result = await task.resolve("play cached thing", complete)
     assert result is cached
+
+
+@pytest.mark.asyncio
+async def test_resolve_does_not_cache_navigation_tasks(monkeypatch):
+    cached = BrowserResult(url="https://cached.example")
+    session.cache_set("search a page for Ada", cached)
+    calls = {"n": 0}
+
+    async def fake_agent_run_task(*a, **k):
+        calls["n"] += 1
+        return BrowserResult(answer="fresh navigation")
+
+    monkeypatch.setattr(task.agent, "run_task", fake_agent_run_task)
+    result = await task.resolve("search a page for Ada", lambda prompt: None)
+    assert result.answer == "fresh navigation"
+    assert calls["n"] == 1
 
 
 @pytest.mark.asyncio
@@ -364,6 +511,29 @@ async def test_resolve_falls_through_to_tier3_when_no_tier_matches(monkeypatch):
     # No "youtube" mention and no known-site name -- tiers 0-2 all have nothing to match.
     result = await task.resolve("find a good recipe for pancakes", complete)
     assert result.answer == "tier3 handled it"
+
+
+@pytest.mark.asyncio
+async def test_resolve_routes_youtube_search_to_results_recipe(monkeypatch):
+    calls = []
+
+    def fake_site_search(site_url, query, site_name=None):
+        calls.append((site_url, query, site_name))
+        return BrowserResult(url="https://www.youtube.com/results?search_query=asyncio", success=True)
+
+    monkeypatch.setattr(task.recipes, "site_search", fake_site_search)
+    monkeypatch.setattr(
+        task.fastpath,
+        "youtube_play",
+        lambda query: (_ for _ in ()).throw(AssertionError("play path used")),
+    )
+
+    async def complete(prompt):
+        return ""
+
+    result = await task.resolve("Search YouTube for Python asyncio tutorial", complete)
+    assert result.success is True
+    assert calls == [("https://www.youtube.com", "Python asyncio tutorial", "youtube")]
 
 
 @pytest.mark.asyncio
@@ -400,9 +570,11 @@ async def test_resolve_reports_when_stealth_also_fails(monkeypatch):
 
 # --- browser capability lock (charlie.resource_locks) -------------------------
 
+
 @pytest.mark.asyncio
 async def test_resolve_holds_and_releases_the_browser_capability(monkeypatch):
     from charlie import resource_locks
+
     resource_locks._owners.pop("browser", None)
     owner_seen = {}
 
@@ -453,6 +625,7 @@ def test_idle_check_does_not_shutdown_during_active_browser_task(monkeypatch):
 @pytest.mark.asyncio
 async def test_resolve_serializes_two_concurrent_browser_tasks(monkeypatch):
     from charlie import resource_locks
+
     resource_locks._owners.pop("browser", None)
     monkeypatch.setattr(task, "_LOCK_POLL_INTERVAL_S", 0.01)
     resource_locks.acquire("browser", "someone-else")
@@ -480,6 +653,7 @@ async def test_resolve_serializes_two_concurrent_browser_tasks(monkeypatch):
 @pytest.mark.asyncio
 async def test_resolve_reports_busy_when_lock_wait_exceeds_deadline(monkeypatch):
     from charlie import resource_locks
+
     resource_locks._owners.pop("browser", None)
     monkeypatch.setattr(task, "_LOCK_POLL_INTERVAL_S", 0.01)
     resource_locks.acquire("browser", "someone-else")  # never released this test
@@ -495,6 +669,7 @@ async def test_resolve_reports_busy_when_lock_wait_exceeds_deadline(monkeypatch)
 
 # --- tools.py gate -----------------------------------------------------------
 
+
 def test_browser_tools_disabled_message(monkeypatch):
     from charlie import tools
 
@@ -509,6 +684,7 @@ def test_browser_task_direct_call_errors():
 
 
 # --- core.py routing: website + leftover text defers instead of launching ----
+
 
 def test_match_open_app_defers_website_with_leftover():
     """router.py split match_open_app (pure) / execute_open_app (side-effecting) after the
@@ -542,6 +718,7 @@ def test_match_open_app_bare_website_still_launches(monkeypatch):
 
 # --- router.py: deterministic "<verb> ... on <site>" browser-task fast-path -----
 
+
 def test_match_browser_task_matches_play_on_site():
     from charlie import router
 
@@ -567,7 +744,71 @@ def test_match_browser_task_ignores_non_matching_verb():
     assert router.match_browser_task("what is the weather on my phone") is None
 
 
+def test_browser_continuation_matches_github_repository_code_lookup():
+    from charlie import router
+
+    url = "https://github.com/ItisPhoenix/C.H.A.R.L.I.E"
+    assert (
+        router.match_browser_continuation(
+            "Find where TaskJournal is implemented and tell me which file contains it.", url
+        )
+        is not None
+    )
+
+
+def test_browser_continuation_matches_explicit_repository_search():
+    from charlie import router
+
+    url = "https://github.com/ItisPhoenix/C.H.A.R.L.I.E"
+    assert router.match_browser_continuation("Search this repository for CapabilityLease.", url) is not None
+    assert router.match_browser_continuation("Open the most relevant result.", url) is not None
+
+
+def test_browser_continuation_does_not_hijack_unrelated_requests():
+    from charlie import router
+
+    url = "https://github.com/ItisPhoenix/C.H.A.R.L.I.E"
+    assert router.match_browser_continuation("Research the latest AI news.", url) is None
+    assert router.match_browser_continuation("Find my running apps.", url) is None
+    assert router.match_browser_continuation("What is TaskJournal?", url) is None
+
+
+def test_browser_continuation_requires_active_page():
+    from charlie import router
+
+    assert router.match_browser_continuation("Search this repository for CapabilityLease.", None) is None
+
+
+def test_github_repository_context_extracts_arbitrary_owner_and_repo():
+    from charlie.browser.recipes import github_repository_context
+
+    assert github_repository_context("https://github.com/acme/widget/tree/main") == ("acme", "widget")
+    assert github_repository_context("https://gitlab.com/acme/widget") is None
+
+
+def test_repository_search_query_extracts_symbols():
+    from charlie.browser.recipes import repository_search_query
+
+    assert repository_search_query("Find where TaskJournal is implemented") == "TaskJournal"
+    assert repository_search_query("Search this repository for CapabilityLease") == "CapabilityLease"
+
+
+def test_repository_recipe_requires_github_repository_context():
+    from charlie.browser.recipes import current_repository_search
+
+    assert current_repository_search("Search this repository for CapabilityLease", None) is None
+    assert current_repository_search("Search this repository for CapabilityLease", "https://example.com/page") is None
+
+
+def test_github_auth_wall_is_detected_without_claiming_success():
+    from charlie.browser.recipes import _github_auth_wall
+
+    assert _github_auth_wall("You must be signed in to search code", "https://github.com/login") is True
+    assert _github_auth_wall("Public repository files", "https://github.com/acme/widget") is False
+
+
 # --- recipes.site_search: fall back past an unfillable combobox (e.g. Amazon's category select) ---
+
 
 def test_site_search_skips_unfillable_combobox_falls_back_to_textbox(monkeypatch):
     from charlie.browser import recipes
@@ -619,7 +860,180 @@ def test_site_search_returns_none_when_no_candidate_fillable(monkeypatch):
     assert recipes.site_search("https://amazon.com", "mechanical keyboards") is None
 
 
+def test_youtube_result_links_reads_watch_titles_from_main(monkeypatch):
+    class Link:
+        def __init__(self, text):
+            self.text = text
+
+        def inner_text(self, timeout=None):
+            return self.text
+
+    class Locator:
+        def __init__(self):
+            self.items = [Link("Asyncio in Python - Full Tutorial"), Link("")]
+
+        def count(self):
+            return len(self.items)
+
+        def nth(self, index):
+            return self.items[index]
+
+    class Page:
+        def locator(self, selector):
+            assert selector == '[role="main"] a[href*="/watch?v="]'
+            return Locator()
+
+    assert recipes._youtube_result_links(Page()) == ["Asyncio in Python - Full Tutorial"]
+
+
+def test_youtube_player_commands_are_deterministic_and_narrow():
+    assert recipes.youtube_player_command("Pause the video.") == "pause"
+    assert recipes.youtube_player_command("Play the video.") == "play"
+    assert recipes.youtube_player_command("Skip forward 10 seconds.") == "seek_forward"
+    assert recipes.youtube_player_command("Open the video.") is None
+
+
+def test_youtube_filter_distinguishes_videos_from_shorts():
+    assert recipes.is_youtube_video_filter_label("Videos") is True
+    assert recipes.is_youtube_video_filter_label("Video") is True
+    assert recipes.is_youtube_video_filter_label("VOD") is True
+    assert recipes.is_youtube_video_filter_label("Shorts") is False
+    assert recipes.is_youtube_video_filter_label("Python asyncio tutorial") is False
+
+
+def test_youtube_player_state_reads_actual_media_element():
+    class Page:
+        def evaluate(self, script):
+            assert "document.querySelector('video')" in script
+            return {
+                "video": True,
+                "paused": True,
+                "currentTime": 12.0,
+                "duration": 600.0,
+                "muted": False,
+                "adActive": False,
+            }
+
+    from charlie.browser import actions
+
+    assert actions.youtube_player_state(Page()) == {
+        "video": True,
+        "paused": True,
+        "currentTime": 12.0,
+        "duration": 600.0,
+        "muted": False,
+        "adActive": False,
+    }
+
+
+def test_youtube_ad_state_is_not_content_state():
+    assert recipes.is_youtube_video_filter_label("Shorts") is False
+
+
+# --- Flipkart deterministic recipes -----------------------------------------
+
+
+def test_flipkart_price_and_ram_parsers_use_rendered_card_text():
+    assert recipes._flipkart_price("16 GB RAM\n₹79,990") == 79990
+    assert recipes._flipkart_ram("16 GB RAM, 512 GB SSD") == 16
+    assert recipes._flipkart_ram("16 GB DDR4 RAM, 512 GB SSD") == 16
+    assert recipes._flipkart_ram("8 GB LPDDR5 RAM, 256 GB SSD") == 8
+    assert recipes._flipkart_ram("8 GB RAM") == 8
+    assert recipes._flipkart_ram("System Memory: 16 GB") == 16
+    assert recipes._flipkart_ram("RAM: 8 GB") == 8
+    assert recipes._flipkart_ram("512 GB SSD") is None
+
+
+def test_flipkart_visible_products_deduplicates_product_links_and_reads_cards():
+    class Link:
+        def __init__(self, href, title):
+            self.href = href
+            self.title = title
+
+        def is_visible(self):
+            return True
+
+        def get_attribute(self, name):
+            return self.href if name == "href" else None
+
+        def inner_text(self, timeout=None):
+            return self.title
+
+    class Locator:
+        def __init__(self, items):
+            self.items = items
+
+        def count(self):
+            return len(self.items)
+
+        def nth(self, index):
+            return self.items[index]
+
+    class Page:
+        url = "https://shop.example/search?q=devices"
+
+        def get_by_role(self, role, name=None):
+            assert role == "link"
+            return Locator(
+                [
+                    Link("/item/one", "Device Alpha\n16 GB RAM\n₹79,990"),
+                    Link("/item/one", "Device Alpha\n16 GB RAM\n₹79,990"),
+                    Link("/item/two", "Device Beta\n8 GB RAM\n₹54,990"),
+                ]
+            )
+
+    products = recipes._flipkart_visible_products(Page())
+    assert [(item["url"], item["ram_gb"], item["price"]) for item in products] == [
+        ("https://shop.example/item/one", 16, 79990),
+        ("https://shop.example/item/two", 8, 54990),
+    ]
+
+
+def test_flipkart_filter_verification_requires_all_visible_sampled_products():
+    products = [
+        {"ram_gb": 16, "price": 70000},
+        {"ram_gb": 16, "price": 79999},
+        {"ram_gb": 16, "price": 60000},
+    ]
+    assert recipes._flipkart_verify_products(products, ram_gb=16, max_price=80000)[0] is True
+    products[1]["price"] = 81000
+    assert recipes._flipkart_verify_products(products, ram_gb=16, max_price=80000)[0] is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_routes_flipkart_continuations_without_tier3(monkeypatch):
+    session.record_navigation("https://www.flipkart.com/search?q=laptops")
+    calls = []
+
+    class Page:
+        url = "https://www.flipkart.com/search?q=laptops"
+
+    monkeypatch.setattr(task.controller, "run", lambda fn, timeout=None: fn(Page()))
+
+    def fake_action(task_text):
+        calls.append(task_text)
+        return BrowserResult(url=Page.url, answer="filtered", success=True, verification="flipkart-test")
+
+    monkeypatch.setattr(task.recipes, "flipkart_action", fake_action)
+
+    async def complete(prompt):
+        raise AssertionError("recognized Flipkart continuation must not reach tier 3")
+
+    result = await task.resolve("Filter these results to 16 GB RAM.", complete)
+    assert result.verification == "flipkart-test"
+    assert calls == ["Filter these results to 16 GB RAM."]
+
+
+def test_router_matches_flipkart_continuation_phrases():
+    from charlie import router
+
+    current = "https://www.flipkart.com/search?q=laptops"
+    assert router.match_browser_continuation("Filter these results to 16 GB RAM.", current) is not None
+    assert router.match_browser_continuation("Go back to the filtered laptop results.", current) is not None
+
+
 # --- stealth.retry_blocked: Patchright needs Proactor, swap must restore the prior policy -----
+
 
 def test_retry_blocked_restores_event_loop_policy(monkeypatch):
     import asyncio
@@ -662,6 +1076,7 @@ def test_launch_skips_windows_policy_swap_off_windows(monkeypatch):
             class FakePage:
                 def route(self, pattern, handler):
                     pass
+
             return FakePage()
 
     class FakeChromium:

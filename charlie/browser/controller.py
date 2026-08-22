@@ -38,6 +38,38 @@ _active_task_leases = 0
 _active_operations = 0
 
 
+def _page_is_alive() -> bool:
+    """Return False when Playwright retained a page object after its transport died."""
+    if _page is None or _context is None or _playwright is None:
+        return False
+    try:
+        if _page.is_closed():
+            return False
+        browser = getattr(_context, "browser", None)
+        if browser is not None and hasattr(browser, "is_connected") and not browser.is_connected():
+            return False
+        return bool(_context.pages)
+    except Exception:
+        return False
+
+
+def _dispose_stale() -> None:
+    """Best-effort disposal for dead Playwright objects, always on browser thread."""
+    global _playwright, _context, _page
+    from charlie.browser.session import reset_session
+    reset_session()
+    for resource in (_context, _playwright):
+        if resource is None:
+            continue
+        try:
+            resource.close() if resource is _context else resource.stop()
+        except Exception:
+            logger.debug("Ignoring stale browser cleanup failure", exc_info=True)
+    _playwright = None
+    _context = None
+    _page = None
+
+
 def _block_heavy_resources(route: Any) -> None:
     if route.request.resource_type in _BLOCKED_RESOURCE_TYPES:
         route.abort()
@@ -68,19 +100,39 @@ def _launch() -> None:
         headless=config.browser_headless,
         viewport={"width": 1280, "height": 900},
     )
+    launch_mode = "bundled Chromium"
     try:
         _context = _playwright.chromium.launch_persistent_context(**launch_kwargs)
     except Exception:
         logger.warning("Bundled Chromium unavailable, falling back to the installed browser", exc_info=True)
         _context = _playwright.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
+        launch_mode = "installed Chrome fallback"
     _context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
     _page = _context.new_page()
     _page.route("**/*", _block_heavy_resources)
-    logger.info("Browser controller launched")
+    try:
+        import importlib.metadata
+        playwright_version = importlib.metadata.version("playwright")
+    except Exception:
+        playwright_version = "unknown"
+    try:
+        browser_version = _context.browser.version if _context.browser is not None else "unknown"
+    except Exception:
+        browser_version = "unknown"
+    logger.info(
+        "Browser controller launched: %s, playwright=%s, browser=%s",
+        launch_mode,
+        playwright_version,
+        browser_version,
+    )
 
 
 def _ensure_launched() -> Any:
     if _page is None:
+        _launch()
+    elif not _page_is_alive():
+        logger.warning("Stale browser state detected; relaunching once")
+        _dispose_stale()
         _launch()
     return _page
 
@@ -108,7 +160,7 @@ def wait_host_cooldown(url: str) -> None:
     _last_nav_by_host[host] = time.monotonic()
 
 
-def _run_on_thread(fn: Callable[[Any], T]) -> T:
+def _run_on_thread(fn: Callable[[Any], T], retry_on_stale: bool = True) -> T:
     global _last_used_at, _active_operations
     page = _ensure_launched()
     with _activity_lock:
@@ -116,6 +168,12 @@ def _run_on_thread(fn: Callable[[Any], T]) -> T:
         _last_used_at = time.monotonic()
     try:
         return fn(page)
+    except Exception:
+        if not retry_on_stale or _page_is_alive():
+            raise
+        logger.warning("Browser operation lost Playwright state; relaunching once")
+        _dispose_stale()
+        return fn(_ensure_launched())
     finally:
         with _activity_lock:
             _active_operations -= 1
@@ -125,11 +183,11 @@ def _run_on_thread(fn: Callable[[Any], T]) -> T:
             _schedule_idle_shutdown()
 
 
-def run(fn: Callable[[Any], T], timeout: Optional[float] = None) -> T:
+def run(fn: Callable[[Any], T], timeout: Optional[float] = None, retry_on_stale: bool = True) -> T:
     """Run fn(page) on the dedicated browser thread, launching on first use."""
     if not BROWSER_EXECUTOR:
         raise BrowserUnavailable("playwright is not installed")
-    future = BROWSER_EXECUTOR.submit(_run_on_thread, fn)
+    future = BROWSER_EXECUTOR.submit(_run_on_thread, fn, retry_on_stale)
     return future.result(timeout=timeout)
 
 

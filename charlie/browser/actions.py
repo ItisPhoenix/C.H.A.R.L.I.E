@@ -70,6 +70,12 @@ def click(page: Any, mark_id: int) -> str:
     locator, mark = _locator_for(page, mark_id)
     locator.click(timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
     session.record_action(f'click [{mark_id}] {mark.role} "{mark.name}"')
+    session.invalidate_marks()
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
+    except Exception:
+        logger.debug("click did not settle a document navigation")
+    session.record_navigation(page.url)
     return f'{mark.role} "{mark.name}"'
 
 
@@ -78,12 +84,42 @@ def type_text(page: Any, mark_id: int, text: str, submit: bool = False) -> None:
     locator.fill(text, timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
     if submit:
         locator.press("Enter")
+        session.invalidate_marks()
     session.record_action(f'type [{mark_id}] "{text}"' + (" + Enter" if submit else ""))
 
 
 def press_key(page: Any, key: str) -> None:
     page.keyboard.press(key)
     session.record_action(f"press {key}")
+
+
+def youtube_player_key(page: Any, key: str) -> None:
+    """Send a YouTube keyboard shortcut through the active player surface."""
+    player = page.locator("#movie_player")
+    player.press(key, timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
+    session.record_action(f"YouTube player key {key}")
+
+
+def youtube_player_state(page: Any) -> dict:
+    """Read state from the active HTML media element on a YouTube watch page."""
+    return page.evaluate(
+        """() => {
+            const video = document.querySelector('video');
+            const active = document.activeElement;
+            return {
+                video: Boolean(video),
+                paused: video ? video.paused : null,
+                currentTime: video ? video.currentTime : null,
+                duration: video ? video.duration : null,
+                muted: video ? video.muted : null,
+                adActive: Boolean(document.querySelector(
+                    '#movie_player.ad-showing, #movie_player.ad-interrupting, '
+                    + '.ytp-ad-player-overlay, .ytp-ad-message-container'
+                )),
+                active: active ? `${active.tagName}#${active.id || ''}.${active.className || ''}` : '',
+            };
+        }"""
+    )
 
 
 def scroll(page: Any, direction: str = "down", amount: int = 800) -> None:

@@ -16,6 +16,10 @@ _SEARCH_QUERY_RE = re.compile(
     r"\b(?:search|find|look\s+up|browse|check)\s+(?:for\s+)?(?P<query>.+?)\s+on\s+(?P<site>[a-z0-9][\w.]*)\b",
     re.IGNORECASE,
 )
+_SITE_FIRST_SEARCH_RE = re.compile(
+    r"\b(?:search|find|look\s+up|browse|check)\s+(?P<site>[a-z0-9][\w.]*(?:\s+india)?)\s+for\s+(?P<query>.+)$",
+    re.IGNORECASE,
+)
 _OPEN_AND_SEARCH_RE = re.compile(
     r"\b(?:search|find|look\s+up|browse|check)\s+(?:for\s+)?(?P<query>.+)$",
     re.IGNORECASE,
@@ -43,12 +47,22 @@ def parse_site_intent(task: str, site: str) -> Optional[BrowserIntent]:
     if search_match and search_match.group("site").lower().strip(".,!? ") == site_lower:
         query = search_match.group("query")
     else:
-        media_match = _MEDIA_QUERY_RE.search(original)
-        if media_match and media_match.group("site").lower() == site_lower:
-            query = media_match.group("query")
+        site_first_match = _SITE_FIRST_SEARCH_RE.search(original)
+        matched_site = site_first_match.group("site").lower().strip(".,!? ") if site_first_match else ""
+        site_matches = matched_site == site_lower or (site_lower == "amazon" and matched_site == "amazon india")
+        if site_first_match and site_matches:
+            query = site_first_match.group("query")
         else:
-            open_search = _OPEN_AND_SEARCH_RE.search(original)
-            query = open_search.group("query") if site_lower in original.lower().split() and open_search else original
+            media_match = _MEDIA_QUERY_RE.search(original)
+            if media_match and media_match.group("site").lower() == site_lower:
+                query = media_match.group("query")
+            else:
+                open_search = _OPEN_AND_SEARCH_RE.search(original)
+                query = (
+                    open_search.group("query")
+                    if site_lower in original.lower().split() and open_search
+                    else original
+                )
     query = re.sub(r"\s+", " ", query).strip(" .,!?\t\r\n")
     if not query:
         return None
@@ -72,3 +86,8 @@ def is_freshness_sensitive(task: str) -> bool:
     """True when the task looks time-sensitive enough that a cached result would be wrong."""
     lowered = task.lower()
     return any(keyword in lowered for keyword in _FRESHNESS_KEYWORDS)
+
+
+def is_search_intent(task: str) -> bool:
+    """Return True for search/find requests that must land on a results page."""
+    return bool(re.search(r"\b(?:search|find|look\s+up|browse|check)\b", task, re.IGNORECASE))

@@ -12,6 +12,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
+from urllib.parse import urlparse
 
 from charlie.browser import controller, session
 from charlie.browser.actions import click, navigate, scroll, type_text
@@ -40,12 +41,14 @@ _ACTION_GRAMMAR = (
     "CLICK <mark_id>\n"
     'TYPE <mark_id> "<text>" [SUBMIT]\n'
     "SCROLL down|up\n"
+    "BACK\n"
     "NAVIGATE <url>\n"
     'DONE url="<url or empty>" answer="<answer or empty>"\n'
 )
 _CLICK_RE = re.compile(r"^CLICK\s+(\d+)$", re.IGNORECASE)
 _TYPE_RE = re.compile(r'^TYPE\s+(\d+)\s+"([^"]*)"(\s+SUBMIT)?$', re.IGNORECASE)
 _SCROLL_RE = re.compile(r"^SCROLL\s+(down|up)$", re.IGNORECASE)
+_BACK_RE = re.compile(r"^BACK$", re.IGNORECASE)
 _NAVIGATE_RE = re.compile(r"^NAVIGATE\s+(\S+)$", re.IGNORECASE)
 _DONE_RE = re.compile(r'^DONE\s+url="([^"]*)"\s+answer="([^"]*)"$', re.IGNORECASE)
 
@@ -108,6 +111,8 @@ def _parse_action(raw: str) -> Optional[_Action]:
     match = _SCROLL_RE.match(line)
     if match:
         return _Action(kind="scroll", direction=match.group(1).lower())
+    if _BACK_RE.match(line):
+        return _Action(kind="back")
     match = _NAVIGATE_RE.match(line)
     if match:
         return _Action(kind="navigate", url=match.group(1))
@@ -139,8 +144,38 @@ def _apply_action(page, action: _Action) -> None:
         type_text(page, action.mark_id, action.text, submit=action.submit)
     elif action.kind == "scroll":
         scroll(page, action.direction)
+    elif action.kind == "back":
+        from charlie.browser.actions import back
+        back(page)
     elif action.kind == "navigate":
         navigate(page, action.url)
+
+
+def _same_site_or_related_host(current_url: str, target_url: str) -> bool:
+    current = urlparse(current_url).netloc.lower().split(":", 1)[0]
+    target = urlparse(target_url).netloc.lower().split(":", 1)[0]
+    return bool(current and target and (current == target or target.endswith(f".{current}")))
+
+
+def _is_site_continuation(task: str) -> bool:
+    lowered = task.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "these results", "this page", "current page", "on this page", "on amazon", "on flipkart",
+            "on youtube", "on wikipedia", "sort these", "filter these", "first matching",
+        )
+    )
+
+
+def _controller_run(fn, *, timeout: float, retry_on_stale: bool = True):
+    """Call controller with compatibility for focused tests' simple monkeypatches."""
+    try:
+        return controller.run(fn, timeout=timeout, retry_on_stale=retry_on_stale)
+    except TypeError as exc:
+        if "retry_on_stale" not in str(exc):
+            raise
+        return controller.run(fn, timeout=timeout)
 
 
 def _grab_annotated_screenshot(page, marks: list) -> bytes:
@@ -174,7 +209,7 @@ async def _augment_with_vision(
         def _run(page):
             return _grab_annotated_screenshot(page, marks)
 
-        png = await loop.run_in_executor(None, lambda: controller.run(_run, timeout=_STEP_CALL_TIMEOUT_S))
+        png = await loop.run_in_executor(None, lambda: _controller_run(_run, timeout=_STEP_CALL_TIMEOUT_S))
         data_url = desktop_vision.to_data_url(png)
         description = await describe_image(data_url)
         return f"{observation}\n\n[Vision] {description}"
@@ -208,7 +243,7 @@ async def run_task(
 
         try:
             observation, marks, blocked = await loop.run_in_executor(
-                None, lambda: controller.run(_observe_page, timeout=_STEP_CALL_TIMEOUT_S)
+                None, lambda: _controller_run(_observe_page, timeout=_STEP_CALL_TIMEOUT_S)
             )
         except Exception:
             logger.warning("Tier 3 observation failed on step %d", step, exc_info=True)
@@ -239,6 +274,13 @@ async def run_task(
                 success=True,
                 verification="agent-confirmed",
             )
+        if action.kind == "navigate" and action.url and _is_site_continuation(task):
+            current_url = session.get_session().last_url or ""
+            if current_url and not _same_site_or_related_host(current_url, action.url):
+                return BrowserResult(
+                    answer="I couldn't complete that without leaving the current site.",
+                    verification="site-containment",
+                )
         if action.kind == "click" and approve_click is not None:
             mark = session.get_session().marks.get(action.mark_id)
             if mark and any(k in mark.name.lower() for k in _PURCHASE_KEYWORDS):
@@ -248,7 +290,11 @@ async def run_task(
         try:
             await loop.run_in_executor(
                 None,
-                lambda: controller.run(lambda page, a=action: _apply_action(page, a), timeout=_STEP_CALL_TIMEOUT_S),
+                lambda: _controller_run(
+                    lambda page, a=action: _apply_action(page, a),
+                    timeout=_STEP_CALL_TIMEOUT_S,
+                    retry_on_stale=action.kind != "click",
+                ),
             )
             fail_count = 0
         except Exception:

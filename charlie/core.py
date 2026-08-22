@@ -84,6 +84,8 @@ def publish_turn_research_reports(
             callback(report)
         else:
             callback(report, session_id=session_id, task_id=task_id)
+
+
 if TYPE_CHECKING:
     from charlie.config import Config
 
@@ -92,15 +94,27 @@ async def _record_llm_response(response: httpx.Response) -> None:
     """httpx response event hook: records every LLM call's outcome for GET /api/health and /api/metrics."""
     telemetry.record_llm_call(success=response.status_code < 400)
 
+
 # --- LLM tuning ---
 _LLM_TEMPERATURE = 0.3
 _TOOL_TIMEOUT_SEC = 15.0
 _MIN_BROWSER_STEPS = 8
-_DESKTOP_CONTROL_TOOLS = frozenset({
-    "desktop_click", "desktop_type", "desktop_invoke", "desktop_key",
-    "desktop_click_at", "desktop_move", "desktop_drag", "desktop_scroll",
-    "desktop_focus", "desktop_window", "desktop_move_window", "system_control",
-})
+_DESKTOP_CONTROL_TOOLS = frozenset(
+    {
+        "desktop_click",
+        "desktop_type",
+        "desktop_invoke",
+        "desktop_key",
+        "desktop_click_at",
+        "desktop_move",
+        "desktop_drag",
+        "desktop_scroll",
+        "desktop_focus",
+        "desktop_window",
+        "desktop_move_window",
+        "system_control",
+    }
+)
 # All tools that touch the UIA/comtypes COM apartment -- perception too, not
 # just the gated effectors -- must run on the single dedicated COM thread.
 _DESKTOP_COM_TOOLS = _DESKTOP_CONTROL_TOOLS | frozenset(
@@ -163,9 +177,7 @@ _TOOL_APPROVAL_TIMEOUT_SEC = 45.0
 _REPEATED_TOOL_RESULT = (
     "Repeated identical tool call suppressed. Choose another valid capability or finish the response."
 )
-_REPEATED_TOOL_FAILURE = (
-    "I couldn't complete that because the model kept requesting an invalid or repeated action."
-)
+_REPEATED_TOOL_FAILURE = "I couldn't complete that because the model kept requesting an invalid or repeated action."
 
 
 class _RepeatToolCallGuard:
@@ -194,6 +206,7 @@ class _RepeatToolCallGuard:
     @property
     def should_escape(self) -> bool:
         return self._suppressed >= self._escape_after
+
 
 # request_id -> Future[bool], resolved by main.py:consume_web_commands (web
 # "tool_approve"/"tool_reject" commands) or by the voice yes/no fallback in
@@ -270,6 +283,7 @@ def _strip_vocatives(query: str) -> str:
     """Remove trailing vocatives like ', Charlie' from the query."""
     return _VOCATIVE_RE.sub("", query).strip()
 
+
 def _is_followup(query: str) -> bool:
     """Check if a query is a short follow-up/clarification that should not trigger web search."""
     q = _strip_vocatives(query)
@@ -337,9 +351,7 @@ _REVIEW_RULES_RE = re.compile(
     r"|list (?:your|the) (?:rules|things you'?ve learned)",
     re.IGNORECASE,
 )
-_FORGET_RULE_RE = re.compile(
-    r"forget (?:that|what you learned about|the rule about)\s+(.+)", re.IGNORECASE
-)
+_FORGET_RULE_RE = re.compile(r"forget (?:that|what you learned about|the rule about)\s+(.+)", re.IGNORECASE)
 _EXPLICIT_MEMORY_RE = re.compile(
     r"^\s*(?:please\s+)?(?:i want you to\s+)?(?:remember|don't forget)"
     r"(?:\s+that)?\s+(.+?)\s*[.!?]?\s*$",
@@ -374,6 +386,8 @@ def _detect_explicit_recall(query: str) -> Optional[str]:
     if not match:
         return None
     return match.group(1).strip() or query.strip()
+
+
 # --- Correction detection (auto-learn from user corrections) ---
 _CORRECTION_RE = re.compile(
     r"(?:"
@@ -446,6 +460,7 @@ def _apply_correction_to_memory(
     entry = f"Correction by user: {query.strip()}. Previous answer: '{short_resp}'."
     try:
         from pathlib import Path as _P
+
         p = _P(opinions_path)
         existing = p.read_text(encoding="utf-8") if p.exists() else ""
         if entry in existing:
@@ -459,13 +474,12 @@ def _apply_correction_to_memory(
         if world_model is not None:
             world_model.add_rule(f"Corrected: {query.strip()}", "correction")
             from charlie.tools import emit_memory_updated
+
             emit_memory_updated("world_model", f"Corrected: {query.strip()}")
         return entry
     except Exception as exc:
         logger.warning("Failed to store correction: %s", exc)
         return None
-
-
 
 
 # --- Fast-path: close/open app (deterministic, no LLM needed) ---
@@ -580,9 +594,7 @@ def _sanitize_roles(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         if role == "user":
             if last_role == "user":
-                cleaned[-1]["content"] = (cleaned[-1].get("content") or "") + (
-                    msg.get("content") or ""
-                )
+                cleaned[-1]["content"] = (cleaned[-1].get("content") or "") + (msg.get("content") or "")
                 continue
             cleaned.append(msg)
             continue
@@ -591,9 +603,7 @@ def _sanitize_roles(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return cleaned
 
 
-def _prune_old_tool_results(
-    messages: List[Dict[str, Any]], keep_last: int = 2
-) -> List[Dict[str, Any]]:
+def _prune_old_tool_results(messages: List[Dict[str, Any]], keep_last: int = 2) -> List[Dict[str, Any]]:
     """Keep only the last N tool-result turns. older ones are pruned."""
     prefix_end = 0
     for i, msg in enumerate(messages):
@@ -620,14 +630,8 @@ def _prune_old_tool_results(
     if current_turn:
         turns.append(current_turn)
 
-    tool_turn_indices = [
-        idx for idx, t in enumerate(turns) if any(m.get("role") == "tool" for m in t)
-    ]
-    kept_indices = (
-        set(tool_turn_indices[-keep_last:])
-        if len(tool_turn_indices) > keep_last
-        else set(tool_turn_indices)
-    )
+    tool_turn_indices = [idx for idx, t in enumerate(turns) if any(m.get("role") == "tool" for m in t)]
+    kept_indices = set(tool_turn_indices[-keep_last:]) if len(tool_turn_indices) > keep_last else set(tool_turn_indices)
 
     result = prefix[:]
     for idx, t in enumerate(turns):
@@ -649,9 +653,7 @@ async def _halve_history(messages: List[Dict[str, Any]], config: Any) -> List[Di
     keep_recent = getattr(config, "history_keep_recent", 4)
     summary_max = getattr(config, "history_summary_max_chars", 400)
 
-    system_msg = (
-        messages[0] if messages and messages[0].get("role") == "system" else None
-    )
+    system_msg = messages[0] if messages and messages[0].get("role") == "system" else None
 
     # Split: prefix (system), middle (dropped), tail (recent verbatim)
     if len(messages) <= keep_recent + (1 if system_msg else 0):
@@ -675,9 +677,7 @@ async def _halve_history(messages: List[Dict[str, Any]], config: Any) -> List[Di
     return result
 
 
-async def _generate_summary(
-    messages: List[Dict[str, Any]], config: Any, max_chars: int
-) -> str:
+async def _generate_summary(messages: List[Dict[str, Any]], config: Any, max_chars: int) -> str:
     """Ask the LLM to summarize dropped messages. Returns stub on failure."""
     lines = []
     for m in messages:
@@ -734,9 +734,7 @@ async def _generate_summary(
         return f"{len(messages)} earlier messages omitted due to length."
 
 
-async def _compress_messages(
-    messages: List[Dict[str, Any]], config: "Config"
-) -> List[Dict[str, Any]]:
+async def _compress_messages(messages: List[Dict[str, Any]], config: "Config") -> List[Dict[str, Any]]:
     total = _token_count(messages)
     window = getattr(config, "context_window", 32000)
     compression_threshold = getattr(config, "compression_threshold", 0.8)
@@ -751,12 +749,9 @@ async def _compress_messages(
     return await _halve_history(pruned, config)
 
 
-async def _prep_messages(
-    messages: List[Dict[str, Any]], config: "Config"
-) -> List[Dict[str, Any]]:
+async def _prep_messages(messages: List[Dict[str, Any]], config: "Config") -> List[Dict[str, Any]]:
     """Sanitize roles then compress to fit the context window."""
     return await _compress_messages(_sanitize_roles(messages), config)
-
 
 
 # --- Verbosity preference detection ---
@@ -836,8 +831,6 @@ def _should_queue_visual_screenshot(user_input: str, config: "Config") -> bool:
         and config.vision_enabled
         and config.desktop_control_enabled
     )
-
-
 
 
 _VISION_SYSTEM_PROMPT = (
@@ -928,13 +921,11 @@ class Brain:
         if register_panic_hotkey and self.config.desktop_control_enabled and _DESKTOP_AVAILABLE:
             try:
                 from pynput import keyboard as _pynput_keyboard
+
                 hotkey_str = "+".join(
-                    f"<{p}>" if len(p) > 1 else p
-                    for p in self.config.desktop_panic_hotkey.lower().split("+")
+                    f"<{p}>" if len(p) > 1 else p for p in self.config.desktop_panic_hotkey.lower().split("+")
                 )
-                self._panic_hotkey_listener = _pynput_keyboard.GlobalHotKeys(
-                    {hotkey_str: self._panic}
-                )
+                self._panic_hotkey_listener = _pynput_keyboard.GlobalHotKeys({hotkey_str: self._panic})
                 self._panic_hotkey_listener.start()
                 logger.info("Desktop panic hotkey armed: %s", self.config.desktop_panic_hotkey)
             except Exception:
@@ -1001,10 +992,12 @@ class Brain:
 
         # --- Knowledge graph memory ---
         from charlie.memory_graph import MemoryGraph
+
         self.memory_graph = MemoryGraph(db_path=config.memory_graph_db)
 
         # --- World model: open threads + machine events ---
         from charlie.world_model import WorldModel
+
         self.world_model = WorldModel(db_path=config.world_model_db_path)
 
     @staticmethod
@@ -1091,6 +1084,7 @@ class Brain:
                     continue
                 content = self._read_file_safe(path_val, max_chars)
                 from charlie.tools import _parse_memory_entries
+
                 entries = _parse_memory_entries(content)
                 current_len = sum(len(e) for e in entries) + (len(entries) - 1 if entries else 0)
                 if current_len / max_chars >= threshold:
@@ -1144,6 +1138,7 @@ class Brain:
             )
             try:
                 import httpx as _httpx
+
                 llm_headers = build_auth_headers(self.config.llm_key)
                 payload = {
                     "model": self.config.llm_model,
@@ -1199,9 +1194,13 @@ class Brain:
             return "Error: background tasks require the event bus to be running."
 
         task = await background_task.start(
-            self.config, recovery._event_bus, text,
-            session_store=self.session_store, memory_store=self.memory_store,
-            priority=arguments.get("priority", 0), depends_on=arguments.get("depends_on") or [],
+            self.config,
+            recovery._event_bus,
+            text,
+            session_store=self.session_store,
+            memory_store=self.memory_store,
+            priority=arguments.get("priority", 0),
+            depends_on=arguments.get("depends_on") or [],
             on_result_stored=self.on_result_stored,
         )
         return f"Background task started (id={task.id}, status={task.status}): {text}"
@@ -1213,17 +1212,19 @@ class Brain:
             return ""
         payload = {
             "model": self._vision_model,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Describe what's visible in this browser screenshot, "
-                        "focusing on clickable elements and their labels.",
-                    },
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            }],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe what's visible in this browser screenshot, "
+                            "focusing on clickable elements and their labels.",
+                        },
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ],
             "temperature": 0.0,
             "max_tokens": 300,
         }
@@ -1270,9 +1271,7 @@ class Brain:
             return document_from_content(result, content, extraction_method=f"playwright:{method}")
 
         try:
-            return await asyncio.get_running_loop().run_in_executor(
-                None, lambda: controller.run(read, timeout=15.0)
-            )
+            return await asyncio.get_running_loop().run_in_executor(None, lambda: controller.run(read, timeout=15.0))
         except Exception:
             logger.info("Browser extraction escalation failed for %s", result.url, exc_info=True)
             return None
@@ -1311,13 +1310,41 @@ class Brain:
         if not self.config.browser_enabled or not _BROWSER_AVAILABLE:
             return "Browser control is disabled (set BROWSER_ENABLED=true and install the browser extra)."
 
+        from charlie.browser import controller as browser_controller
         from charlie.browser import intent as browser_intent
+        from charlie.browser import recipes as browser_recipes
+        from charlie.browser.actions import back as browser_back
         from charlie.browser.actions import open_in_real_browser
+        from charlie.browser.observation import extract_visible_text
         from charlie.browser.session import get_session
         from charlie.browser.task import resolve as resolve_browser_task
 
         loop = asyncio.get_running_loop()
         open_intent = browser_intent.has_open_intent(task)
+        lowered_task = task.lower()
+        youtube_watch_fact = "youtube.com/watch?v=" in (get_session().last_url or "") and any(
+            term in lowered_task for term in ("title", "channel", "uploaded this video")
+        )
+        flipkart_product_fact = (
+            "flipkart.com" in (get_session().last_url or "").lower()
+            and "/p/" in (get_session().last_url or "")
+            and any(term in lowered_task for term in ("processor", "ram", "storage", "price"))
+        )
+        flipkart_fact_request = any(
+            interrogative in lowered_task for interrogative in ("what", "how", "which")
+        ) and any(term in lowered_task for term in ("processor", "ram", "storage", "price"))
+        flipkart_context = "flipkart.com" in (get_session().last_url or "").lower() or isinstance(
+            browser_recipes._FLIPKART_STATE.get("query"), str
+        )
+
+        current_page_read = (
+            bool(get_session().last_url)
+            and any(
+                phrase in lowered_task for phrase in ("this page", "current page", "from this article", "from here")
+            )
+            or youtube_watch_fact
+            or flipkart_product_fact
+        ) and not any(verb in lowered_task.split() for verb in ("open", "search", "find", "click", "navigate", "go"))
 
         if browser_intent.is_bare_followup(task):
             last_url = get_session().last_url
@@ -1325,6 +1352,18 @@ class Brain:
                 return "I don't have a page to reopen yet."
             opened = await loop.run_in_executor(None, open_in_real_browser, last_url)
             return f"Opened {last_url}." if opened else f"Found {last_url} but couldn't open your browser."
+
+        if flipkart_fact_request and flipkart_context and not flipkart_product_fact:
+            return "I couldn't verify a current Flipkart product page for that fact."
+
+        if task.lower().strip().rstrip(".!?") in {"back", "go back", "go back to the previous page"}:
+            if not get_session().last_url:
+                return "I don't have a browser page to go back from."
+            try:
+                await loop.run_in_executor(None, lambda: browser_controller.run(browser_back, timeout=15.0))
+                return f"Went back to {get_session().last_url}."
+            except Exception:
+                return "I couldn't go back in the browser."
 
         max_steps = max(_MIN_BROWSER_STEPS, self.config.browser_max_steps)
         # Non-voice callers have no live listener waiting on the reply, so they get more wall-clock headroom.
@@ -1337,9 +1376,39 @@ class Brain:
             text, _ = await self._stream_completion(payload, generation)
             return text
 
+        if current_page_read:
+            try:
+                page_text = await loop.run_in_executor(
+                    None,
+                    lambda: browser_controller.run(
+                        lambda page: extract_visible_text(page, max_chars=50000), timeout=15.0
+                    ),
+                )
+            except Exception:
+                return "I couldn't read the current browser page."
+            if not page_text.strip():
+                return "The current browser page has no readable content."
+            answer_prompt = (
+                "Answer the user's question using only the current browser page evidence below. "
+                "Do not navigate, use memory, or suggest another source. Be concise and state uncertainty "
+                "if evidence is missing.\n\n"
+                f"Question: {task}\n\nCurrent page URL: {get_session().last_url}\n"
+                f"Evidence:\n{page_text[:50000]}"
+            )
+            try:
+                answer, _ = await self._stream_completion(
+                    self._build_payload([{"role": "user", "content": answer_prompt}], skip_tools=True),
+                    generation,
+                )
+                return answer.strip() or "The current page did not provide an answer."
+            except Exception:
+                return "I couldn't answer from the current browser page."
+
         async def _approve_click(name: str, url: str) -> bool:
             return await self.request_tool_approval(
-                "browser_task", {"action": f'click "{name}"', "url": url}, f'click "{name}" on {url}',
+                "browser_task",
+                {"action": f'click "{name}"', "url": url},
+                f'click "{name}" on {url}',
                 platform=platform,
             )
 
@@ -1348,6 +1417,7 @@ class Brain:
                 self.on_thinking_update("browser_task", {"task": task})
 
         from charlie import recovery
+
         if recovery._event_bus:
             await recovery._event_bus.emit(
                 "browser_task_started", {"task": task}, meta=EventMeta(source=EventSource.TASK)
@@ -1355,7 +1425,13 @@ class Brain:
 
         describe_image = self._describe_image if self._vision_client is not None else None
         result = await resolve_browser_task(
-            task, _complete, describe_image, _approve_click, max_steps, deadline_s, _on_progress,
+            task,
+            _complete,
+            describe_image,
+            _approve_click,
+            max_steps,
+            deadline_s,
+            _on_progress,
         )
 
         if recovery._event_bus:
@@ -1408,8 +1484,15 @@ class Brain:
             if recovery._event_bus:
                 await recovery._event_bus.emit(
                     "extension_proposed",
-                    {"kind": "generated", "name": name, "source": "chat", "raw_text": code,
-                     "description": description, "declared_tools": [name], "warnings": card.warnings},
+                    {
+                        "kind": "generated",
+                        "name": name,
+                        "source": "chat",
+                        "raw_text": code,
+                        "description": description,
+                        "declared_tools": [name],
+                        "warnings": card.warnings,
+                    },
                     meta=EventMeta(
                         source=EventSource.BRAIN,
                         rationale=f"drafted a new tool '{name}' from a chat request, pending review",
@@ -1425,7 +1508,7 @@ class Brain:
         arguments: Dict[str, Any],
         reason: str,
         platform: str = "voice",
-        risk_class: Optional[str] = None
+        risk_class: Optional[str] = None,
     ) -> bool:
         """Ask the user to approve/decline a gated tool call and wait for the
         answer. Web dashboard is primary: broadcasts a "tool_approval_request"
@@ -1501,9 +1584,7 @@ class Brain:
     ) -> tuple:
         """Stream a chat completion. Returns (accumulated_text, tool_calls_list)."""
         try:
-            async with self.client.stream(
-                "POST", "chat/completions", json=payload
-            ) as response:
+            async with self.client.stream("POST", "chat/completions", json=payload) as response:
                 response.raise_for_status()
                 accumulated, tc_by_index, cancelled = await parse_sse_stream(
                     response, generation, lambda: self._chat_generation
@@ -1532,9 +1613,7 @@ class Brain:
             "stream": True,
         }
         if self._use_native_tools and not skip_tools:
-            payload["tools"] = capability_index.filter_schemas(
-                domains=domain_hints, available_only=True
-            )
+            payload["tools"] = capability_index.filter_schemas(domains=domain_hints, available_only=True)
             payload["tool_choice"] = "auto"
         if getattr(self.config, "llm_disable_reasoning", False):
             payload["reasoning"] = {"effort": "none"}
@@ -1547,9 +1626,7 @@ class Brain:
                 payload.pop("tool_choice", None)
         return payload
 
-    def _select_followup_route(
-        self, payload: Dict[str, Any]
-    ) -> Tuple[httpx.AsyncClient, str, bool]:
+    def _select_followup_route(self, payload: Dict[str, Any]) -> Tuple[httpx.AsyncClient, str, bool]:
         """Pick which endpoint serves a follow-up completion: vision (if this
         payload carries an image block from desktop_screenshot), else small.
         Returns (client, model, is_vision)."""
@@ -1578,9 +1655,7 @@ class Brain:
         stream_filter = TextStreamFilter()
         async with client.stream("POST", "chat/completions", json=payload) as response:
             response.raise_for_status()
-            async for content in stream_followup_content(
-                response, generation, lambda: self._chat_generation, state
-            ):
+            async for content in stream_followup_content(response, generation, lambda: self._chat_generation, state):
                 filtered = stream_filter.push(content)
                 if filtered:
                     yield filtered
@@ -1655,9 +1730,7 @@ class Brain:
         # Load session-specific history from SQLite store at the start of the turn
         if self.session_store:
             try:
-                raw_messages = self.session_store.get_session_messages(
-                    session_id, limit=self._history_max_turns * 2
-                )
+                raw_messages = self.session_store.get_session_messages(session_id, limit=self._history_max_turns * 2)
                 self.history = []
                 for role, content in raw_messages:
                     self.history.append({"role": role, "content": content})
@@ -1680,8 +1753,6 @@ class Brain:
                     self.config.opinions_file,
                     self.world_model,
                 )
-
-
 
         generation = self._chat_generation
         turn_id = str(uuid4())
@@ -1739,6 +1810,7 @@ class Brain:
         if instruction is not None:
             self.world_model.add_rule(instruction, "teaching")
             from charlie.tools import emit_memory_updated
+
             emit_memory_updated("world_model", instruction)
             logger.info("Standing instruction learned: %s", instruction)
             yield "Got it, I'll remember that."
@@ -1778,6 +1850,7 @@ class Brain:
         if verbosity is not None:
             try:
                 from pathlib import Path as _VP
+
                 up = _VP(self.config.user_file)
                 existing = up.read_text(encoding="utf-8") if up.exists() else ""
                 # Replace or append verbosity line
@@ -1797,7 +1870,6 @@ class Brain:
             except Exception as ve:
                 logger.warning("Failed to update verbosity: %s", ve)
 
-
         # --- Fast-path: resume desktop control after the panic hotkey (deterministic, no LLM needed) ---
         if desktop_actions is not None and desktop_actions.is_halted() and _detect_desktop_resume(user_input):
             desktop_actions.clear_halt()
@@ -1816,9 +1888,7 @@ class Brain:
                 fp_match.intent,
                 fp_match.target_domain,
             )
-            requirement, risk_class, requirement_reason = autonomy_evaluate(
-                fp_match.tool_name, fp_match.arguments
-            )
+            requirement, risk_class, requirement_reason = autonomy_evaluate(fp_match.tool_name, fp_match.arguments)
             if requirement == Requirement.BLOCK:
                 msg = f"Operation '{fp_match.intent}' is blocked by security policy: {requirement_reason}"
                 yield msg
@@ -1933,7 +2003,9 @@ class Brain:
                 # Compound instruction: apps already open, confirm and continue with the leftover text.
                 logger.info(
                     "Fast-path partial open: %s -> opened=%s, continuing with: %s",
-                    user_input, open_msg, open_remaining,
+                    user_input,
+                    open_msg,
+                    open_remaining,
                 )
                 yield open_msg + " "
                 user_input = open_remaining
@@ -1944,6 +2016,16 @@ class Brain:
             logger.info("Fast-path browser task: %s", browser_task_query)
             yield await self._browser_task_bounded(browser_task_query, platform)
             return
+
+        # --- Fast-path: continue an explicit request against the active browser page ---
+        if self.config.browser_enabled:
+            from charlie.browser.session import get_session
+
+            browser_continuation = router.match_browser_continuation(user_input, get_session().last_url)
+            if browser_continuation is not None:
+                logger.info("Fast-path browser continuation: %s", browser_continuation)
+                yield await self._browser_task_bounded(browser_continuation, platform)
+                return
 
         # --- Fast-path: live background-task progress query (deterministic, no LLM needed) ---
         task_status_res = router.answer_background_task_status(user_input)
@@ -2005,9 +2087,7 @@ class Brain:
                 screen_observation = await asyncio.get_running_loop().run_in_executor(
                     _UIA_EXECUTOR, tool_registry.execute_tool, "desktop_observe", {}
                 )
-                search_results = (
-                    f"{search_results}\n\n{screen_observation}" if search_results else screen_observation
-                )
+                search_results = f"{search_results}\n\n{screen_observation}" if search_results else screen_observation
                 logger.info("Forced fresh screen observation for screen-content query")
             except Exception:
                 logger.warning("Forced screen observation failed", exc_info=True)
@@ -2051,23 +2131,23 @@ class Brain:
                 logger.debug("Goal expired: %s", self._active_goal)
                 self._active_goal = None
         volatile = prompt_builder.build_volatile_tier(
-            platform, now, budget.remaining,
-            has_search=bool(search_results), has_memory=has_memory,
-            has_user=has_user, has_opinions=has_opinions,
+            platform,
+            now,
+            budget.remaining,
+            has_search=bool(search_results),
+            has_memory=has_memory,
+            has_user=has_user,
+            has_opinions=has_opinions,
             verbosity_hint=verbosity_hint,
             active_goal=self._active_goal,
             operator_persona=_detect_operator_persona(user_input),
             tool_catalog="" if self._use_native_tools else tool_registry.build_tool_prompt(),
             idle_seconds=(
-                desktop_session.user_idle_seconds()
-                if _DESKTOP_AVAILABLE and desktop_session is not None
-                else None
+                desktop_session.user_idle_seconds() if _DESKTOP_AVAILABLE and desktop_session is not None else None
             ),
             world_model_slice=self.world_model.context_slice(),
         )
-        system_msg = prompt_builder.assemble_system_prompt(
-            self._stable_tier, self._context_tier, volatile
-        )
+        system_msg = prompt_builder.assemble_system_prompt(self._stable_tier, self._context_tier, volatile)
 
         # Inject search results so LLM answers from fresh data
         effective_input = user_input
@@ -2114,9 +2194,7 @@ class Brain:
         self.history.append({"role": "user", "content": original_user_input})
 
         payload = self._build_payload(messages, skip_tools=skip_tools)
-        accumulated, tool_calls = await self._stream_completion(
-            payload, generation
-        )
+        accumulated, tool_calls = await self._stream_completion(payload, generation)
 
         # Hybrid fallback: try text-based extraction if native returned nothing
         if not tool_calls and accumulated and not skip_tools:
@@ -2125,9 +2203,7 @@ class Brain:
         if skip_tools:
             tool_calls = []
 
-        tool_calls = router.maybe_inject_visual_screenshot_call(
-            tool_calls, queue_visual_screenshot and not skip_tools
-        )
+        tool_calls = router.maybe_inject_visual_screenshot_call(tool_calls, queue_visual_screenshot and not skip_tools)
 
         if not tool_calls:
             if accumulated:
@@ -2175,9 +2251,10 @@ class Brain:
                 logger.info("Tool %s already executed, reusing result", call["name"])
                 return _seen_tool_calls[ck]
             from charlie.capabilities import capability_index
+
             op = capability_index.get_operation(tool_name)
-            timeout = (op.timeout_sec if (op and op.timeout_sec) else _TOOL_TIMEOUTS.get(tool_name, _TOOL_TIMEOUT_SEC))
-            is_com = ((op and op.executor_type == "com_thread") or tool_name in _DESKTOP_COM_TOOLS)
+            timeout = op.timeout_sec if (op and op.timeout_sec) else _TOOL_TIMEOUTS.get(tool_name, _TOOL_TIMEOUT_SEC)
+            is_com = (op and op.executor_type == "com_thread") or tool_name in _DESKTOP_COM_TOOLS
             required_leases = op.required_leases if (op and op.required_leases) else ()
             lock = self._tool_locks.setdefault(tool_name, asyncio.Lock())
 
@@ -2232,9 +2309,11 @@ class Brain:
                 if tool_name in _DESKTOP_CONTROL_TOOLS:
                     _desktop_action_count[0] += 1
                 try:
+
                     async def _run_with_leases() -> str:
                         if required_leases:
                             from charlie.resource_locks import default_lease_manager
+
                             async with await default_lease_manager.acquire_many(required_leases, f"turn:{turn_id}"):
                                 return await _run()
                         elif tool_registry.is_interactive(tool_name):
@@ -2256,12 +2335,14 @@ class Brain:
                     if tool_name == "shell_execute" and r.startswith("Error"):
                         logger.info("Shell execution returned an error. Running recovery pipeline...")
                         from charlie.recovery import recover_tool
+
                         recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
                         if recovered_res is not None:
                             r = recovered_res
                     elif tool_name == "file_write" and r.startswith("Error"):
                         logger.info("File write returned an error. Running recovery pipeline...")
                         from charlie.recovery import recover_tool
+
                         recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
                         if recovered_res is not None:
                             r = recovered_res
@@ -2269,6 +2350,7 @@ class Brain:
                     if tool_name in ("shell_execute", "file_write"):
                         logger.info("Tool %s timed out. Running recovery pipeline...", tool_name)
                         from charlie.recovery import recover_tool
+
                         recovered_res = await recover_tool(self, tool_name, call["arguments"], te)
                         if recovered_res is not None:
                             r = recovered_res
@@ -2281,6 +2363,7 @@ class Brain:
                     if tool_name in ("shell_execute", "file_write"):
                         logger.info("Tool %s raised exception. Running recovery pipeline...", tool_name)
                         from charlie.recovery import recover_tool
+
                         recovered_res = await recover_tool(self, tool_name, call["arguments"], e)
                         if recovered_res is not None:
                             r = recovered_res
@@ -2315,7 +2398,9 @@ class Brain:
                         self._turn_halted = True
                         logger.warning(
                             "Desktop action %s failed %d time(s) (threshold %d) -- auto-halting.",
-                            tool_name, _desktop_fail_counts[ck], threshold,
+                            tool_name,
+                            _desktop_fail_counts[ck],
+                            threshold,
                         )
                 else:
                     _desktop_fail_counts[ck] = 0
@@ -2394,7 +2479,8 @@ class Brain:
                 return
             # Step 3: Post-tool confidence gate - replace low-quality results
             exec_results = [
-                r if _assess_tool_result_relevance(c["name"], r)
+                r
+                if _assess_tool_result_relevance(c["name"], r)
                 else "Error: Search returned no useful results. Proceed with general knowledge."
                 for c, r in zip(tool_calls, exec_results)
             ]
@@ -2434,9 +2520,7 @@ class Brain:
             messages = await _prep_messages(messages, self.config)
 
             followup_payload = self._build_payload(messages)
-            followup_client, followup_model, is_vision = self._select_followup_route(
-                followup_payload
-            )
+            followup_client, followup_model, is_vision = self._select_followup_route(followup_payload)
 
             state = FollowupStreamState()
             try:
@@ -2446,9 +2530,7 @@ class Brain:
                     pass
             except Exception as tool_exc:
                 error_text = str(tool_exc) or repr(tool_exc)
-                logger.warning(
-                    "%s follow-up LLM error: %s", "Vision" if is_vision else "Tool", error_text
-                )
+                logger.warning("%s follow-up LLM error: %s", "Vision" if is_vision else "Tool", error_text)
                 if not state.accumulated:
                     yield (
                         "I ran into a problem getting a response back just now "
@@ -2472,9 +2554,7 @@ class Brain:
                 self.history.append({"role": "assistant", "content": clean_accumulated})
                 # Save to vector memory (fire-and-forget)
                 self._save_to_memory(clean_accumulated, "assistant")
-                asyncio.ensure_future(
-                    self._extract_thread_update(original_user_input, clean_accumulated, session_id)
-                )
+                asyncio.ensure_future(self._extract_thread_update(original_user_input, clean_accumulated, session_id))
             await self._check_memory_capacity()
             # --- Periodic reflection and knowledge graph update ---
             self._reflect_turn_counter += 1
@@ -2556,6 +2636,7 @@ class Brain:
             )
             self.world_model.add_rule(rule_text, "outcome")
             from charlie.tools import emit_memory_updated
+
             emit_memory_updated("world_model", rule_text)
 
     def _check_observed_patterns(self) -> None:
@@ -2595,7 +2676,6 @@ class Brain:
         except Exception as e:
             logger.debug("Memory save skipped: %s", e)
 
-
     async def _reflect_and_consolidate(self) -> None:
         """Periodically reflect on recent conversation and consolidate the knowledge graph."""
         try:
@@ -2604,9 +2684,7 @@ class Brain:
             if len(recent) < 2:
                 return
 
-            conversation_text = "\n".join(
-                f"{m['role']}: {m['content'][:200]}" for m in recent
-            )
+            conversation_text = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in recent)
 
             client = self.client
             model = self.config.llm_model
@@ -2649,6 +2727,7 @@ class Brain:
                         try:
                             self.memory_graph.add_fact(parts[0], parts[1], parts[2])
                             from charlie.tools import emit_memory_updated
+
                             emit_memory_updated("memory_graph", f"{parts[0]} -> {parts[1]} -> {parts[2]}")
                             added += 1
                         except Exception:
@@ -2665,6 +2744,7 @@ class Brain:
 
         except Exception as e:
             logger.debug("Reflection failed: %s", e, exc_info=True)
+
     @staticmethod
     def _resolve_tool_arguments(tool_name: str, raw_args: str) -> Dict[str, Any]:
         """Map a text-mode TOOL: call's raw argument string onto `tool_name`'s
@@ -2687,9 +2767,7 @@ class Brain:
         if len(quoted) == 1:
             return {params_list[0]: quoted[0]}
         if len(quoted) > 1:
-            return {
-                params_list[i]: val for i, val in enumerate(quoted) if i < len(params_list)
-            }
+            return {params_list[i]: val for i, val in enumerate(quoted) if i < len(params_list)}
         return {params_list[0]: raw_args}
 
     def _extract_tool_calls(self, text: str) -> List[Dict[str, Any]]:
@@ -2707,11 +2785,7 @@ class Brain:
                         arguments = {}
                         if isinstance(function.get("arguments"), str):
                             try:
-                                arguments = (
-                                    json.loads(function["arguments"])
-                                    if function["arguments"]
-                                    else {}
-                                )
+                                arguments = json.loads(function["arguments"]) if function["arguments"] else {}
                             except json.JSONDecodeError:
                                 arguments = {}
                         calls.append(
@@ -2742,9 +2816,7 @@ class Brain:
         # bare-pattern matching on prose causes false tool invocations.
         if not self._use_native_tools:
             known_names = "|".join(re.escape(n) for n in tool_registry.get_tool_names())
-            seen_signatures = {
-                (c["name"], json.dumps(c["arguments"], sort_keys=True)) for c in calls
-            }
+            seen_signatures = {(c["name"], json.dumps(c["arguments"], sort_keys=True)) for c in calls}
             if known_names:
                 bare_pattern = re.compile(r"\b(" + known_names + r")\s*\(([^)]*)\)")
                 for match in bare_pattern.finditer(text):
@@ -2763,9 +2835,7 @@ class Brain:
 # =====================================================================
 
 
-def _build_native_tool_results(
-    tool_calls: List[Dict[str, Any]], exec_results: List[str]
-) -> List[Dict[str, Any]]:
+def _build_native_tool_results(tool_calls: List[Dict[str, Any]], exec_results: List[str]) -> List[Dict[str, Any]]:
     """Build native (OpenAI-style) tool role messages for the follow-up
     payload. Truncates to _TOOL_RESULT_MAX_CHARS like _format_text_tool_summary
     already does for the text-based path -- an MCP tool (e.g. a screenshot)
@@ -2794,9 +2864,7 @@ def _format_text_tool_summary(
             args = call.get("arguments", {})
             cmd = args.get("command", args) if isinstance(args, dict) else args
             if "Command executed successfully" in content:
-                lines.append(
-                    f"shell_execute {cmd} executed successfully. The command is now running."
-                )
+                lines.append(f"shell_execute {cmd} executed successfully. The command is now running.")
             else:
                 lines.append(f"shell_execute {cmd} returned: {content}")
         else:

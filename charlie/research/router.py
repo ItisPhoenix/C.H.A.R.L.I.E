@@ -62,7 +62,9 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
         return ResearchDecision(False, None, "stable general knowledge")
     if _CURRENT_SIGNALS.search(text):
         mode = ResearchMode.STANDARD if re.search(
-            r"\b(price|shopping|products|recommend|compare|travel|research|investigate|trending)\b", text, re.I
+            r"\b(price|shopping|products|recommend|compare|travel|research|investigate|trending|sources?|citations?)\b",
+            text,
+            re.I,
         ) else ResearchMode.QUICK
         return ResearchDecision(True, mode, "fresh or materially changing information")
     return ResearchDecision(False, None, "no live-web signal")

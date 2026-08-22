@@ -20,6 +20,22 @@ logger = logging.getLogger("charlie.browser")
 
 _CAPABILITY = "browser"
 _LOCK_POLL_INTERVAL_S = 0.5
+_NON_CACHEABLE_NAV_WORDS = (
+    "search",
+    "find",
+    "look up",
+    "open",
+    "go back",
+    "navigate",
+    "filter",
+    "show only",
+    "exclude shorts",
+)
+
+
+def _cacheable(task: str, freshness_sensitive: bool) -> bool:
+    lowered = task.lower()
+    return not freshness_sensitive and not any(word in lowered for word in _NON_CACHEABLE_NAV_WORDS)
 
 
 async def _acquire_browser(owner_id: str, max_wait_s: float) -> bool:
@@ -55,15 +71,14 @@ async def resolve(
     start_time = time.perf_counter()
     outcome = "success"
     try:
-        return await _resolve_inner(
-            task, complete, describe_image, approve_click, max_steps, deadline_s, on_progress
-        )
+        return await _resolve_inner(task, complete, describe_image, approve_click, max_steps, deadline_s, on_progress)
     except Exception as e:
         outcome = f"error: {type(e).__name__}"
         raise
     finally:
         elapsed = (time.perf_counter() - start_time) * 1000
         logger.debug(f"browser.task.resolve took {elapsed:.2f}ms, outcome: {outcome}")
+
 
 async def _resolve_inner(
     task: str,
@@ -76,7 +91,7 @@ async def _resolve_inner(
 ) -> BrowserResult:
     """Run the tier cascade for `task`, falling through tier by tier, and cache the result."""
     freshness_sensitive = intent.is_freshness_sensitive(task)
-    if not freshness_sensitive:
+    if _cacheable(task, freshness_sensitive):
         cached = session.cache_get(task)
         if cached is not None:
             return cached
@@ -98,22 +113,104 @@ async def _resolve_inner(
         loop = asyncio.get_running_loop()
         result: Optional[BrowserResult] = None
         lowered = task.lower()
+        youtube_open_request = ("open" in lowered or "play" in lowered) and ("video" in lowered or "youtube" in lowered)
+        flipkart_request = "flipkart" in lowered
+        flipkart_action_request = (
+            ("filter" in lowered and "ram" in lowered)
+            or ("price" in lowered and any(word in lowered for word in ("under", "below", "sort")))
+            or (any(word in lowered for word in ("under", "below", "less than")) and "₹" in task)
+            or ("sort" in lowered and "low" in lowered and "high" in lowered)
+            or "first three" in lowered
+            or "cheapest matching" in lowered
+            or ("go back" in lowered and ("filtered" in lowered or "results" in lowered))
+        )
+        flipkart_fact_request = any(interrogative in lowered for interrogative in ("what", "how", "which")) and any(
+            term in lowered for term in ("processor", "ram", "storage", "price")
+        )
 
-        if "youtube" in lowered:
-            youtube_intent = intent.parse_site_intent(task, "youtube")
-            query = youtube_intent.query if youtube_intent else task
-            url = await loop.run_in_executor(None, fastpath.youtube_play, query)
-            result = (
-                BrowserResult(
-                    url=url,
-                    success=True,
-                    verification="youtube-watch-url",
+        current_url = session.get_session().last_url or ""
+        if result is None and (
+            youtube_open_request
+            or ("filter" in lowered and ("video" in lowered or "short" in lowered))
+            or flipkart_request
+            or flipkart_action_request
+            or "flipkart.com" in current_url.lower()
+        ):
+            try:
+                live_url = await loop.run_in_executor(None, lambda: controller.run(lambda page: page.url, timeout=5.0))
+                if live_url:
+                    current_url = live_url
+            except Exception:
+                pass
+        if "youtube.com/watch?v=" in current_url:
+            player_result = await loop.run_in_executor(None, recipes.youtube_player_control, task)
+            if player_result is not None:
+                result = player_result
+        if result is None and "filter" in lowered and ("video" in lowered or "short" in lowered):
+            if "youtube.com/results" not in current_url:
+                result = BrowserResult(
+                    answer="filter unavailable in current YouTube UI",
+                    verification="youtube-video-filter-unavailable",
                     site="youtube",
-                    query=query,
                 )
-                if url
-                else await loop.run_in_executor(None, recipes.youtube_play, query)
+        if (
+            result is None
+            and "youtube.com/results" in current_url
+            and ("filter" in lowered or "show only" in lowered or "exclude shorts" in lowered)
+        ):
+            result = await loop.run_in_executor(None, recipes.youtube_filter_videos)
+        if "youtube.com/results" in current_url and (intent.has_open_intent(task) or "open" in lowered.split()):
+            result = await loop.run_in_executor(None, recipes.youtube_open_current, task)
+
+        if result is None and flipkart_request and intent.is_search_intent(task):
+            flipkart_intent = intent.parse_site_intent(task, "flipkart")
+            query = flipkart_intent.query if flipkart_intent else task
+            result = await loop.run_in_executor(None, recipes.flipkart_search, query)
+
+        if result is None and ("flipkart.com" in current_url.lower() or flipkart_action_request):
+            result = await loop.run_in_executor(None, recipes.flipkart_action, task)
+
+        if result is None and flipkart_fact_request and isinstance(recipes._FLIPKART_STATE.get("query"), str):
+            result = BrowserResult(
+                answer="I couldn't verify a current Flipkart product page for that fact.",
+                verification="flipkart-product-page-unavailable",
+                site="flipkart",
             )
+
+        if result is None and (flipkart_request or flipkart_action_request):
+            result = BrowserResult(
+                answer="I couldn't verify the current Flipkart page needed for that action.",
+                verification="flipkart-current-page-unavailable",
+                site="flipkart",
+            )
+
+        if result is None and "youtube" in lowered:
+            if youtube_open_request:
+                result = BrowserResult(
+                    answer="I couldn't verify a current YouTube results page to open from.",
+                    verification="youtube-open-current-page-unavailable",
+                    site="youtube",
+                )
+            else:
+                youtube_intent = intent.parse_site_intent(task, "youtube")
+                query = youtube_intent.query if youtube_intent else task
+                if intent.is_search_intent(task):
+                    result = await loop.run_in_executor(
+                        None, recipes.site_search, "https://www.youtube.com", query, "youtube"
+                    )
+                else:
+                    url = await loop.run_in_executor(None, fastpath.youtube_play, query)
+                    result = (
+                        BrowserResult(
+                            url=url,
+                            success=True,
+                            verification="youtube-watch-url",
+                            site="youtube",
+                            query=query,
+                        )
+                        if url
+                        else await loop.run_in_executor(None, recipes.youtube_play, query)
+                    )
 
         if result is None:
             site = _resolve_known_site(task)
@@ -127,18 +224,22 @@ async def _resolve_inner(
                 result = await loop.run_in_executor(None, recipes.site_search, site, query, site_name)
 
         if result is None:
+            repository_result = await loop.run_in_executor(
+                None, recipes.current_repository_search, task, session.get_session().last_url
+            )
+            if repository_result is not None:
+                result = repository_result
+
+        if result is None:
             result = await agent.run_task(
                 task, complete, describe_image, approve_click, max_steps, remaining_deadline_s, on_progress
             )
             if result.answer == "blocked":
                 blocked_url = session.get_session().last_url
-                retried = (
-                    await loop.run_in_executor(None, stealth.retry_blocked, blocked_url)
-                    if blocked_url else None
-                )
+                retried = await loop.run_in_executor(None, stealth.retry_blocked, blocked_url) if blocked_url else None
                 result = retried or BrowserResult(answer="That site blocked me and I couldn't get through.")
 
-        if result is not None and result.success and not freshness_sensitive:
+        if result is not None and result.success and _cacheable(task, freshness_sensitive):
             session.cache_set(task, result)
         return result
     finally:

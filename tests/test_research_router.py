@@ -18,6 +18,12 @@ def test_research_router_distinguishes_stable_and_fresh_requests():
     assert route("deep research open source browser agents").mode is ResearchMode.DEEP
 
 
+def test_current_request_asking_for_sources_fetches_documents():
+    decision = route("latest major AI developments today with sources")
+    assert decision.should_research is True
+    assert decision.mode is ResearchMode.STANDARD
+
+
 def test_clean_query_removes_instruction_and_format_noise():
     cleaned = clean_query("Do a web search and tell me what's currently trending in AI & tech. Be short under 60 words")
     assert cleaned == "trending in AI & tech"

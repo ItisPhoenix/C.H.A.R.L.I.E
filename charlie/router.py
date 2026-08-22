@@ -93,7 +93,7 @@ def match_close_app(query: str) -> Optional[Tuple[List[str], List[str]]]:
     if not verb_matched:
         return None
 
-    target_text = q_clean[len(verb_matched):].strip()
+    target_text = q_clean[len(verb_matched) :].strip()
     if not target_text:
         return None
 
@@ -122,7 +122,9 @@ def match_close_app(query: str) -> Optional[Tuple[List[str], List[str]]]:
 
     cleaned_remaining = re.sub(
         r"\b(and|or|then|please|also|to|write|save|type)\b|\.exe\b|[.,;&!?]",
-        " ", remaining_text, flags=re.IGNORECASE,
+        " ",
+        remaining_text,
+        flags=re.IGNORECASE,
     ).strip()
     if cleaned_remaining:
         logger.info("Extra instructions detected in close app query: '%s', bypassing fast-path", cleaned_remaining)
@@ -176,6 +178,23 @@ def close_process_for(app: str) -> Optional[str]:
 
 _BROWSER_TASK_VERB_RE = re.compile(r"^\s*(?:play|watch|search|find|look up|browse|check)\b", re.IGNORECASE)
 _BROWSER_TASK_ON_SITE_RE = re.compile(r"\bon\s+([a-z0-9][\w.]*)", re.IGNORECASE)
+_BROWSER_CONTINUATION_ACTION_RE = re.compile(
+    r"\b(?:find|search|look\s+up|read|open|browse|check|inspect|summari[sz]e|filter|sort|go\s+back)\b",
+    re.IGNORECASE,
+)
+_BROWSER_CONTINUATION_CUE_RE = re.compile(
+    r"\b(?:this\s+(?:repository|repo|page|site)|current\s+(?:page|repository)|here|"
+    r"these\s+results|filter\s+these|sort\s+these|first\s+three\s+matching|"
+    r"cheapest\s+matching|go\s+back\s+to\s+the\s+filtered|on\s+github|on\s+flipkart|"
+    r"search\s+this\s+repository|find\s+.+?\s+in\s+this\s+repository|"
+    r"open\s+the\s+(?:most\s+)?relevant\s+result)\b",
+    re.IGNORECASE,
+)
+_GITHUB_CODE_LOOKUP_RE = re.compile(
+    r"\b(?:implemented|implementation|defined|definition|source|file|class|function|"
+    r"repository|repo|code|result)\b",
+    re.IGNORECASE,
+)
 
 
 def match_browser_task(query: str) -> Optional[str]:
@@ -193,17 +212,72 @@ def match_browser_task(query: str) -> Optional[str]:
     return query.strip()
 
 
-_URL_RE = re.compile(
-    r"\b((?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+)\b", re.IGNORECASE
+def match_browser_continuation(query: str, current_url: Optional[str]) -> Optional[str]:
+    """Match actions that explicitly refer to the active browser page/repository."""
+    if not current_url or not _BROWSER_CONTINUATION_ACTION_RE.search(query):
+        return None
+    lowered_url = current_url.lower()
+    explicit_context = _BROWSER_CONTINUATION_CUE_RE.search(query)
+    github_code_context = "github.com" in lowered_url and _GITHUB_CODE_LOOKUP_RE.search(query)
+    if not explicit_context and not github_code_context:
+        return None
+    if "github.com" not in lowered_url and not explicit_context:
+        return None
+    return query.strip()
+
+
+_URL_RE = re.compile(r"\b((?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+)\b", re.IGNORECASE)
+_FILE_EXTENSIONS = frozenset(
+    {
+        "txt",
+        "doc",
+        "docx",
+        "pdf",
+        "csv",
+        "xlsx",
+        "xls",
+        "ppt",
+        "pptx",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "bmp",
+        "svg",
+        "ico",
+        "mp3",
+        "mp4",
+        "wav",
+        "avi",
+        "mov",
+        "mkv",
+        "py",
+        "js",
+        "ts",
+        "jsx",
+        "tsx",
+        "json",
+        "xml",
+        "yaml",
+        "yml",
+        "toml",
+        "zip",
+        "rar",
+        "7z",
+        "tar",
+        "gz",
+        "exe",
+        "msi",
+        "dll",
+        "bat",
+        "ps1",
+        "log",
+        "md",
+        "ini",
+        "cfg",
+        "env",
+    }
 )
-_FILE_EXTENSIONS = frozenset({
-    "txt", "doc", "docx", "pdf", "csv", "xlsx", "xls", "ppt", "pptx",
-    "png", "jpg", "jpeg", "gif", "bmp", "svg", "ico",
-    "mp3", "mp4", "wav", "avi", "mov", "mkv",
-    "py", "js", "ts", "jsx", "tsx", "json", "xml", "yaml", "yml", "toml",
-    "zip", "rar", "7z", "tar", "gz", "exe", "msi", "dll", "bat", "ps1",
-    "log", "md", "ini", "cfg", "env",
-})
 _OPEN_APP_MAP = {name: entry.open_cmd for name, entry in _APP_REGISTRY.items()}
 
 
@@ -241,7 +315,7 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
     if not verb_matched:
         return None
 
-    target_text = q_clean[len(verb_matched):].strip()
+    target_text = q_clean[len(verb_matched) :].strip()
     if not target_text:
         return None
 
@@ -273,7 +347,9 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
 
     cleaned_remaining = re.sub(
         r"\b(and|or|then|please|also|to|write|save|type)\b|\.exe\b|[.,;&!?]",
-        " ", remaining_text, flags=re.IGNORECASE,
+        " ",
+        remaining_text,
+        flags=re.IGNORECASE,
     ).strip()
     leftover_instruction = remaining_text.strip() if cleaned_remaining else None
 
@@ -287,7 +363,8 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
         launched_commands = [c for _, c in kept]
         logger.info(
             "Compound open-app query: '%s' -- opening app(s) now, continuing with: '%s'",
-            query, leftover_instruction,
+            query,
+            leftover_instruction,
         )
 
     return matched_apps, launched_commands, leftover_instruction
@@ -304,6 +381,7 @@ def execute_open_app(matched_apps: List[str], launched_commands: List[str]) -> s
         process_name = _CLOSE_APP_MAP.get(app)
         if process_name and is_process_running(process_name):
             from charlie.desktop.windows import focus_window
+
             focus_window(process_name.removesuffix(".exe"))
             already_open_apps.append(app)
             continue

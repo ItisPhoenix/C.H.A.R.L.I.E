@@ -47,6 +47,11 @@ def record_marks(marks: List[Mark]) -> None:
     get_session().marks = {m.mark_id: m for m in marks}
 
 
+def invalidate_marks() -> None:
+    """Discard references tied to the previous DOM snapshot."""
+    get_session().marks.clear()
+
+
 def resolve_mark(mark_id: int) -> Mark:
     mark = get_session().marks.get(mark_id)
     if mark is None:
@@ -60,6 +65,7 @@ def record_action(description: str) -> None:
 
 def record_navigation(url: str) -> None:
     session = get_session()
+    session.marks.clear()
     session.last_url = url
     session.visited_urls.append(url)
 
