@@ -31,10 +31,10 @@ from charlie.events import EventMeta, EventSource, EventType
 from charlie.resource_locks import CapabilityLease, CapabilityLeaseManager
 from charlie.results import ResultsStore
 from charlie.task_journal import (
-    TaskJournal,
     TaskOrigin,
     TaskPriority,
     TaskTransitionError,
+    get_task_journal,
     normalize_task_status,
 )
 from charlie.task_journal import (
@@ -141,7 +141,7 @@ class BackgroundTask:
 
 _current_task: Optional[BackgroundTask] = None
 _active_event_bus: Optional[Any] = None
-_journal = TaskJournal(state_path=_JOURNAL_FILE)
+_journal = get_task_journal()
 
 
 def _priority_name(priority: int) -> TaskPriority:

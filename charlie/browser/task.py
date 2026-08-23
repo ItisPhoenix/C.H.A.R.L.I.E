@@ -40,16 +40,17 @@ def _cacheable(task: str, freshness_sensitive: bool) -> bool:
     return not freshness_sensitive and not any(word in lowered for word in _NON_CACHEABLE_NAV_WORDS)
 
 
-async def _acquire_browser(owner_id: str, max_wait_s: float) -> bool:
-    """Poll for the browser capability without allowing concurrent page mutations."""
-    elapsed = 0.0
-    while not resource_locks.acquire(_CAPABILITY, owner_id):
-        if elapsed >= max_wait_s:
-            logger.warning("Browser capability lock wait timed out after %.1fs", max_wait_s)
-            return False
-        await asyncio.sleep(_LOCK_POLL_INTERVAL_S)
-        elapsed += _LOCK_POLL_INTERVAL_S
-    return True
+async def _acquire_browser(owner_id: str, max_wait_s: float) -> Optional[resource_locks.CapabilityLease]:
+    """Acquire canonical browser lease without allowing concurrent page mutations."""
+    try:
+        return await resource_locks.default_lease_manager.acquire(
+            _CAPABILITY,
+            owner_id,
+            timeout=max_wait_s,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Browser capability lock wait timed out after %.1fs", max_wait_s)
+        return None
 
 
 def _resolve_known_site(task: str) -> Optional[str]:
@@ -77,11 +78,21 @@ async def resolve(
     max_steps: int = 3,
     deadline_s: float = 25.0,
     on_progress=None,
+    owner_id: Optional[str] = None,
 ) -> BrowserResult:
     start_time = time.perf_counter()
     outcome = "success"
     try:
-        return await _resolve_inner(task, complete, describe_image, approve_click, max_steps, deadline_s, on_progress)
+        return await _resolve_inner(
+            task,
+            complete,
+            describe_image,
+            approve_click,
+            max_steps,
+            deadline_s,
+            on_progress,
+            owner_id,
+        )
     except Exception as e:
         outcome = f"error: {type(e).__name__}"
         raise
@@ -98,6 +109,7 @@ async def _resolve_inner(
     max_steps: int = 3,
     deadline_s: float = 25.0,
     on_progress=None,
+    owner_id: Optional[str] = None,
 ) -> BrowserResult:
     """Run the tier cascade for `task`, falling through tier by tier, and cache the result."""
     freshness_sensitive = intent.is_freshness_sensitive(task)
@@ -107,9 +119,9 @@ async def _resolve_inner(
             return cached
 
     wait_start = time.monotonic()
-    owner_id = make_id()
-    acquired = await _acquire_browser(owner_id, max_wait_s=deadline_s)
-    if not acquired:
+    owner_id = owner_id or make_id()
+    capability_lease = await _acquire_browser(owner_id, max_wait_s=deadline_s)
+    if capability_lease is None:
         return BrowserResult(
             answer="The browser is busy with another task. Try again shortly.",
             verification="capability-busy",
@@ -194,5 +206,4 @@ async def _resolve_inner(
     finally:
         if controller_lease:
             controller.release_task_lease()
-        if acquired:
-            resource_locks.release(_CAPABILITY, owner_id)
+        await capability_lease.release()

@@ -14,7 +14,7 @@ from urllib.parse import quote, unquote, urljoin, urlparse
 
 from charlie.browser import actions, controller, session
 from charlie.browser.intent import _ATTRIBUTE_ALIASES, BrowserIntent, Constraint, normalize_attribute
-from charlie.browser.observation import Mark, parse_snapshot, rank_and_cap
+from charlie.browser.observation import Mark, is_blocked, parse_snapshot, rank_and_cap
 from charlie.known_apps import resolve_website_url
 
 logger = logging.getLogger("charlie.browser")
@@ -1159,6 +1159,22 @@ def site_search(site_url: str, query: str, site_name: Optional[str] = None) -> O
         if not settled:
             if is_wikipedia:
                 return wikipedia_fallback(page)
+            rendered = _content_text(page)
+            try:
+                rendered = f"{rendered}\n{page.content()[:12000]}"
+            except Exception:
+                pass
+            if is_blocked(marks, rendered):
+                return BrowserResult(
+                    url=page.url,
+                    answer=(
+                        f"SITE_STATE_BLOCKED: {site_name or resolved_site_url} displayed an external "
+                        "verification or access challenge, so search results could not be verified."
+                    ),
+                    verification="site-state-blocked",
+                    site=site_name,
+                    query=query,
+                )
             return BrowserResult(
                 url=page.url,
                 answer=f"I reached {site_name or resolved_site_url}, but couldn't verify search results for '{query}'.",

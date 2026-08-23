@@ -12,6 +12,12 @@ from charlie.task_journal import (
 )
 
 
+def test_default_task_journal_is_shared_singleton() -> None:
+    from charlie.task_journal import get_task_journal
+
+    assert get_task_journal() is get_task_journal()
+
+
 def test_task_journal_creates_stable_canonical_record() -> None:
     journal = TaskJournal()
 

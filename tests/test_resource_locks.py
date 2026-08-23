@@ -1,6 +1,10 @@
 from charlie import resource_locks
 
 
+def test_default_capability_lease_manager_is_introspectable() -> None:
+    assert resource_locks.get_capability_lease_manager() is resource_locks.default_lease_manager
+
+
 def test_acquire_succeeds_when_capability_is_free():
     assert resource_locks.acquire("desktop", "task-a") is True
     resource_locks.release("desktop", "task-a")

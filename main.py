@@ -106,6 +106,7 @@ from charlie.personality import get_emotion_for_context, parse_voice_command, pa
 from charlie.session_store import SessionStore
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus
+from charlie.task_journal import TaskOrigin, TaskPriority, TaskStatus, get_task_journal
 from charlie.presentation import (
     AnchorTarget,
     AttentionLevel as PresentationAttention,
@@ -959,6 +960,60 @@ async def main():
             voice.speak("Here you go.", last_emotion)
             return
 
+        turn_task_id = uuid.uuid4().hex
+        capability_requirements: tuple[str, ...] = ()
+        try:
+            from charlie import router as task_router
+            from charlie.browser import intent as browser_intent
+            from charlie.browser.session import get_session as get_browser_session
+
+            browser_session = get_browser_session()
+            parsed_browser_request = browser_intent.parse_browser_intent(
+                text,
+                browser_session.current_domain or "",
+            )
+            browser_operations = {
+                "BACK",
+                "FILTER",
+                "SORT",
+                "READ",
+                "CURRENT_PAGE_FACT",
+                "COMPARE",
+                "PRODUCT_SELECT",
+                "MEDIA",
+            }
+            if task_router.match_browser_task(text) or (
+                browser_session.last_url and parsed_browser_request.operation in browser_operations
+            ):
+                capability_requirements = ("browser",)
+        except Exception:
+            logger.debug("Foreground capability classification failed", exc_info=True)
+
+        foreground_journal = get_task_journal()
+        turn_task = foreground_journal.create_task(
+            text,
+            task_id=turn_task_id,
+            origin=TaskOrigin.FOREGROUND,
+            priority=TaskPriority.HIGH,
+            status=TaskStatus.RUNNING,
+            session_id=session_id,
+            capability_requirements=capability_requirements,
+        )
+
+        async def _emit_foreground_task(record) -> None:
+            if event_bus:
+                await event_bus.emit(
+                    "background_task",
+                    record.to_dict(),
+                    meta=EventMeta(
+                        source=EventSource.TASK,
+                        task_id=turn_task_id,
+                        session_id=session_id,
+                    ),
+                )
+
+        await _emit_foreground_task(turn_task)
+
         # Emit transcript event for voice-originated turns only. The web
         # client already renders its own optimistic user bubble the instant
         # it sends the chat command (see handleSendMessage in page.tsx), so
@@ -1025,7 +1080,12 @@ async def main():
         is_first_flush = True
         turn_active = True
         try:
-            async for chunk in brain.chat_stream(text, platform=platform, session_id=session_id):
+            async for chunk in brain.chat_stream(
+                text,
+                platform=platform,
+                session_id=session_id,
+                task_id=turn_task_id,
+            ):
                 if is_first_chunk:
                     print("\r" + " " * 30 + "\r", end="", flush=True)
                     is_first_chunk = False
@@ -1135,6 +1195,13 @@ async def main():
                         logger.warning("Failed to send Telegram reply", exc_info=True)
 
             # Emit response_done event so the UI can stop its typing indicator.
+            turn_task = foreground_journal.transition(turn_task_id, TaskStatus.VERIFYING)
+            await _emit_foreground_task(turn_task)
+            turn_task = foreground_journal.complete(
+                turn_task_id,
+                result_reference=f"session:{session_id}",
+            )
+            await _emit_foreground_task(turn_task)
             if event_bus:
                 await event_bus.emit(
                     "response_done",
@@ -1143,6 +1210,11 @@ async def main():
                 )
         except Exception as exc:
             logger.error("Turn failed", exc_info=True)
+            try:
+                turn_task = foreground_journal.fail(turn_task_id, error_summary=str(exc)[:500])
+                await _emit_foreground_task(turn_task)
+            except Exception:
+                logger.warning("Failed to mark foreground task failed", exc_info=True)
             error_class, message = classify_exception(exc)
             _safe_speak(voice, message, last_emotion, "turn-failed")
             if event_bus:

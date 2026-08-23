@@ -314,6 +314,11 @@ def test_is_blocked_on_challenge_phrase():
     assert is_blocked([], "Please verify you are human to continue") is True
 
 
+def test_is_blocked_on_generic_interstitial_markup():
+    markup = '<script>triggerInterstitialChallenge(); fetch("/_sec/verify?provider=interstitial")</script>'
+    assert is_blocked([], markup) is True
+
+
 def test_is_blocked_false_for_sparse_legitimate_page():
     # example.com is genuinely this sparse -- must not be flagged as blocked.
     assert is_blocked([], "This domain is for use in illustrative examples.") is False
@@ -654,6 +659,19 @@ async def test_resolve_holds_and_releases_the_browser_capability(monkeypatch):
     assert resource_locks.current_owner("browser") is None  # released after
 
 
+@pytest.mark.asyncio
+async def test_browser_acquire_returns_canonical_capability_lease():
+    from charlie import resource_locks
+
+    resource_locks._owners.pop("browser", None)
+    lease = await task._acquire_browser("gate-turn", max_wait_s=0.1)
+
+    assert isinstance(lease, resource_locks.CapabilityLease)
+    assert resource_locks.current_owner("browser") == "gate-turn"
+    await lease.release()
+    assert resource_locks.current_owner("browser") is None
+
+
 def test_idle_check_does_not_shutdown_during_active_browser_task(monkeypatch):
     from charlie.browser import controller
 
@@ -744,6 +762,46 @@ def test_browser_task_direct_call_errors():
     assert "Brain.browser_task" in tools.browser_task("anything")
 
 
+@pytest.mark.asyncio
+async def test_brain_browser_task_emits_task_scoped_presentation(monkeypatch):
+    from charlie import recovery
+    from charlie.config import Config
+    from charlie.core import Brain
+
+    emitted = []
+
+    class Bus:
+        async def emit(self, event_type, payload, meta=None):
+            emitted.append((event_type, payload, meta))
+
+    async def fake_resolve(*args, **kwargs):
+        return BrowserResult(
+            url="https://shop.example/search?q=laptops",
+            answer="Verified laptop results.",
+            success=True,
+            verification="content-links",
+            site="shop.example",
+            query="laptops",
+        )
+
+    monkeypatch.setattr(recovery, "_event_bus", Bus())
+    monkeypatch.setattr(task, "resolve", fake_resolve)
+    brain = Brain(Config(llm_url="http://localhost", llm_key="x", llm_model="dummy", browser_enabled=True))
+
+    result = await brain.browser_task(
+        "Search shop.example for laptops.",
+        platform="web",
+        task_id="turn-1",
+        session_id="session-1",
+    )
+
+    assert result == "Verified laptop results."
+    by_type = {event_type: (payload, meta) for event_type, payload, meta in emitted}
+    assert {"browser_task_started", "browser_task_done", "presentation_intent"} <= by_type.keys()
+    assert all(by_type[event_type][1].task_id == "turn-1" for event_type in by_type)
+    assert by_type["presentation_intent"][0]["session_id"] == "session-1"
+
+
 # --- core.py routing: website + leftover text defers instead of launching ----
 
 
@@ -791,6 +849,22 @@ def test_match_browser_task_matches_search_on_site():
     from charlie import router
 
     assert router.match_browser_task("search mechanical keyboards on amazon") is not None
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "Search Amazon India for laptops.",
+        "Search Flipkart for laptops.",
+        "Search YouTube for Python asyncio tutorial.",
+        "Search Wikipedia for Alan Turing.",
+        "Search docs.python.org for asyncio.",
+    ],
+)
+def test_match_browser_task_matches_generic_site_first_search(utterance):
+    from charlie import router
+
+    assert router.match_browser_task(utterance) == utterance
 
 
 def test_match_browser_task_ignores_unknown_site():
@@ -921,6 +995,32 @@ def test_site_search_returns_none_when_no_candidate_fillable(monkeypatch):
     monkeypatch.setattr(recipes.controller, "run", lambda fn, timeout=None: fn(object()))
 
     assert recipes.site_search("https://amazon.com", "mechanical keyboards") is None
+
+
+def test_site_search_classifies_rendered_challenge_as_site_state_blocked(monkeypatch):
+    from charlie.browser import recipes
+
+    monkeypatch.setattr(recipes.actions, "navigate", lambda page, url: None)
+    monkeypatch.setattr(recipes, "_observe", lambda page: [])
+    monkeypatch.setattr(recipes, "submit_search", lambda page, query: True)
+    monkeypatch.setattr(recipes, "_link_count", lambda page: 0)
+    monkeypatch.setattr(recipes, "_wait_for_search_results", lambda *args: False)
+    monkeypatch.setattr(recipes, "_content_text", lambda page: "Please verify you are human to continue")
+
+    class FakePage:
+        url = "https://shop.example/search?q=laptops"
+
+        def wait_for_load_state(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(recipes.controller, "run", lambda fn, timeout=None: fn(FakePage()))
+
+    result = recipes.site_search("https://shop.example", "laptops")
+
+    assert result is not None
+    assert result.success is False
+    assert result.verification == "site-state-blocked"
+    assert "blocked" in result.answer.casefold()
 
 
 def test_media_player_commands_are_deterministic_and_narrow():

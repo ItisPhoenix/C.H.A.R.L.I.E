@@ -175,7 +175,15 @@ def build_observation(page: Any, max_marks: int = _MAX_MARKS, text_budget: int =
     return result
 
 
-_BLOCK_PHRASES = ("verify you are human", "unusual traffic", "enable javascript", "access denied", "cf-challenge")
+_BLOCK_PHRASES = (
+    "verify you are human",
+    "unusual traffic",
+    "enable javascript",
+    "access denied",
+    "cf-challenge",
+    "interstitialchallenge",
+    "verify?provider=interstitial",
+)
 
 
 def is_blocked(marks: List[Mark], text: str, status: Optional[int] = None) -> bool:

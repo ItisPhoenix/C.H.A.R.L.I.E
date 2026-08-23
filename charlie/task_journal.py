@@ -365,3 +365,11 @@ class TaskJournal:
         payload = {"version": 1, "tasks": [task.to_dict() for task in self._records.values()]}
         temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         os.replace(temporary, self._state_path)
+
+
+_default_task_journal = TaskJournal(state_path=".charlie_task_journal.json")
+
+
+def get_task_journal() -> TaskJournal:
+    """Return process-wide canonical journal shared by foreground/background adapters."""
+    return _default_task_journal

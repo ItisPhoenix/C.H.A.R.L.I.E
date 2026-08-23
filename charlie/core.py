@@ -1290,15 +1290,37 @@ class Brain:
         report = await engine.run(query, getattr(self.config, "research_default_mode", "auto"))
         return report if report.successful else None
 
-    async def _browser_task_bounded(self, task: str, platform: str) -> str:
+    async def _browser_task_bounded(
+        self,
+        task: str,
+        platform: str,
+        *,
+        task_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
         """Fast-path callers' safety net -- same timeout bound _exec_one already gives the LLM-dispatched path."""
         try:
-            return await asyncio.wait_for(self.browser_task(task, platform=platform), timeout=_BROWSER_TASK_TIMEOUT_SEC)
+            return await asyncio.wait_for(
+                self.browser_task(
+                    task,
+                    platform=platform,
+                    task_id=task_id,
+                    session_id=session_id,
+                ),
+                timeout=_BROWSER_TASK_TIMEOUT_SEC,
+            )
         except asyncio.TimeoutError:
             logger.warning("Fast-path browser_task timed out after %.0fs: %s", _BROWSER_TASK_TIMEOUT_SEC, task)
             return "That's taking too long -- I gave up on it."
 
-    async def browser_task(self, task: str, platform: str = "voice") -> str:
+    async def browser_task(
+        self,
+        task: str,
+        platform: str = "voice",
+        *,
+        task_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
         """Resolve `task` through charlie.browser's tier cascade and report back.
 
         Tiers 0-2 need no LLM; tier 3 uses this Brain's own client/model via
@@ -1413,7 +1435,9 @@ class Brain:
 
         if recovery._event_bus:
             await recovery._event_bus.emit(
-                "browser_task_started", {"task": task}, meta=EventMeta(source=EventSource.TASK)
+                "browser_task_started",
+                {"task": task},
+                meta=EventMeta(source=EventSource.TASK, task_id=task_id, session_id=session_id),
             )
 
         describe_image = self._describe_image if self._vision_client is not None else None
@@ -1425,6 +1449,7 @@ class Brain:
             max_steps,
             deadline_s,
             _on_progress,
+            owner_id=f"turn:{task_id}" if task_id else None,
         )
 
         if recovery._event_bus:
@@ -1438,7 +1463,41 @@ class Brain:
                     "site": result.site,
                     "query": result.query,
                 },
-                meta=EventMeta(source=EventSource.TASK),
+                meta=EventMeta(source=EventSource.TASK, task_id=task_id, session_id=session_id),
+            )
+
+            from charlie.presentation import ExecutionOutcome, PresentationContext, default_presentation_resolver
+
+            verification_status = "completed" if result.success else "unverified"
+            outcome = ExecutionOutcome(
+                request=task,
+                task_id=task_id,
+                session_id=session_id,
+                capability="browser",
+                operation=parsed_browser_intent.operation.casefold(),
+                status=verification_status,
+                result=result.answer or result.url or "",
+                verification={
+                    "verified": result.success,
+                    "status": verification_status,
+                    "message": result.verification,
+                },
+                source="browser_runtime",
+                data={
+                    "url": result.url,
+                    "site": result.site,
+                    "query": result.query,
+                    "verification": result.verification,
+                },
+            )
+            presentation = default_presentation_resolver.resolve(
+                outcome,
+                PresentationContext(platform=platform),
+            )
+            await recovery._event_bus.emit(
+                "presentation_intent",
+                presentation.to_dict(),
+                meta=EventMeta(source=EventSource.TASK, task_id=task_id, session_id=session_id),
             )
 
         if result.url and open_intent:
@@ -1717,6 +1776,7 @@ class Brain:
         skip_pre_search: bool = False,
         session_id: str = "default",
         skip_tools: bool = False,
+        task_id: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         from datetime import datetime
 
@@ -1748,7 +1808,7 @@ class Brain:
                 )
 
         generation = self._chat_generation
-        turn_id = str(uuid4())
+        turn_id = task_id or str(uuid4())
         # Preserved for history/memory even if a fast-path below rebinds user_input
         # to a compound instruction's leftover text (see the open-app fast-path).
         original_user_input = user_input
@@ -1983,7 +2043,12 @@ class Brain:
             if not open_apps and open_remaining:
                 if self.config.browser_enabled:
                     logger.info("Fast-path browser task (deferred open): %s", open_remaining)
-                    yield await self._browser_task_bounded(open_remaining, platform)
+                    yield await self._browser_task_bounded(
+                        open_remaining,
+                        platform,
+                        task_id=turn_id,
+                        session_id=session_id,
+                    )
                     return
                 user_input = open_remaining
             else:
@@ -2007,7 +2072,12 @@ class Brain:
         browser_task_query = router.match_browser_task(user_input)
         if browser_task_query is not None and self.config.browser_enabled:
             logger.info("Fast-path browser task: %s", browser_task_query)
-            yield await self._browser_task_bounded(browser_task_query, platform)
+            yield await self._browser_task_bounded(
+                browser_task_query,
+                platform,
+                task_id=turn_id,
+                session_id=session_id,
+            )
             return
 
         # --- Fast-path: continue an explicit request against the active browser page ---
@@ -2017,7 +2087,12 @@ class Brain:
             browser_continuation = router.match_browser_continuation(user_input, get_session().last_url)
             if browser_continuation is not None:
                 logger.info("Fast-path browser continuation: %s", browser_continuation)
-                yield await self._browser_task_bounded(browser_continuation, platform)
+                yield await self._browser_task_bounded(
+                    browser_continuation,
+                    platform,
+                    task_id=turn_id,
+                    session_id=session_id,
+                )
                 return
 
         # --- Fast-path: live background-task progress query (deterministic, no LLM needed) ---
@@ -2292,7 +2367,12 @@ class Brain:
             elif tool_name == "start_background_task":
                 r = await self._handle_start_background_task(call["arguments"])
             elif tool_name == "browser_task":
-                r = await self.browser_task(call["arguments"].get("task", ""), platform=platform)
+                r = await self.browser_task(
+                    call["arguments"].get("task", ""),
+                    platform=platform,
+                    task_id=turn_id,
+                    session_id=session_id,
+                )
             elif tool_name in _DESKTOP_CONTROL_TOOLS and self._is_desktop_halted():
                 r = "Error: Desktop control is halted (panic or repeated failure). Say 'continue' to resume."
             elif tool_name in _DESKTOP_CONTROL_TOOLS and _desktop_action_count[0] >= self.config.desktop_max_actions:

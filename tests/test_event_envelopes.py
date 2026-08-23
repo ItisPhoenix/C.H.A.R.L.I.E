@@ -156,6 +156,21 @@ def _dict_has_session_id(node: ast.AST) -> bool:
     return False
 
 
+def test_foreground_turn_uses_one_task_id_for_journal_and_brain() -> None:
+    module_ast = ast.parse(_MAIN_SOURCE)
+    process_fn = next(
+        node
+        for node in ast.walk(module_ast)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_process"
+    )
+    process_source = ast.get_source_segment(_MAIN_SOURCE, process_fn) or ""
+
+    assert "get_task_journal" in process_source
+    assert "create_task" in process_source
+    assert "TaskStatus.VERIFYING" in process_source
+    assert "task_id=turn_task_id" in process_source
+
+
 @pytest.mark.asyncio
 async def test_tool_callbacks_emit_populated_event_meta():
     """The Phase 1 typed-event migration (charlie/events.py) attaches an

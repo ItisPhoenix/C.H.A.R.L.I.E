@@ -180,6 +180,10 @@ def close_process_for(app: str) -> Optional[str]:
 
 _BROWSER_TASK_VERB_RE = re.compile(r"^\s*(?:play|watch|search|find|look up|browse|check)\b", re.IGNORECASE)
 _BROWSER_TASK_ON_SITE_RE = re.compile(r"\bon\s+(https?://[^\s]+|[a-z0-9][\w.-]*)", re.IGNORECASE)
+_BROWSER_TASK_SITE_FIRST_RE = re.compile(
+    r"^\s*(?:search|find|look\s+up|browse|check)\s+(?P<site>.+?)\s+(?:for|about)\s+\S",
+    re.IGNORECASE,
+)
 _BROWSER_CONTINUATION_ACTION_RE = re.compile(
     r"\b(?:find|search|look\s+up|read|open|browse|check|inspect|summari[sz]e|filter|sort|go\s+back)\b",
     re.IGNORECASE,
@@ -200,14 +204,18 @@ _REPOSITORY_CODE_LOOKUP_RE = re.compile(
 
 
 def match_browser_task(query: str) -> Optional[str]:
-    """Pure: deterministic '<verb> ... on <site>' detection -- models skip prompted tool calls."""
+    """Pure: detect generic site-scoped browser requests before model routing."""
     q = query.lower().strip()
     if not _BROWSER_TASK_VERB_RE.match(q):
         return None
     on_match = _BROWSER_TASK_ON_SITE_RE.search(q)
-    if not on_match:
+    site_first_match = _BROWSER_TASK_SITE_FIRST_RE.match(q)
+    if on_match:
+        site = on_match.group(1).strip(".,!?")
+    elif site_first_match:
+        site = site_first_match.group("site").strip(".,!?")
+    else:
         return None
-    site = on_match.group(1).strip(".,!?")
     entry = _APP_REGISTRY.get(site)
     if (not entry or not entry.is_website) and resolve_website_url(site) is None:
         return None

@@ -8,11 +8,14 @@ deadlock, and generalizes charlie/desktop/session.py's original desktop-only mut
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, Optional
 
 from charlie.utils import make_id
+
+logger = logging.getLogger("charlie.capability_leases")
 
 _lock = threading.Lock()
 _owners: Dict[str, str] = {}
@@ -140,6 +143,12 @@ class CapabilityLeaseManager:
         while True:
             lease = self._try_acquire(capability, owner_id)
             if lease is not None:
+                logger.info(
+                    "Capability lease acquired: capability=%s owner=%s lease=%s",
+                    capability,
+                    owner_id,
+                    lease.lease_id,
+                )
                 return lease
             if cancel_event is not None and cancel_event.is_set():
                 raise asyncio.CancelledError
@@ -214,6 +223,12 @@ class CapabilityLeaseManager:
                 _owners.pop(lease.capability, None)
                 released = True
         if released:
+            logger.info(
+                "Capability lease released: capability=%s owner=%s lease=%s",
+                lease.capability,
+                lease.owner_id,
+                lease.lease_id,
+            )
             _wake((lease.capability,))
 
     async def _wait_for_change(self, capability: str, cancel_event: Optional[asyncio.Event]) -> None:
@@ -246,6 +261,11 @@ class CapabilityLeaseManager:
 
 
 default_lease_manager = CapabilityLeaseManager()
+
+
+def get_capability_lease_manager() -> CapabilityLeaseManager:
+    """Return process-wide canonical capability lease authority."""
+    return default_lease_manager
 
 
 def get_all_leases() -> Dict[str, str]:
