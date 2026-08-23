@@ -42,6 +42,10 @@ _MEDIA_QUERY_RE = re.compile(
     r"(?:\s+on\s+(?P<site>https?://[^\s]+|[a-z0-9][\w.-]*(?:\s+[a-z0-9][\w.-]*)?))?$",
     re.IGNORECASE,
 )
+_MEDIA_CONTROL_RE = re.compile(
+    r"\b(?:pause|play|resume|continue|skip|seek|forward|rewind|backward|mute|unmute)\b",
+    re.IGNORECASE,
+)
 _SEARCH_WORDS_RE = re.compile(r"\b(?:search|find|look\s+up|browse|check)\b", re.IGNORECASE)
 _VALUE_RE = re.compile(
     r"(?:(?P<prefix>₹|\$|€|£|rs\.?|usd|inr|eur|gbp)\s*)?"
@@ -327,7 +331,7 @@ def parse_browser_intent(task: str, current_domain: str = "") -> BrowserIntent:
         site = media_match.group("site").strip(".,!? ")
 
     operation = "SEARCH" if _SEARCH_WORDS_RE.search(original) else "OPEN"
-    if media_match:
+    if media_match or _MEDIA_CONTROL_RE.search(original):
         operation = "MEDIA"
     elif re.search(r"\bopen\b", lowered) and re.search(r"\b(?:video|audio|media)\b", lowered):
         operation = "MEDIA"
@@ -347,6 +351,8 @@ def parse_browser_intent(task: str, current_domain: str = "") -> BrowserIntent:
     ):
         operation = "PRODUCT_SELECT"
     elif any(term in lowered for term in ("what is on", "what's on", "read this", "read the current", "how much")):
+        operation = "CURRENT_PAGE_FACT"
+    elif re.search(r"\bwhat\s+page\s+(?:am\s+i|are\s+we)\s+on\b|\bwhich\s+page\b", lowered):
         operation = "CURRENT_PAGE_FACT"
     elif any(term in lowered for term in ("read", "summarize", "inspect")):
         operation = "READ"
@@ -440,6 +446,11 @@ def has_open_intent(task: str) -> bool:
     if any(f" {verb} " in lowered for verb in _OPEN_VERBS):
         return True
     return any(phrase in lowered for phrase in _OPEN_PHRASES)
+
+
+def is_media_control(task: str) -> bool:
+    """True for media mutation wording, distinct from opening media content."""
+    return bool(_MEDIA_CONTROL_RE.search(task))
 
 
 def is_bare_followup(task: str) -> bool:

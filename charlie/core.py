@@ -1334,14 +1334,13 @@ class Brain:
 
         from charlie.browser import controller as browser_controller
         from charlie.browser import intent as browser_intent
-        from charlie.browser.actions import back as browser_back
         from charlie.browser.actions import open_in_real_browser
         from charlie.browser.observation import extract_visible_text
         from charlie.browser.session import get_session
         from charlie.browser.task import resolve as resolve_browser_task
 
         loop = asyncio.get_running_loop()
-        open_intent = browser_intent.has_open_intent(task)
+        open_intent = browser_intent.has_open_intent(task) and not browser_intent.is_media_control(task)
         lowered_task = task.lower()
         parsed_browser_intent = browser_intent.parse_browser_intent(
             task,
@@ -1363,22 +1362,6 @@ class Brain:
             )
             and not any(verb in lowered_task.split() for verb in ("open", "search", "find", "click", "navigate", "go"))
         )
-
-        if browser_intent.is_bare_followup(task):
-            last_url = get_session().last_url
-            if not last_url:
-                return "I don't have a page to reopen yet."
-            opened = await loop.run_in_executor(None, open_in_real_browser, last_url)
-            return f"Opened {last_url}." if opened else f"Found {last_url} but couldn't open your browser."
-
-        if task.lower().strip().rstrip(".!?") in {"back", "go back", "go back to the previous page"}:
-            if not get_session().last_url:
-                return "I don't have a browser page to go back from."
-            try:
-                await loop.run_in_executor(None, lambda: browser_controller.run(browser_back, timeout=15.0))
-                return f"Went back to {get_session().last_url}."
-            except Exception:
-                return "I couldn't go back in the browser."
 
         max_steps = max(_MIN_BROWSER_STEPS, self.config.browser_max_steps)
         # Non-voice callers have no live listener waiting on the reply, so they get more wall-clock headroom.
@@ -1500,7 +1483,7 @@ class Brain:
                 meta=EventMeta(source=EventSource.TASK, task_id=task_id, session_id=session_id),
             )
 
-        if result.url and open_intent:
+        if result.success and result.url and open_intent:
             opened = await loop.run_in_executor(None, open_in_real_browser, result.url)
             parts = ([result.answer] if result.answer else []) + [
                 f"Opened {result.url}." if opened else f"Found {result.url} but couldn't open your browser."
@@ -1929,6 +1912,22 @@ class Brain:
             logger.info("Desktop control resumed by user command: %s", user_input)
             yield "Desktop control resumed."
             return
+
+        # Active verified browser media owns contextual controls before global
+        # system-media fastpaths. Explicit desktop/app targets still fall through.
+        if self.config.browser_enabled:
+            from charlie.browser.session import get_session
+
+            browser_media = router.match_browser_media_continuation(user_input, get_session().last_url)
+            if browser_media is not None:
+                logger.info("Fast-path browser media continuation: %s", browser_media)
+                yield await self._browser_task_bounded(
+                    browser_media,
+                    platform,
+                    task_id=turn_id,
+                    session_id=session_id,
+                )
+                return
 
         # --- Authoritative Deterministic Fast-Paths (Telemetry, Volume, Settings, Focus, Filesystem, Browser) ---
         from charlie.fastpaths import execute_fast_path, match_fast_path

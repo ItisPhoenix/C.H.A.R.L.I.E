@@ -30,8 +30,21 @@ def navigate(page: Any, url: str, wait_selector: Optional[str] = None) -> None:
             raise
         current_host = urlparse(getattr(page, "url", "")).netloc.lower()
         requested_host = urlparse(url).netloc.lower()
-        if not current_host or not (current_host == requested_host or current_host.endswith(f".{requested_host}")):
-            raise
+        reached_host = bool(
+            current_host and (current_host == requested_host or current_host.endswith(f".{requested_host}"))
+        )
+        if not reached_host:
+            try:
+                page.goto(url, wait_until="commit", timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
+            except Exception as commit_exc:
+                if type(commit_exc).__name__ not in {"TimeoutError", "PlaywrightTimeoutError"}:
+                    raise
+            current_host = urlparse(getattr(page, "url", "")).netloc.lower()
+            reached_host = bool(
+                current_host and (current_host == requested_host or current_host.endswith(f".{requested_host}"))
+            )
+            if not reached_host:
+                raise exc
         logger.debug("Navigation load timed out after reaching %s; continuing with the loaded document", page.url)
     if wait_selector:
         try:

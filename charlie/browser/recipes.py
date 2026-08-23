@@ -7,6 +7,7 @@ call, so callers invoke them directly without wrapping.
 
 import logging
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Optional
@@ -14,7 +15,7 @@ from urllib.parse import quote, unquote, urljoin, urlparse
 
 from charlie.browser import actions, controller, session
 from charlie.browser.intent import _ATTRIBUTE_ALIASES, BrowserIntent, Constraint, normalize_attribute
-from charlie.browser.observation import Mark, is_blocked, parse_snapshot, rank_and_cap
+from charlie.browser.observation import Mark, discover_search_query, is_blocked, parse_snapshot, rank_and_cap
 from charlie.known_apps import resolve_website_url
 
 logger = logging.getLogger("charlie.browser")
@@ -623,7 +624,7 @@ def _record_result_observation(page: Any, results: list[dict[str, Any]], page_ty
 
 def apply_current_page_intent(task: str, parsed: BrowserIntent) -> Optional[BrowserResult]:
     """Run generic current-page operations before any site adapter or agent fallback."""
-    supported = {"BACK", "FILTER", "SORT", "READ", "CURRENT_PAGE_FACT", "COMPARE", "PRODUCT_SELECT"}
+    supported = {"BACK", "OPEN", "FILTER", "SORT", "READ", "CURRENT_PAGE_FACT", "COMPARE", "PRODUCT_SELECT"}
     if parsed.operation not in supported:
         return None
 
@@ -691,8 +692,11 @@ def apply_current_page_intent(task: str, parsed: BrowserIntent) -> Optional[Brow
                 if not apply_constraint(page, constraint):
                     return BrowserResult(
                         url=page.url,
-                        answer=f"Could not find a live control for {constraint.attribute}={constraint.value}.",
-                        verification="constraint-unverified",
+                        answer=(
+                            "SITE_STATE_BLOCKED: The current page does not expose a verified "
+                            f"control for {constraint.attribute}={constraint.value}."
+                        ),
+                        verification="site-state-blocked",
                         site=domain,
                     )
                 applied.append(constraint)
@@ -766,17 +770,28 @@ def apply_current_page_intent(task: str, parsed: BrowserIntent) -> Optional[Brow
                 site=domain,
             )
 
-        if parsed.operation == "PRODUCT_SELECT":
+        if parsed.operation in {"OPEN", "PRODUCT_SELECT"}:
             if not results:
                 return None
+            priced = [item for item in results if item.get("price") is not None]
             selected = (
-                min(results, key=lambda item: item["price"])
-                if "cheap" in task.casefold() and any(item.get("price") for item in results)
+                min(priced, key=lambda item: item["price"])
+                if "cheap" in task.casefold() and priced
                 else rank_results(results, task)[0]
             )
             actions.navigate(page, selected["url"])
             facts = extract_structured_facts(page)
-            if not facts.get("title") or page.url == current_url:
+            selected_words = {
+                word for word in re.findall(r"[a-z0-9]+", selected.get("title", "").casefold()) if len(word) > 2
+            }
+            rendered_words = set(
+                re.findall(r"[a-z0-9]+", f"{facts.get('title', '')} {facts.get('text', '')}".casefold())
+            )
+            if (
+                not facts.get("title")
+                or page.url == current_url
+                or (selected_words and not selected_words & rendered_words)
+            ):
                 return BrowserResult(
                     url=page.url,
                     answer="The selected rendered result did not verify after opening.",
@@ -818,21 +833,86 @@ def _link_count(page) -> int:
         return 0
 
 
-def _wait_for_search_results(page, before_url: str, before_links: int) -> bool:
-    """Wait for navigation or a changed main-content link set instead of sleeping."""
+def _capture_search_evidence(page: Any) -> dict[str, Any]:
+    """Capture comparable live search evidence without assuming page structure."""
+    current_url = str(page.url)
+    control = discover_search_control(page)
+    search_value = ""
+    if control is not None:
+        try:
+            search_value = str(control.input_value(timeout=500) or "")
+        except Exception:
+            try:
+                search_value = str(control.get_attribute("value") or "")
+            except Exception:
+                pass
     try:
-        page.wait_for_function(
-            """state => {
-                const root = document.querySelector('main, [role="main"], article') || document.body;
-                return location.href !== state.url || root.querySelectorAll('a[href]').length > state.links;
-            }""",
-            {"url": before_url, "links": before_links},
-            timeout=5000,
-        )
-        return True
+        results = discover_results(page, limit=20)
     except Exception:
-        logger.debug("site_search: result condition did not settle before timeout")
+        results = []
+    result_urls = tuple(item["url"] for item in results if item.get("url"))
+    try:
+        content = _normalize_semantic_text(_content_text(page))[:4000]
+    except Exception:
+        content = ""
+    signature = "\n".join((content, *result_urls))
+    return {
+        "url": current_url,
+        "query": discover_search_query(current_url),
+        "search_value": search_value,
+        "signature": signature,
+        "result_urls": result_urls,
+    }
+
+
+def _search_postcondition_satisfied(
+    before: Mapping[str, Any], after: Mapping[str, Any], query: str
+) -> bool:
+    """Require fresh result evidence plus navigation, query, or DOM confirmation."""
+    wanted = _normalize_semantic_text(query)
+    if not wanted:
         return False
+    before_results = tuple(before.get("result_urls") or ())
+    after_results = tuple(after.get("result_urls") or ())
+    usable_results = len(after_results) >= 2
+    results_changed = usable_results and after_results != before_results
+    signature_changed = bool(after.get("signature")) and after.get("signature") != before.get("signature")
+    url_changed = bool(after.get("url")) and after.get("url") != before.get("url")
+    query_confirmed = any(
+        wanted in _normalize_semantic_text(str(value or ""))
+        for value in (after.get("query"), after.get("search_value"))
+    )
+    return bool(
+        (url_changed and query_confirmed and usable_results)
+        or (query_confirmed and signature_changed and results_changed)
+        or (signature_changed and results_changed)
+    )
+
+
+def _wait_for_search_results(
+    page: Any,
+    before: Mapping[str, Any],
+    query: str,
+    *,
+    timeout_ms: int = 5000,
+) -> bool:
+    """Poll bounded fresh observations so SPA context replacement is recoverable."""
+    deadline = time.monotonic() + max(timeout_ms, 0) / 1000.0
+    while True:
+        try:
+            after = _capture_search_evidence(page)
+            if _search_postcondition_satisfied(before, after, query):
+                return True
+        except Exception:
+            logger.debug("site_search: observation changed during settlement; retrying", exc_info=True)
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            logger.debug("site_search: result condition did not settle before timeout")
+            return False
+        try:
+            page.wait_for_timeout(min(150, remaining_ms))
+        except Exception:
+            continue
 
 
 def _content_root(page, preferred_selector: Optional[str] = None):
@@ -1096,6 +1176,63 @@ def media_result_candidates(
     return sorted(candidates, key=lambda item: (item["relevance"], item.get("duration") or 0), reverse=True)
 
 
+def open_site(site_url: str) -> Optional[BrowserResult]:
+    """Navigate Charlie's active page to an arbitrary public site and verify rendered state."""
+    resolved = resolve_website_url(site_url)
+    if not resolved:
+        return None
+
+    def run(page: Any) -> BrowserResult:
+        actions.navigate(page, resolved)
+        marks = _observe(page)
+        content = _content_text(page)
+        try:
+            title = str(page.title()).strip()
+        except Exception:
+            title = ""
+        requested_host = (urlparse(resolved).hostname or "").casefold()
+        current_host = (urlparse(str(page.url)).hostname or "").casefold()
+        same_site = bool(
+            requested_host
+            and current_host
+            and (current_host == requested_host or current_host.endswith(f".{requested_host}"))
+        )
+        rendered = f"{title}\n{content}"
+        if is_blocked(marks, rendered):
+            return BrowserResult(
+                url=page.url,
+                answer="SITE_STATE_BLOCKED: The current site displayed an external access challenge.",
+                verification="site-state-blocked",
+                site=current_host or requested_host,
+            )
+        if not same_site or (not title and len(content) < 40):
+            return BrowserResult(
+                url=page.url,
+                answer="The requested page did not expose enough rendered evidence to verify navigation.",
+                verification="page-open-unverified",
+                site=current_host or requested_host,
+            )
+        session.record_observation(page.url, page_type="page")
+        return BrowserResult(
+            url=page.url,
+            answer=f"Opened {title or page.url}.",
+            success=True,
+            verification="page-opened",
+            site=current_host,
+        )
+
+    try:
+        return controller.run(run, timeout=_RECIPE_TIMEOUT_S)
+    except Exception:
+        logger.debug("Generic site open failed for %s", resolved, exc_info=True)
+        return BrowserResult(
+            url=resolved,
+            answer="The requested page could not be verified in the Charlie browser.",
+            verification="page-open-unverified",
+            site=urlparse(resolved).hostname,
+        )
+
+
 def site_search(site_url: str, query: str, site_name: Optional[str] = None) -> Optional[BrowserResult]:
     """Search the live page semantically, with one stable protocol fallback."""
 
@@ -1134,8 +1271,7 @@ def site_search(site_url: str, query: str, site_name: Optional[str] = None) -> O
         is_wikipedia = bool(site_name and site_name.lower() == "wikipedia") or "wikipedia.org" in resolved_site_url
         actions.navigate(page, resolved_site_url)
         marks = _observe(page)
-        before_url = page.url
-        before_links = _link_count(page)
+        before = _capture_search_evidence(page)
         submitted = submit_search(page, query)
         if not submitted:
             # A combobox may be a select and reject fill(). Text-like marks win;
@@ -1150,12 +1286,23 @@ def site_search(site_url: str, query: str, site_name: Optional[str] = None) -> O
                 except Exception:
                     logger.debug("site_search: mark %d not fillable, trying next candidate", search_mark.mark_id)
         if not submitted:
-            return wikipedia_fallback(page) if is_wikipedia else None
+            if is_wikipedia:
+                return wikipedia_fallback(page)
+            return BrowserResult(
+                url=page.url,
+                answer=(
+                    f"SITE_STATE_BLOCKED: {site_name or resolved_site_url} does not expose a verified "
+                    "search control on the current page."
+                ),
+                verification="site-state-blocked",
+                site=site_name,
+                query=query,
+            )
         try:
             page.wait_for_load_state("domcontentloaded", timeout=8000)
         except Exception:
             logger.debug("site_search: no navigation detected after submit on %s", resolved_site_url)
-        settled = _wait_for_search_results(page, before_url, before_links)
+        settled = _wait_for_search_results(page, before, query)
         if not settled:
             if is_wikipedia:
                 return wikipedia_fallback(page)

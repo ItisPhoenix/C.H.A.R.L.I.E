@@ -819,20 +819,15 @@ def test_match_open_app_defers_website_with_leftover():
     assert leftover and "search for cats" in leftover
 
 
-def test_match_open_app_bare_website_still_launches(monkeypatch):
+def test_match_open_app_bare_website_defers_to_verified_browser():
     from charlie import router
 
-    class FakePopen:
-        def __init__(self, *a, **k):
-            pass
-
-    monkeypatch.setattr("subprocess.Popen", FakePopen)
     result = router.match_open_app("open youtube")
     assert result is not None
     apps, commands, leftover = result
-    assert leftover is None
-    msg = router.execute_open_app(apps, commands)
-    assert "youtube" in msg.lower()
+    assert apps == []
+    assert commands == []
+    assert leftover == "open youtube"
 
 
 # --- router.py: deterministic "<verb> ... on <site>" browser-task fast-path -----
@@ -981,7 +976,7 @@ def test_site_search_skips_unfillable_combobox_falls_back_to_textbox(monkeypatch
     assert result is not None
 
 
-def test_site_search_returns_none_when_no_candidate_fillable(monkeypatch):
+def test_site_search_reports_site_state_when_no_candidate_fillable(monkeypatch):
     from charlie.browser import recipes
 
     dropdown = Mark(mark_id=1, role="combobox", name="Search in", ref="e1")
@@ -992,9 +987,14 @@ def test_site_search_returns_none_when_no_candidate_fillable(monkeypatch):
         raise Exception("not fillable")
 
     monkeypatch.setattr(recipes.actions, "type_text", fake_type_text)
-    monkeypatch.setattr(recipes.controller, "run", lambda fn, timeout=None: fn(object()))
+    class FakePage:
+        url = "https://amazon.com/"
 
-    assert recipes.site_search("https://amazon.com", "mechanical keyboards") is None
+    monkeypatch.setattr(recipes.controller, "run", lambda fn, timeout=None: fn(FakePage()))
+
+    result = recipes.site_search("https://amazon.com", "mechanical keyboards")
+    assert result is not None
+    assert result.verification == "site-state-blocked"
 
 
 def test_site_search_classifies_rendered_challenge_as_site_state_blocked(monkeypatch):
@@ -1032,6 +1032,347 @@ def test_media_player_commands_are_deterministic_and_narrow():
     assert recipes.media_player_command("Open the media.") is None
 
 
+def _search_evidence(**overrides):
+    values = {
+        "url": "https://example.test/",
+        "query": None,
+        "search_value": "",
+        "signature": "before",
+        "result_urls": (),
+    }
+    values.update(overrides)
+    return values
+
+
+@pytest.mark.parametrize(
+    "after",
+    [
+        _search_evidence(
+            url="https://example.test/search?q=asyncio",
+            query="asyncio",
+            signature="traditional-results",
+            result_urls=("https://example.test/a", "https://example.test/b"),
+        ),
+        _search_evidence(
+            url="https://example.test/results?query=asyncio",
+            query="asyncio",
+            signature="spa-url-results",
+            result_urls=("https://example.test/a", "https://example.test/b"),
+        ),
+        _search_evidence(
+            search_value="asyncio",
+            signature="spa-dom-results",
+            result_urls=("https://example.test/a", "https://example.test/b"),
+        ),
+    ],
+)
+def test_generic_search_postcondition_accepts_navigation_and_spa_evidence(after):
+    before = _search_evidence()
+
+    assert recipes._search_postcondition_satisfied(before, after, "asyncio") is True
+
+
+def test_generic_search_postcondition_rejects_unchanged_page():
+    before = _search_evidence()
+
+    assert recipes._search_postcondition_satisfied(before, before, "asyncio") is False
+
+
+def test_generic_search_wait_accepts_lazy_result_appearance(monkeypatch):
+    before = _search_evidence()
+    observations = iter(
+        [
+            before,
+            _search_evidence(search_value="asyncio", signature="loading"),
+            _search_evidence(
+                search_value="asyncio",
+                signature="results",
+                result_urls=("https://example.test/a", "https://example.test/b"),
+            ),
+        ]
+    )
+
+    class Page:
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+    monkeypatch.setattr(recipes, "_capture_search_evidence", lambda page: next(observations))
+
+    assert recipes._wait_for_search_results(Page(), before, "asyncio", timeout_ms=100) is True
+
+
+def test_browser_intent_recognizes_contextual_media_controls():
+    for utterance in ("Pause it.", "Play it.", "Resume it.", "Skip forward 10 seconds.", "Mute it."):
+        assert intent.parse_browser_intent(utterance, "video.example").operation == "MEDIA"
+
+
+def test_browser_media_continuation_requires_current_verified_media_surface():
+    from charlie import router
+
+    url = "https://video.example/watch/123"
+    session.record_observation(url, page_type="media_surface", capabilities=["media_controls"])
+    assert router.match_browser_media_continuation("Pause it.", url) == "Pause it."
+    assert router.match_browser_media_continuation("Pause Spotify.", url) is None
+
+    session.record_observation(url, page_type="page", capabilities=[])
+    assert router.match_browser_media_continuation("Pause it.", url) is None
+
+
+@pytest.mark.asyncio
+async def test_active_browser_media_precedes_global_media_fastpath(monkeypatch):
+    from charlie import fastpaths
+    from charlie.config import Config
+    from charlie.core import Brain
+
+    url = "https://video.example/watch/123"
+    session.record_observation(url, page_type="media_surface", capabilities=["media_controls"])
+    brain = Brain(Config(llm_url="http://localhost", llm_key="x", llm_model="dummy", browser_enabled=True))
+    browser_calls = []
+
+    async def fake_browser(task_text, platform, **kwargs):
+        browser_calls.append(task_text)
+        return "Media pause verified."
+
+    monkeypatch.setattr(brain, "_browser_task_bounded", fake_browser)
+    monkeypatch.setattr(
+        fastpaths,
+        "match_fast_path",
+        lambda _query: pytest.fail("global media fastpath must not run for active browser media"),
+    )
+
+    chunks = [chunk async for chunk in brain.chat_stream("Pause it.", platform="web")]
+
+    assert chunks == ["Media pause verified."]
+    assert browser_calls == ["Pause it."]
+
+
+@pytest.mark.asyncio
+async def test_unverified_browser_open_never_narrates_opened(monkeypatch):
+    from charlie import recovery
+    from charlie.config import Config
+    from charlie.core import Brain
+
+    opened = []
+    session.record_observation("https://example.test/search", page_type="search_results")
+
+    async def fake_resolve(*args, **kwargs):
+        return BrowserResult(
+            url="https://example.test/result",
+            answer="The selected result could not be verified.",
+            verification="result-open-unverified",
+        )
+
+    monkeypatch.setattr(recovery, "_event_bus", None)
+    monkeypatch.setattr(task, "resolve", fake_resolve)
+    monkeypatch.setattr("charlie.browser.actions.open_in_real_browser", lambda url: opened.append(url) or True)
+    brain = Brain(Config(llm_url="http://localhost", llm_key="x", llm_model="dummy", browser_enabled=True))
+
+    result = await brain.browser_task("Show it to me.", platform="web")
+
+    assert result == "The selected result could not be verified."
+    assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_verified_browser_media_control_never_opens_external_browser(monkeypatch):
+    from charlie import recovery
+    from charlie.config import Config
+    from charlie.core import Brain
+
+    opened = []
+    session.record_observation(
+        "https://video.example/watch/123",
+        page_type="media_surface",
+        capabilities=["media_controls"],
+    )
+
+    async def fake_resolve(*args, **kwargs):
+        return BrowserResult(
+            url="https://video.example/watch/123",
+            answer="Media play verified.",
+            success=True,
+            verification="media-play",
+        )
+
+    monkeypatch.setattr(recovery, "_event_bus", None)
+    monkeypatch.setattr(task, "resolve", fake_resolve)
+    monkeypatch.setattr("charlie.browser.actions.open_in_real_browser", lambda url: opened.append(url) or True)
+    brain = Brain(Config(llm_url="http://localhost", llm_key="x", llm_model="dummy", browser_enabled=True))
+
+    result = await brain.browser_task("Play it.", platform="web")
+
+    assert result == "Media play verified."
+    assert opened == []
+
+
+def test_generic_result_open_then_back_uses_real_page_history(monkeypatch):
+    page_a = "https://example.test/search?q=moon"
+    page_b = "https://example.test/result-b"
+
+    class Page:
+        url = page_a
+
+    page = Page()
+    selected = {"title": "Result B", "url": page_b, "price": None}
+    session.record_observation(page_a, page_type="search_results", results=[selected])
+    monkeypatch.setattr(recipes.controller, "run", lambda fn, timeout=None: fn(page))
+    monkeypatch.setattr(recipes, "discover_results", lambda page, limit=10: [selected])
+    monkeypatch.setattr(
+        recipes.actions,
+        "navigate",
+        lambda page, url: (setattr(page, "url", url), session.record_navigation(url)),
+    )
+    monkeypatch.setattr(
+        recipes,
+        "extract_structured_facts",
+        lambda page: {"title": "Result B", "text": "Result B details", "price": None},
+    )
+
+    opened = recipes.apply_current_page_intent(
+        "Open Result B.", intent.parse_browser_intent("Open Result B.", "example.test")
+    )
+    assert opened is not None and opened.success is True
+    assert opened.verification == "result-opened"
+
+    monkeypatch.setattr(
+        recipes.actions,
+        "back",
+        lambda page: (setattr(page, "url", page_a), session.record_navigation(page_a)),
+    )
+    returned = recipes.apply_current_page_intent("Go back.", intent.parse_browser_intent("Go back.", "example.test"))
+    assert returned is not None and returned.success is True
+    assert returned.url == page_a
+    assert session.get_session().current_url == page_a
+
+
+@pytest.mark.asyncio
+async def test_search_this_site_stays_on_current_verified_domain(monkeypatch):
+    current = "https://docs.example.test/guide/"
+    session.record_observation(current, page_type="page", capabilities=[])
+    searched = []
+
+    async def complete(_prompt):
+        raise AssertionError("agent fallback must not replace active-site context")
+
+    monkeypatch.setattr(task.controller, "run", lambda fn, timeout=None: current)
+
+    def fake_search(site_url, query, site_name=None):
+        searched.append((site_url, query, site_name))
+        return BrowserResult(url=current, answer="Search unavailable.", verification="site-state-blocked")
+
+    monkeypatch.setattr(task.recipes, "site_search", fake_search)
+
+    result = await task.resolve("Search this site for asyncio.", complete)
+
+    assert result.verification == "site-state-blocked"
+    assert searched == [("https://docs.example.test", "asyncio", None)]
+
+
+@pytest.mark.asyncio
+async def test_explicit_unseen_site_open_uses_verified_charlie_browser_navigation(monkeypatch):
+    opened = []
+
+    async def complete(_prompt):
+        raise AssertionError("agent fallback must not replace explicit site navigation")
+
+    def fake_open(site_url):
+        opened.append(site_url)
+        return BrowserResult(
+            url="https://docs.example.test/",
+            answer="Opened Documentation.",
+            success=True,
+            verification="page-opened",
+        )
+
+    monkeypatch.setattr(task.recipes, "open_site", fake_open)
+    monkeypatch.setattr(task.recipes, "site_search", lambda *args: pytest.fail("open must not become search"))
+
+    result = await task.resolve("Open docs.example.test.", complete)
+
+    assert result.success is True
+    assert result.verification == "page-opened"
+    assert opened == ["https://docs.example.test"]
+
+
+def test_bare_website_open_defers_to_charlie_browser():
+    from charlie import router
+
+    apps, commands, leftover = router.match_open_app("Open docs.example.test.")
+
+    assert apps == []
+    assert commands == []
+    assert leftover == "Open docs.example.test."
+
+
+def test_missing_active_site_search_control_is_explicit_site_state_block(monkeypatch):
+    monkeypatch.setattr(recipes.actions, "navigate", lambda page, url: None)
+    monkeypatch.setattr(recipes, "_observe", lambda page: [])
+    monkeypatch.setattr(recipes, "submit_search", lambda page, query: False)
+
+    class Page:
+        url = "https://docs.example.test/"
+
+    monkeypatch.setattr(recipes.controller, "run", lambda fn, timeout=None: fn(Page()))
+
+    result = recipes.site_search("https://docs.example.test", "asyncio")
+
+    assert result is not None
+    assert result.verification == "site-state-blocked"
+    assert "SITE_STATE_BLOCKED" in result.answer
+
+
+def test_missing_rendered_filter_is_explicit_site_state_block(monkeypatch):
+    class Page:
+        url = "https://shop.example.test/search?q=laptops"
+
+    session.record_observation(Page.url, page_type="search_results")
+    monkeypatch.setattr(recipes.controller, "run", lambda fn, timeout=None: fn(Page()))
+    monkeypatch.setattr(recipes, "discover_results", lambda page, limit=10: [])
+    monkeypatch.setattr(recipes, "apply_constraint", lambda page, constraint: False)
+    parsed = intent.parse_browser_intent("Filter these results under $800.", "shop.example.test")
+
+    result = recipes.apply_current_page_intent("Filter these results under $800.", parsed)
+
+    assert result is not None
+    assert result.verification == "site-state-blocked"
+    assert "SITE_STATE_BLOCKED" in result.answer
+
+
+def test_unexplained_search_failure_is_not_site_state_blocked(monkeypatch):
+    monkeypatch.setattr(recipes.actions, "navigate", lambda page, url: None)
+    monkeypatch.setattr(recipes, "_observe", lambda page: [])
+    monkeypatch.setattr(recipes, "submit_search", lambda page, query: True)
+    monkeypatch.setattr(recipes, "_capture_search_evidence", lambda page: _search_evidence())
+    monkeypatch.setattr(recipes, "_wait_for_search_results", lambda *args, **kwargs: False)
+    monkeypatch.setattr(recipes, "_content_text", lambda page: "ordinary page with no positive blocker evidence")
+
+    class Page:
+        url = "https://example.test/"
+
+        def wait_for_load_state(self, *args, **kwargs):
+            return None
+
+        def content(self):
+            return "<main>ordinary page</main>"
+
+    monkeypatch.setattr(recipes.controller, "run", lambda fn, timeout=None: fn(Page()))
+
+    result = recipes.site_search("https://example.test", "asyncio")
+
+    assert result is not None
+    assert result.verification == "search-not-settled"
+
+
+def test_current_page_question_is_browser_continuation():
+    from charlie import router
+
+    current = "https://example.test/result"
+    session.record_observation(current, page_type="page")
+
+    assert router.match_browser_continuation("What page am I on?", current) is not None
+    assert intent.parse_browser_intent("What page am I on?", "example.test").operation == "CURRENT_PAGE_FACT"
+
+
 def test_media_player_state_reads_actual_media_element():
     class Page:
         def evaluate(self, script):
@@ -1053,6 +1394,29 @@ def test_media_player_state_reads_actual_media_element():
         "duration": 600.0,
         "muted": False,
     }
+
+
+def test_navigation_timeout_retries_only_until_document_commit():
+    from charlie.browser import actions
+
+    class Page:
+        url = "about:blank"
+
+        def __init__(self):
+            self.calls = []
+
+        def goto(self, url, wait_until, timeout):
+            self.calls.append((url, wait_until, timeout))
+            if wait_until == "domcontentloaded":
+                raise TimeoutError("DOM load remained busy")
+            self.url = url
+
+    page = Page()
+
+    actions.navigate(page, "https://dynamic.example/search")
+
+    assert [call[1] for call in page.calls] == ["domcontentloaded", "commit"]
+    assert session.get_session().current_url == "https://dynamic.example/search"
 # --- Generic rendered product facts -----------------------------------------
 
 

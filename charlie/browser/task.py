@@ -33,6 +33,10 @@ _NON_CACHEABLE_NAV_WORDS = (
     "show only",
     "exclude shorts",
 )
+_CURRENT_SITE_CUE_RE = re.compile(
+    r"\b(?:this\s+site|current\s+site|search\s+here|find\s+this\s+here|on\s+this\s+(?:site|page))\b",
+    re.IGNORECASE,
+)
 
 
 def _cacheable(task: str, freshness_sensitive: bool) -> bool:
@@ -58,6 +62,11 @@ def _resolve_known_site(task: str) -> Optional[str]:
     url_match = re.search(r"https?://[^\s<>\"']+", task, re.IGNORECASE)
     if url_match:
         return resolve_website_url(url_match.group(0))
+    domain_match = re.search(r"\b(?:www\.)?[a-z0-9](?:[a-z0-9-]*\.)+[a-z]{2,}\b", task, re.IGNORECASE)
+    if domain_match:
+        resolved = resolve_website_url(domain_match.group(0))
+        if resolved:
+            return resolved
     site_match = re.search(r"\bon\s+([a-z0-9][\w.-]*)", task, re.IGNORECASE)
     if site_match:
         resolved = resolve_website_url(site_match.group(1))
@@ -146,20 +155,27 @@ async def _resolve_inner(
             task,
             urlparse(current_url).hostname or session.get_session().current_domain or "",
         )
-        if result is None and current_url and parsed_intent.operation in {
-            "BACK",
-            "FILTER",
-            "SORT",
-            "READ",
-            "CURRENT_PAGE_FACT",
-            "COMPARE",
-            "PRODUCT_SELECT",
-            "MEDIA",
-        }:
+        resolved_site = _resolve_known_site(task)
+        if (
+            result is None
+            and current_url
+            and not (resolved_site and parsed_intent.operation in {"OPEN", "SEARCH"})
+            and parsed_intent.operation in {
+                "BACK",
+                "OPEN",
+                "FILTER",
+                "SORT",
+                "READ",
+                "CURRENT_PAGE_FACT",
+                "COMPARE",
+                "PRODUCT_SELECT",
+                "MEDIA",
+            }
+        ):
             result = await loop.run_in_executor(None, recipes.apply_current_page_intent, task, parsed_intent)
 
         if result is None and parsed_intent.operation == "MEDIA":
-            site = _resolve_known_site(task)
+            site = resolved_site
             if site is None and current_url:
                 parsed_current = urlparse(current_url)
                 if parsed_current.scheme in {"http", "https"} and parsed_current.netloc:
@@ -169,20 +185,39 @@ async def _resolve_inner(
                 query = site_intent.query if site_intent else parsed_intent.query or task
                 result = await loop.run_in_executor(None, recipes.media_request, site, query, parsed_intent)
 
+        if (
+            result is None
+            and current_url
+            and parsed_intent.operation == "SEARCH"
+            and _CURRENT_SITE_CUE_RE.search(task)
+        ):
+            parsed_current = urlparse(current_url)
+            current_site = f"{parsed_current.scheme}://{parsed_current.netloc}"
+            result = await loop.run_in_executor(
+                None,
+                recipes.site_search,
+                current_site,
+                parsed_intent.query or task,
+                None,
+            )
+
         if result is None:
-            site = _resolve_known_site(task)
+            site = resolved_site
             if site:
-                site_name = next(
-                    (name for name, entry in APP_REGISTRY.items() if entry.is_website and entry.open_cmd == site),
-                    None,
-                )
-                site_intent = intent.parse_site_intent(task, site_name or "")
-                if site_intent:
-                    query = site_intent.query
+                if parsed_intent.operation == "OPEN":
+                    result = await loop.run_in_executor(None, recipes.open_site, site)
                 else:
-                    parsed_site_intent = intent.parse_browser_intent(task, urlparse(site).hostname or "")
-                    query = parsed_site_intent.query or task
-                result = await loop.run_in_executor(None, recipes.site_search, site, query, site_name)
+                    site_name = next(
+                        (name for name, entry in APP_REGISTRY.items() if entry.is_website and entry.open_cmd == site),
+                        None,
+                    )
+                    site_intent = intent.parse_site_intent(task, site_name or "")
+                    if site_intent:
+                        query = site_intent.query
+                    else:
+                        parsed_site_intent = intent.parse_browser_intent(task, urlparse(site).hostname or "")
+                        query = parsed_site_intent.query or task
+                    result = await loop.run_in_executor(None, recipes.site_search, site, query, site_name)
 
         if result is None:
             repository_result = await loop.run_in_executor(

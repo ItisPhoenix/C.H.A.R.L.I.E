@@ -185,7 +185,7 @@ _BROWSER_TASK_SITE_FIRST_RE = re.compile(
     re.IGNORECASE,
 )
 _BROWSER_CONTINUATION_ACTION_RE = re.compile(
-    r"\b(?:find|search|look\s+up|read|open|browse|check|inspect|summari[sz]e|filter|sort|go\s+back)\b",
+    r"\b(?:find|search|look\s+up|read|open|browse|check|inspect|summari[sz]e|filter|sort|go\s+back|what\s+page)\b",
     re.IGNORECASE,
 )
 _BROWSER_CONTINUATION_CUE_RE = re.compile(
@@ -193,7 +193,12 @@ _BROWSER_CONTINUATION_CUE_RE = re.compile(
     r"these\s+results|filter\s+these|sort\s+these|first\s+three\s+matching|"
     r"cheapest\s+matching|go\s+back\s+to\s+the\s+filtered|on\s+(?:this\s+)?(?:site|page)|"
     r"search\s+this\s+repository|find\s+.+?\s+in\s+this\s+repository|"
-    r"open\s+the\s+(?:most\s+)?relevant\s+result)\b",
+    r"open\s+the\s+(?:most\s+)?relevant\s+result|what\s+page\s+(?:am\s+i|are\s+we)\s+on)\b",
+    re.IGNORECASE,
+)
+_BROWSER_MEDIA_CONTINUATION_RE = re.compile(
+    r"^\s*(?:pause|play|resume|continue|mute|unmute|skip|seek|forward|rewind)\b.*\b"
+    r"(?:it|this|video|audio|media|playback|seconds?)\b",
     re.IGNORECASE,
 )
 _REPOSITORY_CODE_LOOKUP_RE = re.compile(
@@ -239,6 +244,21 @@ def match_browser_continuation(query: str, current_url: Optional[str]) -> Option
     if not repository_context:
         repository_context = any(segment in parsed_path for segment in ("/tree/", "/blob/", "/src/", "/commit/"))
     if not explicit_context and not (repository_context and _REPOSITORY_CODE_LOOKUP_RE.search(query)):
+        return None
+    return query.strip()
+
+
+def match_browser_media_continuation(query: str, current_url: Optional[str]) -> Optional[str]:
+    """Prefer verified active browser media only for contextual media wording."""
+    if not current_url or not _BROWSER_MEDIA_CONTINUATION_RE.search(query):
+        return None
+    from charlie.browser.session import get_session
+
+    observed = get_session()
+    observed_current = observed.current_url or observed.last_url
+    if observed_current != current_url:
+        return None
+    if observed.page_type != "media_surface" and "media_controls" not in observed.page_capabilities:
         return None
     return query.strip()
 
@@ -358,6 +378,11 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
             entry = _APP_REGISTRY.get(key)
             is_website_flags.append(bool(entry and entry.is_website))
             remaining_text = re.sub(pattern, " ", remaining_text)
+
+    # Website navigation belongs to Charlie's verified browser runtime, not
+    # desktop app launching. Preserve the original utterance for browser_task.
+    if matched_apps and all(is_website_flags):
+        return [], [], query.strip()
 
     # Registry miss: perform bounded read-only runtime discovery for one app-like
     # target. Discovery is a resolver hint, never a new cached app registry.
