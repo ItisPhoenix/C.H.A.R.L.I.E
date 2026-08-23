@@ -219,12 +219,17 @@ def match_browser_continuation(query: str, current_url: Optional[str]) -> Option
     if not current_url or not _BROWSER_CONTINUATION_ACTION_RE.search(query):
         return None
     explicit_context = _BROWSER_CONTINUATION_CUE_RE.search(query)
+    from charlie.browser.session import get_session
+
+    observed = get_session()
+    observed_current = observed.current_url or observed.last_url
+    observed_for_url = observed_current == current_url
+    semantic_page_type = observed.page_type if observed_for_url else None
+    semantic_capabilities = observed.page_capabilities if observed_for_url else set()
     parsed_path = re.sub(r"/+", "/", current_url.split("?", 1)[0].lower())
-    repository_context = any(segment in parsed_path for segment in ("/tree/", "/blob/", "/src/", "/commit/"))
-    if not repository_context and "github.com/" in parsed_path:
-        github_path = parsed_path.split("github.com/", 1)[1].strip("/").split("/")
-        reserved = {"search", "login", "settings", "notifications", "marketplace", "topics"}
-        repository_context = len(github_path) >= 2 and not any(part in reserved for part in github_path[:2])
+    repository_context = semantic_page_type == "repository" or "repository" in semantic_capabilities
+    if not repository_context:
+        repository_context = any(segment in parsed_path for segment in ("/tree/", "/blob/", "/src/", "/commit/"))
     if not explicit_context and not (repository_context and _REPOSITORY_CODE_LOOKUP_RE.search(query)):
         return None
     return query.strip()

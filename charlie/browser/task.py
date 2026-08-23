@@ -1,6 +1,6 @@
 """Tier-cascade orchestration for the browser_task tool.
 
-Tiers 0-2 (fastpath/recipes) need no LLM and run inline; tier 3 needs one, so the caller
+Deterministic browser recipes need no LLM and run inline; the fallback agent needs one, so the caller
 (Brain.browser_task in core.py) supplies complete/describe_image/approve_click. Never imports
 Brain/core.py -- same constraint as agent.py, core.py imports this lazily instead.
 """
@@ -13,7 +13,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from charlie import resource_locks
-from charlie.browser import agent, controller, fastpath, intent, recipes, session, stealth
+from charlie.browser import agent, controller, intent, recipes, session, stealth
 from charlie.browser.recipes import BrowserResult
 from charlie.known_apps import APP_REGISTRY, resolve_website_url
 from charlie.utils import make_id
@@ -122,9 +122,6 @@ async def _resolve_inner(
         remaining_deadline_s = max(0.0, deadline_s - (time.monotonic() - wait_start))
         loop = asyncio.get_running_loop()
         result: Optional[BrowserResult] = None
-        lowered = task.lower()
-        youtube_open_request = ("open" in lowered or "play" in lowered) and ("video" in lowered or "youtube" in lowered)
-
         current_url = session.get_session().last_url or ""
         if result is None and current_url:
             try:
@@ -145,63 +142,20 @@ async def _resolve_inner(
             "CURRENT_PAGE_FACT",
             "COMPARE",
             "PRODUCT_SELECT",
+            "MEDIA",
         }:
             result = await loop.run_in_executor(None, recipes.apply_current_page_intent, task, parsed_intent)
-        if "youtube.com/watch?v=" in current_url:
-            player_result = await loop.run_in_executor(None, recipes.youtube_player_control, task)
-            if player_result is not None:
-                result = player_result
-        if result is None and "filter" in lowered and ("video" in lowered or "short" in lowered):
-            if "youtube.com/results" not in current_url:
-                result = BrowserResult(
-                    answer="filter unavailable in current YouTube UI",
-                    verification="youtube-video-filter-unavailable",
-                    site="youtube",
-                )
-        if (
-            result is None
-            and "youtube.com/results" in current_url
-            and ("filter" in lowered or "show only" in lowered or "exclude shorts" in lowered)
-        ):
-            result = await loop.run_in_executor(None, recipes.youtube_filter_videos)
-        if result is None and "youtube.com/results" in current_url and (
-            intent.has_open_intent(task) or "open" in lowered.split()
-        ):
-            result = await loop.run_in_executor(None, recipes.youtube_open_current, task)
 
-        # Compatibility adapter only: generic current-page operations own the
-        # normal path; the legacy ecommerce adapter is consulted after generic
-        # controls cannot verify the live result set.
-        if result is None and "flipkart.com" in current_url.lower():
-            result = await loop.run_in_executor(None, recipes.flipkart_action, task)
-
-        if result is None and "youtube" in lowered:
-            if youtube_open_request:
-                result = BrowserResult(
-                    answer="I couldn't verify a current YouTube results page to open from.",
-                    verification="youtube-open-current-page-unavailable",
-                    site="youtube",
-                )
-            else:
-                youtube_intent = intent.parse_site_intent(task, "youtube")
-                query = youtube_intent.query if youtube_intent else task
-                if intent.is_search_intent(task):
-                    result = await loop.run_in_executor(
-                        None, recipes.site_search, "https://www.youtube.com", query, "youtube"
-                    )
-                else:
-                    url = await loop.run_in_executor(None, fastpath.youtube_play, query)
-                    result = (
-                        BrowserResult(
-                            url=url,
-                            success=True,
-                            verification="youtube-watch-url",
-                            site="youtube",
-                            query=query,
-                        )
-                        if url
-                        else await loop.run_in_executor(None, recipes.youtube_play, query)
-                    )
+        if result is None and parsed_intent.operation == "MEDIA":
+            site = _resolve_known_site(task)
+            if site is None and current_url:
+                parsed_current = urlparse(current_url)
+                if parsed_current.scheme in {"http", "https"} and parsed_current.netloc:
+                    site = f"{parsed_current.scheme}://{parsed_current.netloc}"
+            if site:
+                site_intent = intent.parse_site_intent(task, site)
+                query = site_intent.query if site_intent else parsed_intent.query or task
+                result = await loop.run_in_executor(None, recipes.media_request, site, query, parsed_intent)
 
         if result is None:
             site = _resolve_known_site(task)

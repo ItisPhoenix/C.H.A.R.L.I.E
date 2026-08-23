@@ -59,6 +59,7 @@ APP_REGISTRY: Dict[str, AppEntry] = {
     "wikipedia": AppEntry("https://wikipedia.org", is_website=True),
     "netflix": AppEntry("https://netflix.com", is_website=True),
     "amazon": AppEntry("https://amazon.com", is_website=True),
+    "amazon india": AppEntry("https://www.amazon.in", is_website=True),
     "flipkart": AppEntry("https://www.flipkart.com", is_website=True),
 }
 

@@ -95,31 +95,33 @@ def press_key(page: Any, key: str) -> None:
     session.record_action(f"press {key}")
 
 
-def youtube_player_key(page: Any, key: str) -> None:
-    """Send a YouTube keyboard shortcut through the active player surface."""
+def media_player_key(page: Any, key: str) -> None:
+    """Send a keyboard shortcut through the active rendered media surface."""
     try:
-        page.locator("video").press(key, timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
+        media = page.locator("video, audio")
+        media.first.press(key, timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
     except Exception:
         page.keyboard.press(key)
-    session.record_action(f"YouTube player key {key}")
+    session.record_action(f"media player key {key}")
 
 
-def youtube_player_state(page: Any) -> dict:
-    """Read state from the active HTML media element on a YouTube watch page."""
+def media_player_state(page: Any) -> dict:
+    """Read state from the active HTMLMediaElement exposed by the current page."""
     return page.evaluate(
         """() => {
-            const video = document.querySelector('video');
+            const fallbackVideo = document.querySelector('video');
+            const media = [...document.querySelectorAll('video, audio')]
+                .find(element => {
+                    const rect = element.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                }) || fallbackVideo || document.querySelector('audio');
             const active = document.activeElement;
             return {
-                video: Boolean(video),
-                paused: video ? video.paused : null,
-                currentTime: video ? video.currentTime : null,
-                duration: video ? video.duration : null,
-                muted: video ? video.muted : null,
-                adActive: Boolean(document.querySelector(
-                    '[class*="ad-showing"], [class*="ad-interrupting"], '
-                    + '[class*="ad-player"], [aria-label*="Advertisement"]'
-                )),
+                media: Boolean(media),
+                paused: media ? media.paused : null,
+                currentTime: media ? media.currentTime : null,
+                duration: media ? media.duration : null,
+                muted: media ? media.muted : null,
                 active: active ? `${active.tagName}#${active.id || ''}.${active.className || ''}` : '',
             };
         }"""

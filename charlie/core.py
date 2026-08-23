@@ -1327,7 +1327,7 @@ class Brain:
         )
         page_question = any(
             interrogative in lowered_task for interrogative in ("what", "how", "which", "why")
-        ) and bool(parsed_browser_intent.attribute)
+        ) and bool(parsed_browser_intent.constraints or parsed_browser_intent.attribute)
 
         current_page_read = (
             bool(get_session().last_url)

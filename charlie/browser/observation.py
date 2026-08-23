@@ -207,8 +207,8 @@ def discover_search_query(url: str) -> Optional[str]:
 
 
 def discover_page_capabilities(marks: List[Mark]) -> List[str]:
-    """Infer only capabilities evidenced by the current accessible controls."""
-    names = " ".join(mark.name.lower() for mark in marks)
+    """Infer capabilities from current accessible roles and rendered labels."""
+    names = " ".join(mark.name.casefold() for mark in marks)
     capabilities: set[str] = set()
     if any(mark.role in _PRIMARY_INPUT_ROLES for mark in marks):
         capabilities.add("input")
@@ -216,32 +216,57 @@ def discover_page_capabilities(marks: List[Mark]) -> List[str]:
         capabilities.add("search")
     if any(mark.role in {"checkbox", "radio", "option", "listitem"} for mark in marks):
         capabilities.add("choice")
-    if any(term in names for term in ("filter", "sort", "price", "rating", "brand")):
+    if any(mark.role in {"checkbox", "radio", "combobox", "listbox"} for mark in marks):
         capabilities.add("constraints")
+    if any(term in names for term in ("sort", "ascending", "descending", "low to high", "high to low")):
+        capabilities.add("sort")
     if any(mark.role == "link" for mark in marks):
         capabilities.add("links")
     if any(term in names for term in ("play", "pause", "volume", "seek")):
         capabilities.add("media_controls")
+    if any(
+        term in names
+        for term in ("repository", "branch", "commit", "source code", "file tree", "directory")
+    ):
+        capabilities.add("repository")
     return sorted(capabilities)
 
 
 def classify_page_type(url: str, title: str, marks: List[Mark], text: str) -> str:
-    """Classify page shape from live URL/content evidence, not a site registry."""
+    """Classify page shape from semantic evidence, with URL shape as a fallback hint."""
     parsed = urlparse(url)
     path = parsed.path.lower()
-    lowered_title = title.lower()
-    if "/watch" in path or any(term in lowered_title for term in ("watch", "video", "player")):
+    semantic_names = " ".join(mark.name.casefold() for mark in marks)
+    semantic_text = f"{title} {semantic_names} {text}".casefold()
+    capabilities = set(discover_page_capabilities(marks))
+    media_evidence = capabilities.intersection({"media_controls"}) or any(
+        term in semantic_text for term in ("video player", "audio player", "media player", "duration")
+    )
+    if media_evidence:
         return "media_surface"
-    if any(segment in path for segment in ("/tree/", "/blob/", "/commit/", "/src/")):
+    if "repository" in capabilities:
         return "repository"
-    if discover_search_query(url) or any(term in path for term in ("/search", "/results", "/find")):
-        if any(mark.role == "link" for mark in marks) or len(text) > 80:
-            return "search_results"
+    has_result_evidence = any(mark.role in {"link", "listitem"} for mark in marks) and (
+        len(marks) >= 3 or len(text) > 80
+    )
+    if capabilities.intersection({"search"}) and has_result_evidence:
+        return "search_results"
+    if "constraints" in capabilities and has_result_evidence:
+        return "interactive_results"
+    if capabilities.intersection({"search"}):
         return "search"
-    if any(mark.role in {"checkbox", "radio", "option"} for mark in marks):
+    if "constraints" in capabilities:
         return "interactive_results"
     if len(text) > 80:
         return "content"
+    # URL structure is only a low-confidence hint when semantic evidence is
+    # sparse; it cannot override a contradictory rendered page shape.
+    if any(segment in path for segment in ("/tree/", "/blob/", "/commit/", "/src/")):
+        return "repository"
+    if any(segment in path for segment in ("/watch", "/player")):
+        return "media_surface"
+    if discover_search_query(url) or any(term in path for term in ("/search", "/results", "/find")):
+        return "search"
     return "page"
 
 

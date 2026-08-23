@@ -1,5 +1,4 @@
 import asyncio
-import json
 import sys
 import time
 from types import ModuleType
@@ -37,90 +36,17 @@ def _reset_session():
     session.clear_verified_state()
 
 
-# --- fastpath (tier 0) -------------------------------------------------------
-
-
-def _yt_html(items):
-    data = {
-        "contents": {
-            "twoColumnSearchResultsRenderer": {
-                "primaryContents": {"sectionListRenderer": {"contents": [{"itemSectionRenderer": {"contents": items}}]}}
-            }
-        }
-    }
-    return f"<html><script>var ytInitialData = {json.dumps(data)};</script></html>"
-
-
-def _video_item(video_id, length="3:45", channel="Some Channel"):
-    return {
-        "videoRenderer": {
-            "videoId": video_id,
-            "lengthText": {"simpleText": length},
-            "longBylineText": {"runs": [{"text": channel}]},
-        }
-    }
-
-
-def test_fastpath_youtube_play_picks_matching_channel(monkeypatch):
-    from charlie.browser import fastpath
-
-    html = _yt_html([_video_item("short1", "0:30"), _video_item("abc123", "4:00", "DL91 Official")])
-
-    class FakeResp:
-        status = 200
-        body = html.encode()
-
-    monkeypatch.setattr("scrapling.fetchers.Fetcher.get", lambda *a, **k: FakeResp())
-    assert fastpath.youtube_play("DL91") == "https://www.youtube.com/watch?v=abc123"
-
-
-def test_fastpath_youtube_play_skips_short_videos(monkeypatch):
-    from charlie.browser import fastpath
-
-    html = _yt_html([_video_item("tooshort", "0:45")])
-
-    class FakeResp:
-        status = 200
-        body = html.encode()
-
-    monkeypatch.setattr("scrapling.fetchers.Fetcher.get", lambda *a, **k: FakeResp())
-    assert fastpath.youtube_play("anything") is None
-
-
-def test_fastpath_youtube_play_empty_html_falls_through(monkeypatch):
-    from charlie.browser import fastpath
-
-    class FakeResp:
-        status = 200
-        body = b"<html>no data here</html>"
-
-    monkeypatch.setattr("scrapling.fetchers.Fetcher.get", lambda *a, **k: FakeResp())
-    assert fastpath.youtube_play("anything") is None
-
-
-def test_fastpath_youtube_play_http_error_returns_none(monkeypatch):
-    from charlie.browser import fastpath
-
-    class FakeResp:
-        status = 429
-        body = b""
-
-    monkeypatch.setattr("scrapling.fetchers.Fetcher.get", lambda *a, **k: FakeResp())
-    assert fastpath.youtube_play("anything") is None
-
-
 def test_youtube_duration_parser_accepts_minute_and_hour_formats():
     assert recipes._duration_text_to_seconds("05:23") == 323
     assert recipes._duration_text_to_seconds("1:02:03") == 3723
     assert recipes._duration_text_to_seconds("12 minutes, 4 seconds") == 724
 
 
-def test_youtube_visible_candidates_groups_duration_title_and_rejects_shorts_and_promos():
-    class FakeLink:
-        def __init__(self, href, text, card_text=""):
+def test_media_result_candidates_use_rendered_duration_and_query_relevance():
+    class Link:
+        def __init__(self, href, text):
             self.href = href
             self.text = text
-            self.card_text = card_text
 
         def is_visible(self):
             return True
@@ -131,69 +57,59 @@ def test_youtube_visible_candidates_groups_duration_title_and_rejects_shorts_and
         def inner_text(self, timeout=None):
             return self.text
 
-        def evaluate(self, script):
-            return self.card_text
-
-    class FakeLinks:
-        def __init__(self, links):
-            self.links = links
+    class Locator:
+        def __init__(self, items):
+            self.items = items
 
         def count(self):
-            return len(self.links)
+            return len(self.items)
 
         def nth(self, index):
-            return self.links[index]
+            return self.items[index]
 
-    class FakePage:
-        def __init__(self, links):
-            self.links = FakeLinks(links)
+    class Page:
+        url = "https://media.example/search?q=asyncio"
 
-        def locator(self, selector):
-            assert selector == 'a[href*="/watch?v="]'
-            return self.links
+        def get_by_role(self, role, **kwargs):
+            if role == "link":
+                return Locator(
+                    [
+                        Link("/long", "24:59 Asyncio in Python - Full Tutorial"),
+                        Link("/short", "02:00 Asyncio quick tip"),
+                    ]
+                )
+            return Locator([])
 
-    page = FakePage(
-        [
-            FakeLink("/watch?v=good", "24:59\nNow playing"),
-            FakeLink("/watch?v=good", "Asyncio in Python - Full Tutorial"),
-            FakeLink("/watch?v=short", "Python asyncio shorts"),
-            FakeLink("/shorts/nope", "Python asyncio short"),
-            FakeLink("/watch?v=playlist&list=abc", "Python asyncio playlist"),
-            FakeLink("/watch?v=promo", "45:00\nNow playing", "Sponsored"),
-            FakeLink("/watch?v=promo", "Python asyncio promoted course", "Sponsored"),
-        ]
-    )
-
-    candidates = recipes._youtube_visible_candidates(page, "Python asyncio tutorial")
-
+    candidates = recipes.media_result_candidates(Page(), "Python asyncio tutorial", minimum_duration_s=300)
     assert [(item["title"], item["duration"]) for item in candidates] == [
-        ("Asyncio in Python - Full Tutorial", 1499),
+        ("24:59 Asyncio in Python - Full Tutorial", 1499),
     ]
-
-
 @pytest.mark.asyncio
-async def test_resolve_current_youtube_open_never_falls_to_tier3(monkeypatch):
+async def test_resolve_current_media_open_never_falls_to_tier3(monkeypatch):
     from charlie.browser import controller
 
-    session.record_navigation("https://www.youtube.com/results?search_query=Python+asyncio+tutorial")
+    session.record_navigation("https://media.example/results?q=Python+asyncio+tutorial")
     monkeypatch.setattr(
         controller,
         "run",
-        lambda fn, timeout=None: "https://www.youtube.com/results?search_query=Python+asyncio+tutorial",
+        lambda fn, timeout=None: "https://media.example/results?q=Python+asyncio+tutorial",
     )
     calls = {"open": 0}
 
-    def fake_open(task_text):
+    def fake_open(site_url, query, parsed=None):
         calls["open"] += 1
-        return BrowserResult(url="https://www.youtube.com/watch?v=abc", success=True)
+        return BrowserResult(url="https://media.example/item/abc", success=True)
 
-    monkeypatch.setattr(task.recipes, "youtube_open_current", fake_open)
+    monkeypatch.setattr(task.recipes, "media_request", fake_open)
 
     async def fail_tier3(*args, **kwargs):
         raise AssertionError("recognized YouTube open must not reach tier 3")
 
     monkeypatch.setattr(task.agent, "run_task", fail_tier3)
-    result = await task.resolve("Open a relevant normal video longer than 5 minutes.", lambda prompt: "")
+    result = await task.resolve(
+        "Play a relevant normal video longer than 5 minutes on media.example.",
+        lambda prompt: "",
+    )
 
     assert result.success is True
     assert calls["open"] == 1
@@ -522,18 +438,13 @@ async def test_resolve_routes_youtube_search_to_results_recipe(monkeypatch):
         return BrowserResult(url="https://www.youtube.com/results?search_query=asyncio", success=True)
 
     monkeypatch.setattr(task.recipes, "site_search", fake_site_search)
-    monkeypatch.setattr(
-        task.fastpath,
-        "youtube_play",
-        lambda query: (_ for _ in ()).throw(AssertionError("play path used")),
-    )
 
     async def complete(prompt):
         return ""
 
     result = await task.resolve("Search YouTube for Python asyncio tutorial", complete)
     assert result.success is True
-    assert calls == [("https://www.youtube.com", "Python asyncio tutorial", "youtube")]
+    assert calls == [("https://youtube.com", "Python asyncio tutorial", "youtube")]
 
 
 @pytest.mark.asyncio
@@ -748,6 +659,8 @@ def test_browser_continuation_matches_github_repository_code_lookup():
     from charlie import router
 
     url = "https://github.com/ItisPhoenix/C.H.A.R.L.I.E"
+    session.reset_session()
+    session.record_observation(url, page_type="repository", capabilities=["repository"])
     assert (
         router.match_browser_continuation(
             "Find where TaskJournal is implemented and tell me which file contains it.", url
@@ -860,91 +773,49 @@ def test_site_search_returns_none_when_no_candidate_fillable(monkeypatch):
     assert recipes.site_search("https://amazon.com", "mechanical keyboards") is None
 
 
-def test_youtube_result_links_reads_watch_titles_from_main(monkeypatch):
-    class Link:
-        def __init__(self, text):
-            self.text = text
-
-        def inner_text(self, timeout=None):
-            return self.text
-
-    class Locator:
-        def __init__(self):
-            self.items = [Link("Asyncio in Python - Full Tutorial"), Link("")]
-
-        def count(self):
-            return len(self.items)
-
-        def nth(self, index):
-            return self.items[index]
-
-    class Page:
-        def locator(self, selector):
-            assert selector == '[role="main"] a[href*="/watch?v="]'
-            return Locator()
-
-    assert recipes._youtube_result_links(Page()) == ["Asyncio in Python - Full Tutorial"]
+def test_media_player_commands_are_deterministic_and_narrow():
+    assert recipes.media_player_command("Pause the media.") == "pause"
+    assert recipes.media_player_command("Play the media.") == "play"
+    assert recipes.media_player_command("Skip forward 10 seconds.") == "seek_forward"
+    assert recipes.media_player_command("Open the media.") is None
 
 
-def test_youtube_player_commands_are_deterministic_and_narrow():
-    assert recipes.youtube_player_command("Pause the video.") == "pause"
-    assert recipes.youtube_player_command("Play the video.") == "play"
-    assert recipes.youtube_player_command("Skip forward 10 seconds.") == "seek_forward"
-    assert recipes.youtube_player_command("Open the video.") is None
-
-
-def test_youtube_filter_distinguishes_videos_from_shorts():
-    assert recipes.is_youtube_video_filter_label("Videos") is True
-    assert recipes.is_youtube_video_filter_label("Video") is True
-    assert recipes.is_youtube_video_filter_label("VOD") is True
-    assert recipes.is_youtube_video_filter_label("Shorts") is False
-    assert recipes.is_youtube_video_filter_label("Python asyncio tutorial") is False
-
-
-def test_youtube_player_state_reads_actual_media_element():
+def test_media_player_state_reads_actual_media_element():
     class Page:
         def evaluate(self, script):
             assert "document.querySelector('video')" in script
             return {
-                "video": True,
+                "media": True,
                 "paused": True,
                 "currentTime": 12.0,
                 "duration": 600.0,
                 "muted": False,
-                "adActive": False,
             }
 
     from charlie.browser import actions
 
-    assert actions.youtube_player_state(Page()) == {
-        "video": True,
+    assert actions.media_player_state(Page()) == {
+        "media": True,
         "paused": True,
         "currentTime": 12.0,
         "duration": 600.0,
         "muted": False,
-        "adActive": False,
     }
+# --- Generic rendered product facts -----------------------------------------
 
 
-def test_youtube_ad_state_is_not_content_state():
-    assert recipes.is_youtube_video_filter_label("Shorts") is False
+def test_rendered_facts_keep_arbitrary_labels_and_numeric_values():
+    facts = recipes.extract_rendered_facts(
+        "16 GB RAM, 512 GB SSD\nDisplay Type: OLED\nPrice: ₹79,990"
+    )
+    by_key = {fact["normalized_key"]: fact["value"] for fact in facts}
+    assert by_key["ram"] == "16 GB"
+    assert by_key["storage"] == "512 GB"
+    assert by_key["display type"] == "OLED"
+    assert by_key["price"] == "₹79,990"
 
 
-# --- Flipkart deterministic recipes -----------------------------------------
-
-
-def test_flipkart_price_and_ram_parsers_use_rendered_card_text():
-    assert recipes._flipkart_price("16 GB RAM\n₹79,990") == 79990
-    assert recipes._flipkart_ram("16 GB RAM, 512 GB SSD") == 16
-    assert recipes._flipkart_ram("16 GB DDR4 RAM, 512 GB SSD") == 16
-    assert recipes._flipkart_ram("8 GB LPDDR5 RAM, 256 GB SSD") == 8
-    assert recipes._flipkart_ram("8 GB RAM") == 8
-    assert recipes._flipkart_ram("System Memory: 16 GB") == 16
-    assert recipes._flipkart_ram("RAM: 8 GB") == 8
-    assert recipes._flipkart_ram("512 GB SSD") is None
-
-
-def test_flipkart_visible_products_deduplicates_product_links_and_reads_cards():
+def test_discover_results_deduplicates_product_links_and_reads_rendered_facts():
     class Link:
         def __init__(self, href, title):
             self.href = href
@@ -982,52 +853,58 @@ def test_flipkart_visible_products_deduplicates_product_links_and_reads_cards():
                 ]
             )
 
-    products = recipes._flipkart_visible_products(Page())
-    assert [(item["url"], item["ram_gb"], item["price"]) for item in products] == [
-        ("https://shop.example/item/one", 16, 79990),
-        ("https://shop.example/item/two", 8, 54990),
+    products = recipes.discover_results(Page(), require_price=True)
+    assert [(item["url"], item["price"]) for item in products] == [
+        ("https://shop.example/item/one", 79990),
+        ("https://shop.example/item/two", 54990),
     ]
+    assert products[0]["attributes"]["ram"] == "16 GB"
+    assert products[1]["attributes"]["ram"] == "8 GB"
 
 
-def test_flipkart_filter_verification_requires_all_visible_sampled_products():
+def test_filter_verification_requires_all_visible_sampled_constraints():
     products = [
-        {"ram_gb": 16, "price": 70000},
-        {"ram_gb": 16, "price": 79999},
-        {"ram_gb": 16, "price": 60000},
+        {"attributes": {"ram": "16 GB"}, "price": 70000},
+        {"attributes": {"ram": "16 GB"}, "price": 79999},
+        {"attributes": {"ram": "16 GB"}, "price": 60000},
     ]
-    assert recipes._flipkart_verify_products(products, ram_gb=16, max_price=80000)[0] is True
+    constraints = (
+        recipes.Constraint("ram", "eq", "16 GB"),
+        recipes.Constraint("price", "lte", "₹80,000"),
+    )
+    assert recipes.verify_constraints(products, constraints)[0] is True
     products[1]["price"] = 81000
-    assert recipes._flipkart_verify_products(products, ram_gb=16, max_price=80000)[0] is False
+    assert recipes.verify_constraints(products, constraints)[0] is False
 
 
 @pytest.mark.asyncio
-async def test_resolve_routes_flipkart_continuations_without_tier3(monkeypatch):
-    session.record_navigation("https://www.flipkart.com/search?q=laptops")
+async def test_resolve_routes_generic_result_continuations_without_tier3(monkeypatch):
+    session.record_navigation("https://shop.example/search?q=laptops")
     calls = []
 
-    class Page:
-        url = "https://www.flipkart.com/search?q=laptops"
-
-    monkeypatch.setattr(task.controller, "run", lambda fn, timeout=None: fn(Page()))
-
-    def fake_action(task_text):
+    def fake_action(task_text, parsed_intent):
         calls.append(task_text)
-        return BrowserResult(url=Page.url, answer="filtered", success=True, verification="flipkart-test")
+        return BrowserResult(
+            url="https://shop.example/search?q=laptops",
+            answer="filtered",
+            success=True,
+            verification="generic-test",
+        )
 
-    monkeypatch.setattr(task.recipes, "flipkart_action", fake_action)
+    monkeypatch.setattr(task.recipes, "apply_current_page_intent", fake_action)
 
     async def complete(prompt):
         raise AssertionError("recognized Flipkart continuation must not reach tier 3")
 
     result = await task.resolve("Filter these results to 16 GB RAM.", complete)
-    assert result.verification == "flipkart-test"
+    assert result.verification == "generic-test"
     assert calls == ["Filter these results to 16 GB RAM."]
 
 
-def test_router_matches_flipkart_continuation_phrases():
+def test_router_matches_generic_result_continuation_phrases():
     from charlie import router
 
-    current = "https://www.flipkart.com/search?q=laptops"
+    current = "https://shop.example/search?q=laptops"
     assert router.match_browser_continuation("Filter these results to 16 GB RAM.", current) is not None
     assert router.match_browser_continuation("Go back to the filtered laptop results.", current) is not None
 

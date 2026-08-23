@@ -1,4 +1,5 @@
 from charlie.browser import intent, recipes, session
+from charlie.browser.intent import Constraint
 from charlie.known_apps import resolve_website_url
 
 
@@ -82,35 +83,67 @@ class _SemanticPage:
         return _Locator([control for control in self.controls if control.role == role])
 
 
-def _page_shape(search_role, filter_role, sort_role):
+def _page_shape(search_role, filter_role, sort_role, *, filter_text="16 GB RAM", filter_label=None):
     return _SemanticPage(
         [
             _Control(search_role, "Search products", placeholder="Search products"),
-            _Control("link", "Alpha Laptop 16 GB RAM ₹79,990", "/item/alpha"),
-            _Control("link", "Beta Laptop 16 GB RAM ₹69,990", "/item/beta"),
-            _Control(filter_role, "16 GB RAM", aria_label="16 GB RAM"),
+            _Control("link", "Alpha Laptop 16 GB RAM Display Type OLED ₹79,990", "/item/alpha"),
+            _Control("link", "Beta Laptop 16 GB RAM Display Type OLED ₹69,990", "/item/beta"),
+            _Control(filter_role, filter_text, aria_label=filter_label or filter_text),
             _Control(sort_role, "Price Low to High", aria_label="Price Low to High"),
         ]
     )
 
 
-def test_semantic_controls_and_results_survive_two_dom_shapes():
+def test_semantic_controls_and_results_survive_four_dom_shapes():
     session.reset_session()
     for page in (
         _page_shape("searchbox", "checkbox", "button"),
-        _page_shape("textbox", "option", "menuitem"),
+        _SemanticPage(
+            [
+                _Control("textbox", "Search products", placeholder="Search products"),
+                _Control("link", "Alpha Laptop 16 GB RAM Display Type OLED ₹79,990", "/item/alpha"),
+                _Control("link", "Beta Laptop 16 GB RAM Display Type OLED ₹69,990", "/item/beta"),
+                _Control("button", "Display Type", aria_label="Display Type"),
+                _Control("listbox", "OLED", aria_label="Display Type"),
+                _Control("option", "OLED", aria_label="OLED"),
+                _Control("menuitem", "Price Low to High", aria_label="Price Low to High"),
+            ]
+        ),
+        _page_shape("searchbox", "radio", "button", filter_text="OLED", filter_label="Display Type OLED"),
+        _SemanticPage(
+            [
+                _Control("combobox", "Search products", placeholder="Search products"),
+                _Control("link", "Alpha Laptop 16 GB RAM Display Type OLED ₹79,990", "/item/alpha"),
+                _Control("link", "Beta Laptop 16 GB RAM Display Type OLED ₹69,990", "/item/beta"),
+                _Control("combobox", "Display Type", aria_label="Display Type"),
+                _Control("option", "OLED", aria_label="OLED"),
+                _Control("combobox", "Price Low to High", aria_label="Price Low to High"),
+            ]
+        ),
     ):
         assert recipes.discover_search_control(page) is not None
         results = recipes.discover_results(page, require_price=True)
         assert [item["title"] for item in results] == [
-            "Alpha Laptop 16 GB RAM ₹79,990",
-            "Beta Laptop 16 GB RAM ₹69,990",
+            "Alpha Laptop 16 GB RAM Display Type OLED ₹79,990",
+            "Beta Laptop 16 GB RAM Display Type OLED ₹69,990",
         ]
-        assert recipes.apply_constraint(page, "ram", "eq", "16 GB") is True
+        has_display_control = any(
+            control.role != "link"
+            and (
+                "display type" in control.text.casefold()
+                or "display type" in str(control.attributes.get("aria-label", "")).casefold()
+            )
+            for control in page.controls
+        )
+        requested = Constraint("display type", "eq", "OLED") if has_display_control else Constraint(
+            "ram", "eq", "16 GB"
+        )
+        assert recipes.apply_constraint(page, requested) is True
         assert recipes.apply_sort(page, "price", "ascending") is True
         verified, detail = recipes.verify_constraints(
             results,
-            {"ram": "16 GB", "price": {"operator": "lte", "value": 80000}},
+            [requested, Constraint("price", "lte", "80000")],
         )
         assert verified, detail
 
@@ -121,6 +154,20 @@ def test_intent_slots_and_http_resolution_are_environment_driven():
     assert parsed.attribute == "ram"
     assert parsed.value == "16 GB"
     assert parsed.operator == "lte"
+
+    examples = {
+        "16 GB RAM under ₹80,000": {("ram", "eq", "16 GB"), ("price", "lte", "₹ 80000")},
+        "at least 8 GB RAM and 512 GB storage": {("ram", "gte", "8 GB"), ("storage", "eq", "512 GB")},
+        "under $1000 with rating above 4": {("price", "lte", "$ 1000"), ("rating", "gte", "4")},
+        "brand Lenovo and minimum 16 GB memory": {("brand", "eq", "Lenovo"), ("ram", "gte", "16 GB")},
+        "Display Type OLED": {("display type", "eq", "OLED")},
+    }
+    for sample, expected in examples.items():
+        actual = {
+            (item.attribute, item.operator, item.value)
+            for item in intent.parse_browser_intent(sample).constraints
+        }
+        assert actual == expected
 
     assert intent.parse_browser_intent("Sort these results by price low to high.", "shop.example").operation == "SORT"
     assert resolve_website_url("https://internal-service/catalog") == "https://internal-service/catalog"
@@ -158,3 +205,23 @@ def test_repository_ref_is_discovered_from_current_page_links():
 
     assert recipes.github_repository_ref(_RepositoryPage()) == "release"
     assert recipes._github_ref_from_url("https://github.com/acme/widget/tree/feature%2Fui") == "feature/ui"
+
+
+def test_repository_ref_accepts_rendered_nested_branch_control():
+    class _Links:
+        def evaluate_all(self, script, limit):
+            return []
+
+    class _ControlPage:
+        url = "https://github.com/acme/widget"
+
+        def locator(self, selector):
+            assert selector == "a[href]"
+            return _Links()
+
+        def get_by_role(self, role, **kwargs):
+            if role == "button":
+                return _Locator([_Control("button", "feature/browser/dynamic-runtime")])
+            return _Locator([])
+
+    assert recipes.github_repository_ref(_ControlPage()) == "feature/browser/dynamic-runtime"
