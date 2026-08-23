@@ -106,14 +106,45 @@ def semantic_control_match(
 
 def discover_search_control(page: Any) -> Optional[Any]:
     """Find current page search input from role and accessible metadata."""
-    controls = _visible_role_controls(page, ("searchbox", "textbox", "combobox"))
-    if not controls:
-        return None
-    scored = []
-    for control in controls:
-        evidence = _control_evidence(control)
-        scored.append((100 if "search" in evidence or "find" in evidence else 0, control))
-    return max(scored, key=lambda item: item[0])[1]
+    ranked: list[tuple[int, Any]] = []
+    semantic_words = re.compile(r"\b(?:search|find|query)\b", re.IGNORECASE)
+    for role in ("searchbox", "textbox", "combobox"):
+        for control in _visible_role_controls(page, (role,)):
+            score = 120 if role == "searchbox" else 0
+            evidence = _control_evidence(control)
+            if semantic_words.search(evidence):
+                score += 80
+            try:
+                context = control.evaluate(
+                    """element => {
+                        const form = element.closest('form, [role="search"]');
+                        const labels = element.labels ? [...element.labels].map(label => label.innerText) : [];
+                        const submitRoot = form || element.parentElement;
+                        const submits = submitRoot
+                            ? [...submitRoot.querySelectorAll('button, input[type="submit"]')]
+                                .map(item => item.getAttribute('aria-label') || item.value || item.innerText || '')
+                            : [];
+                        return {
+                            type: element.getAttribute('type') || '',
+                            labels: labels.join(' '),
+                            form: form
+                            ? [form.getAttribute('role'), form.getAttribute('aria-label'),
+                                form.getAttribute('name'), form.id]
+                                    .filter(Boolean).join(' ')
+                                : '',
+                            submit: submits.join(' '),
+                        };
+                    }"""
+                ) or {}
+            except Exception:
+                context = {}
+            if str(context.get("type", "")).casefold() == "search":
+                score += 100
+            if semantic_words.search(" ".join(str(context.get(key, "")) for key in ("labels", "form", "submit"))):
+                score += 60
+            if score > 0:
+                ranked.append((score, control))
+    return max(ranked, key=lambda item: item[0])[1] if ranked else None
 
 
 def submit_search(page: Any, query: str) -> bool:
@@ -495,14 +526,11 @@ def apply_constraint(
         preferred_kind = "max" if operator == "lte" else "min"
         classified = [(control, _price_control_kind(control)) for control in comboboxes]
         preferred = [control for control, kind in classified if kind == preferred_kind]
-        unknown = [control for control, kind in classified if kind is None]
-        if preferred:
+        if len(preferred) == 1:
             candidate_controls = preferred
-        elif len(comboboxes) == 1:
-            candidate_controls = comboboxes
         else:
-            # Multiple unlabelled price controls cannot be selected safely by order.
-            candidate_controls = unknown
+            # Unknown or duplicate range roles cannot be selected safely by DOM order.
+            candidate_controls = []
         for control in candidate_controls:
             try:
                 options = control.get_by_role("option")
@@ -530,6 +558,7 @@ def apply_constraint(
                 return True
             except Exception:
                 continue
+        return False
 
     expected = _normalize_semantic_text(value)
     controls = discover_filter_controls(page)
@@ -872,12 +901,28 @@ def _duration_text_to_seconds(text: str) -> Optional[int]:
 def media_player_command(task: str) -> Optional[str]:
     """Recognize the small generic media command vocabulary from user wording."""
     lowered = task.casefold()
+    if re.search(r"\bunmute\b", lowered):
+        return "unmute"
+    if re.search(r"\bmute\b", lowered):
+        return "mute"
     if re.search(r"\b(?:pause|stop)\b", lowered):
         return "pause"
     if re.search(r"\b(?:play|resume|continue)\b", lowered):
         return "play"
-    if re.search(r"\b(?:skip|seek|forward)\b", lowered):
-        return "seek_forward"
+    if re.search(r"\b(?:skip|seek|forward|rewind|backward)\b", lowered):
+        return "seek"
+    if re.search(r"\bvolume\b", lowered):
+        return "volume"
+    return None
+
+
+def _media_command_value(task: str, command: str) -> Optional[float]:
+    match = re.search(r"\b(\d+(?:\.\d+)?)\s*(seconds?|secs?|s|percent|%)?\b", task, re.IGNORECASE)
+    if command == "seek":
+        amount = float(match.group(1)) if match else 10.0
+        return -amount if re.search(r"\b(?:rewind|backward|back)\b", task, re.IGNORECASE) else amount
+    if command == "volume" and match:
+        return float(match.group(1)) / 100.0
     return None
 
 
@@ -888,69 +933,18 @@ def media_control_current(task: str) -> Optional[BrowserResult]:
         return None
 
     def run(page):
-        before = actions.media_player_state(page)
+        result = actions.media_player_action(page, command, _media_command_value(task, command))
+        before = result["before"]
         if not before.get("media"):
             return BrowserResult(
                 url=page.url,
-                answer="The current page does not expose an active media element.",
-                verification="media-element-missing",
+                answer="The current page does not expose one unambiguous active media element.",
+                verification=result["reason"],
             )
-        if command == "pause" and before.get("paused"):
+        if not result["verified"]:
             return BrowserResult(
                 url=page.url,
-                answer="Media is already paused.",
-                success=True,
-                verification="media-paused",
-            )
-        if command == "play" and before.get("paused") is False:
-            return BrowserResult(
-                url=page.url,
-                answer="Media is already playing.",
-                success=True,
-                verification="media-playing",
-            )
-        actions.media_player_key(page, "l" if command == "seek_forward" else "k")
-        try:
-            page.wait_for_function(
-                """state => {
-                    const element = document.querySelector('video, audio');
-                    if (!element) return false;
-                    if (state.command === 'pause') return element.paused;
-                    if (state.command === 'play') return !element.paused;
-                    return element.currentTime >= state.before + 8;
-                }""",
-                {"command": command, "before": before.get("currentTime") or 0},
-                timeout=5000,
-            )
-        except Exception:
-            after = actions.media_player_state(page)
-            changed = (
-                command == "pause" and after.get("paused")
-            ) or (
-                command == "play" and after.get("paused") is False
-            ) or (
-                command == "seek_forward"
-                and (after.get("currentTime") or 0) >= (before.get("currentTime") or 0) + 8
-            )
-            if not changed:
-                return BrowserResult(
-                    url=page.url,
-                    answer="The media action was sent but the rendered media state did not verify.",
-                    verification="media-action-unverified",
-                )
-        after = actions.media_player_state(page)
-        verified = (
-            command == "pause" and after.get("paused")
-        ) or (
-            command == "play" and after.get("paused") is False
-        ) or (
-            command == "seek_forward"
-            and (after.get("currentTime") or 0) >= (before.get("currentTime") or 0) + 8
-        )
-        if not verified:
-            return BrowserResult(
-                url=page.url,
-                answer="The media action was sent but the rendered media state did not remain verified.",
+                answer="The browser-native media action did not satisfy its rendered postcondition.",
                 verification="media-action-unverified",
             )
         return BrowserResult(
@@ -967,24 +961,58 @@ def media_control_current(task: str) -> Optional[BrowserResult]:
         return None
 
 
-def _open_verified_media_result(page: Any, query: str) -> BrowserResult:
-    candidates = media_result_candidates(page, query, minimum_duration_s=300)
+def _duration_constraint(constraints: Iterable[Constraint]) -> Optional[Constraint]:
+    return next((item for item in constraints if normalize_attribute(item.attribute) == "duration"), None)
+
+
+def _duration_constraint_seconds(constraint: Constraint) -> Optional[float]:
+    spelled = _spelled_duration_to_seconds(constraint.value)
+    if spelled is not None:
+        return float(spelled)
+    value = _numeric_slot(constraint.value)
+    if value is None:
+        return None
+    unit = (constraint.unit or "seconds").casefold()
+    multiplier = 3600 if unit.startswith("hour") else 60 if unit.startswith("minute") else 1
+    return float(value * multiplier)
+
+
+def _duration_matches(duration: Optional[float], constraint: Optional[Constraint]) -> bool:
+    if constraint is None:
+        return True
+    expected = _duration_constraint_seconds(constraint)
+    if duration is None or expected is None:
+        return False
+    return {
+        "gt": duration > expected,
+        "gte": duration >= expected,
+        "lt": duration < expected,
+        "lte": duration <= expected,
+        "eq": abs(duration - expected) <= 1,
+    }.get(constraint.operator, False)
+
+
+def _open_verified_media_result(
+    page: Any, query: str, constraints: Iterable[Constraint] = ()
+) -> BrowserResult:
+    duration_constraint = _duration_constraint(constraints)
+    candidates = media_result_candidates(page, query, constraints=constraints)
     if not candidates:
         return BrowserResult(
             url=page.url,
-            answer="Current rendered results exposed no media with verified duration over five minutes.",
-            verification="media-duration-unverified",
+            answer="Current rendered results exposed no media satisfying the requested constraints.",
+            verification="media-duration-unverified" if duration_constraint else "media-result-unverified",
             query=query,
         )
     selected = candidates[0]
     before = page.url
     actions.navigate(page, selected["url"])
     state = actions.media_player_state(page)
-    if not state.get("media") or state.get("duration") is None or state.get("duration") < 300:
+    if not state.get("media") or not _duration_matches(state.get("duration"), duration_constraint):
         return BrowserResult(
             url=page.url,
-            answer="The selected result opened, but its active media duration was not verified over five minutes.",
-            verification="media-duration-unverified",
+            answer="The selected result opened, but its active media constraints were not verified.",
+            verification="media-duration-unverified" if duration_constraint else "media-open-unverified",
             query=query,
         )
     try:
@@ -1025,7 +1053,7 @@ def media_request(site_url: str, query: str, parsed: Optional[BrowserIntent] = N
                     return current_result
                 if parsed and parsed.operation == "MEDIA":
                     return controller.run(
-                        lambda page: _open_verified_media_result(page, query),
+                        lambda page: _open_verified_media_result(page, query, parsed.constraints),
                         timeout=_RECIPE_TIMEOUT_S,
                     )
         except Exception:
@@ -1037,7 +1065,7 @@ def media_request(site_url: str, query: str, parsed: Optional[BrowserIntent] = N
 
     try:
         return controller.run(
-            lambda page: _open_verified_media_result(page, query),
+            lambda page: _open_verified_media_result(page, query, parsed.constraints if parsed else ()),
             timeout=max(_RECIPE_TIMEOUT_S, 30.0),
         )
     except Exception:
@@ -1050,13 +1078,16 @@ def media_request(site_url: str, query: str, parsed: Optional[BrowserIntent] = N
         )
 
 
-def media_result_candidates(page: Any, query: str = "", minimum_duration_s: int = 0) -> list[dict[str, Any]]:
+def media_result_candidates(
+    page: Any, query: str = "", constraints: Iterable[Constraint] = ()
+) -> list[dict[str, Any]]:
     """Rank rendered media links by query relevance and verified duration."""
     words = {word for word in re.findall(r"[a-z0-9]+", query.casefold()) if len(word) > 2}
+    duration_constraint = _duration_constraint(constraints)
     candidates = []
     for item in discover_results(page, limit=80):
         duration = item.get("duration")
-        if duration is None or duration < minimum_duration_s:
+        if not _duration_matches(duration, duration_constraint):
             continue
         relevance = len(words & set(re.findall(r"[a-z0-9]+", item.get("title", "").casefold())))
         item = dict(item)

@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import time
+from contextlib import contextmanager
 from types import ModuleType
 
 import pytest
@@ -23,6 +24,25 @@ from charlie.browser import intent, recipes, session, task
 from charlie.browser.agent import run_task
 from charlie.browser.observation import Mark, is_blocked, parse_snapshot, rank_and_cap
 from charlie.browser.recipes import BrowserResult
+
+
+@contextmanager
+def _local_browser_page():
+    from playwright.sync_api import sync_playwright
+
+    prior_policy = asyncio.get_event_loop_policy()
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                yield browser.new_page()
+            finally:
+                browser.close()
+    finally:
+        if sys.platform == "win32":
+            asyncio.set_event_loop_policy(prior_policy)
 
 
 @pytest.fixture(autouse=True)
@@ -80,10 +100,140 @@ def test_media_result_candidates_use_rendered_duration_and_query_relevance():
                 )
             return Locator([])
 
-    candidates = recipes.media_result_candidates(Page(), "Python asyncio tutorial", minimum_duration_s=300)
+    candidates = recipes.media_result_candidates(
+        Page(),
+        "Python asyncio tutorial",
+        constraints=(intent.Constraint("duration", "gt", "5 minutes", "MINUTES"),),
+    )
     assert [(item["title"], item["duration"]) for item in candidates] == [
         ("24:59 Asyncio in Python - Full Tutorial", 1499),
     ]
+
+
+def test_media_result_candidates_have_no_implicit_duration_floor():
+    class Link:
+        def __init__(self, href, text):
+            self.href, self.text = href, text
+
+        def is_visible(self):
+            return True
+
+        def get_attribute(self, name):
+            return self.href if name == "href" else None
+
+        def inner_text(self, timeout=None):
+            return self.text
+
+    class Locator:
+        def __init__(self, items):
+            self.items = items
+
+        def count(self):
+            return len(self.items)
+
+        def nth(self, index):
+            return self.items[index]
+
+    class Page:
+        url = "https://media.example/results"
+
+        def get_by_role(self, role, **kwargs):
+            return Locator(
+                [Link("/short", "02:00 Short trailer"), Link("/unknown", "Relevant video")]
+                if role == "link"
+                else []
+            )
+
+    candidates = recipes.media_result_candidates(Page(), "relevant video", constraints=())
+    assert {item["url"] for item in candidates} == {
+        "https://media.example/short",
+        "https://media.example/unknown",
+    }
+
+
+def test_media_duration_constraints_do_not_reclassify_media_as_product_filter():
+    under = intent.parse_browser_intent("Open a relevant video under 10 minutes.")
+    exact = intent.parse_browser_intent("Play a 2 minute trailer.")
+
+    assert under.operation == "MEDIA"
+    assert {(item.attribute, item.operator, item.value) for item in under.constraints} == {
+        ("duration", "lte", "10 MINUTES")
+    }
+    assert exact.operation == "MEDIA"
+    assert {(item.attribute, item.operator, item.value) for item in exact.constraints} == {
+        ("duration", "eq", "2 MINUTE")
+    }
+
+
+@pytest.mark.parametrize("tag", ["video", "audio"])
+def test_local_html_media_actions_use_html_media_state(tag):
+    from charlie.browser import actions
+
+    with _local_browser_page() as page:
+        page.set_content(f"<{tag} aria-label='Primary media'></{tag}>")
+        page.eval_on_selector(
+            tag,
+            """element => {
+                let paused = true;
+                let currentTime = 12;
+                Object.defineProperties(element, {
+                    paused: {get: () => paused},
+                    currentTime: {get: () => currentTime, set: value => currentTime = value},
+                    duration: {get: () => 120},
+                });
+                element.play = async () => { paused = false; };
+                element.pause = () => { paused = true; };
+            }""",
+        )
+
+        assert actions.media_player_action(page, "play")["verified"]
+        assert actions.media_player_action(page, "pause")["verified"]
+        seek = actions.media_player_action(page, "seek", value=10)
+        assert seek["verified"] and seek["after"]["currentTime"] == pytest.approx(22, abs=1)
+        assert actions.media_player_action(page, "mute")["verified"]
+        assert actions.media_player_action(page, "unmute")["verified"]
+        page.eval_on_selector(
+            tag,
+            "element => { element.play = async () => { throw new DOMException('blocked', 'NotAllowedError'); }; }",
+        )
+        rejected = actions.media_player_action(page, "play")
+        assert not rejected["verified"] and rejected["reason"] == "NotAllowedError"
+
+
+def test_local_html_media_selection_fails_ambiguous_and_prefers_playing_element():
+    from charlie.browser import actions
+
+    with _local_browser_page() as page:
+        page.set_content("<video></video><video></video>")
+        page.locator("video").evaluate_all(
+            """elements => elements.forEach(element => Object.defineProperties(element, {
+                paused: {get: () => element.dataset.playing !== 'true'},
+                currentTime: {get: () => 0}, duration: {get: () => 120}
+            }))"""
+        )
+        assert actions.media_player_state(page)["ambiguous"] is True
+        page.locator("video").nth(1).evaluate("element => { element.dataset.playing = 'true'; }")
+        active = actions.media_player_state(page)
+        assert active["media"] is True and active["index"] == 1 and active["ambiguous"] is False
+
+
+@pytest.mark.parametrize(
+    ("html", "found"),
+    [
+        ("<input role='searchbox'>", True),
+        ("<input placeholder='Search products'>", True),
+        ("<form role='search'><input><button>Search</button></form>", True),
+        (
+            "<label>Email <input type='email'></label>"
+            "<label>Password <input type='password'></label><button>Login</button>",
+            False,
+        ),
+    ],
+)
+def test_local_html_search_discovery_cross_dom_shapes(html, found):
+    with _local_browser_page() as page:
+        page.set_content(html)
+        assert (recipes.discover_search_control(page) is not None) is found
 @pytest.mark.asyncio
 async def test_resolve_current_media_open_never_falls_to_tier3(monkeypatch):
     from charlie.browser import controller
@@ -776,14 +926,16 @@ def test_site_search_returns_none_when_no_candidate_fillable(monkeypatch):
 def test_media_player_commands_are_deterministic_and_narrow():
     assert recipes.media_player_command("Pause the media.") == "pause"
     assert recipes.media_player_command("Play the media.") == "play"
-    assert recipes.media_player_command("Skip forward 10 seconds.") == "seek_forward"
+    assert recipes.media_player_command("Skip forward 10 seconds.") == "seek"
+    assert recipes.media_player_command("Mute the media.") == "mute"
+    assert recipes.media_player_command("Unmute the media.") == "unmute"
     assert recipes.media_player_command("Open the media.") is None
 
 
 def test_media_player_state_reads_actual_media_element():
     class Page:
         def evaluate(self, script):
-            assert "document.querySelector('video')" in script
+            assert "document.querySelectorAll('video, audio')" in script
             return {
                 "media": True,
                 "paused": True,

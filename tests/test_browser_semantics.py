@@ -31,6 +31,14 @@ class _Control:
     def press(self, key):
         return None
 
+    def evaluate(self, script):
+        return {
+            "type": self.attributes.get("type", ""),
+            "labels": self.attributes.get("label_semantics", ""),
+            "form": self.attributes.get("form_semantics", ""),
+            "submit": self.attributes.get("submit_semantics", ""),
+        }
+
 
 class _Locator:
     def __init__(self, items):
@@ -186,6 +194,43 @@ def test_price_constraints_choose_min_or_max_control_from_rendered_evidence():
 
     assert recipes.apply_constraint(page, "price", "gte", "₹40,000") is True
     assert minimum.selected_label == "₹40,000"
+
+
+def test_search_discovery_requires_positive_semantic_evidence():
+    searchbox = _Control("searchbox", "")
+    placeholder = _Control("textbox", "", placeholder="Search products")
+    form_search = _Control("textbox", "", form_semantics="Catalog", submit_semantics="Search")
+    email = _Control("textbox", "", aria_label="Email", type="email")
+    password = _Control("textbox", "", aria_label="Password", type="password")
+
+    assert recipes.discover_search_control(_SemanticPage([searchbox])) is searchbox
+    assert recipes.discover_search_control(_SemanticPage([placeholder])) is placeholder
+    assert recipes.discover_search_control(_SemanticPage([form_search])) is form_search
+    assert recipes.discover_search_control(_SemanticPage([email, password, _Control("button", "Login")])) is None
+
+
+def test_price_constraints_accept_semantic_shapes_and_reject_ambiguous_selectors():
+    labelled_min = _PriceSelect(["Minimum", "₹20,000", "₹40,000"], "Minimum")
+    labelled_max = _PriceSelect(["Maximum", "₹40,000", "₹60,000"], "Maximum")
+    assert recipes.apply_constraint(_SemanticPage([labelled_min, labelled_max]), "price", "lte", "₹50,000")
+    assert labelled_max.selected_label == "₹40,000"
+
+    from_select = _PriceSelect(["From", "₹20,000", "₹40,000"], "From")
+    to_select = _PriceSelect(["To", "₹40,000", "₹60,000"], "To")
+    assert recipes.apply_constraint(_SemanticPage([from_select, to_select]), "price", "gte", "₹30,000")
+    assert from_select.selected_label == "₹40,000"
+
+    only_max = _PriceSelect(["Maximum price", "₹20,000", "₹50,000"], "Maximum price")
+    assert recipes.apply_constraint(_SemanticPage([only_max]), "price", "lte", "₹50,000")
+    assert only_max.selected_label == "₹50,000"
+
+    ambiguous_a = _PriceSelect(["₹10,000", "₹20,000", "₹30,000"], "₹10,000")
+    ambiguous_b = _PriceSelect(["₹40,000", "₹50,000", "₹60,000"], "₹40,000")
+    assert not recipes.apply_constraint(
+        _SemanticPage([ambiguous_a, ambiguous_b]), "price", "lte", "₹50,000"
+    )
+    assert ambiguous_a.selected_label == "₹10,000"
+    assert ambiguous_b.selected_label == "₹40,000"
 
 
 def test_repository_ref_is_discovered_from_current_page_links():

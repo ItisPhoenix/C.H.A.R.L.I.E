@@ -335,7 +335,9 @@ def parse_browser_intent(task: str, current_domain: str = "") -> BrowserIntent:
         operation = "BACK"
     elif _parse_sort(lowered):
         operation = "SORT"
-    elif re.search(r"\b(?:filter|under|below|less than|at most|minimum|maximum|at least|above|over)\b", lowered):
+    elif operation != "MEDIA" and re.search(
+        r"\b(?:filter|under|below|less than|at most|minimum|maximum|at least|above|over)\b", lowered
+    ):
         operation = "FILTER"
     elif "compare" in lowered:
         operation = "COMPARE"

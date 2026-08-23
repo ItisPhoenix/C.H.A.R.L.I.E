@@ -95,37 +95,120 @@ def press_key(page: Any, key: str) -> None:
     session.record_action(f"press {key}")
 
 
-def media_player_key(page: Any, key: str) -> None:
-    """Send a keyboard shortcut through the active rendered media surface."""
+_MEDIA_STATE_SCRIPT = """requestedIndex => {
+    const elements = [...document.querySelectorAll('video, audio')];
+    const evidence = elements.map((element, index) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const visible = rect.width > 0 && rect.height > 0
+            && style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || 1) > 0;
+        const duration = Number.isFinite(element.duration) ? element.duration : null;
+        let score = 0;
+        if (visible) score += 40 + Math.min(40, (rect.width * rect.height) / 10000);
+        if (!element.paused && !element.ended) score += 100;
+        if (element.currentTime > 0) score += 25;
+        if (duration !== null && duration > 0) score += 15;
+        if (document.visibilityState === 'visible') score += 5;
+        if (document.activeElement === element) score += 25;
+        if (element.closest('main, article, figure, [role="main"]')) score += 10;
+        if (element.getAttribute('aria-label') || element.getAttribute('title')) score += 5;
+        return {element, index, score, visible, width: rect.width, height: rect.height, duration};
+    });
+    let selected = null;
+    let ambiguous = false;
+    if (Number.isInteger(requestedIndex) && evidence[requestedIndex]) {
+        selected = evidence[requestedIndex];
+    } else if (evidence.length === 1) {
+        selected = evidence[0];
+    } else if (evidence.length > 1) {
+        evidence.sort((left, right) => right.score - left.score);
+        ambiguous = Math.abs(evidence[0].score - evidence[1].score) < 5;
+        if (!ambiguous) selected = evidence[0];
+    }
+    const media = selected && selected.element;
+    return {
+        media: Boolean(media),
+        ambiguous,
+        count: elements.length,
+        index: selected ? selected.index : null,
+        tag: media ? media.tagName.toLowerCase() : null,
+        paused: media ? media.paused : null,
+        currentTime: media ? media.currentTime : null,
+        duration: media && Number.isFinite(media.duration) ? media.duration : null,
+        muted: media ? media.muted : null,
+        volume: media ? media.volume : null,
+        visible: selected ? selected.visible : false,
+        width: selected ? selected.width : 0,
+        height: selected ? selected.height : 0,
+    };
+}"""
+
+
+def media_player_state(page: Any, media_index: Optional[int] = None) -> dict:
+    """Read the uniquely supported active HTMLMediaElement from runtime evidence."""
+    if media_index is None:
+        return page.evaluate(_MEDIA_STATE_SCRIPT)
+    return page.evaluate(_MEDIA_STATE_SCRIPT, media_index)
+
+
+def media_player_action(page: Any, command: str, value: Optional[float] = None) -> dict:
+    """Mutate one evidenced HTMLMediaElement and freshly verify its postcondition."""
+    before = media_player_state(page)
+    if not before.get("media"):
+        return {
+            "verified": False,
+            "reason": "media-identity-ambiguous" if before.get("ambiguous") else "media-element-missing",
+            "before": before,
+            "after": before,
+        }
+    index = int(before["index"])
     try:
-        media = page.locator("video, audio")
-        media.first.press(key, timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
-    except Exception:
-        page.keyboard.press(key)
-    session.record_action(f"media player key {key}")
-
-
-def media_player_state(page: Any) -> dict:
-    """Read state from the active HTMLMediaElement exposed by the current page."""
-    return page.evaluate(
-        """() => {
-            const fallbackVideo = document.querySelector('video');
-            const media = [...document.querySelectorAll('video, audio')]
-                .find(element => {
-                    const rect = element.getBoundingClientRect();
-                    return rect.width > 0 && rect.height > 0;
-                }) || fallbackVideo || document.querySelector('audio');
-            const active = document.activeElement;
-            return {
-                media: Boolean(media),
-                paused: media ? media.paused : null,
-                currentTime: media ? media.currentTime : null,
-                duration: media ? media.duration : null,
-                muted: media ? media.muted : null,
-                active: active ? `${active.tagName}#${active.id || ''}.${active.className || ''}` : '',
-            };
-        }"""
+        dispatched = page.evaluate(
+            """async payload => {
+                const media = [...document.querySelectorAll('video, audio')][payload.index];
+                if (!media) return {ok: false, reason: 'media-element-stale'};
+                try {
+                    if (payload.command === 'play') await media.play();
+                    else if (payload.command === 'pause') media.pause();
+                    else if (payload.command === 'seek') {
+                        const requested = media.currentTime + payload.value;
+                        media.currentTime = Number.isFinite(media.duration)
+                            ? Math.max(0, Math.min(media.duration, requested))
+                            : Math.max(0, requested);
+                    } else if (payload.command === 'mute') media.muted = true;
+                    else if (payload.command === 'unmute') media.muted = false;
+                    else if (payload.command === 'volume') media.volume = Math.max(0, Math.min(1, payload.value));
+                    else return {ok: false, reason: 'media-command-unsupported'};
+                    return {ok: true};
+                } catch (error) {
+                    return {ok: false, reason: error && error.name ? error.name : 'media-action-rejected'};
+                }
+            }""",
+            {"command": command, "index": index, "value": float(value or 0)},
+        )
+    except Exception as exc:
+        return {"verified": False, "reason": type(exc).__name__, "before": before, "after": before}
+    after = media_player_state(page, index)
+    target_time = (before.get("currentTime") or 0) + float(value or 0)
+    duration = before.get("duration")
+    if duration is not None:
+        target_time = max(0.0, min(float(duration), target_time))
+    verified = bool(dispatched.get("ok")) and (
+        (command == "pause" and after.get("paused") is True)
+        or (command == "play" and after.get("paused") is False)
+        or (command == "seek" and abs(float(after.get("currentTime") or 0) - target_time) <= 2.0)
+        or (command == "mute" and after.get("muted") is True)
+        or (command == "unmute" and after.get("muted") is False)
+        or (command == "volume" and abs(float(after.get("volume") or 0) - float(value or 0)) <= 0.02)
     )
+    session.invalidate_observation()
+    session.record_action(f"media {command}" + (f" {value}" if value is not None else ""))
+    return {
+        "verified": verified,
+        "reason": "verified" if verified else dispatched.get("reason", "media-action-unverified"),
+        "before": before,
+        "after": after,
+    }
 
 
 def scroll(page: Any, direction: str = "down", amount: int = 800) -> None:
