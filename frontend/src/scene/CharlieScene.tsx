@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from "react";
 import { useCharlieStore } from "../store/charlie";
 import { useWorkspaceStore } from "../layout/workspaceStore";
 import { useWidgetStore } from "../layout/widgetStore";
@@ -13,6 +13,7 @@ import { SettingsModal } from "./SettingsModal";
 import { TaskSwitcher } from "./TaskSwitcher";
 import { ToolApprovalDialog } from "../components/ToolApprovalDialog";
 import type { ZoneContext } from "../layout/zones";
+import type { Rect } from "../layout/geometry";
 import "./scene.css";
 
 export function CharlieScene(): ReactElement | null {
@@ -38,44 +39,84 @@ export function CharlieScene(): ReactElement | null {
   const [debugMode, setDebugMode] = useState(false);
   const [recentModalOpen, setRecentModalOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const sceneRef = useRef<HTMLElement | null>(null);
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const coreRef = useRef<HTMLDivElement | null>(null);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const [layoutContext, setLayoutContext] = useState<ZoneContext | null>(null);
 
   useEffect(() => {
     (window as unknown as { __OPEN_SETTINGS__?: () => void; __CLOSE_SETTINGS__?: () => void }).__OPEN_SETTINGS__ = () => setSettingsModalOpen(true);
     (window as unknown as { __OPEN_SETTINGS__?: () => void; __CLOSE_SETTINGS__?: () => void }).__CLOSE_SETTINGS__ = () => setSettingsModalOpen(false);
   }, []);
 
-  // Sync incoming PresentationIntents to WorkspaceManager and WidgetManager
-  useEffect(() => {
-    const hasWorkspace = Object.values(presentationIntents).some(
-      (i) => i.kind === "workspace",
-    );
-    const zoneCtx: ZoneContext = {
-      viewport: { width: window.innerWidth, height: window.innerHeight },
-      safeMargin: { x: Math.min(Math.max(16, window.innerWidth * 0.035), 48), y: Math.min(Math.max(16, window.innerHeight * 0.035), 48) },
-      coreBounds: {
-        x: window.innerWidth * 0.5 - 150,
-        y: window.innerHeight * 0.5 - 150,
-        width: 300,
-        height: 300,
-      },
-      workspaceBounds: hasWorkspace
-        ? {
-            x: window.innerWidth * 0.1,
-            y: window.innerHeight * 0.1,
-            width: window.innerWidth * 0.8,
-            height: window.innerHeight * 0.8,
-          }
-        : null,
+  const measureLayout = useCallback(() => {
+    const scene = sceneRef.current;
+    const core = coreRef.current;
+    if (!scene || !core) return;
+
+    const sceneRect = scene.getBoundingClientRect();
+    const coreRect = core.getBoundingClientRect();
+    if (!sceneRect.width || !sceneRect.height || !coreRect.width || !coreRect.height) {
+      // jsdom and hidden canvases expose zero rectangles. Do not invent geometry.
+      setLayoutContext(null);
+      return;
+    }
+
+    const toLocalRect = (rect: DOMRect): Rect => ({
+      x: rect.left - sceneRect.left,
+      y: rect.top - sceneRect.top,
+      width: rect.width,
+      height: rect.height,
+    });
+    const frameRect = frameRef.current?.getBoundingClientRect();
+    const workspaceRect = workspaceRef.current?.getBoundingClientRect();
+    const safeMargin = {
+      x: Math.max(0, (frameRect?.left ?? sceneRect.left) - sceneRect.left),
+      y: Math.max(0, (frameRect?.top ?? sceneRect.top) - sceneRect.top),
     };
 
+    setLayoutContext({
+      viewport: { width: sceneRect.width, height: sceneRect.height },
+      safeMargin,
+      coreBounds: toLocalRect(coreRect),
+      workspaceBounds:
+        workspaceRect && workspaceRect.width && workspaceRect.height ? toLocalRect(workspaceRect) : null,
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    measureLayout();
+    window.addEventListener("resize", measureLayout);
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measureLayout) : null;
+    for (const element of [sceneRef.current, frameRef.current, coreRef.current, workspaceRef.current]) {
+      if (element) observer?.observe(element);
+    }
+    return () => {
+      window.removeEventListener("resize", measureLayout);
+      observer?.disconnect();
+    };
+  }, [measureLayout, hudVisible, projection.corePosition, projection.activeWorkspace?.id]);
+
+  // Sync incoming PresentationIntents to WorkspaceManager.
+  useEffect(() => {
     for (const intent of Object.values(presentationIntents)) {
       if (intent.kind === "workspace") {
         openWorkspace(intent);
-      } else if (intent.kind === "widget" || intent.kind === "composed_surface") {
-        upsertWidget(intent, zoneCtx);
       }
     }
   }, [presentationIntents, openWorkspace, upsertWidget]);
+
+  // Widgets need real scene/core/workspace bounds. They wait until the browser
+  // has laid out those layers instead of using a guessed viewport rectangle.
+  useEffect(() => {
+    if (!layoutContext) return;
+    for (const intent of Object.values(presentationIntents)) {
+      if (intent.kind === "widget" || intent.kind === "composed_surface") {
+        upsertWidget(intent, layoutContext);
+      }
+    }
+  }, [presentationIntents, layoutContext, upsertWidget]);
 
   useEffect(() => {
     setSettingsModalOpen(Boolean(settingsIntentId));
@@ -128,6 +169,7 @@ export function CharlieScene(): ReactElement | null {
 
   return (
     <main
+      ref={sceneRef}
       className="charlie-scene-root"
       data-scene-mode={projection.sceneMode}
       data-core-position={projection.corePosition}
@@ -137,6 +179,7 @@ export function CharlieScene(): ReactElement | null {
       <EnvironmentLayer
         corePosition={projection.corePosition}
         hasWorkspace={Boolean(projection.activeWorkspace)}
+        frameRef={frameRef}
       />
 
       {/* 2. Workspace Layer (Primary spatial canvas for research/briefing/terminal/camera) */}
@@ -146,6 +189,7 @@ export function CharlieScene(): ReactElement | null {
           minimizeWorkspace(id);
           dismissIntent(id);
         }}
+        layoutRef={workspaceRef}
       />
 
       {/* 3. Widget Layer (Contextual draggable/resizable/pinnable widgets) */}
@@ -176,6 +220,7 @@ export function CharlieScene(): ReactElement | null {
 
       {/* 6. Charlie Core (Center <-> Dock_Bottom_Right spatial transition, animation hooks) */}
       <CharlieCore
+        rootRef={coreRef}
         position={projection.corePosition}
         coreState={projection.coreState}
         activeWorkspaceType={projection.activeWorkspace?.type}

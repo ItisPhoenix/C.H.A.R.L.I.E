@@ -70,7 +70,7 @@ def click(page: Any, mark_id: int) -> str:
     locator, mark = _locator_for(page, mark_id)
     locator.click(timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
     session.record_action(f'click [{mark_id}] {mark.role} "{mark.name}"')
-    session.invalidate_marks()
+    session.invalidate_observation()
     try:
         page.wait_for_load_state("domcontentloaded", timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
     except Exception:
@@ -84,6 +84,8 @@ def type_text(page: Any, mark_id: int, text: str, submit: bool = False) -> None:
     locator.fill(text, timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
     if submit:
         locator.press("Enter")
+        session.invalidate_observation()
+    else:
         session.invalidate_marks()
     session.record_action(f'type [{mark_id}] "{text}"' + (" + Enter" if submit else ""))
 
@@ -95,8 +97,10 @@ def press_key(page: Any, key: str) -> None:
 
 def youtube_player_key(page: Any, key: str) -> None:
     """Send a YouTube keyboard shortcut through the active player surface."""
-    player = page.locator("#movie_player")
-    player.press(key, timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
+    try:
+        page.locator("video").press(key, timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
+    except Exception:
+        page.keyboard.press(key)
     session.record_action(f"YouTube player key {key}")
 
 
@@ -113,8 +117,8 @@ def youtube_player_state(page: Any) -> dict:
                 duration: video ? video.duration : null,
                 muted: video ? video.muted : null,
                 adActive: Boolean(document.querySelector(
-                    '#movie_player.ad-showing, #movie_player.ad-interrupting, '
-                    + '.ytp-ad-player-overlay, .ytp-ad-message-container'
+                    '[class*="ad-showing"], [class*="ad-interrupting"], '
+                    + '[class*="ad-player"], [aria-label*="Advertisement"]'
                 )),
                 active: active ? `${active.tagName}#${active.id || ''}.${active.className || ''}` : '',
             };

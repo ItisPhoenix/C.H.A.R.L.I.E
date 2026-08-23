@@ -7,13 +7,15 @@ Brain/core.py -- same constraint as agent.py, core.py imports this lazily instea
 
 import asyncio
 import logging
+import re
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
 from charlie import resource_locks
 from charlie.browser import agent, controller, fastpath, intent, recipes, session, stealth
 from charlie.browser.recipes import BrowserResult
-from charlie.known_apps import APP_REGISTRY
+from charlie.known_apps import APP_REGISTRY, resolve_website_url
 from charlie.utils import make_id
 
 logger = logging.getLogger("charlie.browser")
@@ -51,11 +53,19 @@ async def _acquire_browser(owner_id: str, max_wait_s: float) -> bool:
 
 
 def _resolve_known_site(task: str) -> Optional[str]:
-    """First known website name mentioned in task, as a whole word -- for tier 2's site_search."""
-    words = task.lower().split()
-    for name, entry in APP_REGISTRY.items():
-        if entry.is_website and name in words:
-            return entry.open_cmd
+    """Resolve a site hint or arbitrary HTTP(S) target from current intent text."""
+    url_match = re.search(r"https?://[^\s<>\"']+", task, re.IGNORECASE)
+    if url_match:
+        return resolve_website_url(url_match.group(0))
+    site_match = re.search(r"\bon\s+([a-z0-9][\w.-]*)", task, re.IGNORECASE)
+    if site_match:
+        resolved = resolve_website_url(site_match.group(1))
+        if resolved:
+            return resolved
+    lowered = task.casefold()
+    for name, entry in sorted(APP_REGISTRY.items(), key=lambda item: len(item[0]), reverse=True):
+        if entry.is_website and re.search(rf"\b{re.escape(name)}\b", lowered):
+            return resolve_website_url(name)
     return None
 
 
@@ -114,34 +124,29 @@ async def _resolve_inner(
         result: Optional[BrowserResult] = None
         lowered = task.lower()
         youtube_open_request = ("open" in lowered or "play" in lowered) and ("video" in lowered or "youtube" in lowered)
-        flipkart_request = "flipkart" in lowered
-        flipkart_action_request = (
-            ("filter" in lowered and "ram" in lowered)
-            or ("price" in lowered and any(word in lowered for word in ("under", "below", "sort")))
-            or (any(word in lowered for word in ("under", "below", "less than")) and "₹" in task)
-            or ("sort" in lowered and "low" in lowered and "high" in lowered)
-            or "first three" in lowered
-            or "cheapest matching" in lowered
-            or ("go back" in lowered and ("filtered" in lowered or "results" in lowered))
-        )
-        flipkart_fact_request = any(interrogative in lowered for interrogative in ("what", "how", "which")) and any(
-            term in lowered for term in ("processor", "ram", "storage", "price")
-        )
 
         current_url = session.get_session().last_url or ""
-        if result is None and (
-            youtube_open_request
-            or ("filter" in lowered and ("video" in lowered or "short" in lowered))
-            or flipkart_request
-            or flipkart_action_request
-            or "flipkart.com" in current_url.lower()
-        ):
+        if result is None and current_url:
             try:
                 live_url = await loop.run_in_executor(None, lambda: controller.run(lambda page: page.url, timeout=5.0))
                 if live_url:
                     current_url = live_url
             except Exception:
                 pass
+        parsed_intent = intent.parse_browser_intent(
+            task,
+            urlparse(current_url).hostname or session.get_session().current_domain or "",
+        )
+        if result is None and current_url and parsed_intent.operation in {
+            "BACK",
+            "FILTER",
+            "SORT",
+            "READ",
+            "CURRENT_PAGE_FACT",
+            "COMPARE",
+            "PRODUCT_SELECT",
+        }:
+            result = await loop.run_in_executor(None, recipes.apply_current_page_intent, task, parsed_intent)
         if "youtube.com/watch?v=" in current_url:
             player_result = await loop.run_in_executor(None, recipes.youtube_player_control, task)
             if player_result is not None:
@@ -159,30 +164,16 @@ async def _resolve_inner(
             and ("filter" in lowered or "show only" in lowered or "exclude shorts" in lowered)
         ):
             result = await loop.run_in_executor(None, recipes.youtube_filter_videos)
-        if "youtube.com/results" in current_url and (intent.has_open_intent(task) or "open" in lowered.split()):
+        if result is None and "youtube.com/results" in current_url and (
+            intent.has_open_intent(task) or "open" in lowered.split()
+        ):
             result = await loop.run_in_executor(None, recipes.youtube_open_current, task)
 
-        if result is None and flipkart_request and intent.is_search_intent(task):
-            flipkart_intent = intent.parse_site_intent(task, "flipkart")
-            query = flipkart_intent.query if flipkart_intent else task
-            result = await loop.run_in_executor(None, recipes.flipkart_search, query)
-
-        if result is None and ("flipkart.com" in current_url.lower() or flipkart_action_request):
+        # Compatibility adapter only: generic current-page operations own the
+        # normal path; the legacy ecommerce adapter is consulted after generic
+        # controls cannot verify the live result set.
+        if result is None and "flipkart.com" in current_url.lower():
             result = await loop.run_in_executor(None, recipes.flipkart_action, task)
-
-        if result is None and flipkart_fact_request and isinstance(recipes._FLIPKART_STATE.get("query"), str):
-            result = BrowserResult(
-                answer="I couldn't verify a current Flipkart product page for that fact.",
-                verification="flipkart-product-page-unavailable",
-                site="flipkart",
-            )
-
-        if result is None and (flipkart_request or flipkart_action_request):
-            result = BrowserResult(
-                answer="I couldn't verify the current Flipkart page needed for that action.",
-                verification="flipkart-current-page-unavailable",
-                site="flipkart",
-            )
 
         if result is None and "youtube" in lowered:
             if youtube_open_request:
@@ -220,7 +211,11 @@ async def _resolve_inner(
                     None,
                 )
                 site_intent = intent.parse_site_intent(task, site_name or "")
-                query = site_intent.query if site_intent else task
+                if site_intent:
+                    query = site_intent.query
+                else:
+                    parsed_site_intent = intent.parse_browser_intent(task, urlparse(site).hostname or "")
+                    query = parsed_site_intent.query or task
                 result = await loop.run_in_executor(None, recipes.site_search, site, query, site_name)
 
         if result is None:

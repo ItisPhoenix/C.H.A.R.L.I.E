@@ -20,7 +20,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from charlie.desktop.apps import launch_and_verify, resolve_local_app
 from charlie.known_apps import APP_REGISTRY as _APP_REGISTRY
+from charlie.known_apps import resolve_website_url
 from charlie.task_journal import TaskStatus, normalize_task_status
 from charlie.text_utils import format_app_list
 from charlie.utils import is_process_running, make_id
@@ -177,7 +179,7 @@ def close_process_for(app: str) -> Optional[str]:
 
 
 _BROWSER_TASK_VERB_RE = re.compile(r"^\s*(?:play|watch|search|find|look up|browse|check)\b", re.IGNORECASE)
-_BROWSER_TASK_ON_SITE_RE = re.compile(r"\bon\s+([a-z0-9][\w.]*)", re.IGNORECASE)
+_BROWSER_TASK_ON_SITE_RE = re.compile(r"\bon\s+(https?://[^\s]+|[a-z0-9][\w.-]*)", re.IGNORECASE)
 _BROWSER_CONTINUATION_ACTION_RE = re.compile(
     r"\b(?:find|search|look\s+up|read|open|browse|check|inspect|summari[sz]e|filter|sort|go\s+back)\b",
     re.IGNORECASE,
@@ -185,12 +187,12 @@ _BROWSER_CONTINUATION_ACTION_RE = re.compile(
 _BROWSER_CONTINUATION_CUE_RE = re.compile(
     r"\b(?:this\s+(?:repository|repo|page|site)|current\s+(?:page|repository)|here|"
     r"these\s+results|filter\s+these|sort\s+these|first\s+three\s+matching|"
-    r"cheapest\s+matching|go\s+back\s+to\s+the\s+filtered|on\s+github|on\s+flipkart|"
+    r"cheapest\s+matching|go\s+back\s+to\s+the\s+filtered|on\s+(?:this\s+)?(?:site|page)|"
     r"search\s+this\s+repository|find\s+.+?\s+in\s+this\s+repository|"
     r"open\s+the\s+(?:most\s+)?relevant\s+result)\b",
     re.IGNORECASE,
 )
-_GITHUB_CODE_LOOKUP_RE = re.compile(
+_REPOSITORY_CODE_LOOKUP_RE = re.compile(
     r"\b(?:implemented|implementation|defined|definition|source|file|class|function|"
     r"repository|repo|code|result)\b",
     re.IGNORECASE,
@@ -207,7 +209,7 @@ def match_browser_task(query: str) -> Optional[str]:
         return None
     site = on_match.group(1).strip(".,!?")
     entry = _APP_REGISTRY.get(site)
-    if not entry or not entry.is_website:
+    if (not entry or not entry.is_website) and resolve_website_url(site) is None:
         return None
     return query.strip()
 
@@ -216,12 +218,14 @@ def match_browser_continuation(query: str, current_url: Optional[str]) -> Option
     """Match actions that explicitly refer to the active browser page/repository."""
     if not current_url or not _BROWSER_CONTINUATION_ACTION_RE.search(query):
         return None
-    lowered_url = current_url.lower()
     explicit_context = _BROWSER_CONTINUATION_CUE_RE.search(query)
-    github_code_context = "github.com" in lowered_url and _GITHUB_CODE_LOOKUP_RE.search(query)
-    if not explicit_context and not github_code_context:
-        return None
-    if "github.com" not in lowered_url and not explicit_context:
+    parsed_path = re.sub(r"/+", "/", current_url.split("?", 1)[0].lower())
+    repository_context = any(segment in parsed_path for segment in ("/tree/", "/blob/", "/src/", "/commit/"))
+    if not repository_context and "github.com/" in parsed_path:
+        github_path = parsed_path.split("github.com/", 1)[1].strip("/").split("/")
+        reserved = {"search", "login", "settings", "notifications", "marketplace", "topics"}
+        repository_context = len(github_path) >= 2 and not any(part in reserved for part in github_path[:2])
+    if not explicit_context and not (repository_context and _REPOSITORY_CODE_LOOKUP_RE.search(query)):
         return None
     return query.strip()
 
@@ -283,16 +287,12 @@ _OPEN_APP_MAP = {name: entry.open_cmd for name, entry in _APP_REGISTRY.items()}
 
 def _is_probable_domain(text: str) -> bool:
     """Validate if a token looks like a real domain name (not a float, version number, or file path)."""
-    if "." not in text:
+    candidate = text.strip().strip(".,!? ")
+    if "." not in candidate or candidate.replace(".", "").isdigit():
         return False
-    clean = text.replace(".", "")
-    if clean.isdigit():
+    if candidate.rsplit(".", 1)[-1].lower() in _FILE_EXTENSIONS:
         return False
-    parts = text.split(".")
-    ext = parts[-1].lower()
-    if ext in _FILE_EXTENSIONS:
-        return False
-    return ext.isalpha() and 2 <= len(ext) <= 6
+    return resolve_website_url(candidate) is not None
 
 
 def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[str]]]:
@@ -324,13 +324,17 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
     is_website_flags: List[bool] = []
     remaining_text = " " + target_text + " "
 
-    for match in _URL_RE.findall(remaining_text):
-        if _is_probable_domain(match):
-            matched_apps.append(match)
-            cmd_url = match if match.startswith(("http://", "https://")) else f"https://{match}"
-            launched_commands.append(cmd_url)
-            is_website_flags.append(True)
-            remaining_text = re.sub(r"\b" + re.escape(match) + r"\b", " ", remaining_text)
+    explicit_urls = re.findall(r"https?://[^\s<>\"']+", remaining_text, re.IGNORECASE)
+    for match in dict.fromkeys(explicit_urls + _URL_RE.findall(remaining_text)):
+        if "://" not in match and not _is_probable_domain(match):
+            continue
+        cmd_url = resolve_website_url(match)
+        if not cmd_url:
+            continue
+        matched_apps.append(match)
+        launched_commands.append(cmd_url)
+        is_website_flags.append(True)
+        remaining_text = re.sub(r"\b" + re.escape(match) + r"\b", " ", remaining_text)
 
     sorted_keys = sorted(_OPEN_APP_MAP.keys(), key=len, reverse=True)
     for key in sorted_keys:
@@ -341,6 +345,23 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
             entry = _APP_REGISTRY.get(key)
             is_website_flags.append(bool(entry and entry.is_website))
             remaining_text = re.sub(pattern, " ", remaining_text)
+
+    # Registry miss: perform bounded read-only runtime discovery for one app-like
+    # target. Discovery is a resolver hint, never a new cached app registry.
+    if not matched_apps:
+        dynamic_name = re.sub(
+            r"\b(and|or|then|please|also|to|write|save|type)\b|[.,;&!?]",
+            " ",
+            target_text,
+            flags=re.IGNORECASE,
+        ).strip()
+        if dynamic_name and len(dynamic_name.split()) <= 6:
+            resolution = resolve_local_app(dynamic_name)
+            if resolution:
+                matched_apps.append(dynamic_name)
+                launched_commands.append(resolution.launch_target or resolution.window_title or dynamic_name)
+                is_website_flags.append(False)
+                remaining_text = " "
 
     if not matched_apps:
         return None
@@ -385,6 +406,16 @@ def execute_open_app(matched_apps: List[str], launched_commands: List[str]) -> s
             focus_window(process_name.removesuffix(".exe"))
             already_open_apps.append(app)
             continue
+
+        if app not in _OPEN_APP_MAP:
+            resolution = resolve_local_app(app)
+            if resolution:
+                already_open = bool(resolution.window_title or resolution.process_name)
+                if launch_and_verify(resolution):
+                    (already_open_apps if already_open else success_apps).append(app)
+                else:
+                    failed_apps.append((app, "runtime-verification-failed"))
+                continue
 
         launched = False
         last_error = None

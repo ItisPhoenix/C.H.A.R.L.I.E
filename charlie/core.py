@@ -1312,7 +1312,6 @@ class Brain:
 
         from charlie.browser import controller as browser_controller
         from charlie.browser import intent as browser_intent
-        from charlie.browser import recipes as browser_recipes
         from charlie.browser.actions import back as browser_back
         from charlie.browser.actions import open_in_real_browser
         from charlie.browser.observation import extract_visible_text
@@ -1322,29 +1321,26 @@ class Brain:
         loop = asyncio.get_running_loop()
         open_intent = browser_intent.has_open_intent(task)
         lowered_task = task.lower()
-        youtube_watch_fact = "youtube.com/watch?v=" in (get_session().last_url or "") and any(
-            term in lowered_task for term in ("title", "channel", "uploaded this video")
+        parsed_browser_intent = browser_intent.parse_browser_intent(
+            task,
+            get_session().current_domain or "",
         )
-        flipkart_product_fact = (
-            "flipkart.com" in (get_session().last_url or "").lower()
-            and "/p/" in (get_session().last_url or "")
-            and any(term in lowered_task for term in ("processor", "ram", "storage", "price"))
-        )
-        flipkart_fact_request = any(
-            interrogative in lowered_task for interrogative in ("what", "how", "which")
-        ) and any(term in lowered_task for term in ("processor", "ram", "storage", "price"))
-        flipkart_context = "flipkart.com" in (get_session().last_url or "").lower() or isinstance(
-            browser_recipes._FLIPKART_STATE.get("query"), str
-        )
+        page_question = any(
+            interrogative in lowered_task for interrogative in ("what", "how", "which", "why")
+        ) and bool(parsed_browser_intent.attribute)
 
         current_page_read = (
             bool(get_session().last_url)
-            and any(
-                phrase in lowered_task for phrase in ("this page", "current page", "from this article", "from here")
+            and (
+                any(
+                    phrase in lowered_task
+                    for phrase in ("this page", "current page", "from this article", "from here")
+                )
+                or parsed_browser_intent.operation in {"READ", "CURRENT_PAGE_FACT"}
+                or page_question
             )
-            or youtube_watch_fact
-            or flipkart_product_fact
-        ) and not any(verb in lowered_task.split() for verb in ("open", "search", "find", "click", "navigate", "go"))
+            and not any(verb in lowered_task.split() for verb in ("open", "search", "find", "click", "navigate", "go"))
+        )
 
         if browser_intent.is_bare_followup(task):
             last_url = get_session().last_url
@@ -1352,9 +1348,6 @@ class Brain:
                 return "I don't have a page to reopen yet."
             opened = await loop.run_in_executor(None, open_in_real_browser, last_url)
             return f"Opened {last_url}." if opened else f"Found {last_url} but couldn't open your browser."
-
-        if flipkart_fact_request and flipkart_context and not flipkart_product_fact:
-            return "I couldn't verify a current Flipkart product page for that fact."
 
         if task.lower().strip().rstrip(".!?") in {"back", "go back", "go back to the previous page"}:
             if not get_session().last_url:

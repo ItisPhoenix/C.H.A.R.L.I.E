@@ -9,6 +9,7 @@ their label sits in nested child lines instead, so we harvest each mark's subtre
 import re
 from dataclasses import dataclass
 from typing import Any, List, Optional
+from urllib.parse import parse_qs, urlparse
 
 _LINE_RE = re.compile(
     r'^(?P<indent>\s*)- (?P<role>[a-zA-Z][\w-]*)(?:\s+"(?P<name>[^"]*)")?'
@@ -147,13 +148,24 @@ def observe(page: Any, max_marks: int = _MAX_MARKS, text_budget: int = _TEXT_BUD
     raw = page.locator("body").aria_snapshot(mode="ai")
     marks = rank_and_cap(parse_snapshot(raw), max_marks)
     mark_lines = [f'[{m.mark_id}] {m.role} "{m.name}"' for m in marks] if marks else ["(no marked elements)"]
-    result = f"URL: {page.url}\nTITLE: {page.title()}\n" + "\n".join(mark_lines)
+    current_url = str(page.url)
+    title = str(page.title())
+    result = f"URL: {current_url}\nTITLE: {title}\n" + "\n".join(mark_lines)
     text = extract_visible_text(page, text_budget)
     if text:
         result += f"\nTEXT: {text}"
     # ponytail: blunt tail-truncation -- lower _MAX_MARKS/_TEXT_BUDGET_CHARS instead if this trips often
     if len(result) > _OBSERVATION_MAX_CHARS:
         result = result[:_OBSERVATION_MAX_CHARS - 3] + "..."
+    from charlie.browser import session
+
+    session.record_observation(
+        current_url,
+        page_type=classify_page_type(current_url, title, marks, text),
+        capabilities=discover_page_capabilities(marks),
+        search_query=discover_search_query(current_url),
+        signature=_observation_signature(marks, text),
+    )
     return result, marks, text
 
 
@@ -182,3 +194,56 @@ def is_blocked(marks: List[Mark], text: str, status: Optional[int] = None) -> bo
 def looks_empty(marks: List[Mark], text: str) -> bool:
     """Weak signal only -- combine with is_blocked() before treating it as a real block."""
     return len(marks) < 3 and len(text) < 200
+
+
+def discover_search_query(url: str) -> Optional[str]:
+    """Read a search term from any common query parameter without naming a site."""
+    query = parse_qs(urlparse(url).query)
+    for key in ("q", "query", "search_query", "search"):
+        values = query.get(key, [])
+        if values and values[0].strip():
+            return values[0].strip()
+    return None
+
+
+def discover_page_capabilities(marks: List[Mark]) -> List[str]:
+    """Infer only capabilities evidenced by the current accessible controls."""
+    names = " ".join(mark.name.lower() for mark in marks)
+    capabilities: set[str] = set()
+    if any(mark.role in _PRIMARY_INPUT_ROLES for mark in marks):
+        capabilities.add("input")
+    if any(mark.role in {"textbox", "searchbox"} for mark in marks) or "search" in names:
+        capabilities.add("search")
+    if any(mark.role in {"checkbox", "radio", "option", "listitem"} for mark in marks):
+        capabilities.add("choice")
+    if any(term in names for term in ("filter", "sort", "price", "rating", "brand")):
+        capabilities.add("constraints")
+    if any(mark.role == "link" for mark in marks):
+        capabilities.add("links")
+    if any(term in names for term in ("play", "pause", "volume", "seek")):
+        capabilities.add("media_controls")
+    return sorted(capabilities)
+
+
+def classify_page_type(url: str, title: str, marks: List[Mark], text: str) -> str:
+    """Classify page shape from live URL/content evidence, not a site registry."""
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    lowered_title = title.lower()
+    if "/watch" in path or any(term in lowered_title for term in ("watch", "video", "player")):
+        return "media_surface"
+    if any(segment in path for segment in ("/tree/", "/blob/", "/commit/", "/src/")):
+        return "repository"
+    if discover_search_query(url) or any(term in path for term in ("/search", "/results", "/find")):
+        if any(mark.role == "link" for mark in marks) or len(text) > 80:
+            return "search_results"
+        return "search"
+    if any(mark.role in {"checkbox", "radio", "option"} for mark in marks):
+        return "interactive_results"
+    if len(text) > 80:
+        return "content"
+    return "page"
+
+
+def _observation_signature(marks: List[Mark], text: str) -> str:
+    return "|".join(f"{mark.role}:{mark.name}" for mark in marks) + "::" + text[:240]

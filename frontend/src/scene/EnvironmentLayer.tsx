@@ -1,12 +1,13 @@
-import type { ReactElement } from "react";
+import type { ReactElement, Ref } from "react";
 import type { CorePosition } from "./sceneState";
 
 interface EnvironmentLayerProps {
   corePosition: CorePosition;
   hasWorkspace: boolean;
+  frameRef?: Ref<HTMLDivElement>;
 }
 
-export function EnvironmentLayer({ corePosition, hasWorkspace }: EnvironmentLayerProps): ReactElement {
+export function EnvironmentLayer({ corePosition, hasWorkspace, frameRef }: EnvironmentLayerProps): ReactElement {
   const lightX = hasWorkspace ? "60%" : corePosition === "dock_bottom_right" ? "85%" : "50%";
   const lightY = hasWorkspace ? "45%" : corePosition === "dock_bottom_right" ? "85%" : "50%";
 
@@ -28,7 +29,7 @@ export function EnvironmentLayer({ corePosition, hasWorkspace }: EnvironmentLaye
       <div className="charlie-env-grid" />
 
       {/* 3. Restrained perimeter & corner technical framing */}
-      <div className="charlie-env-frame">
+      <div ref={frameRef} className="charlie-env-frame">
         <div className="charlie-frame-corner charlie-frame-tl" />
         <div className="charlie-frame-corner charlie-frame-tr" />
         <div className="charlie-frame-corner charlie-frame-bl" />

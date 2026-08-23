@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from "react";
+import { useState, type ReactElement, type Ref } from "react";
 import { Ring } from "../dashboard/Ring";
 import type { CorePosition } from "./sceneState";
 
@@ -11,6 +11,7 @@ interface CharlieCoreProps {
   onClearScreen?: () => void;
   onOpenRecent?: () => void;
   onOpenSettings?: () => void;
+  rootRef?: Ref<HTMLDivElement>;
 }
 
 export function CharlieCore({
@@ -21,6 +22,7 @@ export function CharlieCore({
   onClearScreen,
   onOpenRecent,
   onOpenSettings,
+  rootRef,
 }: CharlieCoreProps): ReactElement {
   const [showMenu, setShowMenu] = useState(false);
 
@@ -40,6 +42,7 @@ export function CharlieCore({
 
   return (
     <div
+      ref={rootRef}
       className={`charlie-core-wrapper ${isDocked ? "charlie-core-docked" : "charlie-core-center"}`}
       onClick={() => setShowMenu((prev) => !prev)}
       role="button"

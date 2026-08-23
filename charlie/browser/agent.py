@@ -162,8 +162,8 @@ def _is_site_continuation(task: str) -> bool:
     return any(
         phrase in lowered
         for phrase in (
-            "these results", "this page", "current page", "on this page", "on amazon", "on flipkart",
-            "on youtube", "on wikipedia", "sort these", "filter these", "first matching",
+            "these results", "this page", "current page", "on this page", "on this site",
+            "sort these", "filter these", "first matching",
         )
     )
 

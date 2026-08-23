@@ -7,7 +7,9 @@ they could silently drift out of sync. Now it's one entry here.
 """
 
 from dataclasses import dataclass
+from ipaddress import ip_address
 from typing import Dict, Optional, Set
+from urllib.parse import urlsplit, urlunsplit
 
 
 @dataclass(frozen=True)
@@ -69,3 +71,39 @@ _RECOGNITION_ONLY: Set[str] = {
 }
 
 KNOWN_APP_NAMES: Set[str] = set(APP_REGISTRY.keys()) | _RECOGNITION_ONLY
+
+
+def resolve_website_url(target: str) -> Optional[str]:
+    """Resolve alias hints or any valid HTTP(S) host without a TLD allowlist."""
+    value = target.strip().strip("<>\"'.,!? ")
+    if not value:
+        return None
+    entry = APP_REGISTRY.get(value.lower())
+    if entry and entry.is_website:
+        value = entry.open_cmd
+    explicit_scheme = "://" in value
+    candidate = value if explicit_scheme else f"https://{value}"
+    try:
+        parsed = urlsplit(candidate)
+        hostname = parsed.hostname
+        if parsed.scheme.lower() not in {"http", "https"} or not hostname:
+            return None
+        if parsed.username or parsed.password:
+            return None
+        if parsed.port is not None and not 1 <= parsed.port <= 65535:
+            return None
+        normalized_host = hostname.encode("idna").decode("ascii").lower().rstrip(".")
+        is_ip = False
+        try:
+            ip_address(normalized_host)
+            is_ip = True
+        except ValueError:
+            pass
+        if not explicit_scheme and normalized_host != "localhost" and not is_ip and "." not in normalized_host:
+            return None
+        netloc = normalized_host
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        return urlunsplit((parsed.scheme.lower(), netloc, parsed.path or "", parsed.query, parsed.fragment))
+    except (TypeError, ValueError):
+        return None

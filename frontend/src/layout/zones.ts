@@ -39,7 +39,7 @@ export function getZoneCandidateRect(
   size: Size = DEFAULT_WIDGET_SIZE,
   ctx: ZoneContext
 ): Rect {
-  const { viewport, safeMargin, workspaceBounds } = ctx;
+  const { viewport, safeMargin, coreBounds, workspaceBounds } = ctx;
   const width = Math.min(size.width, viewport.width - safeMargin.x * 2);
   const height = Math.min(size.height, viewport.height - safeMargin.y * 2);
 
@@ -68,14 +68,18 @@ export function getZoneCandidateRect(
         height,
       };
 
-    case "bottom_right":
-      // When docked core is at bottom-right, position slightly above/left of core
+    case "bottom_right": {
+      // Place beside the measured core. The core size/position is CSS-owned and
+      // can change with viewport, state, and animation.
+      const aboveCoreY = coreBounds.y - height - 16;
+      const besideCoreX = coreBounds.x - width - 16;
       return {
-        x: viewport.width - safeMargin.x - width,
-        y: Math.max(safeMargin.y, viewport.height - safeMargin.y - height - 220),
+        x: besideCoreX >= safeMargin.x ? besideCoreX : viewport.width - safeMargin.x - width,
+        y: aboveCoreY >= safeMargin.y ? aboveCoreY : viewport.height - safeMargin.y - height,
         width,
         height,
       };
+    }
 
     case "workspace_edge":
       if (workspaceBounds) {

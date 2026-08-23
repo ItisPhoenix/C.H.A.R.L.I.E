@@ -1,4 +1,4 @@
-import { lazy, Suspense, type ReactElement } from "react";
+import { lazy, Suspense, type ReactElement, type Ref } from "react";
 import { ContentMaskLayer } from "./ContentMaskLayer";
 import { useWorkspaceStore, type WorkspaceInstance } from "../layout/workspaceStore";
 import { SurfaceComposer } from "../composer/SurfaceComposer";
@@ -19,9 +19,10 @@ const MapWorkspace = lazy(() =>
 interface WorkspaceLayerProps {
   activeWorkspace?: WorkspaceInstance | null;
   onDismiss?: (id: string) => void;
+  layoutRef?: Ref<HTMLDivElement>;
 }
 
-export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: WorkspaceLayerProps): ReactElement | null {
+export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss, layoutRef }: WorkspaceLayerProps): ReactElement | null {
   const storeActiveWorkspace = useWorkspaceStore((s) => s.getActiveWorkspace());
   const minimizeWorkspace = useWorkspaceStore((s) => s.minimizeWorkspace);
   const closeWorkspace = useWorkspaceStore((s) => s.closeWorkspace);
@@ -123,7 +124,7 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
   // ("The map IS the workspace" — no outer rounded card, no generic header box)
   if (isSpatialMap) {
     return (
-      <div className="charlie-workspace-layer !p-0 !inset-0" role="region" aria-label="Spatial Map Workspace">
+      <div ref={layoutRef} className="charlie-workspace-layer !p-0 !inset-0" role="region" aria-label="Spatial Map Workspace">
         <div className="w-full h-full relative pointer-events-auto overflow-hidden">
           {/* Floating Minimal HUD Controls in Top-Right Safe Zone */}
           <div className="absolute top-4 right-4 z-40 flex items-center gap-1.5 pointer-events-auto font-mono">
@@ -171,7 +172,7 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss }: Wo
   // Spatial workspace mode: the workspace owns its composition; this host only
   // provides safe-area geometry and the two global controls.
   return (
-    <div className={`charlie-workspace-layer charlie-workspace-${wsType}`} role="region" aria-label={`Primary Workspace ${wsTitle}`}>
+    <div ref={layoutRef} className={`charlie-workspace-layer charlie-workspace-${wsType}`} role="region" aria-label={`Primary Workspace ${wsTitle}`}>
       <ContentMaskLayer>
         <div className="charlie-workspace-host pointer-events-auto relative">
           <div className="charlie-workspace-controls" aria-label="Workspace controls">

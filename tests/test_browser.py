@@ -30,11 +30,11 @@ from charlie.browser.recipes import BrowserResult
 def _reset_session():
     session.reset_session()
     session._task_cache.clear()
-    recipes._FLIPKART_STATE.clear()
+    session.clear_verified_state()
     yield
     session.reset_session()
     session._task_cache.clear()
-    recipes._FLIPKART_STATE.clear()
+    session.clear_verified_state()
 
 
 # --- fastpath (tier 0) -------------------------------------------------------
