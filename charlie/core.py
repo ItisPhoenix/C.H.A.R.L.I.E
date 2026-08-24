@@ -1288,7 +1288,8 @@ class Brain:
             browser_fetch=self._research_browser_fetch,
         )
         report = await engine.run(query, getattr(self.config, "research_default_mode", "auto"))
-        return report if report.successful else None
+        decision = engine.decide(query, getattr(self.config, "research_default_mode", "auto"))
+        return report if decision.should_research else None
 
     async def _browser_task_bounded(
         self,
@@ -2130,6 +2131,18 @@ class Brain:
             if research_report is not None:
                 turn_research_reports.append(research_report)
                 search_results = research_report.prompt_context()
+                if research_report.stop_reason == "insufficient-evidence":
+                    search_results = (
+                        "RESEARCH STATUS: insufficient evidence.\n"
+                        "Do not answer this research question from model memory. "
+                        "State that reliable evidence was not found."
+                    )
+                elif research_report.stop_reason == "search-snippets-only":
+                    search_results = (
+                        f"{search_results}\n\n"
+                        "RESEARCH STATUS: snippet-only, lower confidence. "
+                        "Do not present current claims as verified; state the limitation."
+                    )
 
         def publish_research_reports(answer: str) -> None:
             publish_turn_research_reports(
@@ -2139,6 +2152,15 @@ class Brain:
                 session_id=session_id,
                 task_id=turn_id,
             )
+
+        def finalize_research_answer(answer: str) -> str:
+            if research_report is not None and research_report.stop_reason == "insufficient-evidence":
+                answer = "I couldn't find sufficient reliable evidence to answer that research question."
+            elif research_report is not None:
+                answer = strip_invalid_citations(answer, research_report.citations)
+            if research_report is not None:
+                research_report.answer = answer
+            return answer
 
         # --- Force a fresh screen observation for screen-content questions ---
         # Injected the same way as web search results (below) so the model is
@@ -2276,8 +2298,7 @@ class Brain:
             if accumulated:
                 stream_filter = TextStreamFilter()
                 filtered = stream_filter.push(accumulated) + stream_filter.flush()
-                if research_report is not None:
-                    filtered = strip_invalid_citations(filtered, research_report.citations)
+                filtered = finalize_research_answer(filtered)
                 publish_research_reports(filtered)
                 # Save assistant response to history
                 self.history.append({"role": "assistant", "content": filtered})
@@ -2621,6 +2642,7 @@ class Brain:
                 hist_filter = TextStreamFilter()
                 clean_accumulated = hist_filter.push(accumulated) + hist_filter.flush()
                 if not tool_calls and clean_accumulated:
+                    clean_accumulated = finalize_research_answer(clean_accumulated)
                     publish_research_reports(clean_accumulated)
                     yield clean_accumulated
                 self.history.append({"role": "assistant", "content": clean_accumulated})

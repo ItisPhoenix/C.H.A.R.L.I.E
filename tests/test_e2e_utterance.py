@@ -304,6 +304,32 @@ class TestNormalRoundTrips:
         assert report.answer == "Final answer grounded in fresh evidence."
 
     @pytest.mark.asyncio
+    async def test_insufficient_research_cannot_be_replaced_by_model_prior(self, monkeypatch, brain_config):
+        brain = Brain(brain_config)
+        report = ResearchReport(
+            query="QZ-4819 protocol",
+            mode=ResearchMode.STANDARD,
+            stop_reason="insufficient-evidence",
+            errors=["No reliable extracted evidence"],
+        )
+
+        async def run_research(query, session_id):
+            return report
+
+        async def fabricated_completion(payload, generation):
+            serialized = json.dumps(payload)
+            assert "insufficient evidence" in serialized.lower()
+            return "QZ-4819 was verified in 2026. [S1]", []
+
+        monkeypatch.setattr(brain, "_run_research", run_research)
+        monkeypatch.setattr(brain, "_stream_completion", fabricated_completion)
+
+        result = await _collect(brain, "QZ-4819 protocol")
+
+        assert result == "I couldn't find sufficient reliable evidence to answer that research question."
+        assert report.answer == result
+
+    @pytest.mark.asyncio
     async def test_desktop_click_sequence_round_trip(self, monkeypatch, brain_config):
         brain = Brain(brain_config)
         calls = {"n": 0}

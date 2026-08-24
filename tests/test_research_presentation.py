@@ -78,7 +78,7 @@ def test_research_payload_is_clean_structured_and_referentially_integral():
     assert "UNTRUSTED" not in serialized.decode()
     assert "URL:" not in payload["summary"]
     assert "<script>" not in serialized.decode()
-    assert "IGNORE PREVIOUS" in report.prompt_context()
+    assert "IGNORE PREVIOUS" not in report.prompt_context()
     assert "UNTRUSTED SOURCE CONTENT" in report.prompt_context()
 
 

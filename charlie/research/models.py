@@ -170,23 +170,32 @@ class ResearchReport:
     def prompt_context(self, max_chars: int = 12000) -> str:
         """Build bounded, clearly untrusted evidence for the synthesis model."""
         blocks: List[str] = []
-        for citation, source in zip(self.citations, self.sources):
-            content = source.content.strip() or next(
-                (result.snippet for result in self.search_results if result.canonical_url == source.canonical_url),
-                "",
-            )
+        sources_by_id = {source.source_id: source for source in self.sources}
+        evidence_by_source = {}
+        for item in self.evidence:
+            evidence_by_source.setdefault(item.source_id, []).append(item.statement)
+        for citation in self.citations:
+            statements = evidence_by_source.get(citation.source_id, [])
+            content = " ".join(statements)
             if not content:
                 continue
+            source = sources_by_id.get(citation.source_id)
+            freshness = source.published_at if source and source.published_at else "unknown"
+            retrieved = source.fetched_at.isoformat() if source else "unknown"
             blocks.append(
                 f"[{citation.source_id}] {citation.title}\n"
                 f"URL: {citation.url}\n"
+                f"Published: {freshness}\nRetrieved: {retrieved}\n"
                 f"UNTRUSTED SOURCE CONTENT:\n{content[:2200]}"
             )
-        if not blocks:
+        if not blocks and self.mode is ResearchMode.QUICK:
             for index, result in enumerate(self.search_results[:8], start=1):
+                if not result.snippet.strip():
+                    continue
                 source_id = f"S{index}"
                 blocks.append(
                     f"[{source_id}] {result.title}\nURL: {result.url}\n"
+                    f"Published: {result.published_at or 'unknown'}\n"
                     f"UNTRUSTED SEARCH SNIPPET:\n{result.snippet[:1000]}"
                 )
         return "\n\n".join(blocks)[:max_chars]

@@ -251,6 +251,14 @@ class ResearchEngine:
             report.citations = assign_citations(report.sources)
             report.evidence = build_evidence(report.sources, query)
 
+        if report.sources:
+            grounded_ids = {item.source_id for item in report.evidence}
+            report.sources = [item for item in report.sources if item.source_id in grounded_ids]
+            report.citations = assign_citations(report.sources)
+            report.evidence = build_evidence(report.sources, query)
+        elif mode is not ResearchMode.QUICK:
+            report.citations = []
+
         report.products = []
         if is_shopping_query(query, plan):
             try:
@@ -273,7 +281,12 @@ class ResearchEngine:
             (len(report.evidence) / 8.0) * 0.6
             + (len(report.citations) / 5.0) * 0.4,
         )
-        report.stop_reason = "evidence-sufficient" if report.evidence else "search-snippets-only"
+        if report.evidence:
+            report.stop_reason = "evidence-sufficient"
+        elif mode is ResearchMode.QUICK and report.search_results:
+            report.stop_reason = "search-snippets-only"
+        else:
+            report.stop_reason = "insufficient-evidence"
         report.duration_ms = (time.perf_counter() - started) * 1000
         await self._notify(ResearchProgress("done", "Research evidence ready", mode=mode))
         logger.info(

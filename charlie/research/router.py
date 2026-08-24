@@ -15,8 +15,13 @@ _CURRENT_SIGNALS = re.compile(
     re.IGNORECASE,
 )
 _RESEARCH_SIGNALS = re.compile(
-    r"\b(research|investigate|deep research|in[- ]depth|compare thoroughly|thoroughly|"
+    r"\b(research|investigate|deep research|in[- ]depth|compare|comparison|thoroughly|"
     r"look into|analyze current)\b",
+    re.IGNORECASE,
+)
+_FACTUAL_RESEARCH = re.compile(r"\bwhat\s+is\b.+\bused\s+for\b", re.IGNORECASE)
+_SPECIALIZED_FACTUAL = re.compile(
+    r"\bwhat\s+is\b.+\b(status|proposal|protocol|canonicalization|specification|discovery)\b",
     re.IGNORECASE,
 )
 _INTERACTIVE_SIGNALS = re.compile(
@@ -60,12 +65,10 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
         return ResearchDecision(True, mode, "explicit research intent")
     if _STABLE_EXPLANATION.search(text) and not _CURRENT_SIGNALS.search(text):
         return ResearchDecision(False, None, "stable general knowledge")
+    if _FACTUAL_RESEARCH.search(text) or _SPECIALIZED_FACTUAL.search(text):
+        return ResearchDecision(True, ResearchMode.STANDARD, "factual explanation requiring sources")
     if _CURRENT_SIGNALS.search(text):
-        mode = ResearchMode.STANDARD if re.search(
-            r"\b(price|shopping|products|recommend|compare|travel|research|investigate|trending|sources?|citations?)\b",
-            text,
-            re.I,
-        ) else ResearchMode.QUICK
+        mode = ResearchMode.STANDARD
         return ResearchDecision(True, mode, "fresh or materially changing information")
     return ResearchDecision(False, None, "no live-web signal")
 
