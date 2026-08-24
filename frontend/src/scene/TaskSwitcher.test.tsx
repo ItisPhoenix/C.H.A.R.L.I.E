@@ -1,13 +1,17 @@
-import { describe, expect, test, beforeEach } from "vitest";
+import { describe, expect, test, beforeEach, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { TaskSwitcher } from "./TaskSwitcher";
 import { useCharlieStore } from "../store/charlie";
 import { useWorkspaceStore } from "../layout/workspaceStore";
+import { sendCommand } from "../runtime/bridge";
+
+vi.mock("../runtime/bridge", () => ({ sendCommand: vi.fn() }));
 
 describe("TaskSwitcher Component", () => {
   beforeEach(() => {
     useCharlieStore.setState({ tasks: {} });
     useWorkspaceStore.setState({ workspaces: {}, activeWorkspaceId: null, recentWorkspaces: [] });
+    vi.mocked(sendCommand).mockClear();
   });
 
   test("hidden when 0 or 1 task exists", () => {
@@ -68,6 +72,9 @@ describe("TaskSwitcher Component", () => {
 
     render(<TaskSwitcher />);
     fireEvent.click(screen.getByTitle("Switch to task: Data Ingestion"));
-    expect(useWorkspaceStore.getState().activeWorkspaceId).toBe("ws2");
+    expect(sendCommand).toHaveBeenCalledWith("presentation_command", {
+      action: "focus_task",
+      task_id: "t2",
+    });
   });
 });

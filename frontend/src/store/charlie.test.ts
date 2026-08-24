@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import { useCharlieStore } from "./charlie";
+import { useWorkspaceStore } from "../layout/workspaceStore";
 
 beforeEach(() => {
   useCharlieStore.setState({
@@ -290,6 +291,26 @@ test("HUD visibility follows the pet toggle event", () => {
 
     expect(useCharlieStore.getState().presentationIntents["settings-2"]).toBeUndefined();
     expect(useCharlieStore.getState().presentationIntents["attention-1"]).toBeDefined();
+  });
+
+  test("presentation_command focus_task focuses the linked workspace", () => {
+    useWorkspaceStore.setState({
+      workspaces: {
+        "workspace-task-2": {
+          id: "workspace-task-2", type: "tasks", presentationIntentId: "workspace-task-2", taskId: "task-2",
+          title: "Task 2", summary: "", status: "active", lifecycleState: "minimized", focused: false,
+          openedAt: "", lastFocusedAt: "", persistent: false, replayable: true, contentState: {},
+        },
+      },
+      activeWorkspaceId: null,
+    });
+
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_command",
+      payload: { action: "focus_task", task_id: "task-2" },
+    });
+
+    expect(useWorkspaceStore.getState().activeWorkspaceId).toBe("workspace-task-2");
   });
 
   test("presentation_intent maps both camelCase and snake_case payload properties", () => {

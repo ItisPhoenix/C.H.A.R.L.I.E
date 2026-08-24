@@ -1443,6 +1443,45 @@ async def main():
                 elif cmd_type == "stop":
                     voice.stop_tts()
                     brain.cancel_chat()
+                elif cmd_type == "presentation_command":
+                    payload = cmd.get("payload", {})
+                    action = payload.get("action")
+                    if action == "focus_task" and isinstance(payload.get("task_id"), str):
+                        task_id = payload["task_id"]
+                        await event_bus.emit(
+                            "presentation_command",
+                            {"action": "focus_task", "task_id": task_id},
+                            meta=EventMeta(source=EventSource.BRAIN, rationale="operator focused task from HUD rail"),
+                        )
+                        try:
+                            task = get_task_journal().get(task_id)
+                        except KeyError:
+                            logger.warning("Ignoring focus request for unknown task %s", task_id)
+                        else:
+                            intent = PresentationIntent(
+                                id=f"task-focus-{task.id}",
+                                kind=PresentationKind.WORKSPACE,
+                                task_id=task.id,
+                                title=f"TASK // {task.title}",
+                                summary=f"{task.status.value.upper()} // {task.id}",
+                                content={"task_id": task.id, "task": task.to_dict()},
+                                priority=70,
+                                dismiss_policy=DismissPolicy.MANUAL,
+                                workspace_type="tasks",
+                                preferred_zone=PreferredZone.CONTEXTUAL,
+                                anchor=AnchorTarget.CORE,
+                                replayable=False,
+                                replace_key=f"task-focus:{task.id}",
+                            )
+                            await event_bus.emit(
+                                "presentation_intent",
+                                intent.to_dict(),
+                                meta=EventMeta(
+                                    source=EventSource.TASK,
+                                    task_id=task.id,
+                                    rationale="task focus opened its runtime workspace",
+                                ),
+                            )
                 elif cmd_type == "hud_invoke":
                     await _summon_conversation_workspace(toggle=True)
                 elif cmd_type == "audio_control":

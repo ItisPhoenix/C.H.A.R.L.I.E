@@ -47,7 +47,7 @@
     "presentation_intent": {"category": "snapshot", "replay": true, "required": ["id", "kind"]},
     "presentation_update": {"category": "snapshot", "replay": true, "required": ["id", "kind"]},
     "presentation_dismiss": {"category": "acknowledgement", "replay": false, "required": ["id"]},
-    "presentation_command": {"category": "request", "replay": false, "required": ["action"], "allowed_values": {"action": ["clear_screen"]}},
+    "presentation_command": {"category": "request", "replay": false, "required": ["action"], "allowed_values": {"action": ["clear_screen", "focus_task"]}},
     "surface_action": {"category": "request", "replay": false, "required": ["surface_id", "action_id"]},
     "self_extension_requested":      {"category": "request",  "replay": false, "required": ["tx_id", "kind"]},
     "self_extension_classified":     {"category": "progress", "replay": false, "required": ["tx_id", "kind"]},

@@ -1,6 +1,7 @@
 import type { ReactElement } from "react";
 import { useCharlieStore } from "../store/charlie";
 import { useWorkspaceStore } from "../layout/workspaceStore";
+import { sendCommand } from "../runtime/bridge";
 
 interface TaskSwitcherProps {
   forceShow?: boolean;
@@ -9,7 +10,6 @@ interface TaskSwitcherProps {
 export function TaskSwitcher({ forceShow }: TaskSwitcherProps): ReactElement | null {
   const tasks = useCharlieStore((s) => s.tasks);
   const activeWorkspace = useWorkspaceStore((s) => s.getActiveWorkspace());
-  const focusWorkspaceForTask = useWorkspaceStore((s) => s.focusWorkspaceForTask);
 
   const taskList = Object.values(tasks);
 
@@ -43,7 +43,7 @@ export function TaskSwitcher({ forceShow }: TaskSwitcherProps): ReactElement | n
               key={task.id}
               type="button"
               onClick={() => {
-                if (task.id) focusWorkspaceForTask(task.id);
+                if (task.id) sendCommand("presentation_command", { action: "focus_task", task_id: task.id });
               }}
               className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs transition cursor-pointer ${
                 isCurrent

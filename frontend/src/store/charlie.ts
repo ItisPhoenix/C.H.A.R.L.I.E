@@ -307,6 +307,9 @@ export const useCharlieStore = create<CharlieState>((set) => ({
             ),
           }));
         }
+        if (payload.action === "focus_task" && typeof payload.task_id === "string") {
+          useWorkspaceStore.getState().focusWorkspaceForTask(payload.task_id);
+        }
         return;
       default:
         return;
