@@ -113,7 +113,7 @@ function fieldValue(field: ConfigField, drafts: Record<string, unknown>): unknow
 const CATEGORIES = [
   "All",
   "General",
-  "Voice",
+  "Audio",
   "Appearance",
   "HUD",
   "Map",
@@ -131,9 +131,9 @@ const CATEGORIES = [
 
 const CATEGORY_MAP: Record<string, string> = {
   "General": "General",
-  "Voice & Speech": "Voice",
-  "VAD & ASR Tuning": "Voice",
-  "Voice": "Voice",
+  "Voice & Speech": "Audio",
+  "VAD & ASR Tuning": "Audio",
+  "Voice": "Audio",
   "Appearance": "Appearance",
   "HUD": "HUD",
   "Map": "Map",

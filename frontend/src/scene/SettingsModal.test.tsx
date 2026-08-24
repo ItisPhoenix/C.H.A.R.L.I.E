@@ -25,7 +25,7 @@ describe("SettingsModal Component", () => {
     const categories = [
       "All",
       "General",
-      "Voice",
+      "Audio",
       "Appearance",
       "HUD",
       "Map",

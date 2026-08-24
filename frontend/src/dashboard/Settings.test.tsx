@@ -164,7 +164,7 @@ describe("Settings Component", () => {
     render(<Settings embed={true} />);
 
     expect(await screen.findByRole("button", { name: /^General/i })).toBeDefined();
-    expect(await screen.findByRole("button", { name: /^Voice/i })).toBeDefined();
+    expect(await screen.findByRole("button", { name: /^Audio/i })).toBeDefined();
     expect(await screen.findByRole("button", { name: /^Models/i })).toBeDefined();
     expect(await screen.findByRole("button", { name: /^Map/i })).toBeDefined();
     expect(await screen.findByRole("button", { name: /^Pet/i })).toBeDefined();
@@ -178,8 +178,8 @@ describe("Settings Component", () => {
   test("filters settings when clicking category tab", async () => {
     render(<Settings embed={true} />);
 
-    const voiceBtn = await screen.findByRole("button", { name: /^Voice/i });
-    fireEvent.click(voiceBtn);
+    const audioBtn = await screen.findByRole("button", { name: /^Audio/i });
+    fireEvent.click(audioBtn);
 
     expect(await screen.findByText("Voice Profile")).toBeDefined();
   });
@@ -243,4 +243,3 @@ describe("Settings Component", () => {
     expect(await screen.findByText("runtime.model")).toBeDefined();
   });
 });
-
