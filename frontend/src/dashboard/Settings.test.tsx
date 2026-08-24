@@ -13,7 +13,7 @@ describe("Settings Component", () => {
             json: () =>
               Promise.resolve({
                 fields: [
-                  { key: "ASSISTANT_NAME", label: "Assistant Name", group: "General", type: "str", secret: false, restart: null, value: "C.H.A.R.L.I.E.", is_set: true },
+                  { key: "ASSISTANT_NAME", label: "Assistant Name", group: "General", type: "str", secret: false, restart: null, value: "CHARLIE", is_set: true },
                   { key: "API_KEY", label: "Secret API Key", group: "Models", type: "str", secret: true, restart: null, value: "", is_set: true },
                   { key: "KOKORO_VOICE", label: "Voice Profile", group: "Voice & Speech", type: "str", secret: false, restart: null, value: "af_heart", is_set: true },
                 ],

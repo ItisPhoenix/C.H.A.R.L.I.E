@@ -26,6 +26,7 @@ export function WidgetContainer({
   onResumeExpiry,
   onDismiss,
 }: WidgetContainerProps): ReactElement | null {
+  const isSystemWidget = widget.widgetType === "system_metric" || widget.widgetType === "system";
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const dragStartRef = useRef<{ mouseX: number; mouseY: number; widgetX: number; widgetY: number }>({
@@ -126,6 +127,7 @@ export function WidgetContainer({
           ? "border-cyan-400/50 bg-slate-950/90 shadow-cyan-500/10"
           : "border-cyan-500/20 bg-slate-950/80 hover:border-cyan-500/35"
       }`}
+      data-widget-type={widget.widgetType}
       style={{
         transform: `translate3d(${widget.position.x}px, ${widget.position.y}px, 0)`,
         width: `${widget.size.width}px`,
@@ -147,7 +149,7 @@ export function WidgetContainer({
       <span className="absolute -bottom-[1px] -left-[1px] w-2.5 h-2.5 border-b border-l border-cyan-400/70 pointer-events-none" />
       <span className="absolute -bottom-[1px] -right-[1px] w-2.5 h-2.5 border-b border-r border-cyan-400/70 pointer-events-none" />
       {/* Header bar (Drag Handle) */}
-      <div
+      {!isSystemWidget && <div
         className="flex items-center justify-between px-3 py-1 cursor-grab active:cursor-grabbing border-b border-cyan-500/15"
         onPointerDown={handlePointerDownHeader}
         onPointerMove={handlePointerMoveHeader}
@@ -197,11 +199,11 @@ export function WidgetContainer({
             ✕
           </button>
         </div>
-      </div>
+      </div>}
 
       {/* Body content */}
-      <div className="p-3.5 overflow-auto text-left h-[calc(100%-42px)]">
-        {widget.widgetType === "system_metric" || widget.widgetType === "system" ? (
+      <div className={isSystemWidget ? "p-4 overflow-auto text-left h-full" : "p-3.5 overflow-auto text-left h-[calc(100%-42px)]"}>
+        {isSystemWidget ? (
           <SystemWidget widget={widget} />
         ) : widget.content?.surface_spec || widget.content?.schema_version || widget.widgetType === "composed_surface" ? (
           <SurfaceComposer

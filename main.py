@@ -1889,6 +1889,7 @@ async def main():
             import charlie.recovery
 
             charlie.recovery._event_bus = bus
+            brain.event_bus = bus
             charlie.recovery.set_active_session_id(current_web_session_id)
             import charlie.tools
 

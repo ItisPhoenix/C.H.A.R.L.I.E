@@ -893,6 +893,7 @@ class Brain:
         is_background: bool = False,
     ):
         self.config = config
+        self.event_bus = None
         self.on_thought_callback = on_thought_callback
         self._is_background = is_background
         self.session_store = session_store
@@ -2023,6 +2024,15 @@ class Brain:
             intent = default_presentation_resolver.resolve(outcome, p_ctx)
             logger.info("Resolved presentation intent: %s (kind=%s)", intent.id, intent.kind)
             self.world_model.record_event(f"presentation_{intent.kind}", intent.to_dict())
+            from charlie import recovery
+            event_bus = self.event_bus or recovery._event_bus
+
+            if event_bus:
+                await event_bus.emit(
+                    "presentation_intent",
+                    intent.to_dict(),
+                    meta=EventMeta(source=EventSource.BRAIN, task_id=turn_id, session_id=session_id),
+                )
 
             yield intent.spoken_text or fp_res
             return

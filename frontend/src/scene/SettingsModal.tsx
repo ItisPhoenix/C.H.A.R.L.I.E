@@ -15,7 +15,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps): ReactEle
       onClick={onClose}
       role="dialog"
       aria-modal="true"
-      aria-label="C.H.A.R.L.I.E. System Settings"
+      aria-label="CHARLIE System Settings"
     >
       <div
         className="w-full max-w-4xl min-h-[520px] max-h-[85vh] bg-slate-950/95 border border-cyan-400/50 rounded-2xl shadow-2xl shadow-cyan-500/10 flex flex-col overflow-hidden font-mono pointer-events-auto"
@@ -26,7 +26,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps): ReactEle
           <div className="flex items-center gap-3">
             <div className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
             <h2 className="text-sm font-bold text-cyan-200 uppercase tracking-wider">
-              C.H.A.R.L.I.E. CONFIGURATION & SYSTEM SETTINGS
+              CHARLIE CONFIGURATION & SYSTEM SETTINGS
             </h2>
           </div>
           <button

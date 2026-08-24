@@ -6,6 +6,7 @@ import { SourceEvidencePrimitive, type SourceCardItem } from "../../composer/pri
 import { TimelinePrimitive, type TimelineItem } from "../../composer/primitives/TimelinePrimitive";
 import { ChartPrimitive } from "../../composer/primitives/ChartPrimitive";
 import { normalizeResearchWorkspacePayload, type ResearchFinding } from "../../presentation/workspacePayloads";
+import { ResearchRichText } from "./ResearchRichText";
 
 export interface FindingItem {
   id?: string;
@@ -145,7 +146,7 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
                 )}
               </div>
               <p className="text-[13px] text-slate-200 font-sans leading-relaxed">
-                {summary}
+                <ResearchRichText text={summary} />
               </p>
               {payloadConfidence !== null && (
                 <div className="pt-2 border-t border-cyan-500/10 text-[10px] text-slate-400 flex justify-between">
@@ -194,7 +195,7 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
               )}
             </div>
             <p className="text-base sm:text-lg text-slate-100 font-sans font-normal leading-relaxed">
-              {summary}
+              <ResearchRichText text={summary} />
             </p>
             {payloadConfidence !== null && (
               <div className="pt-2 text-xs text-slate-400 flex items-center gap-2 font-mono">

@@ -42,7 +42,7 @@ describe("ConversationWorkspace Component", () => {
     expect(screen.getByText("Hello Charlie")).toBeDefined();
     expect(screen.getByText("Greetings! How can I help you today?")).toBeDefined();
     expect(screen.getByText("OPERATOR")).toBeDefined();
-    expect(screen.getByText("C.H.A.R.L.I.E.")).toBeDefined();
+    expect(screen.getByText("CHARLIE")).toBeDefined();
   });
 
   test("renders pending tool approvals and action buttons", () => {

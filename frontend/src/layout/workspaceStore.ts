@@ -38,6 +38,7 @@ interface WorkspaceStoreState {
   // Actions
   openWorkspace: (intent: PresentationIntent) => WorkspaceInstance;
   focusWorkspace: (id: string) => void;
+  focusWorkspaceForTask: (taskId: string) => void;
   minimizeWorkspace: (id: string) => void;
   restoreWorkspace: (id: string) => void;
   closeWorkspace: (id: string) => void;
@@ -130,6 +131,11 @@ export const useWorkspaceStore = create<WorkspaceStoreState>((set, get) => ({
       },
       activeWorkspaceId: id,
     }));
+  },
+
+  focusWorkspaceForTask: (taskId: string) => {
+    const workspace = Object.values(get().workspaces).find((item) => item.taskId === taskId);
+    if (workspace) get().focusWorkspace(workspace.id);
   },
 
   minimizeWorkspace: (id: string) => {

@@ -178,6 +178,43 @@ class TestMasterFastPathDispatcher:
 
 class TestFastPathPolicyIntegration:
     @pytest.mark.asyncio
+    async def test_fast_path_emits_resolved_presentation_intent(self, monkeypatch):
+        from charlie import recovery
+        from charlie.autonomy import Requirement, RiskClass
+        from charlie.config import Config
+        from charlie.core import Brain
+
+        class EventBus:
+            def __init__(self):
+                self.events = []
+
+            async def emit(self, event_type, payload, *, meta):
+                self.events.append((event_type, payload, meta))
+
+        bus = EventBus()
+        monkeypatch.setattr(recovery, "_event_bus", bus)
+        monkeypatch.setattr(
+            "charlie.core.autonomy_evaluate",
+            lambda *args: (Requirement.ALLOW, RiskClass.SAFE, ""),
+        )
+        monkeypatch.setattr("charlie.fastpaths.execute_fast_path", lambda match: "CPU is 12%")
+
+        brain = Brain(Config(llm_url="https://example.com/v1", llm_key="test-key", llm_model="dummy"))
+        chunks = [
+            chunk
+            async for chunk in brain.chat_stream(
+                "what is the cpu usage?", platform="web", session_id="gate5-test"
+            )
+        ]
+
+        assert "".join(chunks) == "CPU is 12%"
+        assert len(bus.events) == 1
+        event_type, payload, meta = bus.events[0]
+        assert event_type == "presentation_intent"
+        assert payload["kind"] == "widget"
+        assert meta.session_id == "gate5-test"
+
+    @pytest.mark.asyncio
     async def test_fast_path_policy_enforcement_allow(self, monkeypatch):
         from charlie.autonomy import Requirement, RiskClass
         from charlie.config import Config

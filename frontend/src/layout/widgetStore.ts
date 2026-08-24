@@ -149,7 +149,10 @@ export const useWidgetStore = create<WidgetStoreState>((set, get) => ({
     }
 
     // New widget: Calculate placement
-    const candidateSize: Size = DEFAULT_WIDGET_SIZE;
+    const candidateSize: Size =
+      intent.widgetType === "system_metric" || intent.widgetType === "system"
+        ? { width: 320, height: 190 }
+        : DEFAULT_WIDGET_SIZE;
 
     // 1. Check if we have a saved pinned layout for this widgetType / replaceKey
     const pinKey = intent.replaceKey || intent.widgetType || intent.id;

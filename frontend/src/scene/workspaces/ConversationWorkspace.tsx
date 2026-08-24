@@ -180,7 +180,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
                 }`}
               >
                 <div className="flex items-center gap-1.5 text-[9px] text-cyan-400/70 uppercase">
-                  <span>{isUser ? "OPERATOR" : "C.H.A.R.L.I.E."}</span>
+                  <span>{isUser ? "OPERATOR" : "CHARLIE"}</span>
                   {msg.pending && (
                     <span className="text-cyan-400 animate-pulse text-[8px]">[streaming...]</span>
                   )}

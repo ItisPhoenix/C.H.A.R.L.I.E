@@ -171,7 +171,7 @@ function getCategoryForGroup(group: string): string {
 
 export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElement {
   const [fields, setFields] = useState<ConfigField[]>([
-    { key: "ASSISTANT_NAME", label: "Assistant Identity Name", value: "C.H.A.R.L.I.E.", group: "General", type: "str", secret: false, restart: null, is_set: true },
+    { key: "ASSISTANT_NAME", label: "Assistant Identity Name", value: "CHARLIE", group: "General", type: "str", secret: false, restart: null, is_set: true },
     { key: "VOICE_SYNTHESIS", label: "Voice Synthesis Engine", value: "Kokoro ONNX (Local)", group: "Voice", type: "str", secret: false, restart: null, is_set: true },
     { key: "THEME_ACCENT", label: "Interface Accent Theme", value: "Cyan Tactical", group: "Appearance", type: "str", secret: false, restart: null, is_set: true },
     { key: "HUD_AUTO_DISMISS", label: "Auto-Dismiss Transient Widgets", value: true, group: "HUD", type: "bool", secret: false, restart: null, is_set: true },

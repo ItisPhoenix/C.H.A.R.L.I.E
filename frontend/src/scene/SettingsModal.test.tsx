@@ -12,7 +12,7 @@ describe("SettingsModal Component", () => {
     const onClose = vi.fn();
     render(<SettingsModal isOpen={true} onClose={onClose} />);
 
-    expect(screen.getByText(/C.H.A.R.L.I.E. CONFIGURATION & SYSTEM SETTINGS/i)).toBeDefined();
+    expect(screen.getByText(/CHARLIE CONFIGURATION & SYSTEM SETTINGS/i)).toBeDefined();
 
     const closeBtn = screen.getByText("✕ CLOSE");
     fireEvent.click(closeBtn);
