@@ -1078,6 +1078,50 @@ def test_generic_search_postcondition_rejects_unchanged_page():
     assert recipes._search_postcondition_satisfied(before, before, "asyncio") is False
 
 
+def test_generic_search_postcondition_accepts_one_result_and_sparse_rendered_evidence():
+    before = _search_evidence()
+    after = _search_evidence(
+        url="https://example.test/search?q=asyncio",
+        query="asyncio",
+        signature="one-result",
+        result_urls=("https://example.test/a",),
+    )
+    assert recipes._search_postcondition_satisfied(before, after, "asyncio") is True
+
+
+def test_generic_search_postcondition_rejects_query_change_without_result_evidence():
+    before = _search_evidence()
+    after = _search_evidence(
+        url="https://example.test/search?q=asyncio",
+        query="asyncio",
+        signature="blank",
+    )
+    assert recipes._search_postcondition_satisfied(before, after, "asyncio") is False
+
+
+def test_generic_search_postcondition_rejects_home_links_without_query_relevance():
+    before = _search_evidence()
+    after = _search_evidence(
+        url="https://shop.example/search?q=laptops",
+        query="laptops",
+        signature="homepage-navigation",
+        result_urls=("https://shop.example/login", "https://shop.example/cart"),
+    )
+    after.update(
+        content="Explore Plus Login Become a Seller Cart Flights",
+        result_titles=("Explore Plus", "Login", "Cart", "Flights"),
+        result_like_count=4,
+        page_type="search_results",
+        marks=(("link", "Explore Plus"), ("link", "Cart")),
+    )
+    assert recipes._search_postcondition_satisfied(before, after, "laptops") is False
+
+
+def test_query_relevance_rejects_generic_home_navigation():
+    assert recipes._query_token_match("Explore Plus Login Cart Flights", "laptops") is False
+    assert recipes._query_token_match("Laptops 16GB Ryzen", "laptops") is True
+
+
 def test_generic_search_wait_accepts_lazy_result_appearance(monkeypatch):
     before = _search_evidence()
     observations = iter(
@@ -1104,6 +1148,46 @@ def test_generic_search_wait_accepts_lazy_result_appearance(monkeypatch):
 def test_browser_intent_recognizes_contextual_media_controls():
     for utterance in ("Pause it.", "Play it.", "Resume it.", "Skip forward 10 seconds.", "Mute it."):
         assert intent.parse_browser_intent(utterance, "video.example").operation == "MEDIA"
+
+
+def test_generic_media_trial_opens_next_candidate_after_duration_failure(monkeypatch):
+    class Page:
+        url = "https://media.example/results"
+
+        def title(self):
+            return "Candidate"
+
+    page = Page()
+    candidates = [
+        {"url": "https://media.example/short", "title": "Short", "duration": None},
+        {"url": "https://media.example/long", "title": "Long", "duration": None},
+    ]
+    states = iter(
+        [
+            {"media": True, "duration": 120},
+            {"media": True, "duration": 900},
+        ]
+    )
+    monkeypatch.setattr(recipes, "media_result_candidates", lambda *args, **kwargs: candidates)
+    monkeypatch.setattr(
+        recipes.actions,
+        "navigate",
+        lambda current, url: setattr(current, "url", url),
+    )
+    monkeypatch.setattr(
+        recipes.actions,
+        "back",
+        lambda current: setattr(current, "url", "https://media.example/results"),
+    )
+    monkeypatch.setattr(recipes.actions, "media_player_state", lambda current: next(states))
+
+    result = recipes._open_verified_media_result(
+        page,
+        "asyncio tutorial",
+        (intent.Constraint("duration", "gt", "5 minutes", "MINUTES"),),
+    )
+    assert result.success is True
+    assert result.url == "https://media.example/long"
 
 
 def test_browser_media_continuation_requires_current_verified_media_surface():
@@ -1294,6 +1378,47 @@ async def test_explicit_unseen_site_open_uses_verified_charlie_browser_navigatio
     assert opened == ["https://docs.example.test"]
 
 
+def test_open_site_accepts_docs_style_rendered_page_without_main(monkeypatch):
+    class Page:
+        url = "https://docs.python.org/3/"
+
+        def title(self):
+            return "Python 3 Documentation"
+
+    page = Page()
+    monkeypatch.setattr(recipes, "resolve_website_url", lambda value: "https://docs.python.org/3/")
+    monkeypatch.setattr(recipes.actions, "navigate", lambda current, url: setattr(current, "url", url))
+    monkeypatch.setattr(recipes, "_observe", lambda current: [Mark(1, "heading", "Python Documentation", "e1")])
+    monkeypatch.setattr(
+        recipes,
+        "_content_text",
+        lambda current: "Welcome to the Python documentation and library reference.",
+    )
+    monkeypatch.setattr(recipes.controller, "run", lambda fn, timeout=None: fn(page))
+
+    result = recipes.open_site("docs.python.org")
+    assert result is not None and result.success is True
+    assert result.verification == "page-opened"
+
+
+def test_open_site_rejects_blank_same_origin_document(monkeypatch):
+    class Page:
+        url = "https://docs.python.org/"
+
+        def title(self):
+            return ""
+
+    monkeypatch.setattr(recipes, "resolve_website_url", lambda value: "https://docs.python.org/")
+    monkeypatch.setattr(recipes.actions, "navigate", lambda current, url: None)
+    monkeypatch.setattr(recipes, "_observe", lambda current: [])
+    monkeypatch.setattr(recipes, "_content_text", lambda current: "")
+    monkeypatch.setattr(recipes.controller, "run", lambda fn, timeout=None: fn(Page()))
+
+    result = recipes.open_site("docs.python.org")
+    assert result is not None and result.success is False
+    assert result.verification == "page-open-unverified"
+
+
 def test_bare_website_open_defers_to_charlie_browser():
     from charlie import router
 
@@ -1302,6 +1427,24 @@ def test_bare_website_open_defers_to_charlie_browser():
     assert apps == []
     assert commands == []
     assert leftover == "Open docs.example.test."
+
+
+@pytest.mark.asyncio
+async def test_authoritative_deterministic_failure_skips_tier3(monkeypatch):
+    session.record_navigation("https://example.test/results")
+    monkeypatch.setattr(task.controller, "run", lambda fn, timeout=None: "https://example.test/results")
+    monkeypatch.setattr(
+        task.recipes,
+        "apply_current_page_intent",
+        lambda *args: BrowserResult(answer="Search did not settle.", verification="search-not-settled"),
+    )
+
+    async def fail_tier3(*args, **kwargs):
+        raise AssertionError("authoritative deterministic failure must not invoke Tier 3")
+
+    monkeypatch.setattr(task.agent, "run_task", fail_tier3)
+    result = await task.resolve("Open the result.", lambda _prompt: "")
+    assert result.verification == "search-not-settled"
 
 
 def test_missing_active_site_search_control_is_explicit_site_state_block(monkeypatch):

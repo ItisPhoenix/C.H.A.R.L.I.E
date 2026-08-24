@@ -535,26 +535,15 @@ def test_detect_open_app(monkeypatch):
     assert 'start "" chrome' in called_cmds
     assert 'start "" calc' in called_cmds
 
-    # 3. Test opening whitelisted websites by name
+    # Bare websites belong to Charlie BrowserSession, not external OS launch.
     called_cmds.clear()
-    res = _detect_open_app("open youtube and github")
-    msg, remaining = res
-    assert "Youtube and Github" in msg or "Github and Youtube" in msg
-    assert remaining is None
-    assert 'start "" https://youtube.com' in called_cmds
-    assert 'start "" https://github.com' in called_cmds
-
-    # 4. Test opening generic domains/URLs
-    called_cmds.clear()
-    res = _detect_open_app("open reddit.com, wikipedia.org and https://neon.tech")
-    msg, remaining = res
-    assert "reddit.com" in msg
-    assert "wikipedia.org" in msg
-    assert "https://neon.tech" in msg
-    assert remaining is None
-    assert 'start "" https://reddit.com' in called_cmds
-    assert 'start "" https://wikipedia.org' in called_cmds
-    assert 'start "" https://neon.tech' in called_cmds
+    assert router.match_open_app("open youtube and github") == (
+        [], [], "open youtube and github"
+    )
+    assert router.match_open_app("open reddit.com, wikipedia.org and https://neon.tech") == (
+        [], [], "open reddit.com, wikipedia.org and https://neon.tech"
+    )
+    assert called_cmds == []
 
     # 5. Test float/version number exclusion (must not match as domain)
     res = _detect_open_app("open version 3.5")

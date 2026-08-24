@@ -6,6 +6,7 @@ Brain/core.py -- same constraint as agent.py, core.py imports this lazily instea
 """
 
 import asyncio
+import inspect
 import logging
 import re
 import time
@@ -37,6 +38,20 @@ _CURRENT_SITE_CUE_RE = re.compile(
     r"\b(?:this\s+site|current\s+site|search\s+here|find\s+this\s+here|on\s+this\s+(?:site|page))\b",
     re.IGNORECASE,
 )
+
+_AUTHORITATIVE_DETERMINISTIC_FAILURES = {
+    "search-not-settled",
+    "page-open-unverified",
+    "content-too-short",
+    "content-not-found",
+    "constraint-unverified",
+    "site-state-blocked",
+    "media-open-unverified",
+    "media-duration-unverified",
+    "media-result-unverified",
+    "result-open-unverified",
+    "back-unverified",
+}
 
 
 def _cacheable(task: str, freshness_sensitive: bool) -> bool:
@@ -183,7 +198,14 @@ async def _resolve_inner(
             if site:
                 site_intent = intent.parse_site_intent(task, site)
                 query = site_intent.query if site_intent else parsed_intent.query or task
-                result = await loop.run_in_executor(None, recipes.media_request, site, query, parsed_intent)
+                media_request = recipes.media_request
+                if "deadline_s" in inspect.signature(media_request).parameters:
+                    result = await loop.run_in_executor(
+                        None,
+                        lambda: media_request(site, query, parsed_intent, deadline_s=remaining_deadline_s),
+                    )
+                else:
+                    result = await loop.run_in_executor(None, media_request, site, query, parsed_intent)
 
         if (
             result is None
@@ -201,7 +223,11 @@ async def _resolve_inner(
                 None,
             )
 
-        if result is None:
+        # None means primitive not applicable. A named deterministic failure is
+        # authoritative and must be returned without an unrelated Tier-3 chain.
+        if result is None or (
+            not result.success and result.verification not in _AUTHORITATIVE_DETERMINISTIC_FAILURES
+        ):
             site = resolved_site
             if site:
                 if parsed_intent.operation == "OPEN":
