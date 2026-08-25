@@ -10,8 +10,13 @@ In web-only mode, only the FastAPI server starts (useful for testing the UI).
 
 import argparse
 import asyncio
+import hashlib
+import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -32,23 +37,115 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 
+_FRONTEND_SHARED_INPUTS = (
+    Path("shared/event_contract.json"),
+    Path("shared/presentation_contract.json"),
+)
+_FRONTEND_CONFIG_GLOBS = (
+    "vite.config.*",
+    "tsconfig*.json",
+    "package.json",
+    "package-lock.json",
+    "index.html",
+)
+
+
+def _frontend_build_inputs(frontend_dir: Path) -> list[Path]:
+    """Return files that can affect Vite's production bundle.
+
+    Keep this list rooted in actual Vite inputs. Backend-only files and generated
+    output are intentionally excluded. Shared JSON files are listed because
+    frontend runtime modules import them directly.
+    """
+    root = frontend_dir.parent
+    inputs: set[Path] = set()
+    for directory in (frontend_dir / "src", frontend_dir / "public"):
+        if directory.is_dir():
+            inputs.update(path for path in directory.rglob("*") if path.is_file())
+    for pattern in _FRONTEND_CONFIG_GLOBS:
+        inputs.update(path for path in frontend_dir.glob(pattern) if path.is_file())
+    inputs.update(path for path in (root / relative for relative in _FRONTEND_SHARED_INPUTS) if path.is_file())
+    return sorted(inputs, key=lambda path: path.relative_to(root).as_posix())
+
+
+def _frontend_inputs_fingerprint(frontend_dir: Path) -> str:
+    digest = hashlib.sha256()
+    root = frontend_dir.parent
+    for path in _frontend_build_inputs(frontend_dir):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _read_frontend_manifest(dist_dir: Path) -> dict | None:
+    manifest_path = dist_dir / "charlie-build.json"
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _git_build_identity(root: Path) -> tuple[str | None, bool | None]:
+    try:
+        git_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=root, text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        dirty = bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                cwd=root,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        )
+        return git_sha, dirty
+    except (OSError, subprocess.CalledProcessError):
+        return None, None
+
+
 def _frontend_build_is_stale(frontend_dir: Path, dist_dir: Path) -> bool:
-    """True if any frontend source file is newer than the last build output."""
-    index_html = dist_dir / "index.html"
-    if not index_html.exists():
+    """True when required build inputs differ from the served frontend build."""
+    if not (dist_dir / "index.html").is_file():
         return True
-    build_time = index_html.stat().st_mtime
-    src_root = frontend_dir / "src"
-    if not src_root.exists():
-        return False
-    return any(
-        f.stat().st_mtime > build_time for f in src_root.rglob("*") if f.is_file()
-    )
+    manifest = _read_frontend_manifest(dist_dir)
+    if not manifest or manifest.get("input_fingerprint") != _frontend_inputs_fingerprint(frontend_dir):
+        return True
+    git_sha, dirty = _git_build_identity(frontend_dir.parent)
+    if git_sha is not None and manifest.get("git_sha") != git_sha:
+        return True
+    if dirty is not None and manifest.get("dirty") != dirty:
+        return True
+    return False
 
 
-def check_and_build_frontend() -> None:
+def _publish_frontend_build(staging_dir: Path, dist_dir: Path) -> None:
+    """Publish a verified build while retaining old output on build failure."""
+    backup_dir = dist_dir.with_name(f"{dist_dir.name}.previous")
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+    moved_old = False
+    try:
+        if dist_dir.exists():
+            dist_dir.rename(backup_dir)
+            moved_old = True
+        staging_dir.rename(dist_dir)
+    except Exception:
+        if dist_dir.exists():
+            shutil.rmtree(dist_dir)
+        if moved_old and backup_dir.exists():
+            backup_dir.rename(dist_dir)
+        raise
+    finally:
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+
+
+def check_and_build_frontend(project_root: Path | None = None) -> None:
     """Ensure a current frontend exists; refuse to serve stale output after a failed build."""
-    root = Path(__file__).parent
+    root = project_root or Path(__file__).parent
     frontend_dir = root / "frontend"
     dist_dir = frontend_dir / "dist"
 
@@ -59,13 +156,13 @@ def check_and_build_frontend() -> None:
         return
 
     print("Frontend build missing or stale. Compiling frontend...")
-    import shutil
-    import subprocess
-
     npm_path = shutil.which("npm")
     if not npm_path:
         raise RuntimeError("npm was not found; install Node.js/npm and run 'npm run build' in frontend/.")
 
+    staging_dir = Path(tempfile.mkdtemp(prefix=".charlie-build-", dir=frontend_dir))
+    build_env = os.environ.copy()
+    build_env["CHARLIE_FRONTEND_OUT_DIR"] = str(staging_dir)
     try:
         if not (frontend_dir / "node_modules").exists():
             print("Running 'npm install' in frontend...")
@@ -78,14 +175,26 @@ def check_and_build_frontend() -> None:
         subprocess.run(
             [npm_path, "run", "build"],
             cwd=str(frontend_dir),
+            env=build_env,
             check=True,
         )
+        manifest = _read_frontend_manifest(staging_dir)
+        if not (staging_dir / "index.html").is_file() or not manifest:
+            raise RuntimeError("Frontend build completed without a valid charlie-build.json identity.")
+        manifest["input_fingerprint"] = _frontend_inputs_fingerprint(frontend_dir)
+        (staging_dir / "charlie-build.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        _publish_frontend_build(staging_dir, dist_dir)
         print("Frontend built successfully!")
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             "Frontend build failed; refusing to start with stale React HUD assets. "
             "See the npm output above and fix the build before restarting."
         ) from e
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
 
 
 def run_full():

@@ -362,6 +362,16 @@ app.add_middleware(
 )
 
 _FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+
+
+def _frontend_build_identity() -> dict[str, Any] | None:
+    try:
+        manifest = json.loads((_FRONTEND_DIST / "charlie-build.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
 if _FRONTEND_DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="surface-assets")
 
@@ -674,11 +684,14 @@ async def history(limit: int = 50):
 @app.get("/api/status")
 async def status():
     import platform as _platform
+    frontend_build = _frontend_build_identity()
     return {
         "state": pipeline_state,
         "launch_id": LAUNCH_ID,
         "uptime_seconds": int(time.time() - _START_TIME),
         "pid": os.getpid(),
+        "frontend_build": frontend_build,
+        "source_identity": (frontend_build or {}).get("git_sha"),
         "desktop_control_enabled": config.desktop_control_enabled,
         "os_host": f"{_platform.system()} {_platform.machine()}",
     }
