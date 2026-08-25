@@ -127,6 +127,21 @@ async def test_hud_repeated_summon_no_duplicate_while_connected():
 
 
 @pytest.mark.asyncio
+async def test_hud_invoke_semantics_are_idempotent_show_when_connected():
+    """The production invoke path must not hide an already-visible HUD."""
+    import main as main_mod
+
+    main_mod.hud_client_count = 1
+    main_mod.hud_visible = True
+
+    with patch("charlie.utils.open_url_in_browser") as mock_open:
+        await main_mod._summon_conversation_workspace()
+
+    assert main_mod.hud_visible is True
+    mock_open.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_hud_disconnect_then_summon_opens_again():
     """Disconnect then summon = opens again."""
     import main as main_mod
@@ -263,4 +278,3 @@ async def test_terminal_input_routes_through_main_approval_channel(monkeypatch):
 
     assert result["status"] == "approval_pending"
     assert bus.commands[0]["type"] == "terminal_command_request"
-

@@ -1488,7 +1488,9 @@ async def main():
                                 ),
                             )
                 elif cmd_type == "hud_invoke":
-                    await _summon_conversation_workspace(toggle=True)
+                    # HUD invoke is an idempotent show command. Explicit visibility
+                    # toggles remain available through the dedicated toggle path.
+                    await _summon_conversation_workspace()
                 elif cmd_type == "audio_control":
                     payload = cmd.get("payload", {})
                     state = voice.set_audio_state(
