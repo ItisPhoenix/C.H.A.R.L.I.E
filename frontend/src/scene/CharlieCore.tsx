@@ -1,5 +1,5 @@
 import { useState, type ReactElement, type Ref } from "react";
-import { Ring } from "../dashboard/Ring";
+import { CharlieRing } from "./core/CharlieRing";
 import type { CorePosition } from "./sceneState";
 
 interface CharlieCoreProps {
@@ -44,6 +44,7 @@ export function CharlieCore({
     <div
       ref={rootRef}
       className={`charlie-core-wrapper ${isDocked ? "charlie-core-docked" : "charlie-core-center"}`}
+      data-testid="charlie-core"
       onClick={() => setShowMenu((prev) => !prev)}
       role="button"
       tabIndex={0}
@@ -56,7 +57,7 @@ export function CharlieCore({
     >
       <div className="w-full h-full relative flex items-center justify-center">
         {/* Core Ring */}
-        <Ring />
+        <CharlieRing />
 
         {/* Center Inner Branding */}
         <div className="charlie-core-brand-center" aria-hidden="true">

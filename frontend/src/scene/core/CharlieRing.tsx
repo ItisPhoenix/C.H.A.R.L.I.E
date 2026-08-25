@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactElement } from "react";
-import { useCharlieStore } from "../store/charlie";
+import { useCharlieStore } from "../../store/charlie";
 import { OuterHudSystem } from "./OuterHudSystem";
 
 type CoreVisualState =
@@ -423,7 +423,7 @@ function drawFrame(
   drawLuminousRing(ctx, centerX, centerY, unit, elapsed, profile, pulse, audioLevel);
 }
 
-export function Ring(): ReactElement {
+export function CharlieRing(): ReactElement {
   const coreState = useCharlieStore((state) => state.coreState);
   const connected = useCharlieStore((state) => state.connected);
 
@@ -533,6 +533,7 @@ export function Ring(): ReactElement {
     <div
       ref={containerRef}
       className="hud-ring"
+      data-core-renderer="authoritative-charlie-ring"
       data-state={state}
       data-audio-level={useCharlieStore.getState().audioLevel}
       role="img"

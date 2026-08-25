@@ -45,6 +45,8 @@ describe("CharlieScene spatial projection & layers", () => {
     const main = screen.getByRole("main");
     expect(main.getAttribute("data-scene-mode")).toBe("idle");
     expect(main.getAttribute("data-core-position")).toBe("center");
+    expect(screen.getAllByTestId("charlie-core")).toHaveLength(1);
+    expect(screen.getAllByTestId("charlie-core")[0].querySelectorAll('[data-core-renderer="authoritative-charlie-ring"]')).toHaveLength(1);
     expect(screen.queryByRole("region", { name: /primary workspace/i })).toBeNull();
   });
 
@@ -74,6 +76,8 @@ describe("CharlieScene spatial projection & layers", () => {
     const ws = screen.getByRole("region", { name: /primary workspace/i });
     expect(ws).toBeDefined();
     expect(ws).toHaveClass("charlie-workspace-research");
+    expect(screen.getAllByTestId("charlie-core")).toHaveLength(1);
+    expect(screen.getAllByTestId("charlie-core")[0].querySelectorAll('[data-core-renderer="authoritative-charlie-ring"]')).toHaveLength(1);
     expect(screen.getByText("RESEARCH & SYNTHESIS")).toBeInTheDocument();
     expect(screen.queryByText("Deep Research: Quantum Computing")).toBeNull();
     expect(container.querySelector(".charlie-panel")).toBeNull();
