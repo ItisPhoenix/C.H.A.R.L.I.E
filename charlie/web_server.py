@@ -1077,6 +1077,8 @@ def _apply_presentation_event(cache: dict, event: dict) -> None:
     if etype == "presentation_dismiss":
         cache.pop(pid, None)
     elif etype in ("presentation_intent", "presentation_update"):
+        # Reinsert updates so replay order reflects runtime's latest focus.
+        cache.pop(pid, None)
         if payload.get("replayable") or payload.get("kind") in ("workspace", "attention", "composed_surface"):
             cache[pid] = event
         else:

@@ -311,7 +311,7 @@ test("HUD visibility follows the pet toggle event", () => {
     expect(useCharlieStore.getState().presentationIntents["attention-1"]).toBeDefined();
   });
 
-  test("presentation_command focus_task focuses the linked workspace", () => {
+  test("presentation_command focus_task does not resolve workspace in frontend", () => {
     useWorkspaceStore.setState({
       workspaces: {
         "workspace-task-2": {
@@ -328,7 +328,7 @@ test("HUD visibility follows the pet toggle event", () => {
       payload: { action: "focus_task", task_id: "task-2" },
     });
 
-    expect(useWorkspaceStore.getState().activeWorkspaceId).toBe("workspace-task-2");
+    expect(useWorkspaceStore.getState().activeWorkspaceId).toBeNull();
   });
 
   test("presentation_intent maps both camelCase and snake_case payload properties", () => {
@@ -352,5 +352,19 @@ test("HUD visibility follows the pet toggle event", () => {
     expect(intent?.attentionLevel).toBe("high");
     expect(intent?.autoDismissMs).toBe(10000);
     expect(intent?.createdAt).toBe("2026-08-19T20:00:00.000Z");
+  });
+
+  test("replayed task focus intent moves stable identity to active end", () => {
+    for (const [id, taskId] of [["task-workspace:a", "a"], ["task-workspace:b", "b"], ["task-workspace:a", "a"]]) {
+      useCharlieStore.getState().applyEvent({
+        type: "presentation_update",
+        payload: { id, kind: "workspace", task_id: taskId, workspace_type: "tasks" },
+      });
+    }
+
+    expect(Object.keys(useCharlieStore.getState().presentationIntents)).toEqual([
+      "task-workspace:b",
+      "task-workspace:a",
+    ]);
   });
 });

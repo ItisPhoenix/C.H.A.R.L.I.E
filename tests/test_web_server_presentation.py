@@ -39,6 +39,21 @@ def test_non_replayable_presentation_is_not_cached():
     assert cache == {}
 
 
+def test_replay_order_tracks_latest_runtime_task_focus_without_duplicate_identity():
+    cache: dict = {}
+    task_a = {"type": "presentation_intent", "payload": {
+        "id": "task-workspace:task-a", "kind": "workspace", "task_id": "task-a", "replayable": True,
+    }}
+    task_b = {"type": "presentation_intent", "payload": {
+        "id": "task-workspace:task-b", "kind": "workspace", "task_id": "task-b", "replayable": True,
+    }}
+    web_server._apply_presentation_event(cache, task_a)
+    web_server._apply_presentation_event(cache, task_b)
+    web_server._apply_presentation_event(cache, task_a)
+    assert list(cache) == ["task-workspace:task-b", "task-workspace:task-a"]
+    assert len(cache) == 2
+
+
 def test_unrelated_event_type_ignored():
     cache: dict = {}
     web_server._apply_presentation_event(cache, {"type": "system_status", "payload": {}})

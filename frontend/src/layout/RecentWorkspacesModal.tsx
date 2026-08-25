@@ -1,5 +1,6 @@
 import type { ReactElement } from "react";
 import { useWorkspaceStore } from "./workspaceStore";
+import { sendCommand } from "../runtime/bridge";
 
 interface RecentWorkspacesModalProps {
   isOpen: boolean;
@@ -45,7 +46,11 @@ export function RecentWorkspacesModal({ isOpen, onClose }: RecentWorkspacesModal
                 key={entry.id}
                 className="p-3 rounded-xl bg-cyan-950/20 border border-cyan-500/15 hover:border-cyan-500/40 hover:bg-cyan-950/40 transition cursor-pointer flex items-center justify-between gap-3"
                 onClick={() => {
-                  restoreWorkspace(entry.id);
+                  if (entry.taskId) {
+                    sendCommand("presentation_command", { action: "focus_task", task_id: entry.taskId });
+                  } else {
+                    restoreWorkspace(entry.id);
+                  }
                   onClose();
                 }}
               >

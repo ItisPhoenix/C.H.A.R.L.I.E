@@ -139,6 +139,25 @@ def _watcher_surface_kind(level: AttentionLevel) -> tuple[PresentationKind, Dism
     return PresentationKind.NOTIFICATION, DismissPolicy.TIMED, 8000, PreferredZone.TOP_RIGHT
 
 
+def _task_workspace_intent(task: Any) -> PresentationIntent:
+    """Build canonical task workspace intent from runtime Task Journal record."""
+    return PresentationIntent(
+        id=f"task-workspace:{task.id}",
+        kind=PresentationKind.WORKSPACE,
+        task_id=task.id,
+        title=f"TASK // {task.title}",
+        summary=f"{task.status.value.upper()} // {task.id}",
+        content={"task_id": task.id, "task": task.to_dict()},
+        priority=70,
+        dismiss_policy=DismissPolicy.MANUAL,
+        workspace_type="tasks",
+        preferred_zone=PreferredZone.CONTEXTUAL,
+        anchor=AnchorTarget.CORE,
+        replayable=True,
+        replace_key=f"task-focus:{task.id}",
+    )
+
+
 _runtime_health = HealthRegistry(
     (
         "brain",
@@ -1472,21 +1491,7 @@ async def main():
                         except KeyError:
                             logger.warning("Ignoring focus request for unknown task %s", task_id)
                         else:
-                            intent = PresentationIntent(
-                                id=f"task-focus-{task.id}",
-                                kind=PresentationKind.WORKSPACE,
-                                task_id=task.id,
-                                title=f"TASK // {task.title}",
-                                summary=f"{task.status.value.upper()} // {task.id}",
-                                content={"task_id": task.id, "task": task.to_dict()},
-                                priority=70,
-                                dismiss_policy=DismissPolicy.MANUAL,
-                                workspace_type="tasks",
-                                preferred_zone=PreferredZone.CONTEXTUAL,
-                                anchor=AnchorTarget.CORE,
-                                replayable=False,
-                                replace_key=f"task-focus:{task.id}",
-                            )
+                            intent = _task_workspace_intent(task)
                             await event_bus.emit(
                                 "presentation_intent",
                                 intent.to_dict(),

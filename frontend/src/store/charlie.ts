@@ -335,9 +335,6 @@ export const useCharlieStore = create<CharlieState>((set) => ({
             ),
           }));
         }
-        if (payload.action === "focus_task" && typeof payload.task_id === "string") {
-          useWorkspaceStore.getState().focusWorkspaceForTask(payload.task_id);
-        }
         return;
       default:
         return;
@@ -453,6 +450,9 @@ function applyPresentationIntentUpsert(
         }
       }
     }
+    // Runtime focus updates are authoritative. Reinsert identity so workspace
+    // sync renders latest focused intent last.
+    delete nextIntents[intent.id];
     nextIntents[intent.id] = intent;
     const caption = intent.kind === "caption" ? intent.captionText || intent.summary : s.activeCaption;
     return { presentationIntents: nextIntents, activeCaption: caption };

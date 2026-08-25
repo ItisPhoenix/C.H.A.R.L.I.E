@@ -47,7 +47,7 @@ describe("TaskSwitcher Component", () => {
     expect(screen.getByText("Data Ingestion")).toBeDefined();
   });
 
-  test("switches to the workspace linked to the selected task", () => {
+  test("requests runtime focus without resolving workspace locally", () => {
     useCharlieStore.setState({
       tasks: {
         t1: { id: "t1", title: "Surveillance Scan", status: "running", currentStep: 1, totalSteps: 2 },
@@ -76,5 +76,6 @@ describe("TaskSwitcher Component", () => {
       action: "focus_task",
       task_id: "t2",
     });
+    expect(useWorkspaceStore.getState().activeWorkspaceId).toBe("ws1");
   });
 });

@@ -90,6 +90,19 @@ describe("WorkspaceManager Store & Lifecycle", () => {
     expect(useWorkspaceStore.getState().getActiveWorkspace()?.lifecycleState).toBe("active");
   });
 
+  test("minimize and restore preserve runtime task and presentation identity", () => {
+    const taskIntent = { ...mockIntent1, id: "task-workspace:task-99" };
+    useWorkspaceStore.getState().openWorkspace(taskIntent);
+    useWorkspaceStore.getState().minimizeWorkspace(taskIntent.id);
+    useWorkspaceStore.getState().restoreWorkspace(taskIntent.id);
+
+    const restored = useWorkspaceStore.getState().getActiveWorkspace();
+    expect(restored?.id).toBe("task-workspace:task-99");
+    expect(restored?.presentationIntentId).toBe("task-workspace:task-99");
+    expect(restored?.taskId).toBe("task-99");
+    expect(useWorkspaceStore.getState().workspaces).toHaveProperty("task-workspace:task-99");
+  });
+
   test("closing workspace removes active presence while retaining task linkage in history", () => {
     useWorkspaceStore.getState().openWorkspace(mockIntent1);
     useWorkspaceStore.getState().closeWorkspace("ws-research-1");

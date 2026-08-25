@@ -40,7 +40,10 @@ export function useSceneProjection(): SceneProjection {
 
     if (!activeWorkspace) {
       const rawWs = intents.find((i) => i.kind === "workspace");
-      if (rawWs) {
+      // A known minimized instance is authoritative local lifecycle state for
+      // rendering. Do not resurrect it from the raw intent until runtime
+      // sends a fresh focus update.
+      if (rawWs && !workspaces[rawWs.id]) {
         activeWorkspace = {
           id: rawWs.id,
           type: rawWs.workspaceType || "custom",
