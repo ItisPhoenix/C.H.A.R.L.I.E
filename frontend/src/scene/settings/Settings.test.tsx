@@ -2,11 +2,11 @@ import { describe, expect, test, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { Settings } from "./Settings";
 
+let fetchMock: ReturnType<typeof vi.fn>;
+
 describe("Settings Component", () => {
   beforeEach(() => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation((url: string) => {
+    fetchMock = vi.fn().mockImplementation((url: string) => {
         if (url === "/api/config") {
           return Promise.resolve({
             ok: true,
@@ -16,6 +16,8 @@ describe("Settings Component", () => {
                   { key: "ASSISTANT_NAME", label: "Assistant Name", group: "General", type: "str", secret: false, restart: null, value: "CHARLIE", is_set: true },
                   { key: "API_KEY", label: "Secret API Key", group: "Models", type: "str", secret: true, restart: null, value: "", is_set: true },
                   { key: "KOKORO_VOICE", label: "Voice Profile", group: "Voice & Speech", type: "str", secret: false, restart: null, value: "af_heart", is_set: true },
+                  { key: "CONTEXT_WINDOW", label: "Context Window", group: "Chat Behavior", type: "int", secret: false, restart: null, value: 8192, is_set: true },
+                  { key: "HUD_INVOKE_HOTKEY", label: "HUD Invoke Hotkey", group: "Surfaces", type: "str", secret: false, restart: "process", value: "ctrl+space", is_set: true },
                 ],
               }),
           });
@@ -156,12 +158,12 @@ describe("Settings Component", () => {
           });
         }
         return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
-      })
-    );
+      });
+    vi.stubGlobal("fetch", fetchMock);
   });
 
   test("renders settings categories sidebar including standard categories", async () => {
-    render(<Settings embed={true} />);
+    render(<Settings />);
 
     expect(await screen.findByRole("button", { name: /^General/i })).toBeDefined();
     expect(await screen.findByRole("button", { name: /^Audio/i })).toBeDefined();
@@ -175,8 +177,18 @@ describe("Settings Component", () => {
     expect(await screen.findByRole("button", { name: /^Audit & Diagnostics/i })).toBeDefined();
   });
 
+  test("exposes one authoritative settings surface with Audio, not Voice, as top-level category", async () => {
+    render(<Settings />);
+
+    expect(await screen.findByTestId("authoritative-settings")).toBeDefined();
+    for (const category of ["General", "Appearance", "Audio", "Pet", "Privacy", "Tools / MCP", "Integrations", "System"]) {
+      expect(screen.getByRole("button", { name: new RegExp(`^${category.replace("/", "\\/")}$`, "i") })).toBeDefined();
+    }
+    expect(screen.queryByRole("button", { name: /^Voice$/i })).toBeNull();
+  });
+
   test("filters settings when clicking category tab", async () => {
-    render(<Settings embed={true} />);
+    render(<Settings />);
 
     const audioBtn = await screen.findByRole("button", { name: /^Audio/i });
     fireEvent.click(audioBtn);
@@ -184,8 +196,57 @@ describe("Settings Component", () => {
     expect(await screen.findByText("Voice Profile")).toBeDefined();
   });
 
+  test("maps voice fields into Audio and keeps configured secrets masked", async () => {
+    render(<Settings />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Audio/i }));
+    expect(await screen.findByText("Voice Profile")).toBeDefined();
+    expect(screen.queryByDisplayValue("•••••••• (configured)")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /^All/i }));
+    const secret = await screen.findByLabelText("Secret API Key");
+    expect(secret).toHaveAttribute("type", "password");
+    expect(secret).toHaveAttribute("placeholder", "•••••••• (configured)");
+  });
+
+  test("routes backend General and HUD groups and explains scene-owned Appearance", async () => {
+    render(<Settings />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^General/i }));
+    expect(await screen.findByText("Context Window")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: /^HUD/i }));
+    expect(await screen.findByText("HUD Invoke Hotkey")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Appearance/i }));
+    expect(await screen.findByText(/Appearance follows CharlieScene theme tokens/i)).toBeDefined();
+  });
+
+  test("saves only modified fields and reports failed saves", async () => {
+    render(<Settings />);
+    const assistantName = await screen.findByLabelText("Assistant Name");
+    fireEvent.change(assistantName, { target: { value: "CHARLIE TEST" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    await screen.findByText("Saved. Reload required settings when ready.");
+    const saveCall = fetchMock.mock.calls.find(
+      ([url, init]) => url === "/api/config" && (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(saveCall).toBeDefined();
+    expect(JSON.parse(String((saveCall?.[1] as RequestInit).body))).toEqual({ ASSISTANT_NAME: "CHARLIE TEST" });
+
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/api/config" && init?.method === "POST") return Promise.resolve({ ok: false });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+    fireEvent.change(assistantName, { target: { value: "CHARLIE FAILED" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    expect(await screen.findByText("Settings save failed.")).toBeDefined();
+    expect(screen.queryByText("Saved. Reload required settings when ready.")).toBeNull();
+  });
+
   test("displays MCP servers when Tools / MCP category is selected", async () => {
-    render(<Settings embed={true} />);
+    render(<Settings />);
 
     const mcpBtn = await screen.findByRole("button", { name: /^Tools \/ MCP/i });
     fireEvent.click(mcpBtn);
@@ -196,7 +257,7 @@ describe("Settings Component", () => {
   });
 
   test("displays Memory items and controls when Memory category is selected", async () => {
-    render(<Settings embed={true} />);
+    render(<Settings />);
 
     const memBtn = await screen.findByRole("button", { name: /^Memory/i });
     fireEvent.click(memBtn);
@@ -206,7 +267,7 @@ describe("Settings Component", () => {
   });
 
   test("displays Privacy and retention summary when Privacy category is selected", async () => {
-    render(<Settings embed={true} />);
+    render(<Settings />);
 
     const privBtn = await screen.findByRole("button", { name: /^Privacy/i });
     fireEvent.click(privBtn);
@@ -216,7 +277,7 @@ describe("Settings Component", () => {
   });
 
   test("displays Developer diagnostics and logs when Developer category is selected", async () => {
-    render(<Settings embed={true} />);
+    render(<Settings />);
 
     const devBtn = await screen.findByRole("button", { name: /^Developer/i });
     fireEvent.click(devBtn);
@@ -228,7 +289,7 @@ describe("Settings Component", () => {
   });
 
   test("runs self-knowledge query when submitted", async () => {
-    render(<Settings embed={true} />);
+    render(<Settings />);
 
     const devBtn = await screen.findByRole("button", { name: /^Developer/i });
     fireEvent.click(devBtn);

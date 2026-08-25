@@ -1,5 +1,5 @@
 import type { ReactElement } from "react";
-import { Settings } from "../dashboard/Settings";
+import { Settings } from "./settings/Settings";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -41,7 +41,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps): ReactEle
 
         {/* Modal Body hosting existing Settings system */}
         <div className="flex-1 p-6 overflow-y-auto font-sans text-left">
-          <Settings embed={true} />
+          <Settings />
         </div>
       </div>
     </div>

@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState, type ReactElement } from "react";
-import { Panel } from "./Panel";
-import { useMapStore } from "../map/mapStore";
+import { useMapStore } from "../../map/mapStore";
 
 interface ConfigField {
   key: string;
@@ -131,11 +130,16 @@ const CATEGORIES = [
 
 const CATEGORY_MAP: Record<string, string> = {
   "General": "General",
+  "Chat Behavior": "General",
+  "Desktop Control": "Automation",
+  "Monitoring": "System",
   "Voice & Speech": "Audio",
   "VAD & ASR Tuning": "Audio",
+  "Wake Word": "Audio",
   "Voice": "Audio",
   "Appearance": "Appearance",
   "HUD": "HUD",
+  "Surfaces": "HUD",
   "Map": "Map",
   "Companion": "Pet",
   "Pet": "Pet",
@@ -144,7 +148,6 @@ const CATEGORY_MAP: Record<string, string> = {
   "Vision": "Models",
   "Memory Files": "Memory",
   "Memory": "Memory",
-  "Chat Behavior": "Automation",
   "Autonomy": "Automation",
   "Automation": "Automation",
   "Privacy": "Privacy",
@@ -152,6 +155,8 @@ const CATEGORY_MAP: Record<string, string> = {
   "Search Providers": "Tools / MCP",
   "Web Research": "Tools / MCP",
   "Research Advanced": "Tools / MCP",
+  "Agentic OS": "Tools / MCP",
+  "Browser": "Tools / MCP",
   "MCP": "Tools / MCP",
   "Tools / MCP": "Tools / MCP",
   "Plugins": "Tools / MCP",
@@ -165,11 +170,15 @@ const CATEGORY_MAP: Record<string, string> = {
   "Debug": "Developer",
 };
 
+const EMPTY_CATEGORY_COPY: Record<string, string> = {
+  Appearance: "Appearance follows CharlieScene theme tokens. No runtime appearance fields are exposed yet.",
+};
+
 function getCategoryForGroup(group: string): string {
   return CATEGORY_MAP[group] || group;
 }
 
-export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElement {
+export function Settings(): ReactElement {
   const [fields, setFields] = useState<ConfigField[]>([
     { key: "ASSISTANT_NAME", label: "Assistant Identity Name", value: "CHARLIE", group: "General", type: "str", secret: false, restart: null, is_set: true },
     { key: "VOICE_SYNTHESIS", label: "Voice Synthesis Engine", value: "Kokoro ONNX (Local)", group: "Voice", type: "str", secret: false, restart: null, is_set: true },
@@ -645,7 +654,10 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
   }, [groups, activeCategory]);
 
   const body = (
-    <div className="settings-workspace font-mono text-left flex flex-col h-full">
+    <div
+      className="settings-workspace font-mono text-left flex flex-col h-full"
+      data-testid="authoritative-settings"
+    >
       {/* 1. Header Toolbar */}
       <div className="settings-intro mb-3 flex items-center justify-between border-b border-cyan-500/20 pb-2.5">
         <div>
@@ -815,7 +827,8 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
             activeCategory !== "Privacy" &&
             activeCategory !== "Developer" ? (
             <div className="p-6 rounded-xl border border-cyan-500/10 bg-slate-950/40 text-center text-slate-400 text-xs">
-              No configuration properties in category &ldquo;{activeCategory}&rdquo;.
+              {EMPTY_CATEGORY_COPY[activeCategory] ??
+                `No runtime configuration properties in category “${activeCategory}”.`}
             </div>
           ) : null}
 
@@ -1535,13 +1548,5 @@ export function Settings({ embed = false }: { embed?: boolean } = {}): ReactElem
     </div>
   );
 
-  if (embed) {
-    return body;
-  }
-
-  return (
-    <Panel id="settings" title="Settings">
-      {body}
-    </Panel>
-  );
+  return body;
 }

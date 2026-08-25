@@ -17,9 +17,10 @@ describe("SettingsModal Component", () => {
     const closeBtn = screen.getByText("✕ CLOSE");
     fireEvent.click(closeBtn);
     expect(onClose).toHaveBeenCalled();
+    expect(screen.getAllByTestId("authoritative-settings")).toHaveLength(1);
   });
 
-  test("renders 15 settings categories in modal sidebar", () => {
+  test("renders one authoritative settings surface with all current categories", () => {
     render(<SettingsModal isOpen={true} onClose={() => {}} />);
 
     const categories = [
@@ -44,5 +45,7 @@ describe("SettingsModal Component", () => {
     for (const cat of categories) {
       expect(screen.getByRole("button", { name: new RegExp(`^${cat.replace("/", "\\/")}$`, "i") })).toBeDefined();
     }
+    expect(screen.getAllByTestId("authoritative-settings")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: /^Voice$/i })).toBeNull();
   });
 });
