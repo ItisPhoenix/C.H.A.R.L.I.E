@@ -130,6 +130,15 @@ from charlie.watchers import (
 logger = logging.getLogger("charlie.main")
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
 _state_machine = StateMachine()  # single authoritative CoreState instance for this process
+
+
+def _watcher_surface_kind(level: AttentionLevel) -> tuple[PresentationKind, DismissPolicy, int | None, PreferredZone]:
+    """Map authoritative watcher urgency to the matching non-tool HUD surface."""
+    if level >= AttentionLevel.ATTENTION:
+        return PresentationKind.ATTENTION, DismissPolicy.MANUAL, None, PreferredZone.CENTER
+    return PresentationKind.NOTIFICATION, DismissPolicy.TIMED, 8000, PreferredZone.TOP_RIGHT
+
+
 _runtime_health = HealthRegistry(
     (
         "brain",
@@ -2049,18 +2058,21 @@ async def main():
 
             _watcher_loop = asyncio.get_running_loop()
 
-            async def _spawn_watcher_surface(event: dict, message: str, reason: str) -> None:
+            async def _spawn_watcher_surface(
+                event: dict, message: str, reason: str, level: AttentionLevel
+            ) -> None:
                 from charlie.utils import make_id
+                kind, dismiss_policy, auto_dismiss_ms, preferred_zone = _watcher_surface_kind(level)
                 watcher_intent = PresentationIntent(
                     id=make_id(),
-                    kind=PresentationKind.NOTIFICATION,
+                    kind=kind,
                     title="Heads up",
                     summary=message,
                     priority=65,
                     attention_level=PresentationAttention.HIGH,
-                    dismiss_policy=DismissPolicy.TIMED,
-                    auto_dismiss_ms=8000,
-                    preferred_zone=PreferredZone.TOP_RIGHT,
+                    dismiss_policy=dismiss_policy,
+                    auto_dismiss_ms=auto_dismiss_ms,
+                    preferred_zone=preferred_zone,
                     anchor=AnchorTarget.CORE,
                 )
                 await bus.emit(
@@ -2091,7 +2103,9 @@ async def main():
                     except Exception:
                         logger.warning("Failed to speak watcher alert", exc_info=True)
                     try:
-                        asyncio.run_coroutine_threadsafe(_spawn_watcher_surface(event, message, reason), _watcher_loop)
+                        asyncio.run_coroutine_threadsafe(
+                            _spawn_watcher_surface(event, message, reason, level), _watcher_loop
+                        )
                     except Exception:
                         logger.warning("Failed to spawn watcher alert surface", exc_info=True)
 
