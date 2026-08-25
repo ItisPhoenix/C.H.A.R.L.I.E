@@ -196,6 +196,35 @@ describe("CharlieScene spatial projection & layers", () => {
     expect(screen.getByTestId("tool-approval-overlay")).toBeInTheDocument();
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
     expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Approve & Run" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeInTheDocument();
+  });
+
+  test("generic attention with request metadata stays non-actionable", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_intent",
+      payload: {
+        id: "att-approval-context",
+        kind: "attention",
+        title: "Approval context",
+        summary: "Runtime approval is handled elsewhere.",
+        attention_level: "high",
+        content: { request_id: "approval-context-1" },
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    expect(screen.getByText(/Approval handled by Charlie's approval dialog/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Decline" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Acknowledge" })).toBeNull();
   });
 
   test("minimize and restore workspace recenters then re-docks core", () => {

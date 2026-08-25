@@ -45,7 +45,7 @@ describe("ConversationWorkspace Component", () => {
     expect(screen.getByText("CHARLIE")).toBeDefined();
   });
 
-  test("renders pending tool approvals and action buttons", () => {
+  test("renders passive pending approval context without duplicate action buttons", () => {
     useCharlieStore.setState({
       activeToolApproval: {
         request_id: "req-123",
@@ -60,8 +60,9 @@ describe("ConversationWorkspace Component", () => {
 
     expect(screen.getByText(/Approval Required: run_shell_command/i)).toBeDefined();
     expect(screen.getByText("Execute directory listing")).toBeDefined();
-    expect(screen.getByText("Approve Action")).toBeDefined();
-    expect(screen.getByText("Reject")).toBeDefined();
+    expect(screen.getByText("Respond using the approval dialog.")).toBeDefined();
+    expect(screen.queryByText("Approve Action")).toBeNull();
+    expect(screen.queryByText("Reject")).toBeNull();
   });
 
   test("submits input text when Send button is clicked", async () => {

@@ -19,7 +19,7 @@ describe("ToolApprovalDialog", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  test("approves the active request through the normal bridge command", () => {
+  test("approves through the normal bridge command and waits for runtime resolution", () => {
     useCharlieStore.setState({
       activeToolApproval: {
         request_id: "approval-1",
@@ -39,6 +39,10 @@ describe("ToolApprovalDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Approve & Run" }));
 
     expect(sendCommand).toHaveBeenCalledWith("tool_approve", { request_id: "approval-1" });
+    expect(useCharlieStore.getState().activeToolApproval?.request_id).toBe("approval-1");
+    expect(screen.getByRole("button", { name: "Approve & Run" })).toBeDisabled();
+
+    useCharlieStore.getState().applyEvent({ type: "tool_approval_resolved", payload: { request_id: "approval-1" } });
     expect(useCharlieStore.getState().activeToolApproval).toBeNull();
   });
 
@@ -57,6 +61,26 @@ describe("ToolApprovalDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Decline" }));
 
     expect(sendCommand).toHaveBeenCalledWith("tool_reject", { request_id: "approval-2" });
-    expect(useCharlieStore.getState().activeToolApproval).toBeNull();
+    expect(useCharlieStore.getState().activeToolApproval?.request_id).toBe("approval-2");
+    expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
+  });
+
+  test("rapid approval clicks send one command", () => {
+    useCharlieStore.setState({
+      activeToolApproval: {
+        request_id: "approval-3",
+        tool_name: "shell_execute",
+        reason: "Run once.",
+        arguments: { command: "echo safe" },
+        risk_class: "security_sensitive",
+      },
+    });
+
+    render(<ToolApprovalDialog />);
+    const approve = screen.getByRole("button", { name: "Approve & Run" });
+    fireEvent.click(approve);
+    fireEvent.click(approve);
+
+    expect(sendCommand).toHaveBeenCalledTimes(1);
   });
 });

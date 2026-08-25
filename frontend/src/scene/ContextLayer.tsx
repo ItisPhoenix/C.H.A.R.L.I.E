@@ -1,6 +1,5 @@
 import type { ReactElement } from "react";
 import type { PresentationIntent } from "../store/charlie";
-import { sendCommand } from "../runtime/bridge";
 
 interface ContextLayerProps {
   captionText: string | null;
@@ -63,28 +62,9 @@ export function ContextLayer({
             <p className="text-xs text-slate-200 mb-6 leading-relaxed">{activeAttention.summary}</p>
             <div className="flex gap-3 justify-center">
               {typeof activeAttention.content.request_id === "string" ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      sendCommand("tool_reject", { request_id: activeAttention.content.request_id });
-                      onDismissIntent?.(activeAttention.id);
-                    }}
-                    className="px-4 py-2 text-xs font-semibold rounded-lg bg-rose-950/80 border border-rose-400/40 text-rose-200 hover:bg-rose-900 cursor-pointer transition"
-                  >
-                    Decline
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      sendCommand("tool_approve", { request_id: activeAttention.content.request_id });
-                      onDismissIntent?.(activeAttention.id);
-                    }}
-                    className="px-4 py-2 text-xs font-semibold rounded-lg bg-cyan-950/80 border border-cyan-400/40 text-cyan-200 hover:bg-cyan-900 cursor-pointer transition"
-                  >
-                    Approve
-                  </button>
-                </>
+                <p className="text-[11px] text-slate-400" role="status">
+                  Approval handled by Charlie&apos;s approval dialog.
+                </p>
               ) : onDismissIntent ? (
                 <button
                   type="button"

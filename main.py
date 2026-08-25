@@ -504,7 +504,12 @@ async def main():
         """Resolve pending future and dismiss its canonical attention intent."""
         from charlie.core import resolve_tool_approval
 
-        resolve_tool_approval(request_id, approved)
+        if not isinstance(request_id, str) or not request_id:
+            logger.warning("Rejected malformed tool approval request id")
+            return
+        if not resolve_tool_approval(request_id, approved):
+            logger.warning("Ignored stale or unknown tool approval: %s", request_id)
+            return
         if event_bus is not None:
             asyncio.run_coroutine_threadsafe(
                 event_bus.emit(

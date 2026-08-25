@@ -115,6 +115,7 @@ interface CharlieState {
   activities: string[];
   presentationIntents: Record<string, PresentationIntent>;
   activeCaption: string | null;
+  pendingToolApprovals: Record<string, ToolApprovalRequest>;
   activeToolApproval: ToolApprovalRequest | null;
   systemStatus: SystemStatus | null;
   netHistory: number[];
@@ -144,6 +145,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   activities: [],
   presentationIntents: {},
   activeCaption: null,
+  pendingToolApprovals: {},
   activeToolApproval: null,
   systemStatus: null,
   netHistory: [],
@@ -169,7 +171,18 @@ export const useCharlieStore = create<CharlieState>((set) => ({
       return { presentationIntents: rest };
     });
   },
-  setActiveToolApproval: (activeToolApproval) => set({ activeToolApproval }),
+  setActiveToolApproval: (activeToolApproval) =>
+    set((s) =>
+      activeToolApproval
+        ? {
+            activeToolApproval,
+            pendingToolApprovals: {
+              ...s.pendingToolApprovals,
+              [activeToolApproval.request_id]: activeToolApproval,
+            },
+          }
+        : { activeToolApproval: null, pendingToolApprovals: {} }
+    ),
   seedMcpStatus: (servers) =>
     set((s) => {
       const next = { ...s.mcpStatus };
@@ -194,12 +207,27 @@ export const useCharlieStore = create<CharlieState>((set) => ({
         });
         return;
       case "tool_approval_request":
-        set({ activeToolApproval: payload as unknown as ToolApprovalRequest });
+        set((s) => {
+          const request = payload as unknown as ToolApprovalRequest;
+          const pendingToolApprovals = {
+            ...s.pendingToolApprovals,
+            [request.request_id]: request,
+          };
+          return {
+            pendingToolApprovals,
+            activeToolApproval: s.activeToolApproval ?? request,
+          };
+        });
         return;
       case "tool_approval_resolved":
-        set((s) =>
-          s.activeToolApproval?.request_id === payload.request_id ? { activeToolApproval: null } : {}
-        );
+        set((s) => {
+          const requestId = payload.request_id;
+          const pendingToolApprovals = { ...s.pendingToolApprovals };
+          delete pendingToolApprovals[String(requestId)];
+          if (s.activeToolApproval?.request_id !== requestId) return { pendingToolApprovals };
+          const nextApproval = Object.values(pendingToolApprovals)[0] ?? null;
+          return { pendingToolApprovals, activeToolApproval: nextApproval };
+        });
         return;
       case "system_status": {
         const netKbps = numberOrNull(payload.net_kbps);

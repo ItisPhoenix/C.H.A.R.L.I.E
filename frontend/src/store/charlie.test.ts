@@ -10,6 +10,7 @@ beforeEach(() => {
     activities: [],
     presentationIntents: {},
     activeCaption: null,
+    pendingToolApprovals: {},
     activeToolApproval: null,
     systemStatus: null,
     netHistory: [],
@@ -59,6 +60,23 @@ describe("applyEvent", () => {
       type: "tool_approval_request",
       payload: { request_id: "r2", tool_name: "shell_execute", reason: "gated", arguments: {} },
     });
+    useCharlieStore.getState().applyEvent({ type: "tool_approval_resolved", payload: { request_id: "r1" } });
+    expect(useCharlieStore.getState().activeToolApproval?.request_id).toBe("r2");
+  });
+
+  test("multiple approval requests queue behind one actionable projection", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "tool_approval_request",
+      payload: { request_id: "r1", tool_name: "shell_execute", reason: "first", arguments: {} },
+    });
+    useCharlieStore.getState().applyEvent({
+      type: "tool_approval_request",
+      payload: { request_id: "r2", tool_name: "shell_execute", reason: "second", arguments: {} },
+    });
+
+    expect(useCharlieStore.getState().activeToolApproval?.request_id).toBe("r1");
+    expect(Object.keys(useCharlieStore.getState().pendingToolApprovals)).toEqual(["r1", "r2"]);
+
     useCharlieStore.getState().applyEvent({ type: "tool_approval_resolved", payload: { request_id: "r1" } });
     expect(useCharlieStore.getState().activeToolApproval?.request_id).toBe("r2");
   });

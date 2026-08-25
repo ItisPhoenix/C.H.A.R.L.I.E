@@ -115,16 +115,6 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
     void fetch("/api/stop", { method: "POST" }).catch(() => {});
   };
 
-  const handleToolApprove = (requestId: string) => {
-    sendCommand("tool_approve", { request_id: requestId });
-    useCharlieStore.getState().setActiveToolApproval(null);
-  };
-
-  const handleToolReject = (requestId: string) => {
-    sendCommand("tool_reject", { request_id: requestId });
-    useCharlieStore.getState().setActiveToolApproval(null);
-  };
-
   return (
     <div className="w-full h-full flex flex-col justify-between font-mono select-none text-left p-2 overflow-hidden space-y-3 pr-[calc(var(--core-docked-size)+12px)]">
       {/* Header */}
@@ -227,22 +217,9 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
                 {JSON.stringify(activeToolApproval.arguments, null, 2)}
               </pre>
             )}
-            <div className="flex gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => handleToolApprove(activeToolApproval.request_id)}
-                className="px-3 py-1 text-xs font-bold rounded bg-emerald-950 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-900 transition cursor-pointer"
-              >
-                Approve Action
-              </button>
-              <button
-                type="button"
-                onClick={() => handleToolReject(activeToolApproval.request_id)}
-                className="px-3 py-1 text-xs font-bold rounded bg-rose-950 border border-rose-500/50 text-rose-300 hover:bg-rose-900 transition cursor-pointer"
-              >
-                Reject
-              </button>
-            </div>
+            <p className="text-[10px] text-amber-300/80" role="status">
+              Respond using the approval dialog.
+            </p>
           </div>
         )}
 

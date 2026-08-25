@@ -1,4 +1,4 @@
-import type { ReactElement } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import { useCharlieStore } from "../store/charlie";
 import { sendCommand } from "../runtime/bridge";
 import { Modal, ModalField, ModalActions } from "./Modal";
@@ -6,13 +6,18 @@ import { Modal, ModalField, ModalActions } from "./Modal";
 // Ported from frontend@c7aa7df~1's ToolApprovalDialog.tsx, rewired onto the new store/bridge.
 export function ToolApprovalDialog(): ReactElement | null {
   const activeToolApproval = useCharlieStore((s) => s.activeToolApproval);
-  const setActiveToolApproval = useCharlieStore((s) => s.setActiveToolApproval);
+  const [respondingFor, setRespondingFor] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRespondingFor(null);
+  }, [activeToolApproval?.request_id]);
 
   if (!activeToolApproval) return null;
 
   const respond = (approved: boolean) => {
+    if (respondingFor === activeToolApproval.request_id) return;
+    setRespondingFor(activeToolApproval.request_id);
     sendCommand(approved ? "tool_approve" : "tool_reject", { request_id: activeToolApproval.request_id });
-    setActiveToolApproval(null);
   };
 
   const argsSummary = Object.entries(activeToolApproval.arguments || {})
@@ -41,7 +46,13 @@ export function ToolApprovalDialog(): ReactElement | null {
         </ModalField>
       </div>
 
-      <ModalActions rejectLabel="Decline" approveLabel="Approve & Run" onReject={() => respond(false)} onApprove={() => respond(true)} />
+      <ModalActions
+        rejectLabel="Decline"
+        approveLabel="Approve & Run"
+        onReject={() => respond(false)}
+        onApprove={() => respond(true)}
+        busy={respondingFor === activeToolApproval.request_id}
+      />
     </Modal>
   );
 }
