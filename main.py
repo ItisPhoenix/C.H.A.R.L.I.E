@@ -16,6 +16,7 @@ from charlie.runtime import configure as _configure_platform
 
 _configure_platform()
 import subprocess
+import tempfile
 import uuid
 
 from charlie.text_utils import normalize_app_list as _normalize_app_list
@@ -159,20 +160,23 @@ def _task_workspace_intent(task: Any) -> PresentationIntent:
 
 
 def _task_workspace_admitted(task: Any) -> bool:
-    """Return whether task has enough lifecycle substance for a full workspace."""
-    status = getattr(getattr(task, "status", None), "value", getattr(task, "status", ""))
-    active_statuses = {
-        TaskStatus.QUEUED.value,
-        TaskStatus.PLANNING.value,
-        TaskStatus.WAITING.value,
-        TaskStatus.RUNNING.value,
-        TaskStatus.PAUSED.value,
-        TaskStatus.APPROVAL_REQUIRED.value,
-        TaskStatus.VERIFYING.value,
-    }
-    if str(status) in active_statuses:
+    """Return whether task has execution substance for a full workspace.
+
+    Lifecycle status alone is not enough: fast-path and placeholder records can
+    be active with zero steps and no meaningful execution detail.
+    """
+    total_steps = int(getattr(task, "total_steps", 0) or 0)
+    if total_steps > 0:
         return True
-    return int(getattr(task, "total_steps", 0) or 0) > 0
+    if str(getattr(task, "current_action", "") or "").strip():
+        return True
+    if str(getattr(task, "waiting_reason", "") or "").strip():
+        return True
+    if str(getattr(task, "approval_reference", "") or "").strip():
+        return True
+    if getattr(task, "capability_requirements", ()):
+        return True
+    return False
 
 
 _runtime_health = HealthRegistry(
@@ -195,8 +199,8 @@ hud_client_count: int = 0
 _main_event_bus: Optional[Any] = None
 
 
-async def _summon_conversation_workspace(toggle: bool = False, event_bus: Optional[Any] = None) -> None:
-    """Summon the one React HUD surface; never open a legacy dashboard route."""
+async def _summon_hud(toggle: bool = False, event_bus: Optional[Any] = None) -> None:
+    """Show the React HUD without opening a workspace."""
     global hud_visible, hud_client_count
     from charlie.utils import open_url_in_browser
 
@@ -223,8 +227,15 @@ async def _summon_conversation_workspace(toggle: bool = False, event_bus: Option
         await bus.emit(
             "hud_visibility",
             {"visible": hud_visible},
-            meta=EventMeta(source=EventSource.SURFACE, rationale="pet or hotkey toggled React HUD"),
+            meta=EventMeta(source=EventSource.SURFACE, rationale="pet or hotkey summoned React HUD"),
         )
+
+
+async def _open_conversation_workspace(event_bus: Optional[Any] = None) -> None:
+    """Ensure HUD visibility, then open the canonical conversation workspace."""
+    await _summon_hud(event_bus=event_bus)
+    bus = event_bus or _main_event_bus
+    if bus:
         await bus.emit(
             "presentation_intent",
             PresentationIntent(
@@ -240,7 +251,7 @@ async def _summon_conversation_workspace(toggle: bool = False, event_bus: Option
                 replace_key="workspace:conversation",
                 replayable=True,
             ).to_dict(),
-            meta=EventMeta(source=EventSource.SURFACE, rationale="summoned conversation workspace"),
+            meta=EventMeta(source=EventSource.SURFACE, rationale="operator opened conversation workspace"),
         )
 
 
@@ -252,15 +263,56 @@ async def _publish_subsystem_health(bus: Optional[EventBus] = None) -> None:
     await bus.emit(event["type"], event["payload"], meta=EventMeta(source=EventSource.VOICE))
 
 
-def _set_subsystem_health(name: str, status: HealthStatus) -> None:
+def _set_subsystem_health(name: str, status: HealthStatus, public_detail: Optional[str] = None) -> None:
     """Record one safe public subsystem transition."""
-    _runtime_health.set(name, status)
+    _runtime_health.set(name, status, public_detail=public_detail)
+
+
+def _companion_dependency_status() -> tuple[bool, Optional[str]]:
+    """Check optional Qt dependency before spawning the companion process."""
+    try:
+        from charlie.pet_window import QT_AVAILABLE, QT_IMPORT_ERROR
+    except Exception as exc:
+        return False, f"Companion dependency initialization failed: {type(exc).__name__}"
+    if QT_AVAILABLE:
+        return True, None
+    reason = str(QT_IMPORT_ERROR) if QT_IMPORT_ERROR else "Qt binding unavailable"
+    return False, f"Optional companion dependency unavailable: {reason}"
+
+
+async def _monitor_companion_readiness(process: subprocess.Popen, ready_file: Path, event_bus: Any) -> None:
+    """Publish companion readiness only after child initialization signals success."""
+    deadline = time.monotonic() + 10.0
+    try:
+        while time.monotonic() < deadline:
+            if ready_file.is_file():
+                _set_subsystem_health("companion", HealthStatus.RUNNING, "Ready")
+                await _publish_subsystem_health(event_bus)
+                return
+            exit_code = process.poll()
+            if exit_code is not None:
+                _set_subsystem_health(
+                    "companion",
+                    HealthStatus.DEGRADED,
+                    f"Companion exited before readiness (exit code {exit_code})",
+                )
+                await _publish_subsystem_health(event_bus)
+                return
+            await asyncio.sleep(0.1)
+        _set_subsystem_health("companion", HealthStatus.DEGRADED, "Companion readiness timed out")
+        await _publish_subsystem_health(event_bus)
+    finally:
+        try:
+            ready_file.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Unable to remove companion readiness marker", exc_info=True)
 
 
 def _start_subsystem_process(
     name: str,
     command: Tuple[str, ...],
     env: Optional[Dict[str, str]] = None,
+    readiness_file: Optional[Path] = None,
 ) -> Optional[subprocess.Popen]:
     """Start one optional child process without taking down the core."""
     try:
@@ -274,7 +326,7 @@ def _start_subsystem_process(
         _set_subsystem_health(name, HealthStatus.DEGRADED)
         return None
     logger.info("%s subprocess started (PID: %s)", name.capitalize(), process.pid)
-    _set_subsystem_health(name, HealthStatus.RUNNING)
+    _set_subsystem_health(name, HealthStatus.STARTING if readiness_file else HealthStatus.RUNNING)
     return process
 
 
@@ -282,6 +334,7 @@ class _UnavailableVoiceEngine:
     """No-op voice replacement that keeps non-voice Charlie features available."""
 
     is_available = False
+    is_ready = False
 
     def __init__(self) -> None:
         self.is_speaking = threading.Event()
@@ -346,7 +399,10 @@ def _start_voice_or_degrade(
         logger.warning("Failed to start voice", exc_info=True)
         _set_subsystem_health("voice", HealthStatus.DEGRADED)
         return _UnavailableVoiceEngine()
-    _set_subsystem_health("voice", HealthStatus.RUNNING)
+    if voice.is_ready:
+        _set_subsystem_health("voice", HealthStatus.RUNNING, voice.readiness_detail())
+    else:
+        _set_subsystem_health("voice", HealthStatus.DEGRADED, voice.readiness_detail())
     return voice
 
 
@@ -1023,7 +1079,7 @@ async def main():
 
         # Route conversation-only phrase to the normal HUD summon path.
         if _CONVERSATION_SUMMON_RE.search(text):
-            await _summon_conversation_workspace()
+            await _open_conversation_workspace()
             voice.speak("Here you go.", last_emotion)
             return
 
@@ -1450,6 +1506,8 @@ async def main():
                     from charlie.recovery import set_active_ws_count
 
                     set_active_ws_count(hud_client_count)
+                elif cmd_type == "runtime_state_request":
+                    await _publish_subsystem_health(event_bus)
                 elif cmd_type == "recovery_approve":
                     payload = cmd.get("payload", {})
                     proposal_id = payload.get("proposal_id")
@@ -1513,7 +1571,11 @@ async def main():
                 elif cmd_type == "presentation_command":
                     payload = cmd.get("payload", {})
                     action = payload.get("action")
-                    if action == "dismiss_widget" and isinstance(payload.get("id"), str):
+                    if action == "summon_hud":
+                        await _summon_hud()
+                    elif action == "open_conversation":
+                        await _open_conversation_workspace()
+                    elif action == "dismiss_widget" and isinstance(payload.get("id"), str):
                         await event_bus.emit(
                             "presentation_dismiss",
                             {"id": payload["id"]},
@@ -1545,9 +1607,8 @@ async def main():
                             else:
                                 logger.info("Skipping full workspace for completed zero-step task %s", task.id)
                 elif cmd_type == "hud_invoke":
-                    # HUD invoke is an idempotent show command. Explicit visibility
-                    # toggles remain available through the dedicated toggle path.
-                    await _summon_conversation_workspace()
+                    # Pet/hotkey summon must not open a workspace.
+                    await _summon_hud()
                 elif cmd_type == "audio_control":
                     payload = cmd.get("payload", {})
                     state = voice.set_audio_state(
@@ -1764,9 +1825,25 @@ async def main():
     web_proc = _start_subsystem_process("web", (sys.executable, web_entry), _web_env)
 
     # Start desktop companion subprocess (Windows-only, PySide6)
+    companion_ready_file: Optional[Path] = None
+    companion_monitor_task: Optional[asyncio.Task] = None
     if config.pet_enabled:
-        pet_entry = os.path.join(os.path.dirname(__file__), "charlie", "pet_entry.py")
-        pet_proc = _start_subsystem_process("companion", (sys.executable, pet_entry))
+        _set_subsystem_health("companion", HealthStatus.STARTING)
+        companion_ready, companion_detail = _companion_dependency_status()
+        if not companion_ready:
+            logger.warning("Companion unavailable: %s", companion_detail)
+            _set_subsystem_health("companion", HealthStatus.DEGRADED, companion_detail)
+        else:
+            pet_entry = os.path.join(os.path.dirname(__file__), "charlie", "pet_entry.py")
+            companion_ready_file = Path(tempfile.gettempdir()) / f"charlie-companion-{_LAUNCH_ID}.ready"
+            companion_env = os.environ.copy()
+            companion_env["CHARLIE_COMPANION_READY_FILE"] = str(companion_ready_file)
+            pet_proc = _start_subsystem_process(
+                "companion",
+                (sys.executable, pet_entry),
+                companion_env,
+                readiness_file=companion_ready_file,
+            )
 
     # Telegram runs in-process (needs direct access to _dispatch_or_queue), not a subprocess like web/pet/hud.
     if config.telegram_enabled:
@@ -1853,8 +1930,14 @@ async def main():
             logger.warning(f"Dynamic welcome failed: {type(e).__name__}: {e}. Using fallback.")
             welcome_msg = "Hey there. I'm online and listening."
 
+        if voice.is_ready:
+            welcome_msg = welcome_msg or "Hey there. I'm online and listening."
+            online_status = "   Charlie is online and listening"
+        else:
+            welcome_msg = "Hey there. I'm online. Microphone input is unavailable."
+            online_status = "   Charlie is online; microphone unavailable"
         print("=" * 40, flush=True)
-        print("   Charlie is online and listening", flush=True)
+        print(online_status, flush=True)
         print("=" * 40, flush=True)
         print(f"\rCharlie: {welcome_msg}", flush=True)
         voice.speak(welcome_msg, "neutral")
@@ -1987,6 +2070,10 @@ async def main():
             global _main_event_bus
             _main_event_bus = bus
             await _publish_subsystem_health(bus)
+            if pet_proc is not None and companion_ready_file is not None:
+                companion_monitor_task = asyncio.create_task(
+                    _monitor_companion_readiness(pet_proc, companion_ready_file, bus)
+                )
             bus.set_state_listener(_on_event_for_state)
             voice.set_event_bus(bus)
             import charlie.recovery
@@ -2005,6 +2092,9 @@ async def main():
             # real EventBus loop and MCP subsystem are available. Chat tools
             # delegate to this instance; they never construct an orchestrator.
             await mcp_start_task
+            # Replay after web subscriber and producer command sockets have had
+            # time to connect; initial PUB events can be lost during startup.
+            await _publish_subsystem_health(bus)
             from charlie.capabilities import get_capability_index
             from charlie.code_index import CodeIndex
             from charlie.doctor import CharlieDoctor
@@ -2242,6 +2332,13 @@ async def main():
                 pet_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pet_proc.kill()
+        if companion_monitor_task is not None:
+            companion_monitor_task.cancel()
+        if companion_ready_file is not None:
+            try:
+                companion_ready_file.unlink(missing_ok=True)
+            except OSError:
+                pass
         if telegram_bot is not None:
             try:
                 await telegram_bot.stop()

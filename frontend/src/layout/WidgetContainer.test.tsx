@@ -32,10 +32,10 @@ const callbacks = {
 };
 
 describe("WidgetContainer renderer resolution", () => {
-  test("uses explicit generic renderer for registered media widget", () => {
+  test("marks media widget unavailable until semantic renderer exists", () => {
     render(<WidgetContainer widget={widget("media_control")} {...callbacks} />);
-    expect(screen.getAllByText("media_control")).toHaveLength(2);
-    expect(screen.queryByText("WIDGET UNAVAILABLE")).toBeNull();
+    expect(screen.getByText("WIDGET UNAVAILABLE")).toBeDefined();
+    expect(screen.getByText(/not implemented/i)).toBeDefined();
   });
 
   test("uses shared unavailable renderer for unknown widget type", () => {

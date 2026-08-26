@@ -87,7 +87,7 @@ def test_every_semantic_target_resolves_to_typed_canonical_surface():
     for role in registry.list_semantic_targets():
         resolution = registry.resolve_semantic_target(role)
         assert resolution.resolved
-        assert resolution.descriptor.implemented is True
+        assert resolution.descriptor is not None
 
 
 def test_semantic_target_contract_drift_fails_validation():
@@ -226,7 +226,7 @@ def test_registry_widget_resolution_and_aliases():
         desc = registry.get_widget(w_type)
         assert isinstance(desc, WidgetDescriptor)
         assert desc.name == w_type
-        assert desc.implemented is True
+        assert desc.implemented is (w_type in {"system_metric", "composed_surface"})
         assert desc.default_zone != ""
         assert desc.supports.get("drag") is True
 
@@ -234,6 +234,17 @@ def test_registry_widget_resolution_and_aliases():
     assert registry.resolve_widget_type("system") == "system_metric"
     assert registry.resolve_widget_type("media") == "media_control"
     assert registry.resolve_widget_type("file") == "file_viewer"
+
+
+def test_widget_registry_classifies_renderer_honesty():
+    registry = get_presentation_registry()
+
+    assert registry.get_widget("system_metric").implemented is True
+    assert registry.get_widget("composed_surface").implemented is True
+    assert registry.get_widget("media_control").implemented is False
+    assert registry.get_widget("media_control").renderer == "UnavailableWidget"
+    assert registry.get_widget("file_viewer").implemented is False
+    assert registry.get_widget("file_viewer").renderer == "UnavailableWidget"
 
 
 def test_registry_overlays():

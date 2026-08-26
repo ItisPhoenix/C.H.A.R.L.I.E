@@ -3,13 +3,14 @@ import { useMapStore } from "../../map/mapStore";
 
 interface ConfigField {
   key: string;
+  field?: string;
   label: string;
   group: string;
   type: "str" | "int" | "float" | "bool";
   secret: boolean;
   restart: string | null;
   value: unknown;
-  is_set: boolean;
+  is_set: boolean | null;
 }
 
 interface AuditEntry {
@@ -23,6 +24,10 @@ interface AuditEntry {
 interface CapabilitySnapshot {
   tools?: Array<{ name: string }>;
   runtime?: Record<string, { status?: string; detail?: string }>;
+}
+
+interface RuntimeHealth {
+  subsystems?: Record<string, { status?: string; detail?: string }>;
 }
 
 interface ModelSnapshot {
@@ -147,6 +152,7 @@ const CATEGORY_MAP: Record<string, string> = {
   "Models": "Models",
   "Vision": "Models",
   "Memory Files": "Memory",
+  "Vector Memory": "Memory",
   "Memory": "Memory",
   "Autonomy": "Automation",
   "Automation": "Automation",
@@ -179,16 +185,14 @@ function getCategoryForGroup(group: string): string {
 }
 
 export function Settings(): ReactElement {
-  const [fields, setFields] = useState<ConfigField[]>([
-    { key: "ASSISTANT_NAME", label: "Assistant Identity Name", value: "CHARLIE", group: "General", type: "str", secret: false, restart: null, is_set: true },
-    { key: "VOICE_SYNTHESIS", label: "Voice Synthesis Engine", value: "Kokoro ONNX (Local)", group: "Voice", type: "str", secret: false, restart: null, is_set: true },
-    { key: "THEME_ACCENT", label: "Interface Accent Theme", value: "Cyan Tactical", group: "Appearance", type: "str", secret: false, restart: null, is_set: true },
-    { key: "HUD_AUTO_DISMISS", label: "Auto-Dismiss Transient Widgets", value: true, group: "HUD", type: "bool", secret: false, restart: null, is_set: true },
-  ]);
+  // Backend metadata is authoritative. Keep no synthetic fields that could
+  // make a failed API request look like a complete production configuration.
+  const [fields, setFields] = useState<ConfigField[]>([]);
   const [drafts, setDrafts] = useState<Record<string, unknown>>({});
   const [status, setStatus] = useState("");
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [capabilities, setCapabilities] = useState<CapabilitySnapshot>({});
+  const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealth>({});
   const [modelSnapshot, setModelSnapshot] = useState<ModelSnapshot>({});
   const [modelsLoading, setModelsLoading] = useState(false);
   const [activeCategory, setActiveCategory] = useState("All");
@@ -252,13 +256,17 @@ export function Settings(): ReactElement {
           : null
       )
       .then((data) => {
-        if (data && Array.isArray(data.fields) && data.fields.length > 0) {
-          setFields(data.fields);
-        }
+        if (data && Array.isArray(data.fields)) setFields(data.fields);
+        else setStatus("Runtime configuration unavailable.");
       })
       .catch(() => {
-        // Fallback default fields retained
+        setFields([]);
+        setStatus("Runtime configuration unavailable.");
       });
+    void fetch("/api/health")
+      .then(async (response) => (response.ok ? (response.json() as Promise<RuntimeHealth>) : null))
+      .then((data) => data && setRuntimeHealth(data))
+      .catch(() => setRuntimeHealth({}));
   }, []);
 
   async function refreshModels(): Promise<void> {
@@ -1371,6 +1379,48 @@ export function Settings(): ReactElement {
                   </div>
                 )}
               </div>
+            </section>
+          )}
+
+          {(activeCategory === "All" || activeCategory === "System") && (
+            <section className="settings-group settings-health p-3.5 rounded-xl border border-cyan-500/15 bg-slate-950/60 space-y-3">
+              <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider mb-1">
+                Runtime Health
+              </h3>
+              {Object.keys(runtimeHealth.subsystems ?? {}).length === 0 ? (
+                <p className="text-[11px] text-slate-500 italic">Runtime health unavailable.</p>
+              ) : (
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  {Object.entries(runtimeHealth.subsystems ?? {}).map(([name, health]) => (
+                    <div key={name} className="p-2 rounded bg-slate-900/60 border border-cyan-500/10">
+                      <div className="flex justify-between gap-2">
+                        <strong className="text-cyan-200">{name}</strong>
+                        <span className="text-slate-300 uppercase">{health.status ?? "unknown"}</span>
+                      </div>
+                      <p className="text-[10px] text-slate-400 mt-1">{health.detail ?? "Unknown"}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {(activeCategory === "All" || activeCategory === "Audio") && (
+            <section className="settings-group settings-audio-health p-3.5 rounded-xl border border-cyan-500/15 bg-slate-950/60 space-y-2">
+              <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider mb-1">
+                Audio Readiness
+              </h3>
+              {(["voice", "asr"] as const).map((name) => {
+                const health = runtimeHealth.subsystems?.[name];
+                return (
+                  <div key={name} className="flex justify-between gap-3 text-xs">
+                    <strong className="text-cyan-200 uppercase">{name}</strong>
+                    <span className="text-right text-slate-300">
+                      {health ? `${health.status ?? "unknown"}: ${health.detail ?? "Unknown"}` : "unavailable"}
+                    </span>
+                  </div>
+                );
+              })}
             </section>
           )}
 

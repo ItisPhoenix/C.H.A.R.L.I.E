@@ -1,12 +1,13 @@
 import type { ReactElement } from "react";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
 import { useCharlieStore } from "../../store/charlie";
+import { isTaskWorkspaceEligible } from "../taskWorkspaceEligibility";
 
 const ACTIVE_TASK_STATUSES = new Set([
   "queued", "planning", "waiting", "running", "paused", "approval_required", "verifying",
 ]);
-const isWorkspaceTask = (task: { status: string; totalSteps: number }) =>
-  ACTIVE_TASK_STATUSES.has(task.status) || task.totalSteps > 0;
+const isWorkspaceTask = (task: Parameters<typeof isTaskWorkspaceEligible>[0]) =>
+  isTaskWorkspaceEligible(task, ACTIVE_TASK_STATUSES) || task.totalSteps > 0;
 
 export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
   const tasks = useCharlieStore((s) => s.tasks);

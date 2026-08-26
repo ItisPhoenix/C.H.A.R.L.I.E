@@ -273,10 +273,9 @@ class PresentationRegistry:
                 raise PresentationContractError(
                     f"Semantic target '{role}' must reference canonical {taxonomy}: {surface}"
                 )
-            if not bool(surfaces[taxonomy][surface].get("implemented", True)):
-                raise PresentationContractError(
-                    f"Semantic target '{role}' references unimplemented {taxonomy}: {surface}"
-                )
+            # Semantic targets may intentionally resolve to an unavailable
+            # surface. PresentationResolver converts those to an explicit
+            # unavailable result; startup must not pretend the target is absent.
 
     # -------------------------------------------------------------------------
     # Properties

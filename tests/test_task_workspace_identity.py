@@ -40,6 +40,22 @@ def test_completed_zero_step_task_is_not_admitted_to_full_workspace(tmp_path):
     assert main._task_workspace_admitted(task) is False
 
 
+def test_active_zero_step_task_without_execution_detail_is_not_admitted(tmp_path):
+    journal = TaskJournal(state_path=tmp_path / "tasks.json")
+    journal.create_task("Fast-path placeholder", task_id="placeholder")
+    journal.transition("placeholder", "running")
+
+    assert main._task_workspace_admitted(journal.get("placeholder")) is False
+
+
+def test_waiting_task_with_real_reason_is_admitted_without_steps(tmp_path):
+    journal = TaskJournal(state_path=tmp_path / "tasks.json")
+    journal.create_task("Approval wait", task_id="approval")
+    journal.transition("approval", "waiting", waiting_reason="Awaiting user confirmation")
+
+    assert main._task_workspace_admitted(journal.get("approval")) is True
+
+
 def test_genuine_multistep_task_remains_admitted_after_completion(tmp_path):
     journal = TaskJournal(state_path=tmp_path / "tasks.json")
     task = journal.create_task("Research", task_id="research", total_steps=3)

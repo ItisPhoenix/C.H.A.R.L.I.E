@@ -235,7 +235,7 @@ def run_full():
 
     print("=" * 50)
     print("  Charlie Assistant + React HUD (Full Mode)")
-    print("  - Voice Loop: Active (listening to mic)")
+    print("  - Voice Loop: Starting (microphone readiness pending)")
     print("  - React HUD: Available at http://localhost:8000/")
     print("=" * 50)
 

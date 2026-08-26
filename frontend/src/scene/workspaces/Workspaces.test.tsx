@@ -161,4 +161,17 @@ describe("Phase 9 Workspaces Suite", () => {
     expect(screen.queryByText(/session:voice_secret/)).toBeNull();
     expect(screen.queryByText(/STEP 0 OF 5/i)).toBeNull();
   });
+
+  test("does not admit an active zero-step placeholder task", () => {
+    useCharlieStore.setState({
+      tasks: {
+        "task-empty": {
+          id: "task-empty", title: "Fast-path placeholder", status: "running", currentStep: 0, totalSteps: 0,
+        },
+      },
+    });
+    render(<TasksWorkspace workspace={{ ...mockWorkspace, type: "tasks", taskId: "task-empty" }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("No active tasks reported.");
+    expect(screen.queryByText(/STEP 0 OF/i)).toBeNull();
+  });
 });

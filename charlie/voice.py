@@ -123,6 +123,11 @@ class VoiceEngine:
         # Set for real in _run(); stop() checks this before start() has run
         # (or if opening the audio device failed), so it must exist here too.
         self.audio_stream = None
+        self._readiness_event = threading.Event()
+        self._readiness_lock = threading.Lock()
+        self._readiness_status = "starting"
+        self._readiness_error: Optional[str] = None
+        self._audio_device_info: dict = {}
         self._last_speech_time = 0.0
         self._last_speech_text = ""
         self._last_speech_end = 0.0
@@ -185,6 +190,35 @@ class VoiceEngine:
             self._event_loop = asyncio.get_event_loop()
         except RuntimeError:
             self._event_loop = None
+
+    @property
+    def is_ready(self) -> bool:
+        with self._readiness_lock:
+            return self._readiness_status == "ready"
+
+    def readiness_snapshot(self) -> dict:
+        with self._readiness_lock:
+            return {
+                **self._audio_device_info,
+                "status": self._readiness_status,
+                "stream_open": self._readiness_status == "ready",
+                "error": self._readiness_error,
+            }
+
+    def readiness_detail(self) -> str:
+        snapshot = self.readiness_snapshot()
+        if snapshot["status"] == "ready":
+            return "Microphone ready"
+        error = snapshot.get("error") or "device initialization failed"
+        return f"Microphone unavailable: {error}"
+
+    def _set_readiness(self, status: str, *, error: Optional[str] = None, device_info: Optional[dict] = None) -> None:
+        with self._readiness_lock:
+            self._readiness_status = status
+            self._readiness_error = error
+            if device_info:
+                self._audio_device_info = {**self._audio_device_info, **device_info}
+        self._readiness_event.set()
 
     def _emit_audio_level(self, level: float) -> None:
         """Publish a normalized 0.0-1.0 audio amplitude on the event bus.
@@ -253,6 +287,10 @@ class VoiceEngine:
             target=self._run, daemon=True, name="VoiceInputLoop"
         )
         self.input_thread.start()
+        # Voice start is not readiness. Wait for the input worker to acknowledge
+        # physical stream open/failure before reporting subsystem health.
+        if not self._readiness_event.wait(timeout=10.0):
+            self._set_readiness("failed", error="microphone initialization timed out")
         self.tts_worker = threading.Thread(
             target=self._tts_worker_loop, daemon=True, name="TTSWorker"
         )
@@ -286,7 +324,10 @@ class VoiceEngine:
         else:
             logger.info("Wake word detection disabled.")
 
-        logger.info("Continuous listening mode active.")
+        if self.is_ready:
+            logger.info("Continuous listening mode active.")
+        else:
+            logger.warning("Continuous listening unavailable: %s", self.readiness_detail())
 
     def stop(self):
         """Shut down voice engine. Called from main.py finally block."""
@@ -986,6 +1027,15 @@ class VoiceEngine:
         except Exception as e:
             logger.debug(f"Wake chime error: {e}")
 
+    @staticmethod
+    def _safe_audio_error(error: Exception) -> str:
+        text = re.sub(
+            r"(?i)(api[-_ ]?key|token|password|secret)\s*[:=]\s*[^\s,;]+",
+            r"\1=redacted",
+            str(error),
+        ).strip()
+        return text[:240] or "audio device initialization failed"
+
     def _run(self):
         samplerate = 16000
         block_size = 1024
@@ -1016,6 +1066,34 @@ class VoiceEngine:
         # Resolve input device: -1 -> system default
         input_device = None if self.config.mic_index == -1 else self.config.mic_index
 
+        selected_device_index = input_device
+        device_info: dict = {
+            "configured_device_index": self.config.mic_index,
+            "configured_sample_rate": samplerate,
+            "channels": 1,
+            "block_size": block_size,
+        }
+        try:
+            if selected_device_index is None:
+                selected_device_index = int(sd.default.device[0])
+            dev_info = sd.query_devices(selected_device_index)
+            hostapi_index = int(dev_info.get("hostapi", -1))
+            hostapi_info = sd.query_hostapis(hostapi_index) if hostapi_index >= 0 else {}
+            device_info.update(
+                {
+                    "selected_device_index": selected_device_index,
+                    "device_name": str(dev_info.get("name", selected_device_index)),
+                    "host_api": str(hostapi_info.get("name", "unknown")),
+                    "max_input_channels": int(dev_info.get("max_input_channels", 0)),
+                    "native_sample_rate": float(dev_info.get("default_samplerate", 0.0)),
+                }
+            )
+        except Exception as error:
+            device_info["selected_device_index"] = selected_device_index
+            self._set_readiness("failed", error=self._safe_audio_error(error), device_info=device_info)
+            logger.error("Failed to inspect audio input device: %s", error)
+            return
+
         try:
             self.audio_stream = sd.InputStream(
                 samplerate=samplerate,
@@ -1027,20 +1105,39 @@ class VoiceEngine:
             )
             self.audio_stream.start()
         except Exception as e:
-            logger.error(f"Failed to open audio stream: {e}")
+            if self.audio_stream is not None:
+                try:
+                    self.audio_stream.close()
+                except Exception:
+                    pass
+                self.audio_stream = None
+            self._set_readiness("failed", error=self._safe_audio_error(e), device_info=device_info)
+            logger.error(
+                "Audio input readiness failed: device=%s index=%s host_api=%s "
+                "max_input_channels=%s configured_rate=%s native_rate=%s "
+                "channels=%s block=%s stream_open=False error=%s",
+                device_info.get("device_name"),
+                device_info.get("selected_device_index"),
+                device_info.get("host_api"),
+                device_info.get("max_input_channels"),
+                device_info.get("configured_sample_rate"),
+                device_info.get("native_sample_rate"),
+                device_info.get("channels"),
+                device_info.get("block_size"),
+                self._safe_audio_error(e),
+            )
             return
 
-        try:
-            dev_info = sd.query_devices(input_device)
-            dev_name = (
-                dev_info.get("name", str(input_device))
-                if isinstance(dev_info, dict)
-                else str(input_device)
-            )
-        except Exception:
-            dev_name = str(input_device)
+        self._set_readiness("ready", device_info={**device_info, "stream_open": True})
         logger.info(
-            f"Audio stream opened: device={dev_name} rate={samplerate} block={block_size}"
+            "Audio stream opened: device=%s index=%s host_api=%s rate=%s native_rate=%s channels=%s block=%s",
+            device_info.get("device_name"),
+            device_info.get("selected_device_index"),
+            device_info.get("host_api"),
+            samplerate,
+            device_info.get("native_sample_rate"),
+            1,
+            block_size,
         )
 
         # Start ASR worker process

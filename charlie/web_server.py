@@ -306,6 +306,10 @@ async def lifespan(app: FastAPI):
     )
     await event_bus.__aenter__()
     asyncio.create_task(_event_bridge())
+    # The producer may publish its initial health snapshot before the
+    # subscriber task has completed its ZeroMQ connection. Request a replay
+    # once the consumer is ready so REST/WebSocket health is authoritative.
+    await event_bus.send_command({"type": "runtime_state_request"})
     logger.info("Web server started, event bridge active")
 
     await _ensure_mcp_client_async()

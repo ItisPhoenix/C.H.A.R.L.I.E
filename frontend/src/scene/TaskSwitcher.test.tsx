@@ -38,6 +38,13 @@ describe("TaskSwitcher Component", () => {
           totalSteps: 3,
           progress: 0.33,
         },
+        empty: {
+          id: "empty",
+          title: "Fast-path placeholder",
+          status: "running",
+          currentStep: 0,
+          totalSteps: 0,
+        },
       },
     });
 
@@ -45,6 +52,7 @@ describe("TaskSwitcher Component", () => {
     expect(screen.getByText("TASKS [2]")).toBeDefined();
     expect(screen.getByText("Surveillance Scan")).toBeDefined();
     expect(screen.getByText("Data Ingestion")).toBeDefined();
+    expect(screen.queryByText("Fast-path placeholder")).toBeNull();
   });
 
   test("requests runtime focus without resolving workspace locally", () => {

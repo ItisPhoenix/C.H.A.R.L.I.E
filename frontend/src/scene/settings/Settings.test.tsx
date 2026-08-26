@@ -13,11 +13,11 @@ describe("Settings Component", () => {
             json: () =>
               Promise.resolve({
                 fields: [
-                  { key: "ASSISTANT_NAME", label: "Assistant Name", group: "General", type: "str", secret: false, restart: null, value: "CHARLIE", is_set: true },
-                  { key: "API_KEY", label: "Secret API Key", group: "Models", type: "str", secret: true, restart: null, value: "", is_set: true },
-                  { key: "KOKORO_VOICE", label: "Voice Profile", group: "Voice & Speech", type: "str", secret: false, restart: null, value: "af_heart", is_set: true },
-                  { key: "CONTEXT_WINDOW", label: "Context Window", group: "Chat Behavior", type: "int", secret: false, restart: null, value: 8192, is_set: true },
-                  { key: "HUD_INVOKE_HOTKEY", label: "HUD Invoke Hotkey", group: "Surfaces", type: "str", secret: false, restart: "process", value: "ctrl+space", is_set: true },
+                  { key: "LLM_URL", field: "llm_url", label: "LLM URL", group: "LLM", type: "str", secret: false, restart: null, value: "https://api.kilo.ai/api/gateway/v1", is_set: null },
+                  { key: "LLM_API_KEY", field: "llm_key", label: "LLM Key", group: "LLM", type: "str", secret: true, restart: null, value: null, is_set: true },
+                  { key: "MIC_INDEX", field: "mic_index", label: "Mic Index", group: "Voice & Speech", type: "int", secret: false, restart: "voice", value: -1, is_set: null },
+                  { key: "CONTEXT_WINDOW", field: "context_window", label: "Context Window", group: "Chat Behavior", type: "int", secret: false, restart: null, value: 32000, is_set: null },
+                  { key: "HUD_INVOKE_HOTKEY", field: "hud_invoke_hotkey", label: "Hud Invoke Hotkey", group: "Surfaces", type: "str", secret: false, restart: "process", value: "ctrl+shift+space", is_set: null },
                 ],
               }),
           });
@@ -26,6 +26,18 @@ describe("Settings Component", () => {
           return Promise.resolve({
             ok: true,
             json: () => Promise.resolve({ tools: [{ name: "shell_execute" }], runtime: {} }),
+          });
+        }
+        if (url === "/api/health") {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              subsystems: {
+                voice: { status: "running", detail: "Microphone ready" },
+                asr: { status: "starting", detail: "ASR starting" },
+                companion: { status: "degraded", detail: "Optional companion unavailable" },
+              },
+            }),
           });
         }
         if (url === "/api/models") {
@@ -193,18 +205,18 @@ describe("Settings Component", () => {
     const audioBtn = await screen.findByRole("button", { name: /^Audio/i });
     fireEvent.click(audioBtn);
 
-    expect(await screen.findByText("Voice Profile")).toBeDefined();
+    expect(await screen.findByText("Mic Index")).toBeDefined();
   });
 
   test("maps voice fields into Audio and keeps configured secrets masked", async () => {
     render(<Settings />);
 
     fireEvent.click(await screen.findByRole("button", { name: /^Audio/i }));
-    expect(await screen.findByText("Voice Profile")).toBeDefined();
+    expect(await screen.findByText("Mic Index")).toBeDefined();
     expect(screen.queryByDisplayValue("•••••••• (configured)")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /^All/i }));
-    const secret = await screen.findByLabelText("Secret API Key");
+    const secret = await screen.findByLabelText("LLM Key");
     expect(secret).toHaveAttribute("type", "password");
     expect(secret).toHaveAttribute("placeholder", "•••••••• (configured)");
   });
@@ -216,7 +228,7 @@ describe("Settings Component", () => {
     expect(await screen.findByText("Context Window")).toBeDefined();
 
     fireEvent.click(screen.getByRole("button", { name: /^HUD/i }));
-    expect(await screen.findByText("HUD Invoke Hotkey")).toBeDefined();
+    expect(await screen.findByText("Hud Invoke Hotkey")).toBeDefined();
 
     fireEvent.click(screen.getByRole("button", { name: /^Appearance/i }));
     expect(await screen.findByText(/Appearance follows CharlieScene theme tokens/i)).toBeDefined();
@@ -224,8 +236,8 @@ describe("Settings Component", () => {
 
   test("saves only modified fields and reports failed saves", async () => {
     render(<Settings />);
-    const assistantName = await screen.findByLabelText("Assistant Name");
-    fireEvent.change(assistantName, { target: { value: "CHARLIE TEST" } });
+    const llmUrl = await screen.findByLabelText("LLM URL");
+    fireEvent.change(llmUrl, { target: { value: "https://example.invalid/api" } });
 
     fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
     await screen.findByText("Saved. Reload required settings when ready.");
@@ -233,13 +245,13 @@ describe("Settings Component", () => {
       ([url, init]) => url === "/api/config" && (init as RequestInit | undefined)?.method === "POST",
     );
     expect(saveCall).toBeDefined();
-    expect(JSON.parse(String((saveCall?.[1] as RequestInit).body))).toEqual({ ASSISTANT_NAME: "CHARLIE TEST" });
+    expect(JSON.parse(String((saveCall?.[1] as RequestInit).body))).toEqual({ LLM_URL: "https://example.invalid/api" });
 
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/api/config" && init?.method === "POST") return Promise.resolve({ ok: false });
       return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
     });
-    fireEvent.change(assistantName, { target: { value: "CHARLIE FAILED" } });
+    fireEvent.change(llmUrl, { target: { value: "https://failed.invalid/api" } });
     fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
     expect(await screen.findByText("Settings save failed.")).toBeDefined();
     expect(screen.queryByText("Saved. Reload required settings when ready.")).toBeNull();

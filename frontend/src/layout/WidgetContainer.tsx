@@ -30,8 +30,10 @@ export function WidgetContainer({
   onDismiss,
 }: WidgetContainerProps): ReactElement | null {
   const canonicalWidgetType = resolveWidgetType(widget.widgetType);
+  const definition = canonicalWidgetType ? getWidgetDefinition(canonicalWidgetType) : null;
   const isSystemWidget = canonicalWidgetType === "system_metric";
   const isKnownWidget = canonicalWidgetType !== null;
+  const hasSemanticRenderer = Boolean(definition?.implemented);
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const dragStartRef = useRef<{ mouseX: number; mouseY: number; widgetX: number; widgetY: number }>({
@@ -208,12 +210,12 @@ export function WidgetContainer({
 
       {/* Body content */}
       <div className={isSystemWidget ? "p-4 overflow-auto text-left h-[calc(100%-42px)]" : "p-3.5 overflow-auto text-left h-[calc(100%-42px)]"}>
-        {!isKnownWidget ? (
-          <UnavailableWidget widget={widget} />
+        {!isKnownWidget || !hasSemanticRenderer ? (
+          <UnavailableWidget widget={widget} definition={definition} />
         ) : isSystemWidget ? (
           <SystemWidget widget={widget} />
         ) : canonicalWidgetType === "media_control" || canonicalWidgetType === "file_viewer" ? (
-          <GenericWidget widget={widget} definition={getWidgetDefinition(canonicalWidgetType)} />
+          <GenericWidget widget={widget} definition={definition} />
         ) : widget.content?.surface_spec || widget.content?.schema_version || widget.widgetType === "composed_surface" ? (
           <SurfaceComposer
             spec={

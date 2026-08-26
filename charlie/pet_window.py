@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import threading
 import time
@@ -1491,6 +1492,12 @@ def main() -> None:
     stop_event = threading.Event()
     bridge = PetEventBridge(window.event_received.emit, window.connection_changed.emit)
     bridge.start()
+    ready_file = os.getenv("CHARLIE_COMPANION_READY_FILE")
+    if ready_file:
+        try:
+            Path(ready_file).write_text("ready\n", encoding="utf-8")
+        except OSError:
+            logger.warning("Unable to publish companion readiness", exc_info=True)
     try:
         app.exec()
     finally:

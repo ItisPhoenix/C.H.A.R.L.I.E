@@ -27,6 +27,18 @@ async def test_get_dashboard_config():
     assert len(res["fields"]) > 50
 
 
+def test_settings_frontend_mapping_covers_backend_metadata_groups():
+    """Settings tests must follow the metadata-driven production schema."""
+    frontend = (Path(__file__).parents[1] / "frontend/src/scene/settings/Settings.tsx").read_text(
+        encoding="utf-8"
+    )
+    backend_groups = {spec["group"] for spec in config.editable_field_specs()}
+    missing_groups = [group for group in sorted(backend_groups) if f'"{group}"' not in frontend]
+    assert not missing_groups, f"frontend Settings has no category mapping for: {missing_groups}"
+    assert '"ASSISTANT_NAME"' not in frontend
+    assert '"THEME_ACCENT"' not in frontend
+
+
 def test_desktop_idle_threshold_default(monkeypatch):
     # Real .env can override this (it does in dev, for faster live-testing), so isolate from it.
     import importlib

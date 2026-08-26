@@ -221,7 +221,7 @@ class TestPresentationKindSelection:
                 "media_control",
                 ExecutionOutcome(capability="media", operation="media.volume.set", result="Volume 50%"),
                 PresentationContext(user_intent="show"),
-                {"priority": 50, "anchor": AnchorTarget.CORE, "replayable": False},
+                {"priority": 60, "anchor": AnchorTarget.CORE, "replayable": False},
             ),
             (
                 "research",
@@ -256,7 +256,7 @@ class TestPresentationKindSelection:
                     result="listing",
                 ),
                 PresentationContext(),
-                {"priority": 50, "anchor": AnchorTarget.CORE, "replayable": False},
+                {"priority": 60, "anchor": AnchorTarget.CORE, "replayable": False},
             ),
             (
                 "composed_widget",
@@ -315,7 +315,7 @@ class TestPresentationContextOverrides:
         assert intent.kind == PresentationKind.CAPTION
         assert intent.spoken_text == "CPU is at 22%"
 
-    def test_explicit_show_upgrades_media_to_widget(self):
+    def test_explicit_show_reports_unimplemented_media_renderer(self):
         resolver = PresentationResolver()
         outcome = ExecutionOutcome(
             request="show media player",
@@ -326,11 +326,11 @@ class TestPresentationContextOverrides:
         )
         ctx = PresentationContext(user_intent="show")
         intent = resolver.resolve(outcome, ctx)
-        assert intent.kind == PresentationKind.WIDGET
-        assert intent.widget_type == "media_control"
-        assert intent.auto_dismiss_ms == 6000
+        assert intent.kind == PresentationKind.NOTIFICATION
+        assert intent.widget_type is None
+        assert "unavailable" in intent.summary.lower()
 
-    def test_media_widget_uses_registry_defaults(self):
+    def test_unimplemented_media_does_not_claim_registry_renderer_defaults(self):
         contract = deepcopy(get_presentation_registry().to_dict())
         contract["widgets"]["media_control"]["default_auto_dismiss_ms"] = 2444
         resolver = PresentationResolver(PresentationRegistry.from_dict(contract))
@@ -338,8 +338,9 @@ class TestPresentationContextOverrides:
             ExecutionOutcome(capability="media", operation="media.volume.set", result="Volume 50%"),
             PresentationContext(user_intent="show"),
         )
-        assert intent.widget_type == "media_control"
-        assert intent.auto_dismiss_ms == 2444
+        assert intent.kind == PresentationKind.NOTIFICATION
+        assert intent.widget_type is None
+        assert intent.auto_dismiss_ms == 5000
 
     def test_missing_runtime_target_uses_safe_notification(self):
         registry = PresentationRegistry.from_dict(deepcopy(get_presentation_registry().to_dict()))

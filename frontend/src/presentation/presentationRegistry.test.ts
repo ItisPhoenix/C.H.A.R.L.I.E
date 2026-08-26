@@ -135,7 +135,6 @@ describe("Frontend PresentationRegistry", () => {
         const def = getWidgetDefinition(w);
         expect(def).not.toBeNull();
         expect(def?.name).toBe(w);
-        expect(def?.implemented).toBe(true);
         expect(def?.supports.drag).toBe(true);
         expect(def?.supports.resize).toBe(true);
         expect(def?.supports.pin).toBe(true);
@@ -144,8 +143,10 @@ describe("Frontend PresentationRegistry", () => {
       // Check accurate renderer names
       expect(getWidgetDefinition("system_metric")?.renderer).toBe("SystemWidget");
       expect(getWidgetDefinition("composed_surface")?.renderer).toBe("SurfaceComposer");
-      expect(getWidgetDefinition("media_control")?.renderer).toBe("GenericWidget");
-      expect(getWidgetDefinition("file_viewer")?.renderer).toBe("GenericWidget");
+      expect(getWidgetDefinition("media_control")?.implemented).toBe(false);
+      expect(getWidgetDefinition("media_control")?.renderer).toBe("UnavailableWidget");
+      expect(getWidgetDefinition("file_viewer")?.implemented).toBe(false);
+      expect(getWidgetDefinition("file_viewer")?.renderer).toBe("UnavailableWidget");
     });
 
     it("resolves all widget aliases", () => {

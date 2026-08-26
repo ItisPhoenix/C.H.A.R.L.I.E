@@ -127,6 +127,29 @@ describe("WidgetManager Store & Lifecycle", () => {
     expect(useWidgetStore.getState().pinnedLayouts["widget:system_metric"]).toBeDefined();
   });
 
+  test("unpin restores each widget registry TTL instead of a global constant", () => {
+    const composedIntent: PresentationIntent = {
+      ...metricIntent,
+      id: "intent-composed-1",
+      widgetType: "composed_surface",
+      autoDismissMs: null,
+      replaceKey: "widget:composed_surface",
+    };
+
+    useWidgetStore.getState().upsertWidget(metricIntent, dummyCtx);
+    useWidgetStore.getState().upsertWidget(composedIntent, dummyCtx);
+    useWidgetStore.getState().pinWidget("intent-cpu-1", dummyCtx.viewport);
+    useWidgetStore.getState().pinWidget("intent-composed-1", dummyCtx.viewport);
+
+    useWidgetStore.getState().unpinWidget("intent-cpu-1");
+    useWidgetStore.getState().unpinWidget("intent-composed-1");
+
+    expect(useWidgetStore.getState().widgets["intent-cpu-1"]?.autoDismissMs).toBe(5000);
+    expect(useWidgetStore.getState().widgets["intent-composed-1"]?.autoDismissMs).toBe(8000);
+    expect(useWidgetStore.getState().widgets["intent-cpu-1"]?.expiresAt).toBeGreaterThan(Date.now());
+    expect(useWidgetStore.getState().widgets["intent-composed-1"]?.expiresAt).toBeGreaterThan(Date.now());
+  });
+
   test("tickAutoDismiss dismisses expired temporary widgets but spares pinned and paused widgets", () => {
     const baseTime = 1000000;
     const expiredIntent: PresentationIntent = {

@@ -33,6 +33,20 @@ def test_registry_builds_typed_safe_event() -> None:
     }
 
 
+def test_registry_allows_explicit_safe_public_detail_and_redacts_tokens() -> None:
+    registry = HealthRegistry(("voice",))
+    registry.set(
+        "voice",
+        HealthStatus.DEGRADED,
+        public_detail="Microphone unavailable: MME error 11; api-key=secret",
+    )
+
+    assert registry.snapshot()["voice"] == {
+        "status": "degraded",
+        "detail": "Microphone unavailable: MME error 11; api-key=redacted",
+    }
+
+
 def test_registry_rejects_unknown_subsystem() -> None:
     registry = HealthRegistry(("voice",))
 
@@ -94,7 +108,9 @@ async def test_main_publishes_runtime_health_snapshot() -> None:
 
     bus = FakeBus()
     old = main._runtime_health
-    main._runtime_health = HealthRegistry(("brain", "memory", "plugins", "mcp", "web", "companion", "telegram", "voice", "watchers"))
+    main._runtime_health = HealthRegistry(
+        ("brain", "memory", "plugins", "mcp", "web", "companion", "telegram", "voice", "watchers")
+    )
     try:
         await main._publish_subsystem_health(bus)
     finally:
@@ -164,6 +180,61 @@ def test_main_keeps_core_alive_when_voice_start_fails(monkeypatch) -> None:
         assert main._runtime_health.snapshot()["voice"] == {
             "status": "degraded",
             "detail": "Unavailable",
+        }
+    finally:
+        main._runtime_health = old
+
+
+def test_main_degrades_optional_companion_when_qt_is_unavailable(monkeypatch) -> None:
+    import main
+
+    old = main._runtime_health
+    main._runtime_health = HealthRegistry(("companion",))
+    monkeypatch.setattr(
+        main,
+        "_companion_dependency_status",
+        lambda: (False, "Optional companion dependency unavailable: PySide6/PyQt6"),
+    )
+    try:
+        main._set_subsystem_health("companion", HealthStatus.STARTING)
+        ready, detail = main._companion_dependency_status()
+        assert ready is False
+        assert "PySide6/PyQt6" in detail
+        main._set_subsystem_health("companion", HealthStatus.DEGRADED, detail)
+        assert main._runtime_health.snapshot()["companion"] == {
+            "status": "degraded",
+            "detail": "Optional companion dependency unavailable: PySide6/PyQt6",
+        }
+    finally:
+        main._runtime_health = old
+
+
+def test_main_marks_voice_degraded_when_stream_readiness_fails(monkeypatch) -> None:
+    import main
+
+    class NotReadyVoice:
+        is_available = True
+        is_ready = False
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            return None
+
+        def readiness_detail(self) -> str:
+            return "Microphone unavailable: MME error 11"
+
+    old = main._runtime_health
+    main._runtime_health = HealthRegistry(("voice",))
+    monkeypatch.setattr(main, "VoiceEngine", NotReadyVoice)
+    try:
+        voice = main._start_voice_or_degrade(object(), lambda text: None, lambda: None, lambda: None)
+
+        assert voice.is_ready is False
+        assert main._runtime_health.snapshot()["voice"] == {
+            "status": "degraded",
+            "detail": "Microphone unavailable: MME error 11",
         }
     finally:
         main._runtime_health = old

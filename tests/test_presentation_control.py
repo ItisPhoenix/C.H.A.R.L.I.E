@@ -21,7 +21,6 @@ def test_explicit_requests_resolve_through_registry_taxonomy_and_emit_typed_even
         ("show", "spatial", "map", "workspace", "presentation_intent"),
         ("show", "camera", "vision", "workspace", "presentation_intent"),
         ("show", "chat", "conversation", "workspace", "presentation_intent"),
-        ("show", "media", "media_control", "widget", "presentation_intent"),
         ("show", "settings", "settings", "overlay", "presentation_intent"),
         ("hide", "map", "map", "workspace", "presentation_dismiss"),
         ("hide", "settings", "settings", "overlay", "presentation_dismiss"),
@@ -39,13 +38,16 @@ def test_explicit_requests_resolve_through_registry_taxonomy_and_emit_typed_even
 
     assert events[-1]["type"] == "presentation_dismiss"
 
+    rejected = controller.execute(PresentationRequest("show", "media", EventSource.VOICE))
+    assert rejected.accepted is False
+    assert "not implemented" in rejected.message.lower()
+
 
 def test_explicit_prompt5_policy_parity_for_map_settings_and_media():
     controller, _ = _controller_with_events()
     expected = {
         "map": ("workspace", "core", True),
         "settings": ("overlay", "screen", False),
-        "media": ("widget", "core", False),
     }
     for raw, (taxonomy, anchor, replayable) in expected.items():
         result = controller.resolve(PresentationRequest("show", raw))
@@ -58,6 +60,10 @@ def test_explicit_prompt5_policy_parity_for_map_settings_and_media():
         assert payload["operation"] == "presentation.show"
         assert payload["spoken_text"] == f"Showing {result.canonical_surface.replace('_', ' ')}."
         assert payload["replace_key"] == f"presentation:{taxonomy}:{result.canonical_surface}"
+
+    rejected = controller.resolve(PresentationRequest("show", "media"))
+    assert rejected.accepted is False
+    assert "not implemented" in rejected.message.lower()
 
 
 def test_registry_resolution_precedence_and_ambiguity_are_explicit():

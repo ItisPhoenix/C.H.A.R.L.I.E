@@ -231,7 +231,7 @@ export function CharlieScene(): ReactElement | null {
         coreState={projection.coreState}
         activeWorkspaceType={projection.activeWorkspace?.type}
         onClearScreen={handleClearScreen}
-        onOpenConversation={() => sendCommand("hud_invoke")}
+        onOpenConversation={() => sendCommand("presentation_command", { action: "open_conversation" })}
         onOpenRecent={() => setRecentModalOpen(true)}
         onOpenSettings={() => setSettingsModalOpen(true)}
       />

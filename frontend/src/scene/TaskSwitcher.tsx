@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import { useCharlieStore } from "../store/charlie";
 import { useWorkspaceStore } from "../layout/workspaceStore";
 import { sendCommand } from "../runtime/bridge";
+import { isTaskWorkspaceEligible } from "./taskWorkspaceEligibility";
 
 interface TaskSwitcherProps {
   forceShow?: boolean;
@@ -15,7 +16,7 @@ export function TaskSwitcher({ forceShow }: TaskSwitcherProps): ReactElement | n
   const tasks = useCharlieStore((s) => s.tasks);
   const activeWorkspace = useWorkspaceStore((s) => s.getActiveWorkspace());
 
-  const taskList = Object.values(tasks).filter((task) => ACTIVE_TASK_STATUSES.has(task.status));
+  const taskList = Object.values(tasks).filter((task) => isTaskWorkspaceEligible(task, ACTIVE_TASK_STATUSES));
 
   // Contextual visibility rule: Only show when multiple tasks exist (> 1) or explicitly requested
   if (!forceShow && taskList.length <= 1) {

@@ -18,7 +18,7 @@ import {
   type LayoutZone,
   type ZoneContext,
 } from "./zones";
-import { resolveWidgetType } from "../presentation/presentationRegistry";
+import { getWidgetDefinition, resolveWidgetType } from "../presentation/presentationRegistry";
 
 export interface WidgetInstance {
   id: string;
@@ -35,6 +35,8 @@ export interface WidgetInstance {
   minimized: boolean;
   pinned: boolean;
   autoDismissMs: number | null;
+  /** TTL captured before pinning so unpin restores the widget contract. */
+  restoreAutoDismissMs?: number | null;
   expiresAt: number | null;
   pausedExpiry: boolean;
   createdAt: string;
@@ -188,7 +190,8 @@ export const useWidgetStore = create<WidgetStoreState>((set, get) => ({
       size = { width: freeRect.width, height: freeRect.height };
     }
 
-    const autoMs = isPinned ? null : intent.autoDismissMs ?? (intent.kind === "widget" ? 5000 : null);
+    const registryAutoMs = getWidgetDefinition(canonicalWidgetType)?.default_auto_dismiss_ms ?? null;
+    const autoMs = isPinned ? null : intent.autoDismissMs ?? registryAutoMs;
     const expiresAt = autoMs ? now + autoMs : null;
 
     const newWidget: WidgetInstance = {
@@ -301,6 +304,7 @@ export const useWidgetStore = create<WidgetStoreState>((set, get) => ({
     if (!w) return;
 
     const pinKey = w.replaceKey || w.widgetType || w.id;
+    const restoreAutoDismissMs = w.autoDismissMs ?? getWidgetDefinition(w.widgetType)?.default_auto_dismiss_ms ?? null;
     const normalized = toNormalizedRect({ x: w.position.x, y: w.position.y, width: w.size.width, height: w.size.height }, viewport);
     const nextLayouts = { ...get().pinnedLayouts, [pinKey]: normalized };
     savePinnedLayouts(nextLayouts);
@@ -308,7 +312,7 @@ export const useWidgetStore = create<WidgetStoreState>((set, get) => ({
     set((state) => ({
       widgets: {
         ...state.widgets,
-        [id]: { ...w, pinned: true, autoDismissMs: null, expiresAt: null },
+        [id]: { ...w, pinned: true, autoDismissMs: null, restoreAutoDismissMs, expiresAt: null },
       },
       pinnedLayouts: nextLayouts,
     }));
@@ -323,11 +327,19 @@ export const useWidgetStore = create<WidgetStoreState>((set, get) => ({
     delete nextLayouts[pinKey];
     savePinnedLayouts(nextLayouts);
 
-    const autoMs = 5000;
+    const autoMs = Object.prototype.hasOwnProperty.call(w, "restoreAutoDismissMs")
+      ? (w.restoreAutoDismissMs ?? null)
+      : (getWidgetDefinition(w.widgetType)?.default_auto_dismiss_ms ?? null);
     set((state) => ({
       widgets: {
         ...state.widgets,
-        [id]: { ...w, pinned: false, autoDismissMs: autoMs, expiresAt: Date.now() + autoMs },
+        [id]: {
+          ...w,
+          pinned: false,
+          autoDismissMs: autoMs,
+          restoreAutoDismissMs: undefined,
+          expiresAt: autoMs ? Date.now() + autoMs : null,
+        },
       },
       pinnedLayouts: nextLayouts,
     }));

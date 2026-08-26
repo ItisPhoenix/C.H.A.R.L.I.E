@@ -76,6 +76,11 @@ def test_presentation_command_contract_allows_known_hud_commands_and_is_not_repl
     dismiss_event = build_event("presentation_command", {"action": "dismiss_widget", "id": "widget-1"})
     assert dismiss_event["payload"]["id"] == "widget-1"
 
+    summon_event = build_event("presentation_command", {"action": "summon_hud"})
+    assert summon_event["payload"]["action"] == "summon_hud"
+    conversation_event = build_event("presentation_command", {"action": "open_conversation"})
+    assert conversation_event["payload"]["action"] == "open_conversation"
+
     with pytest.raises(EventValidationError):
         build_event("presentation_command", {"action": "arbitrary_frontend_command"})
     with pytest.raises(EventValidationError):

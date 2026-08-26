@@ -98,7 +98,7 @@ async def test_hud_first_summon_opens_once():
 
     with patch("charlie.utils.open_url_in_browser") as mock_open:
         # First summon: hud_visible should become True and open browser once
-        await main_mod._summon_conversation_workspace()
+        await main_mod._summon_hud()
         assert main_mod.hud_visible is True
         mock_open.assert_called_once()
 
@@ -113,7 +113,7 @@ async def test_hud_repeated_summon_no_duplicate_while_connected():
 
     with patch("charlie.utils.open_url_in_browser") as mock_open:
         # First summon: client count 0 -> opens browser
-        await main_mod._summon_conversation_workspace()
+        await main_mod._summon_hud()
         assert main_mod.hud_visible is True
         mock_open.assert_called_once()
 
@@ -121,7 +121,7 @@ async def test_hud_repeated_summon_no_duplicate_while_connected():
         main_mod.hud_client_count = 1
 
         # Second summon while HUD visible and connected: should remain 1 open
-        await main_mod._summon_conversation_workspace()
+        await main_mod._summon_hud()
         assert main_mod.hud_visible is True
         mock_open.assert_called_once()  # still only 1 call total
 
@@ -135,15 +135,15 @@ async def test_hud_invoke_semantics_are_idempotent_show_when_connected():
     main_mod.hud_visible = True
 
     with patch("charlie.utils.open_url_in_browser") as mock_open:
-        await main_mod._summon_conversation_workspace()
+        await main_mod._summon_hud()
 
     assert main_mod.hud_visible is True
     mock_open.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_hud_summon_emits_conversation_workspace_intent(monkeypatch):
-    """Production summon opens the canonical conversation workspace once."""
+async def test_hud_summon_does_not_open_conversation_workspace(monkeypatch):
+    """HUD summon changes visibility only; workspace opening is explicit."""
     import main as main_mod
 
     class FakeBus:
@@ -158,16 +158,35 @@ async def test_hud_summon_emits_conversation_workspace_intent(monkeypatch):
     main_mod.hud_visible = True
 
     with patch("charlie.utils.open_url_in_browser") as mock_open:
-        await main_mod._summon_conversation_workspace(event_bus=bus)
+        await main_mod._summon_hud(event_bus=bus)
 
     mock_open.assert_not_called()
     presentation = [event for event in bus.events if event[0] == "presentation_intent"]
-    assert len(presentation) == 1
-    payload = presentation[0][1]
-    assert payload["id"] == "conversation-workspace"
-    assert payload["kind"] == "workspace"
-    assert payload["workspace_type"] == "conversation"
-    assert payload["replace_key"] == "workspace:conversation"
+    assert presentation == []
+
+
+@pytest.mark.asyncio
+async def test_open_conversation_workspace_is_explicit_and_idempotent(monkeypatch):
+    import main as main_mod
+
+    class FakeBus:
+        def __init__(self):
+            self.events = []
+
+        async def emit(self, event_type, payload, meta=None):
+            self.events.append((event_type, payload, meta))
+
+    bus = FakeBus()
+    main_mod.hud_client_count = 1
+    main_mod.hud_visible = True
+
+    with patch("charlie.utils.open_url_in_browser"):
+        await main_mod._open_conversation_workspace(event_bus=bus)
+        await main_mod._open_conversation_workspace(event_bus=bus)
+
+    presentation = [event for event in bus.events if event[0] == "presentation_intent"]
+    assert len(presentation) == 2
+    assert all(event[1]["workspace_type"] == "conversation" for event in presentation)
 
 
 @pytest.mark.asyncio
@@ -180,20 +199,20 @@ async def test_hud_disconnect_then_summon_opens_again():
     main_mod.hud_visible = False
 
     with patch("charlie.utils.open_url_in_browser") as mock_open:
-        await main_mod._summon_conversation_workspace()
+        await main_mod._summon_hud()
         assert main_mod.hud_visible is True
         assert mock_open.call_count == 1
 
         # Connected: next summon does not open
         main_mod.hud_client_count = 1
-        await main_mod._summon_conversation_workspace()
+        await main_mod._summon_hud()
         assert mock_open.call_count == 1
 
         # Disconnect occurs (IPC sets hud_client_count = 0)
         main_mod.hud_client_count = 0
 
         # After disconnect, summon should open the HUD again
-        await main_mod._summon_conversation_workspace()
+        await main_mod._summon_hud()
         assert main_mod.hud_visible is True
         assert mock_open.call_count == 2
 
@@ -211,7 +230,7 @@ async def test_hud_close_reopen_cycle():
 
     with patch("charlie.utils.open_url_in_browser") as mock_open:
         # Reopen HUD
-        await main_mod._summon_conversation_workspace()
+        await main_mod._summon_hud()
         assert main_mod.hud_visible is True
         mock_open.assert_called_once()
 
@@ -252,7 +271,7 @@ async def test_hud_toggle_visibility():
 
     with patch("charlie.utils.open_url_in_browser") as mock_open:
         # Toggle to visible
-        await main_mod._summon_conversation_workspace(toggle=True)
+        await main_mod._summon_hud(toggle=True)
         assert main_mod.hud_visible is True
         mock_open.assert_called_once()
 
@@ -260,13 +279,13 @@ async def test_hud_toggle_visibility():
         main_mod.hud_client_count = 1
 
         # Toggle while connected hides HUD normally
-        await main_mod._summon_conversation_workspace(toggle=True)
+        await main_mod._summon_hud(toggle=True)
         assert main_mod.hud_visible is False
         mock_open.assert_called_once()  # no extra call on hide
 
         # Next toggle after hidden shows HUD again
         main_mod.hud_client_count = 0
-        await main_mod._summon_conversation_workspace(toggle=True)
+        await main_mod._summon_hud(toggle=True)
         assert main_mod.hud_visible is True
         assert mock_open.call_count == 2
 
@@ -281,7 +300,7 @@ async def test_hud_toggle_with_zero_clients_reopens_after_manual_browser_close()
     main_mod.hud_client_count = 0
 
     with patch("charlie.utils.open_url_in_browser") as mock_open:
-        await main_mod._summon_conversation_workspace(toggle=True)
+        await main_mod._summon_hud(toggle=True)
         assert main_mod.hud_visible is True
         mock_open.assert_called_once()
 
