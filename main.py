@@ -1780,6 +1780,7 @@ async def main():
                     await asyncio.to_thread(_reload_plugin_tools)
                     await _reload_voice_engine()
                     brain.rebuild_stable_tier()
+                    await _publish_subsystem_health(event_bus)
 
                     await event_bus.emit(
                         "alert",

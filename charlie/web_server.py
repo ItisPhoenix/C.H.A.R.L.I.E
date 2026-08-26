@@ -567,6 +567,9 @@ async def websocket_endpoint(ws: WebSocket):
         logger.warning("Failed to send initial cached state to WebSocket: %s", e)
     if event_bus:
         await event_bus.send_command({"type": "ws_connection_count", "count": len(active_connections)})
+        # Startup health publication can race the web subscriber. A live HUD
+        # connection is the authoritative point at which a replay is useful.
+        await event_bus.send_command({"type": "runtime_state_request"})
     try:
         while True:
             data = await ws.receive_text()
