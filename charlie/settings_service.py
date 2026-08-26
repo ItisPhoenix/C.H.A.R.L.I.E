@@ -145,7 +145,7 @@ class SettingsService:
 
         # Write to temporary file in the same directory, then atomic rename
         changed_keys = sorted(updates)
-        logger.info(
+        logger.warning(
             "env_settings_write source=%s pid=%s keys=%s caller=%s",
             source,
             os.getpid(),
