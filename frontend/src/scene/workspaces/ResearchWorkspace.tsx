@@ -145,9 +145,9 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
                   </span>
                 )}
               </div>
-              <p className="text-[13px] text-slate-200 font-sans leading-relaxed">
+              <div className="text-[13px] text-slate-200 font-sans leading-relaxed">
                 <ResearchRichText text={summary} />
-              </p>
+              </div>
               {payloadConfidence !== null && (
                 <div className="pt-2 border-t border-cyan-500/10 text-[10px] text-slate-400 flex justify-between">
                   <span>CONFIDENCE</span>
@@ -194,9 +194,9 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
                 </span>
               )}
             </div>
-            <p className="text-base sm:text-lg text-slate-100 font-sans font-normal leading-relaxed">
+            <div className="text-base sm:text-lg text-slate-100 font-sans font-normal leading-relaxed">
               <ResearchRichText text={summary} />
-            </p>
+            </div>
             {payloadConfidence !== null && (
               <div className="pt-2 text-xs text-slate-400 flex items-center gap-2 font-mono">
                 <span>CORRELATION CONFIDENCE:</span>

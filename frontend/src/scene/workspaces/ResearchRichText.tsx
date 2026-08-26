@@ -26,10 +26,10 @@ function inlineText(value: string): ReactElement[] {
   });
 }
 
-export function ResearchRichText({ text }: { text: string }): ReactElement {
+export function ResearchRichText({ text, className = "" }: { text: string; className?: string }): ReactElement {
   const lines = normalizeLines(text);
   return (
-    <div className="research-rich-text space-y-3">
+    <div className={`research-rich-text space-y-3 ${className}`.trim()}>
       {lines.map((line, index) => {
         const heading = line.match(/^(#{1,3})\s+(.+)$/);
         if (heading) {
