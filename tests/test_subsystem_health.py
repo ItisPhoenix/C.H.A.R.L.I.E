@@ -170,7 +170,7 @@ def test_main_keeps_core_alive_when_voice_start_fails(monkeypatch) -> None:
             raise OSError("microphone failed: device-token=secret")
 
     old = main._runtime_health
-    main._runtime_health = HealthRegistry(("voice",))
+    main._runtime_health = HealthRegistry(("voice", "voice_capture", "asr"))
     monkeypatch.setattr(main, "VoiceEngine", FailingVoice)
     try:
         voice = main._start_voice_or_degrade(object(), lambda text: None, lambda: None, lambda: None)
@@ -226,7 +226,7 @@ def test_main_marks_voice_degraded_when_stream_readiness_fails(monkeypatch) -> N
             return "Microphone unavailable: MME error 11"
 
     old = main._runtime_health
-    main._runtime_health = HealthRegistry(("voice",))
+    main._runtime_health = HealthRegistry(("voice", "voice_capture", "asr"))
     monkeypatch.setattr(main, "VoiceEngine", NotReadyVoice)
     try:
         voice = main._start_voice_or_degrade(object(), lambda text: None, lambda: None, lambda: None)

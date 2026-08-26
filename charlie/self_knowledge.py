@@ -606,8 +606,8 @@ class SelfKnowledgeService:
         # 3. Model Query
         elif any(k in q_lower for k in ("what model", "which model", "llm provider", "configured model")):
             m = evidence.runtime_facts.get("model", self._introspector.get_model_info())
-            provider = m.get("provider", "openai")
-            model = m.get("model", "gpt-4o")
+            provider = m.get("provider", "unknown")
+            model = m.get("model", "unknown")
             api_set = "configured" if m.get("api_key_configured") else "not configured"
             parts.append(
                 f"I am currently configured to use the **{model}** model via provider **{provider}** "

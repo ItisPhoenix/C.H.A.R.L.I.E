@@ -189,6 +189,8 @@ _runtime_health = HealthRegistry(
         "companion",
         "telegram",
         "voice",
+        "voice_capture",
+        "asr",
         "watchers",
     )
 )
@@ -335,6 +337,8 @@ class _UnavailableVoiceEngine:
 
     is_available = False
     is_ready = False
+    asr_ready = False
+    asr_readiness_status = "failed"
 
     def __init__(self) -> None:
         self.is_speaking = threading.Event()
@@ -379,6 +383,9 @@ class _UnavailableVoiceEngine:
     def cancel_ptt(self) -> None:
         return None
 
+    def asr_readiness_detail(self) -> str:
+        return "ASR unavailable: microphone engine unavailable"
+
 
 def _start_voice_or_degrade(
     voice_config: Config,
@@ -398,11 +405,17 @@ def _start_voice_or_degrade(
     except Exception:
         logger.warning("Failed to start voice", exc_info=True)
         _set_subsystem_health("voice", HealthStatus.DEGRADED)
+        _set_subsystem_health("voice_capture", HealthStatus.DEGRADED)
+        _set_subsystem_health("asr", HealthStatus.DEGRADED, "ASR unavailable: microphone engine unavailable")
         return _UnavailableVoiceEngine()
     if voice.is_ready:
         _set_subsystem_health("voice", HealthStatus.RUNNING, voice.readiness_detail())
+        _set_subsystem_health("voice_capture", HealthStatus.RUNNING, voice.readiness_detail())
+        _set_subsystem_health("asr", HealthStatus.STARTING, voice.asr_readiness_detail())
     else:
         _set_subsystem_health("voice", HealthStatus.DEGRADED, voice.readiness_detail())
+        _set_subsystem_health("voice_capture", HealthStatus.DEGRADED, voice.readiness_detail())
+        _set_subsystem_health("asr", HealthStatus.DEGRADED, "ASR unavailable: microphone capture unavailable")
     return voice
 
 
@@ -1450,6 +1463,31 @@ async def main():
         except Exception as ex:
             logger.error(f"Error reloading VoiceEngine: {ex}", exc_info=True)
 
+    async def _monitor_voice_health(event_bus: EventBus) -> None:
+        """Publish capture and ASR readiness after asynchronous worker startup."""
+        previous: tuple[object, object] | None = None
+        while True:
+            capture_ready = bool(getattr(voice, "is_ready", False))
+            asr_status = str(getattr(voice, "asr_readiness_status", "failed"))
+            state = (capture_ready, asr_status)
+            if state != previous:
+                if capture_ready:
+                    _set_subsystem_health("voice_capture", HealthStatus.RUNNING, voice.readiness_detail())
+                    _set_subsystem_health("voice", HealthStatus.RUNNING, voice.readiness_detail())
+                else:
+                    _set_subsystem_health("voice_capture", HealthStatus.DEGRADED, voice.readiness_detail())
+                    _set_subsystem_health("voice", HealthStatus.DEGRADED, voice.readiness_detail())
+                if asr_status == "ready":
+                    asr_health = HealthStatus.RUNNING
+                elif asr_status == "starting":
+                    asr_health = HealthStatus.STARTING
+                else:
+                    asr_health = HealthStatus.DEGRADED
+                _set_subsystem_health("asr", asr_health, voice.asr_readiness_detail())
+                await _publish_subsystem_health(event_bus)
+                previous = state
+            await asyncio.sleep(0.1)
+
     async def _reload_mcp_client():
         """Stop the MCP subprocess client and restart it if still enabled."""
         nonlocal mcp_client
@@ -2294,6 +2332,7 @@ async def main():
                     _voice_loop_idle(voice),
                     consume_web_commands(bus, brain),
                     _emit_system_status(bus),
+                    _monitor_voice_health(bus),
                     mcp_start_task,
                     _calendar_reminder_loop(),
                 )

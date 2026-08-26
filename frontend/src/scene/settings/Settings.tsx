@@ -1410,11 +1410,13 @@ export function Settings(): ReactElement {
               <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider mb-1">
                 Audio Readiness
               </h3>
-              {(["voice", "asr"] as const).map((name) => {
+              {(["voice_capture", "asr"] as const).map((name) => {
                 const health = runtimeHealth.subsystems?.[name];
                 return (
                   <div key={name} className="flex justify-between gap-3 text-xs">
-                    <strong className="text-cyan-200 uppercase">{name}</strong>
+                    <strong className="text-cyan-200 uppercase">
+                      {name === "voice_capture" ? "voice capture" : name}
+                    </strong>
                     <span className="text-right text-slate-300">
                       {health ? `${health.status ?? "unknown"}: ${health.detail ?? "Unknown"}` : "unavailable"}
                     </span>

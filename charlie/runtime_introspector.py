@@ -168,11 +168,15 @@ class RuntimeIntrospector:
                 "api_key_configured": False,
             }
 
-        api_key = getattr(cfg, "llm_api_key", None)
+        api_key = getattr(cfg, "llm_api_key", None) or getattr(cfg, "llm_key", None)
+        api_base_url = getattr(cfg, "llm_base_url", None) or getattr(cfg, "llm_url", None)
+        provider = getattr(cfg, "llm_provider", None)
+        if not provider:
+            provider = "kilo" if "kilo.ai" in str(api_base_url or "").lower() else "openai-compatible"
         return {
-            "provider": getattr(cfg, "llm_provider", "openai"),
-            "model": getattr(cfg, "llm_model", "gpt-4o"),
-            "api_base_url": getattr(cfg, "llm_base_url", None) or getattr(cfg, "llm_url", None),
+            "provider": provider,
+            "model": getattr(cfg, "llm_model", None) or "unknown",
+            "api_base_url": api_base_url,
             "api_key_configured": bool(api_key),
             "vision_model": getattr(cfg, "vision_model", "local"),
             "embedding_model": getattr(cfg, "embedding_model", "local"),

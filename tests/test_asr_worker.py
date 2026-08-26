@@ -10,6 +10,7 @@ Whisper anchored onto that prompt and echoed it back verbatim as a
 
 from dataclasses import dataclass
 
+import charlie.asr_worker as asr_worker
 from charlie.asr_worker import _build_transcribe_kwargs, _filter_hallucinated_segments
 
 
@@ -67,6 +68,36 @@ def test_warmup_disables_vad_filter():
     )
     assert kwargs["vad_filter"] is False
     assert kwargs["beam_size"] == 1
+
+
+def test_worker_acknowledges_readiness_only_after_model_initializes(monkeypatch):
+    class FakeModel:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class StopInputQueue:
+        def get(self, timeout):
+            raise KeyboardInterrupt
+
+    class OutputQueue:
+        def __init__(self):
+            self.messages = []
+
+        def put(self, message):
+            self.messages.append(message)
+
+    monkeypatch.setattr(asr_worker, "WhisperModel", FakeModel)
+    output_queue = OutputQueue()
+
+    asr_worker.asr_worker_process(
+        StopInputQueue(),
+        output_queue,
+        "distil-large-v3",
+        "cpu",
+        "en",
+    )
+
+    assert output_queue.messages == [{"type": "ready", "model": "distil-large-v3"}]
 
 
 def test_filter_keeps_real_speech_segment():

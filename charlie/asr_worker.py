@@ -155,6 +155,7 @@ def asr_worker_process(
             )
 
     logger.info("ASR Worker: Whisper model loaded and ready.")
+    output_queue.put({"type": "ready", "model": model_size})
 
     while True:
         try:

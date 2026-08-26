@@ -158,6 +158,9 @@ class VoiceEngine:
         self.asr_input_queue: mp.Queue = mp.Queue(maxsize=8)
         self.asr_output_queue: mp.Queue = mp.Queue(maxsize=8)
         self.asr_process = None
+        self._asr_readiness_lock = threading.Lock()
+        self._asr_readiness_status = "starting"
+        self._asr_readiness_error: Optional[str] = None
 
         # Load Kokoro TTS
         self._ensure_models()
@@ -211,6 +214,30 @@ class VoiceEngine:
             return "Microphone ready"
         error = snapshot.get("error") or "device initialization failed"
         return f"Microphone unavailable: {error}"
+
+    @property
+    def asr_readiness_status(self) -> str:
+        with self._asr_readiness_lock:
+            return self._asr_readiness_status
+
+    @property
+    def asr_ready(self) -> bool:
+        return self.asr_readiness_status == "ready"
+
+    def asr_readiness_detail(self) -> str:
+        with self._asr_readiness_lock:
+            status = self._asr_readiness_status
+            error = self._asr_readiness_error
+        if status == "ready":
+            return "ASR worker ready"
+        if status == "failed":
+            return f"ASR unavailable: {error or 'worker initialization failed'}"
+        return "ASR worker starting"
+
+    def _set_asr_readiness(self, status: str, error: Optional[str] = None) -> None:
+        with self._asr_readiness_lock:
+            self._asr_readiness_status = status
+            self._asr_readiness_error = error
 
     def _set_readiness(self, status: str, *, error: Optional[str] = None, device_info: Optional[dict] = None) -> None:
         with self._readiness_lock:
@@ -1164,6 +1191,7 @@ class VoiceEngine:
             daemon=True,
         )
         self.asr_process.start()
+        self._set_asr_readiness("starting")
         logger.info("ASR worker process started.")
 
         # VAD state
@@ -1337,6 +1365,13 @@ class VoiceEngine:
         while not self.stop_event.is_set():
             try:
                 result = self.asr_output_queue.get(timeout=0.1)
+                if isinstance(result, dict):
+                    if result.get("type") == "ready":
+                        self._set_asr_readiness("ready")
+                        logger.info("ASR readiness acknowledged by worker.")
+                    elif result.get("type") == "failed":
+                        self._set_asr_readiness("failed", str(result.get("error") or "worker initialization failed"))
+                    continue
                 if result and self.on_speech:
                     # Worker sends (text, confidence, flags_dict) tuples
                     text = (
@@ -1350,6 +1385,8 @@ class VoiceEngine:
                             self._last_activity_time = time.time()
                         self.on_speech(text)
             except queue.Empty:
+                if self.asr_process is not None and not self.asr_process.is_alive() and not self.asr_ready:
+                    self._set_asr_readiness("failed", "ASR worker exited before readiness")
                 continue
             except Exception as e:
                 logger.error(f"asr_poller_error | {e}")

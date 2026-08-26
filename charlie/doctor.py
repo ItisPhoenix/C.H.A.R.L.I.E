@@ -209,8 +209,9 @@ class CharlieDoctor:
 
     def _check_secrets_configured(self) -> DiagnosticCheck:
         cfg = self._introspector._get_config()
-        api_key = getattr(cfg, "llm_api_key", None) if cfg else None
-        provider = getattr(cfg, "llm_provider", "openai") if cfg else "openai"
+        model_info = self._introspector.get_model_info() if cfg else {}
+        api_key = bool(model_info.get("api_key_configured"))
+        provider = model_info.get("provider", "unknown")
 
         # If provider requires cloud key and it's missing
         if provider in ("openai", "anthropic", "gemini", "groq") and not api_key:

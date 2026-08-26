@@ -103,6 +103,7 @@ def test_doctor_detects_unconfigured_api_key(mock_doctor_env):
     """Verify Doctor flags unconfigured cloud LLM API key with clear evidence."""
     doctor, cfg, _, _, _ = mock_doctor_env
     cfg.llm_api_key = ""
+    cfg.llm_key = ""
 
     report = doctor.diagnose()
     secret_checks = [c for c in report.checks if c.check_id == "secrets_configured"]
