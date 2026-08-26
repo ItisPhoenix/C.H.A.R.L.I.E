@@ -1893,7 +1893,7 @@ _settings_service = SettingsService(config)
 
 
 def _update_env_file(updates: dict):
-    _settings_service._atomic_write_env(updates)
+    _settings_service._atomic_write_env(updates, source="dashboard_config_api")
 
 
 @app.get("/api/config")

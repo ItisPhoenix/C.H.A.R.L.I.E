@@ -10,6 +10,7 @@ import logging
 import os
 import tempfile
 from dataclasses import fields
+from inspect import stack
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -98,11 +99,11 @@ class SettingsService:
         touched = self.config.apply_env_updates(validated)
 
         # Atomic write to .env
-        self._atomic_write_env(validated)
+        self._atomic_write_env(validated, source="settings_service.update_settings")
 
         return touched
 
-    def _atomic_write_env(self, updates: Dict[str, Any]) -> None:
+    def _atomic_write_env(self, updates: Dict[str, Any], *, source: str = "unknown") -> None:
         """Atomically update or append settings in .env without losing existing comments or unrelated keys."""
         target_path = self.env_path.resolve()
         parent_dir = target_path.parent
@@ -143,6 +144,14 @@ class SettingsService:
         new_content = "\n".join(new_lines) + "\n"
 
         # Write to temporary file in the same directory, then atomic rename
+        changed_keys = sorted(updates)
+        logger.info(
+            "env_settings_write source=%s pid=%s keys=%s caller=%s",
+            source,
+            os.getpid(),
+            ",".join(changed_keys),
+            stack()[1].function,
+        )
         tmp_fd, tmp_path_str = tempfile.mkstemp(dir=str(parent_dir), prefix=".env.tmp-")
         try:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
