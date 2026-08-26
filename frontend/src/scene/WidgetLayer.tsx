@@ -2,7 +2,7 @@ import { useEffect, type ReactElement } from "react";
 import { WidgetContainer } from "../layout/WidgetContainer";
 import { useWidgetStore } from "../layout/widgetStore";
 
-export function WidgetLayer(): ReactElement | null {
+export function WidgetLayer({ onDismiss }: { onDismiss?: (id: string) => void }): ReactElement | null {
   const widgets = useWidgetStore((s) => s.widgets);
   const focusWidget = useWidgetStore((s) => s.focusWidget);
   const dragWidget = useWidgetStore((s) => s.dragWidget);
@@ -49,7 +49,10 @@ export function WidgetLayer(): ReactElement | null {
           onUnpin={unpinWidget}
           onPauseExpiry={pauseExpiry}
           onResumeExpiry={resumeExpiry}
-          onDismiss={dismissWidget}
+          onDismiss={(id) => {
+            dismissWidget(id);
+            onDismiss?.(id);
+          }}
         />
       ))}
     </div>

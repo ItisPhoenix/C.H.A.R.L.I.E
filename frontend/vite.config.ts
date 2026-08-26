@@ -1,12 +1,28 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { resolve, relative } from 'node:path'
+import { tmpdir } from 'node:os'
+import { join, resolve, relative } from 'node:path'
 import { defineConfig, type Plugin } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 const BUILD_MARKER = '__CHARLIE_BUILD_IDENTITY__'
+
+function buildOutputDir(): string {
+  const configured = process.env.CHARLIE_FRONTEND_OUT_DIR
+  if (configured) return configured
+
+  const canonical = resolve(process.cwd(), 'dist')
+  try {
+    readdirSync(canonical, { withFileTypes: true })
+    return 'dist'
+  } catch {
+    return join(tmpdir(), `charlie-runtime-build-direct-${process.pid}-${Date.now()}`)
+  }
+}
+
+const configuredBuildOutputDir = buildOutputDir()
 
 function gitIdentity(root: string): { git_sha: string | null; dirty: boolean | null } {
   try {
@@ -71,7 +87,7 @@ function inputFingerprint(frontendRoot: string): string {
 
 function buildIdentityPlugin(): Plugin {
   let root = process.cwd()
-  let outDir = resolve(root, process.env.CHARLIE_FRONTEND_OUT_DIR ?? 'dist')
+  let outDir = resolve(root, configuredBuildOutputDir)
   return {
     name: 'charlie-build-identity',
     configResolved(config) {
@@ -105,7 +121,7 @@ export default defineConfig({
     exclude: ['maplibre-gl'],
   },
   build: {
-    outDir: process.env.CHARLIE_FRONTEND_OUT_DIR ?? 'dist',
+    outDir: configuredBuildOutputDir,
     chunkSizeWarningLimit: 1800,
     rollupOptions: {
       output: {

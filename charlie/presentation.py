@@ -730,7 +730,7 @@ class PresentationResolver:
             summary=result_text,
             priority=50,
             content={
-                "metrics": outcome.data.get("metrics", {}),
+                "metrics": outcome.data.get("metrics", outcome.data),
                 "text": result_text,
             },
             spoken_text=result_text,

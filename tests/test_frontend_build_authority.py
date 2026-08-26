@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import uuid
@@ -95,6 +96,34 @@ def test_failed_build_keeps_old_dist_and_does_not_publish_new_identity(fixture_p
         run.check_and_build_frontend(project)
     assert (frontend / "dist" / "charlie-build.json").read_text(encoding="utf-8") == old_manifest
     assert not list(frontend.glob(".charlie-build-*"))
+
+
+def test_inaccessible_dist_uses_owned_runtime_build(fixture_project, monkeypatch):
+    project, frontend = fixture_project
+    monkeypatch.setattr(run, "_frontend_dist_is_user_accessible", lambda _: False)
+    monkeypatch.setattr(run.shutil, "which", lambda name: "npm.exe")
+
+    def fake_build(args, *, cwd, check, env=None):
+        if args[-2:] != ["run", "build"]:
+            return
+        assert env is not None
+        staging = Path(env["CHARLIE_FRONTEND_OUT_DIR"])
+        (staging / "assets").mkdir(parents=True)
+        (staging / "index.html").write_text("built\n", encoding="utf-8")
+        (staging / "assets" / "bundle.js").write_text("bundle\n", encoding="utf-8")
+        (staging / "charlie-build.json").write_text(
+            json.dumps({"build_id": "runtime-fallback"}) + "\n", encoding="utf-8"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_build)
+    run.check_and_build_frontend(project)
+
+    runtime_dist = Path(os.environ[run._FRONTEND_DIST_ENV])
+    assert runtime_dist.name.startswith("charlie-runtime-build-")
+    assert runtime_dist.parent != frontend
+    assert (runtime_dist / "index.html").read_text(encoding="utf-8") == "built\n"
+    shutil.rmtree(runtime_dist)
+    os.environ.pop(run._FRONTEND_DIST_ENV, None)
 
 
 def test_status_exposes_safe_frontend_identity(fixture_project, monkeypatch):

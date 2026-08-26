@@ -144,8 +144,8 @@ describe("Frontend PresentationRegistry", () => {
       // Check accurate renderer names
       expect(getWidgetDefinition("system_metric")?.renderer).toBe("SystemWidget");
       expect(getWidgetDefinition("composed_surface")?.renderer).toBe("SurfaceComposer");
-      expect(getWidgetDefinition("media_control")?.renderer).toBe("WidgetContainer.generic_fallback");
-      expect(getWidgetDefinition("file_viewer")?.renderer).toBe("WidgetContainer.generic_fallback");
+      expect(getWidgetDefinition("media_control")?.renderer).toBe("GenericWidget");
+      expect(getWidgetDefinition("file_viewer")?.renderer).toBe("GenericWidget");
     });
 
     it("resolves all widget aliases", () => {

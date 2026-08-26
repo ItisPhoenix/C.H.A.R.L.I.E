@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, test } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { useCharlieStore } from "../store/charlie";
 import { CharlieCore } from "./CharlieCore";
 
@@ -34,5 +34,15 @@ describe("CharlieCore authority", () => {
     const { container } = renderCore("center", "listening");
 
     expect(container.querySelector('[data-core-renderer="authoritative-charlie-ring"]')).toHaveAttribute("data-state", "listening");
+  });
+
+  test("idle menu exposes production conversation summon action", () => {
+    const onOpenConversation = vi.fn();
+    render(<CharlieCore position="center" coreState="idle" onOpenConversation={onOpenConversation} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Charlie core in idle state/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Open Conversation" }));
+
+    expect(onOpenConversation).toHaveBeenCalledTimes(1);
   });
 });

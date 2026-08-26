@@ -9,6 +9,7 @@ interface CharlieCoreProps {
   customStatusLabel?: string;
   customSubtext?: string;
   onClearScreen?: () => void;
+  onOpenConversation?: () => void;
   onOpenRecent?: () => void;
   onOpenSettings?: () => void;
   rootRef?: Ref<HTMLDivElement>;
@@ -20,6 +21,7 @@ export function CharlieCore({
   customStatusLabel,
   customSubtext,
   onClearScreen,
+  onOpenConversation,
   onOpenRecent,
   onOpenSettings,
   rootRef,
@@ -80,9 +82,21 @@ export function CharlieCore({
         {/* Compact core context menu */}
         {showMenu && (
           <div
-            className="absolute -top-48 left-1/2 transform -translate-x-1/2 p-2 rounded-xl bg-slate-950/95 border border-cyan-400/40 shadow-2xl backdrop-blur-lg flex flex-col gap-1 z-50 min-w-[160px] pointer-events-auto"
+            className="absolute -top-40 left-1/2 transform -translate-x-1/2 p-2 rounded-xl bg-slate-950/95 border border-cyan-400/40 shadow-2xl backdrop-blur-lg flex flex-col gap-1 z-50 min-w-[160px] pointer-events-auto"
             onClick={(e) => e.stopPropagation()}
           >
+            {onOpenConversation && (
+              <button
+                type="button"
+                onClick={() => {
+                  onOpenConversation();
+                  setShowMenu(false);
+                }}
+                className="px-3 py-1.5 text-xs text-left text-cyan-200 hover:bg-cyan-900/50 rounded transition cursor-pointer font-mono"
+              >
+                Open Conversation
+              </button>
+            )}
             {onOpenRecent && (
               <button
                 type="button"

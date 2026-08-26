@@ -2,13 +2,20 @@ import type { ReactElement } from "react";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
 import { useCharlieStore } from "../../store/charlie";
 
+const ACTIVE_TASK_STATUSES = new Set([
+  "queued", "planning", "waiting", "running", "paused", "approval_required", "verifying",
+]);
+const isWorkspaceTask = (task: { status: string; totalSteps: number }) =>
+  ACTIVE_TASK_STATUSES.has(task.status) || task.totalSteps > 0;
+
 export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
   const tasks = useCharlieStore((s) => s.tasks);
-  const taskList = Object.values(tasks);
+  const focusedTask = workspace.taskId ? tasks[workspace.taskId] : undefined;
+  const taskList = Object.values(tasks).filter(isWorkspaceTask);
 
   // Identify current focused task or fallback to workspace payload
-  const currentTask = (workspace.taskId && tasks[workspace.taskId])
-    ? tasks[workspace.taskId]
+  const currentTask = focusedTask && isWorkspaceTask(focusedTask)
+    ? focusedTask
     : taskList.find((t) => t.status === "running") || taskList[0];
 
   if (!currentTask) {
@@ -25,12 +32,12 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
     : "";
   const capabilities = currentTask.capabilityRequirements?.filter(Boolean) ?? [];
   const hasExecutionDetails = Boolean(
-    currentAction ||
+      currentAction ||
       capabilities.length ||
       currentTask.approvalReference ||
-      currentTask.waitingReason ||
-      currentTask.resultReference,
+      currentTask.waitingReason
   );
+  const hasProgress = currentTask.totalSteps > 0 || typeof currentTask.progress === "number";
 
   const statusColor = (st: string) => {
     switch (st) {
@@ -77,10 +84,10 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
         {/* Execution Journal & Steps */}
         <div className="lg:col-span-8 flex flex-col gap-5">
           {/* Progress Bar Header */}
-          <div className="p-4 rounded-xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md space-y-3">
+          {hasProgress && <div className="p-4 rounded-xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md space-y-3">
             <div className="flex justify-between items-center text-xs">
               <span className="text-cyan-400 font-bold uppercase">
-                Progress: Step {currentTask.currentStep} of {currentTask.totalSteps || 5}
+                Progress: Step {currentTask.currentStep} of {currentTask.totalSteps}
               </span>
               <span className="text-slate-200 font-bold">
                 {typeof currentTask.progress === "number" ? `${Math.round(currentTask.progress * 100)}%` : "—"}
@@ -96,7 +103,7 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
                   />
                 )}
               </div>
-          </div>
+          </div>}
 
           {/* Step-by-Step Task Journal */}
           {hasExecutionDetails && <div className="p-4 rounded-xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md space-y-3">
@@ -156,10 +163,9 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
                 );
               })}
             </div>
-            {(currentTask.waitingReason || currentTask.resultReference || currentTask.approvalReference) && (
+            {(currentTask.waitingReason || currentTask.approvalReference) && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px] text-slate-400">
                 {currentTask.waitingReason && <div><span className="text-cyan-400">WAITING REASON:</span> {currentTask.waitingReason}</div>}
-                {currentTask.resultReference && <div><span className="text-cyan-400">RESULT:</span> {currentTask.resultReference}</div>}
                 {currentTask.approvalReference && <div><span className="text-amber-300">APPROVAL:</span> {currentTask.approvalReference}</div>}
               </div>
             )}

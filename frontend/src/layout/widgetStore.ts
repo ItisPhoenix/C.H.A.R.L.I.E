@@ -18,6 +18,7 @@ import {
   type LayoutZone,
   type ZoneContext,
 } from "./zones";
+import { resolveWidgetType } from "../presentation/presentationRegistry";
 
 export interface WidgetInstance {
   id: string;
@@ -106,6 +107,7 @@ export const useWidgetStore = create<WidgetStoreState>((set, get) => ({
 
     const nextZ = get().topZIndex + 1;
     const zone = (intent.preferredZone as LayoutZone) || "contextual";
+    const canonicalWidgetType = resolveWidgetType(intent.widgetType) ?? intent.widgetType ?? "unknown";
 
     if (existingId && currentWidgets[existingId]) {
       const existing = currentWidgets[existingId];
@@ -150,7 +152,7 @@ export const useWidgetStore = create<WidgetStoreState>((set, get) => ({
 
     // New widget: Calculate placement
     const candidateSize: Size =
-      intent.widgetType === "system_metric" || intent.widgetType === "system"
+      canonicalWidgetType === "system_metric"
         ? { width: 320, height: 190 }
         : DEFAULT_WIDGET_SIZE;
 
@@ -192,7 +194,7 @@ export const useWidgetStore = create<WidgetStoreState>((set, get) => ({
     const newWidget: WidgetInstance = {
       id: intent.id,
       presentationIntentId: intent.id,
-      widgetType: intent.widgetType || (intent as any).widget_type || "system",
+      widgetType: canonicalWidgetType || (intent as any).widget_type || "unknown",
       taskId: intent.taskId ?? null,
       title: intent.title || "WIDGET",
       summary: intent.summary || "",

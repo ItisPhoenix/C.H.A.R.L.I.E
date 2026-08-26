@@ -158,6 +158,23 @@ def _task_workspace_intent(task: Any) -> PresentationIntent:
     )
 
 
+def _task_workspace_admitted(task: Any) -> bool:
+    """Return whether task has enough lifecycle substance for a full workspace."""
+    status = getattr(getattr(task, "status", None), "value", getattr(task, "status", ""))
+    active_statuses = {
+        TaskStatus.QUEUED.value,
+        TaskStatus.PLANNING.value,
+        TaskStatus.WAITING.value,
+        TaskStatus.RUNNING.value,
+        TaskStatus.PAUSED.value,
+        TaskStatus.APPROVAL_REQUIRED.value,
+        TaskStatus.VERIFYING.value,
+    }
+    if str(status) in active_statuses:
+        return True
+    return int(getattr(task, "total_steps", 0) or 0) > 0
+
+
 _runtime_health = HealthRegistry(
     (
         "brain",
@@ -207,6 +224,23 @@ async def _summon_conversation_workspace(toggle: bool = False, event_bus: Option
             "hud_visibility",
             {"visible": hud_visible},
             meta=EventMeta(source=EventSource.SURFACE, rationale="pet or hotkey toggled React HUD"),
+        )
+        await bus.emit(
+            "presentation_intent",
+            PresentationIntent(
+                id="conversation-workspace",
+                kind=PresentationKind.WORKSPACE,
+                title="CONVERSATION",
+                summary="Chat Session",
+                priority=80,
+                dismiss_policy=DismissPolicy.PERSISTENT,
+                workspace_type="conversation",
+                preferred_zone=PreferredZone.CENTER,
+                anchor=AnchorTarget.SCREEN,
+                replace_key="workspace:conversation",
+                replayable=True,
+            ).to_dict(),
+            meta=EventMeta(source=EventSource.SURFACE, rationale="summoned conversation workspace"),
         )
 
 
@@ -1479,7 +1513,13 @@ async def main():
                 elif cmd_type == "presentation_command":
                     payload = cmd.get("payload", {})
                     action = payload.get("action")
-                    if action == "focus_task" and isinstance(payload.get("task_id"), str):
+                    if action == "dismiss_widget" and isinstance(payload.get("id"), str):
+                        await event_bus.emit(
+                            "presentation_dismiss",
+                            {"id": payload["id"]},
+                            meta=EventMeta(source=EventSource.RUNTIME, rationale="operator dismissed widget from HUD"),
+                        )
+                    elif action == "focus_task" and isinstance(payload.get("task_id"), str):
                         task_id = payload["task_id"]
                         await event_bus.emit(
                             "presentation_command",
@@ -1491,16 +1531,19 @@ async def main():
                         except KeyError:
                             logger.warning("Ignoring focus request for unknown task %s", task_id)
                         else:
-                            intent = _task_workspace_intent(task)
-                            await event_bus.emit(
-                                "presentation_intent",
-                                intent.to_dict(),
-                                meta=EventMeta(
-                                    source=EventSource.TASK,
-                                    task_id=task.id,
-                                    rationale="task focus opened its runtime workspace",
-                                ),
-                            )
+                            if _task_workspace_admitted(task):
+                                intent = _task_workspace_intent(task)
+                                await event_bus.emit(
+                                    "presentation_intent",
+                                    intent.to_dict(),
+                                    meta=EventMeta(
+                                        source=EventSource.TASK,
+                                        task_id=task.id,
+                                        rationale="task focus opened its runtime workspace",
+                                    ),
+                                )
+                            else:
+                                logger.info("Skipping full workspace for completed zero-step task %s", task.id)
                 elif cmd_type == "hud_invoke":
                     # HUD invoke is an idempotent show command. Explicit visibility
                     # toggles remain available through the dedicated toggle path.
@@ -1860,7 +1903,7 @@ async def main():
                 last_net = None
             try:
                 while True:
-                    cpu_percent = psutil.cpu_percent()
+                    cpu_percent = psutil.cpu_percent(interval=0.1)
                     ram_percent = psutil.virtual_memory().percent
                     net_kbps = 0.0
                     if last_net is not None:

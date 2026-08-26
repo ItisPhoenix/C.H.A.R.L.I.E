@@ -42,4 +42,36 @@ describe("SystemWidget Component", () => {
     expect(screen.getByText("43°C")).toBeDefined();
     expect(screen.getByText("916 RPM")).toBeDefined();
   });
+
+  test("renders structured runtime metric without parsing summary text", () => {
+    render(
+      <SystemWidget
+        widget={{ ...dummyWidget, summary: "stale summary 4%", content: { metrics: { metric_name: "Memory Utilization", value: 74.3, unit: "percent_0_100" } } }}
+      />
+    );
+
+    expect(screen.getByText("Memory Utilization")).toBeDefined();
+    expect(screen.getByText("74.3%")).toBeDefined();
+    expect(screen.queryByText("4%")).toBeNull();
+  });
+
+  test("converts normalized fractions only under explicit fraction contract", () => {
+    render(
+      <SystemWidget
+        widget={{ ...dummyWidget, content: { metrics: { metric_name: "Memory Utilization", value: 0.743, unit: "fraction_0_1" } } }}
+      />
+    );
+
+    expect(screen.getByText("74.3%")).toBeDefined();
+  });
+
+  test("keeps authoritative zero visible", () => {
+    render(
+      <SystemWidget
+        widget={{ ...dummyWidget, content: { metrics: { metric_name: "CPU Utilization", value: 0, unit: "percent_0_100" } } }}
+      />
+    );
+
+    expect(screen.getByText("0%")).toBeDefined();
+  });
 });

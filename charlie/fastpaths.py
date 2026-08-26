@@ -36,6 +36,17 @@ class FastPathMatch:
     verifier_name: Optional[str] = None
 
 
+class FastPathResult(str):
+    """Text result plus structured data for presentation consumers."""
+
+    data: Dict[str, Any]
+
+    def __new__(cls, text: str, data: Optional[Dict[str, Any]] = None):
+        result = super().__new__(cls, text)
+        result.data = data or {}
+        return result
+
+
 # ---------------------------------------------------------------------------
 # 1. System Telemetry Patterns
 # ---------------------------------------------------------------------------
@@ -44,9 +55,16 @@ _CPU_RE = re.compile(
     r"cpu\s+(?:usage|load|percent|utilization|status|metrics)|how\s+much\s+cpu)\b",
     re.IGNORECASE,
 )
+_CPU_TEMPERATURE_RE = re.compile(
+    r"\b(?:what(?:'s|\s+is)?\s+(?:my\s+|the\s+)?(?:current\s+)?cpu\s+(?:temperature|temp)|"
+    r"show(?:\s+me)?\s+(?:the\s+)?(?:current\s+)?cpu\s+(?:temperature|temp)|"
+    r"(?:current|currently|now|right\s+now)\s+cpu\s+(?:temperature|temp)|"
+    r"cpu\s+(?:temperature|temp)\s+(?:currently|now|right\s+now))\b",
+    re.IGNORECASE,
+)
 _RAM_RE = re.compile(
-    r"\b(?:what(?:'s|\s+is)?\s+(?:the\s+)?(?:ram|memory)(?:\s+usage|\s+free|\s+used|\s+percent)?|"
-    r"(?:ram|memory)\s+(?:usage|load|percent|free|status|metrics)|how\s+much\s+(?:ram|memory))\b",
+    r"\b(?:what(?:'s|\s+is)?\s+(?:the\s+)?(?:ram|memory)(?:\s+usage|\s+utilization|\s+free|\s+used|\s+percent)?|"
+    r"(?:ram|memory)\s+(?:usage|utilization|load|percent|free|status|metrics)|how\s+much\s+(?:ram|memory))\b",
     re.IGNORECASE,
 )
 _DISK_RE = re.compile(
@@ -69,19 +87,89 @@ def _handle_system_diagnostics(check: str) -> str:
     try:
         import psutil
         if check == "cpu":
-            pct = psutil.cpu_percent(interval=None)
+            pct = psutil.cpu_percent(interval=0.1)
             cores = psutil.cpu_count(logical=True) or 1
-            return f"CPU Utilization: {pct:.1f}% ({cores} logical cores)."
+            return FastPathResult(
+                f"CPU Utilization: {pct:.1f}% ({cores} logical cores).",
+                {
+                    "metric_name": "CPU Utilization",
+                    "value": float(pct),
+                    "unit": "percent_0_100",
+                    "sample": "interval_0.1s",
+                },
+            )
+        if check == "cpu_temperature":
+            sensors_temperatures = getattr(psutil, "sensors_temperatures", None)
+            readings = sensors_temperatures() if callable(sensors_temperatures) else {}
+            candidates = []
+            for sensor_name, entries in (readings or {}).items():
+                sensor_label = str(sensor_name).lower()
+                if not any(token in sensor_label for token in ("cpu", "core", "package", "k10temp", "acpitz")):
+                    continue
+                for entry in entries or ():
+                    current = getattr(entry, "current", None)
+                    if current is not None:
+                        candidates.append(float(current))
+            if not candidates:
+                return FastPathResult(
+                    "CPU temperature is unavailable on this system.",
+                    {
+                        "metric_name": "CPU Temperature",
+                        "value": None,
+                        "unit": "celsius",
+                        "available": False,
+                        "reason": "unsupported_or_unavailable",
+                    },
+                )
+            temperature = max(candidates)
+            return FastPathResult(
+                f"CPU Temperature: {temperature:.1f}°C.",
+                {
+                    "metric_name": "CPU Temperature",
+                    "value": temperature,
+                    "unit": "celsius",
+                    "available": True,
+                },
+            )
         if check == "memory":
             vm = psutil.virtual_memory()
             used_gb = (vm.total - vm.available) / (1024 ** 3)
             total_gb = vm.total / (1024 ** 3)
-            return f"Memory Utilization: {vm.percent:.1f}% ({used_gb:.1f} GB / {total_gb:.1f} GB used)."
+            return FastPathResult(
+                f"Memory Utilization: {vm.percent:.1f}% ({used_gb:.1f} GB / {total_gb:.1f} GB used).",
+                {
+                    "metric_name": "Memory Utilization",
+                    "value": float(vm.percent),
+                    "unit": "percent_0_100",
+                    "used_bytes": int(vm.total - vm.available),
+                    "total_bytes": int(vm.total),
+                },
+            )
         if check == "disk":
             disk = psutil.disk_usage("C:\\" if sys.platform == "win32" else "/")
             free_gb = disk.free / (1024 ** 3)
             total_gb = disk.total / (1024 ** 3)
-            return f"Primary Disk Utilization: {disk.percent:.1f}% ({free_gb:.1f} GB free of {total_gb:.1f} GB)."
+            return FastPathResult(
+                f"Primary Disk Utilization: {disk.percent:.1f}% ({free_gb:.1f} GB free of {total_gb:.1f} GB).",
+                {
+                    "metric_name": "Disk Utilization",
+                    "value": float(disk.percent),
+                    "unit": "percent_0_100",
+                    "free_bytes": int(disk.free),
+                    "total_bytes": int(disk.total),
+                },
+            )
+        if check == "battery":
+            battery = psutil.sensors_battery()
+            if battery is None:
+                return FastPathResult(
+                    "Battery telemetry unavailable.",
+                    {"metric_name": "Battery", "value": None, "unit": "percent_0_100"},
+                )
+            return FastPathResult(
+                f"Battery Level: {battery.percent:.1f}%.",
+                {"metric_name": "Battery Level", "value": float(battery.percent), "unit": "percent_0_100"},
+            )
         if check == "processes":
             procs = []
             for p in sorted(
@@ -99,11 +187,20 @@ def _handle_system_diagnostics(check: str) -> str:
 
     from charlie.tools import registry
 
-    return registry.execute_tool("system_diagnostics", {"check": check})
+    return FastPathResult(registry.execute_tool("system_diagnostics", {"check": check}))
 
 
 def match_system_telemetry(query: str) -> Optional[FastPathMatch]:
     q = query.strip()
+    if _CPU_TEMPERATURE_RE.search(q):
+        return FastPathMatch(
+            intent="system_cpu_temperature",
+            semantic_op_id="system.metrics.read",
+            tool_name="system_diagnostics",
+            arguments={"check": "cpu_temperature"},
+            target_domain="system",
+            direct_handler=lambda: _handle_system_diagnostics("cpu_temperature"),
+        )
     if _CPU_RE.search(q):
         return FastPathMatch(
             intent="system_cpu",
@@ -136,9 +233,9 @@ def match_system_telemetry(query: str) -> Optional[FastPathMatch]:
             intent="system_battery",
             semantic_op_id="system.metrics.read",
             tool_name="system_diagnostics",
-            arguments={"check": "memory"},  # diagnostics reports battery if available
+            arguments={"check": "battery"},
             target_domain="system",
-            direct_handler=lambda: _handle_system_diagnostics("memory"),
+            direct_handler=lambda: _handle_system_diagnostics("battery"),
         )
     if _PROCESSES_RE.search(q):
         return FastPathMatch(
@@ -516,16 +613,17 @@ def match_fast_path(query: str) -> Optional[FastPathMatch]:
     return None
 
 
-def execute_fast_path(match: FastPathMatch) -> str:
+def execute_fast_path(match: FastPathMatch) -> FastPathResult:
     """Execute a matched deterministic fast-path operation safely."""
     logger.info("Executing fast-path: intent=%s, op=%s", match.intent, match.semantic_op_id)
     if match.direct_handler is not None:
         try:
-            return match.direct_handler()
+            result = match.direct_handler()
+            return result if isinstance(result, FastPathResult) else FastPathResult(result)
         except Exception as e:
             logger.error("Fast-path direct execution failed: %s", e, exc_info=True)
             return f"Error executing {match.intent}: {e}"
 
     from charlie.tools import registry
 
-    return registry.execute_tool(match.tool_name, match.arguments)
+    return FastPathResult(registry.execute_tool(match.tool_name, match.arguments))

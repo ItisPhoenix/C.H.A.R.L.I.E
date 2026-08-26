@@ -37,6 +37,19 @@ class TestPresentationKindSelection:
         assert intent.replace_key == "widget:system_metric"
         assert intent.anchor == AnchorTarget.CORE
 
+    def test_structured_system_metric_survives_presentation_payload(self):
+        intent = PresentationResolver().resolve(
+            ExecutionOutcome(
+                capability="system",
+                operation="system.metrics.read",
+                result="Memory Utilization: 74.3%",
+                data={"metric_name": "Memory Utilization", "value": 74.3, "unit": "percent_0_100"},
+            )
+        )
+
+        assert intent.content["metrics"]["value"] == 74.3
+        assert intent.content["metrics"]["unit"] == "percent_0_100"
+
     def test_system_widget_uses_registry_defaults(self):
         contract = deepcopy(get_presentation_registry().to_dict())
         contract["widgets"]["system_metric"]["default_auto_dismiss_ms"] = 1777

@@ -146,4 +146,19 @@ describe("Phase 9 Workspaces Suite", () => {
     );
     expect(screen.getByText(/CONVERSATION & DIALOGUE/i)).toBeDefined();
   });
+
+  test("does not fabricate progress or expose internal result references for completed fast paths", () => {
+    useCharlieStore.setState({
+      tasks: {
+        "task-test-1": {
+          id: "task-test-1", title: "CPU query", status: "completed", currentStep: 0, totalSteps: 0,
+          resultReference: "session:voice_secret",
+        },
+      },
+    });
+    render(<TasksWorkspace workspace={{ ...mockWorkspace, type: "tasks" }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("No active tasks reported.");
+    expect(screen.queryByText(/session:voice_secret/)).toBeNull();
+    expect(screen.queryByText(/STEP 0 OF 5/i)).toBeNull();
+  });
 });

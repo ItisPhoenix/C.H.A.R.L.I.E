@@ -66,12 +66,15 @@ def test_replay_event_preserves_identity_but_marks_event_as_replay():
     assert live["replay"] is False
 
 
-def test_presentation_command_contract_allows_only_clear_screen_and_is_not_replayable():
+def test_presentation_command_contract_allows_known_hud_commands_and_is_not_replayable():
     event = build_event("presentation_command", {"action": "clear_screen"})
     assert event["replay"] is False
 
     focus_event = build_event("presentation_command", {"action": "focus_task", "task_id": "task-1"})
     assert focus_event["payload"]["task_id"] == "task-1"
+
+    dismiss_event = build_event("presentation_command", {"action": "dismiss_widget", "id": "widget-1"})
+    assert dismiss_event["payload"]["id"] == "widget-1"
 
     with pytest.raises(EventValidationError):
         build_event("presentation_command", {"action": "arbitrary_frontend_command"})

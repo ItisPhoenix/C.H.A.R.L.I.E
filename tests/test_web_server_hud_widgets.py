@@ -142,6 +142,35 @@ async def test_hud_invoke_semantics_are_idempotent_show_when_connected():
 
 
 @pytest.mark.asyncio
+async def test_hud_summon_emits_conversation_workspace_intent(monkeypatch):
+    """Production summon opens the canonical conversation workspace once."""
+    import main as main_mod
+
+    class FakeBus:
+        def __init__(self):
+            self.events = []
+
+        async def emit(self, event_type, payload, meta=None):
+            self.events.append((event_type, payload, meta))
+
+    bus = FakeBus()
+    main_mod.hud_client_count = 1
+    main_mod.hud_visible = True
+
+    with patch("charlie.utils.open_url_in_browser") as mock_open:
+        await main_mod._summon_conversation_workspace(event_bus=bus)
+
+    mock_open.assert_not_called()
+    presentation = [event for event in bus.events if event[0] == "presentation_intent"]
+    assert len(presentation) == 1
+    payload = presentation[0][1]
+    assert payload["id"] == "conversation-workspace"
+    assert payload["kind"] == "workspace"
+    assert payload["workspace_type"] == "conversation"
+    assert payload["replace_key"] == "workspace:conversation"
+
+
+@pytest.mark.asyncio
 async def test_hud_disconnect_then_summon_opens_again():
     """Disconnect then summon = opens again."""
     import main as main_mod

@@ -306,8 +306,8 @@ export const WIDGETS_METADATA = {
       "music player"
     ],
     "implemented": true,
-    "renderer": "WidgetContainer.generic_fallback",
-    "renderer_module": "frontend/src/layout/WidgetContainer.tsx",
+    "renderer": "GenericWidget",
+    "renderer_module": "frontend/src/scene/widgets/GenericWidget.tsx",
     "default_dismiss_policy": "timed",
     "default_auto_dismiss_ms": 6000,
     "default_zone": "bottom_right",
@@ -324,8 +324,8 @@ export const WIDGETS_METADATA = {
       "file"
     ],
     "implemented": true,
-    "renderer": "WidgetContainer.generic_fallback",
-    "renderer_module": "frontend/src/layout/WidgetContainer.tsx",
+    "renderer": "GenericWidget",
+    "renderer_module": "frontend/src/scene/widgets/GenericWidget.tsx",
     "default_dismiss_policy": "timed",
     "default_auto_dismiss_ms": 5000,
     "default_zone": "top_right",

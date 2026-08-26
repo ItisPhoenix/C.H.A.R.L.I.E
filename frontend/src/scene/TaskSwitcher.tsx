@@ -7,11 +7,15 @@ interface TaskSwitcherProps {
   forceShow?: boolean;
 }
 
+const ACTIVE_TASK_STATUSES = new Set([
+  "queued", "planning", "waiting", "running", "paused", "approval_required", "verifying",
+]);
+
 export function TaskSwitcher({ forceShow }: TaskSwitcherProps): ReactElement | null {
   const tasks = useCharlieStore((s) => s.tasks);
   const activeWorkspace = useWorkspaceStore((s) => s.getActiveWorkspace());
 
-  const taskList = Object.values(tasks);
+  const taskList = Object.values(tasks).filter((task) => ACTIVE_TASK_STATUSES.has(task.status));
 
   // Contextual visibility rule: Only show when multiple tasks exist (> 1) or explicitly requested
   if (!forceShow && taskList.length <= 1) {

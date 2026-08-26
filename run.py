@@ -48,6 +48,7 @@ _FRONTEND_CONFIG_GLOBS = (
     "package-lock.json",
     "index.html",
 )
+_FRONTEND_DIST_ENV = "CHARLIE_FRONTEND_DIST"
 
 
 def _frontend_build_inputs(frontend_dir: Path) -> list[Path]:
@@ -121,6 +122,22 @@ def _frontend_build_is_stale(frontend_dir: Path, dist_dir: Path) -> bool:
     return False
 
 
+def _frontend_dist_is_user_accessible(dist_dir: Path) -> bool:
+    """Return whether the current user can read and replace the served build.
+
+    Windows sandboxes and stale elevated builds can leave ``frontend/dist`` with
+    an ACL that excludes the normal user.  Detect that state before attempting
+    the rename transaction so a fresh build can be served from an owned path.
+    """
+    if not dist_dir.exists():
+        return True
+    try:
+        next(dist_dir.iterdir(), None)
+        return os.access(dist_dir, os.R_OK | os.W_OK | os.X_OK)
+    except OSError:
+        return False
+
+
 def _publish_frontend_build(staging_dir: Path, dist_dir: Path) -> None:
     """Publish a verified build while retaining old output on build failure."""
     backup_dir = dist_dir.with_name(f"{dist_dir.name}.previous")
@@ -148,6 +165,7 @@ def check_and_build_frontend(project_root: Path | None = None) -> None:
     root = project_root or Path(__file__).parent
     frontend_dir = root / "frontend"
     dist_dir = frontend_dir / "dist"
+    os.environ.pop(_FRONTEND_DIST_ENV, None)
 
     if not frontend_dir.exists():
         raise RuntimeError("Frontend directory not found; refusing to start without the React HUD build.")
@@ -160,7 +178,13 @@ def check_and_build_frontend(project_root: Path | None = None) -> None:
     if not npm_path:
         raise RuntimeError("npm was not found; install Node.js/npm and run 'npm run build' in frontend/.")
 
-    staging_dir = Path(tempfile.mkdtemp(prefix=".charlie-build-", dir=frontend_dir))
+    use_runtime_dist = not _frontend_dist_is_user_accessible(dist_dir)
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            prefix="charlie-runtime-build-" if use_runtime_dist else ".charlie-build-",
+            dir=None if use_runtime_dist else frontend_dir,
+        )
+    )
     build_env = os.environ.copy()
     build_env["CHARLIE_FRONTEND_OUT_DIR"] = str(staging_dir)
     try:
@@ -185,7 +209,15 @@ def check_and_build_frontend(project_root: Path | None = None) -> None:
         (staging_dir / "charlie-build.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-        _publish_frontend_build(staging_dir, dist_dir)
+        if not use_runtime_dist:
+            _publish_frontend_build(staging_dir, dist_dir)
+            os.environ[_FRONTEND_DIST_ENV] = str(dist_dir)
+        else:
+            os.environ[_FRONTEND_DIST_ENV] = str(staging_dir)
+            print(
+                "Canonical frontend/dist is not accessible to this user; "
+                f"serving the verified build from {staging_dir}."
+            )
         print("Frontend built successfully!")
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
@@ -193,7 +225,7 @@ def check_and_build_frontend(project_root: Path | None = None) -> None:
             "See the npm output above and fix the build before restarting."
         ) from e
     finally:
-        if staging_dir.exists():
+        if staging_dir.exists() and not use_runtime_dist:
             shutil.rmtree(staging_dir)
 
 

@@ -3,10 +3,15 @@ import type { WidgetInstance } from "../../layout/widgetStore";
 
 export function SystemWidget({ widget }: { widget: WidgetInstance }): ReactElement {
   const content = widget.content || {};
-  const metricName = String(content.metric_name || widget.title || "CPU USAGE");
-  const value = content.value !== undefined
-    ? String(content.value)
-    : (widget.summary.match(/\d+%/)?.[0] || widget.summary || "—");
+  const metrics = content.metrics && typeof content.metrics === "object" && !Array.isArray(content.metrics)
+    ? content.metrics as Record<string, unknown>
+    : content;
+  const metricName = String(metrics.metric_name || content.metric_name || widget.title || "SYSTEM METRIC");
+  const rawValue = metrics.value ?? content.value;
+  const unit = String(metrics.unit || content.unit || "percent_0_100");
+  const value = typeof rawValue === "number" && Number.isFinite(rawValue)
+    ? `${unit === "fraction_0_1" ? rawValue * 100 : rawValue}%`
+    : "—";
 
   const temp = content.temperature !== undefined
     ? `${content.temperature}`
@@ -56,7 +61,7 @@ export function SystemWidget({ widget }: { widget: WidgetInstance }): ReactEleme
             {metricName}
           </div>
           <div className="text-2xl sm:text-3xl font-bold text-cyan-300 tracking-tight mt-1 text-shadow-cyan font-mono">
-            {value.includes("%") || isNaN(Number(value)) ? value : `${value}%`}
+            {value}
           </div>
         </div>
 

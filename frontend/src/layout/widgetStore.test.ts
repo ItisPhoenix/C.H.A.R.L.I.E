@@ -51,6 +51,14 @@ describe("WidgetManager Store & Lifecycle", () => {
     expect(useWidgetStore.getState().widgets["intent-cpu-1"]).toBeDefined();
   });
 
+  test("canonicalizes registered widget aliases and preserves unknown types for explicit fallback", () => {
+    const aliasWidget = useWidgetStore.getState().upsertWidget({ ...metricIntent, id: "alias-system", widgetType: "system" }, dummyCtx);
+    const unknownWidget = useWidgetStore.getState().upsertWidget({ ...metricIntent, id: "unknown-widget", widgetType: "future_metric", replaceKey: "future_metric" }, dummyCtx);
+
+    expect(aliasWidget.widgetType).toBe("system_metric");
+    expect(unknownWidget.widgetType).toBe("future_metric");
+  });
+
   test("replaceKey deduplication updates existing widget in place without spawning new cards", () => {
     useWidgetStore.getState().upsertWidget(metricIntent, dummyCtx);
     expect(Object.keys(useWidgetStore.getState().widgets).length).toBe(1);

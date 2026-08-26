@@ -28,3 +28,23 @@ def test_distinct_tasks_have_distinct_workspace_identity_without_frontend_lookup
     assert intent_a["id"] != intent_b["id"]
     assert intent_a["content"]["task_id"] == "task-a"
     assert intent_b["content"]["task_id"] == "task-b"
+
+
+def test_completed_zero_step_task_is_not_admitted_to_full_workspace(tmp_path):
+    journal = TaskJournal(state_path=tmp_path / "tasks.json")
+    task = journal.create_task("CPU query", task_id="cpu-query")
+    journal.transition("cpu-query", "running")
+    journal.transition("cpu-query", "verifying")
+    task = journal.complete("cpu-query", result_reference="session:voice_secret")
+
+    assert main._task_workspace_admitted(task) is False
+
+
+def test_genuine_multistep_task_remains_admitted_after_completion(tmp_path):
+    journal = TaskJournal(state_path=tmp_path / "tasks.json")
+    task = journal.create_task("Research", task_id="research", total_steps=3)
+    journal.transition("research", "running")
+    journal.transition("research", "verifying")
+    task = journal.complete("research", result_reference="session:voice_research")
+
+    assert main._task_workspace_admitted(task) is True

@@ -78,4 +78,18 @@ describe("TaskSwitcher Component", () => {
     });
     expect(useWorkspaceStore.getState().activeWorkspaceId).toBe("ws1");
   });
+
+  test("excludes completed zero-step history from active task rail", () => {
+    useCharlieStore.setState({
+      tasks: {
+        completed: { id: "completed", title: "CPU query", status: "completed", currentStep: 0, totalSteps: 0 },
+        running: { id: "running", title: "Research", status: "running", currentStep: 1, totalSteps: 3 },
+        queued: { id: "queued", title: "Queued work", status: "queued", currentStep: 0, totalSteps: 2 },
+      },
+    });
+    render(<TaskSwitcher />);
+    expect(screen.getByText("TASKS [2]")).toBeDefined();
+    expect(screen.queryByText("CPU query")).toBeNull();
+    expect(screen.getByText("Research")).toBeDefined();
+  });
 });

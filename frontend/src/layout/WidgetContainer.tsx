@@ -2,6 +2,9 @@ import { useRef, useState, type PointerEvent, type ReactElement } from "react";
 import type { WidgetInstance } from "./widgetStore";
 import { SurfaceComposer } from "../composer/SurfaceComposer";
 import { SystemWidget } from "../scene/widgets/SystemWidget";
+import { GenericWidget } from "../scene/widgets/GenericWidget";
+import { UnavailableWidget } from "../scene/widgets/UnavailableWidget";
+import { getWidgetDefinition, resolveWidgetType } from "../presentation/presentationRegistry";
 
 interface WidgetContainerProps {
   widget: WidgetInstance;
@@ -26,7 +29,9 @@ export function WidgetContainer({
   onResumeExpiry,
   onDismiss,
 }: WidgetContainerProps): ReactElement | null {
-  const isSystemWidget = widget.widgetType === "system_metric" || widget.widgetType === "system";
+  const canonicalWidgetType = resolveWidgetType(widget.widgetType);
+  const isSystemWidget = canonicalWidgetType === "system_metric";
+  const isKnownWidget = canonicalWidgetType !== null;
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const dragStartRef = useRef<{ mouseX: number; mouseY: number; widgetX: number; widgetY: number }>({
@@ -149,7 +154,7 @@ export function WidgetContainer({
       <span className="absolute -bottom-[1px] -left-[1px] w-2.5 h-2.5 border-b border-l border-cyan-400/70 pointer-events-none" />
       <span className="absolute -bottom-[1px] -right-[1px] w-2.5 h-2.5 border-b border-r border-cyan-400/70 pointer-events-none" />
       {/* Header bar (Drag Handle) */}
-      {!isSystemWidget && <div
+      <div
         className="flex items-center justify-between px-3 py-1 cursor-grab active:cursor-grabbing border-b border-cyan-500/15"
         onPointerDown={handlePointerDownHeader}
         onPointerMove={handlePointerMoveHeader}
@@ -157,7 +162,7 @@ export function WidgetContainer({
       >
         <div className="flex items-center gap-2 overflow-hidden">
           <span className="text-[10px] font-mono text-cyan-400 uppercase tracking-wider truncate">
-            {widget.widgetType}
+            {canonicalWidgetType ?? widget.widgetType}
           </span>
           {widget.pinned && (
             <span className="text-[10px] text-cyan-300 font-mono" title="Pinned to spatial canvas">
@@ -199,12 +204,16 @@ export function WidgetContainer({
             ✕
           </button>
         </div>
-      </div>}
+      </div>
 
       {/* Body content */}
-      <div className={isSystemWidget ? "p-4 overflow-auto text-left h-full" : "p-3.5 overflow-auto text-left h-[calc(100%-42px)]"}>
-        {isSystemWidget ? (
+      <div className={isSystemWidget ? "p-4 overflow-auto text-left h-[calc(100%-42px)]" : "p-3.5 overflow-auto text-left h-[calc(100%-42px)]"}>
+        {!isKnownWidget ? (
+          <UnavailableWidget widget={widget} />
+        ) : isSystemWidget ? (
           <SystemWidget widget={widget} />
+        ) : canonicalWidgetType === "media_control" || canonicalWidgetType === "file_viewer" ? (
+          <GenericWidget widget={widget} definition={getWidgetDefinition(canonicalWidgetType)} />
         ) : widget.content?.surface_spec || widget.content?.schema_version || widget.widgetType === "composed_surface" ? (
           <SurfaceComposer
             spec={

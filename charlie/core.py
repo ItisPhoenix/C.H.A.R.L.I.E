@@ -2016,9 +2016,10 @@ class Brain:
                 request=user_input,
                 capability=fp_match.target_domain,
                 operation=fp_match.semantic_op_id,
-                result=fp_res,
+                result=str(fp_res),
                 verification=v_dict,
                 source="deterministic_fastpath",
+                data=getattr(fp_res, "data", {}),
             )
             p_ctx = PresentationContext(platform=platform)
             intent = default_presentation_resolver.resolve(outcome, p_ctx)

@@ -361,7 +361,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+_FRONTEND_DIST = Path(
+    os.environ.get(
+        "CHARLIE_FRONTEND_DIST",
+        str(Path(__file__).parent.parent / "frontend" / "dist"),
+    )
+)
 
 
 def _frontend_build_identity() -> dict[str, Any] | None:
@@ -372,8 +377,9 @@ def _frontend_build_identity() -> dict[str, Any] | None:
     return manifest if isinstance(manifest, dict) else None
 
 
-if _FRONTEND_DIST.is_dir():
-    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="surface-assets")
+_FRONTEND_ASSETS = _FRONTEND_DIST / "assets"
+if _FRONTEND_ASSETS.is_dir():
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_ASSETS), name="surface-assets")
 
 
 @app.get("/")

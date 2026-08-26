@@ -1,6 +1,11 @@
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from charlie.fastpaths import (
+    FastPathResult,
+    _handle_system_diagnostics,
     match_direct_url,
     match_fast_path,
     match_filesystem_basic,
@@ -12,6 +17,73 @@ from charlie.fastpaths import (
 
 
 class TestSystemTelemetryMatching:
+    def test_current_cpu_temperature_is_local_telemetry(self):
+        for query in (
+            "Show me the current CPU temperature.",
+            "What is my CPU temp right now?",
+            "CPU temperature currently",
+        ):
+            match = match_system_telemetry(query)
+            assert match is not None
+            assert match.intent == "system_cpu_temperature"
+            assert match.arguments == {"check": "cpu_temperature"}
+
+    def test_safe_cpu_temperature_remains_informational(self):
+        assert match_system_telemetry("What temperature is considered safe for a CPU?") is None
+
+    def test_cpu_temperature_unavailable_is_explicit(self, monkeypatch):
+        fake_psutil = SimpleNamespace(sensors_temperatures=lambda: {})
+        monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+        result = _handle_system_diagnostics("cpu_temperature")
+
+        assert result.data["metric_name"] == "CPU Temperature"
+        assert result.data["value"] is None
+        assert result.data["available"] is False
+        assert "unavailable" in result.lower()
+
+    def test_cpu_temperature_reads_cpu_sensor(self, monkeypatch):
+        reading = SimpleNamespace(current=67.4)
+        fake_psutil = SimpleNamespace(sensors_temperatures=lambda: {"coretemp": [reading]})
+        monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+        result = _handle_system_diagnostics("cpu_temperature")
+
+        assert result.data["value"] == 67.4
+        assert result.data["available"] is True
+        assert "67.4°C" in result
+
+    def test_system_payload_preserves_authoritative_percent_value(self, monkeypatch):
+        fake_psutil = SimpleNamespace(
+            cpu_percent=lambda interval=None: 74.3,
+            cpu_count=lambda logical=True: 12,
+            virtual_memory=lambda: SimpleNamespace(percent=74.3, total=1000, available=257),
+            disk_usage=lambda path: SimpleNamespace(percent=61.2, free=400, total=1000),
+            sensors_battery=lambda: None,
+        )
+        monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+        result = _handle_system_diagnostics("memory")
+
+        assert isinstance(result, FastPathResult)
+        assert result.data["value"] == 74.3
+        assert result.data["unit"] == "percent_0_100"
+        assert "74.3%" in result
+
+    def test_cpu_sampling_keeps_nonzero_and_authoritative_zero(self, monkeypatch):
+        samples = iter([37.0, 0.0])
+        fake_psutil = SimpleNamespace(
+            cpu_percent=lambda interval=None: next(samples),
+            cpu_count=lambda logical=True: 12,
+        )
+        monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+        nonzero = _handle_system_diagnostics("cpu")
+        zero = _handle_system_diagnostics("cpu")
+
+        assert nonzero.data["value"] == 37.0
+        assert zero.data["value"] == 0.0
+
     def test_cpu_queries(self):
         queries = [
             "what's the cpu usage?",
@@ -34,6 +106,7 @@ class TestSystemTelemetryMatching:
             "how much memory is free?",
             "RAM percent",
             "memory usage",
+            "Show me the current memory utilization.",
         ]
         for q in queries:
             m = match_system_telemetry(q)
@@ -213,6 +286,29 @@ class TestFastPathPolicyIntegration:
         assert event_type == "presentation_intent"
         assert payload["kind"] == "widget"
         assert meta.session_id == "gate5-test"
+
+    @pytest.mark.asyncio
+    async def test_unavailable_cpu_temperature_does_not_enter_research(self, monkeypatch):
+        from charlie.config import Config
+        from charlie.core import Brain
+
+        fake_psutil = SimpleNamespace(sensors_temperatures=lambda: {})
+        monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+        brain = Brain(Config(llm_url="https://example.com/v1", llm_key="test-key", llm_model="dummy"))
+
+        async def fail_research(*args, **kwargs):
+            raise AssertionError("local CPU temperature must not enter research")
+
+        monkeypatch.setattr(brain, "_run_research", fail_research)
+        chunks = [
+            chunk
+            async for chunk in brain.chat_stream(
+                "Show me the current CPU temperature.", platform="web", session_id="cpu-temp-test"
+            )
+        ]
+
+        result = "".join(chunks)
+        assert "unavailable" in result.lower()
 
     @pytest.mark.asyncio
     async def test_fast_path_policy_enforcement_allow(self, monkeypatch):

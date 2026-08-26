@@ -12,6 +12,7 @@ import { RecentWorkspacesModal } from "../layout/RecentWorkspacesModal";
 import { SettingsModal } from "./SettingsModal";
 import { TaskSwitcher } from "./TaskSwitcher";
 import { ToolApprovalDialog } from "../components/ToolApprovalDialog";
+import { sendCommand } from "../runtime/bridge";
 import type { ZoneContext } from "../layout/zones";
 import type { Rect } from "../layout/geometry";
 import "./scene.css";
@@ -193,7 +194,12 @@ export function CharlieScene(): ReactElement | null {
       />
 
       {/* 3. Widget Layer (Contextual draggable/resizable/pinnable widgets) */}
-      <WidgetLayer />
+      <WidgetLayer
+        onDismiss={(id) => {
+          sendCommand("presentation_command", { action: "dismiss_widget", id });
+          dismissIntent(id);
+        }}
+      />
 
       {/* 4. Context Layer (Near-core captions, transient notifications, attention modals) */}
       <ContextLayer
@@ -225,6 +231,7 @@ export function CharlieScene(): ReactElement | null {
         coreState={projection.coreState}
         activeWorkspaceType={projection.activeWorkspace?.type}
         onClearScreen={handleClearScreen}
+        onOpenConversation={() => sendCommand("hud_invoke")}
         onOpenRecent={() => setRecentModalOpen(true)}
         onOpenSettings={() => setSettingsModalOpen(true)}
       />
