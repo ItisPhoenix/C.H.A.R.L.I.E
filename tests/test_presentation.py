@@ -37,6 +37,21 @@ class TestPresentationKindSelection:
         assert intent.replace_key == "widget:system_metric"
         assert intent.anchor == AnchorTarget.CORE
 
+    def test_full_system_status_resolves_to_system_workspace(self):
+        intent = PresentationResolver().resolve(
+            ExecutionOutcome(
+                request="Show me the full system status.",
+                capability="system",
+                operation="system.workspace.read",
+                result="Full system status collected from the live host.",
+                data={"vitals": {"gauges": []}, "processes": {"processes": []}},
+                status="completed",
+            )
+        )
+        assert intent.kind == PresentationKind.WORKSPACE
+        assert intent.workspace_type == "system"
+        assert intent.content["vitals"] == {"gauges": []}
+
     def test_structured_system_metric_survives_presentation_payload(self):
         intent = PresentationResolver().resolve(
             ExecutionOutcome(

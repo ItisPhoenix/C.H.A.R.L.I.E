@@ -1063,6 +1063,52 @@ class VoiceEngine:
         ).strip()
         return text[:240] or "audio device initialization failed"
 
+    @staticmethod
+    def _input_device_candidates(configured_index: int) -> list[int | None]:
+        """Return configured input first, then same device via other host APIs."""
+        selected = None if configured_index == -1 else configured_index
+        selected_index = int(sd.default.device[0]) if selected is None else int(selected)
+        selected_info = sd.query_devices(selected_index)
+        selected_name = str(selected_info.get("name", "")).strip()
+        candidates: list[int | None] = [selected_index]
+        if not selected_name:
+            return candidates
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            return candidates
+        for index, info in enumerate(devices):
+            if index == selected_index or int(info.get("max_input_channels", 0)) < 1:
+                continue
+            if str(info.get("name", "")).strip() == selected_name:
+                candidates.append(index)
+        return candidates
+
+    def _open_input_stream(self, samplerate: int, block_size: int, callback, configured_index: int):
+        """Open capture with bounded retry and same-device host API fallback."""
+        errors: list[str] = []
+        for candidate_index in self._input_device_candidates(configured_index):
+            for attempt in range(2):
+                stream = None
+                try:
+                    stream = sd.InputStream(
+                        samplerate=samplerate, channels=1, dtype="float32",
+                        blocksize=block_size, device=candidate_index, callback=callback,
+                    )
+                    stream.start()
+                    return stream, candidate_index
+                except Exception as error:
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
+                    errors.append(f"{candidate_index if candidate_index is not None else 'default'}: {self._safe_audio_error(error)}")
+                    if attempt == 0:
+                        time.sleep(0.25)
+        detail = "; ".join(errors[-4:]) or "no input devices available"
+        raise RuntimeError(f"all microphone open attempts failed ({detail})")
+
     def _run(self):
         samplerate = 16000
         block_size = 1024
@@ -1122,15 +1168,24 @@ class VoiceEngine:
             return
 
         try:
-            self.audio_stream = sd.InputStream(
-                samplerate=samplerate,
-                channels=1,
-                dtype="float32",
-                blocksize=block_size,
-                device=input_device,
-                callback=_callback,
+            self.audio_stream, selected_device_index = self._open_input_stream(
+                samplerate, block_size, _callback, self.config.mic_index
             )
-            self.audio_stream.start()
+            opened_info = sd.query_devices(selected_device_index)
+            opened_hostapi_index = int(opened_info.get("hostapi", -1))
+            opened_hostapi = sd.query_hostapis(opened_hostapi_index) if opened_hostapi_index >= 0 else {}
+            device_info.update(
+                {
+                    "selected_device_index": selected_device_index,
+                    "device_name": str(opened_info.get("name", selected_device_index)),
+                    "host_api": str(opened_hostapi.get("name", "unknown")),
+                    "max_input_channels": int(opened_info.get("max_input_channels", 0)),
+                    "native_sample_rate": float(opened_info.get("default_samplerate", 0.0)),
+                    "fallback_host_api": selected_device_index != (
+                        int(sd.default.device[0]) if input_device is None else input_device
+                    ),
+                }
+            )
         except Exception as e:
             if self.audio_stream is not None:
                 try:

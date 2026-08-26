@@ -2,11 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from charlie.research.citations import assign_citations, strip_invalid_citations, validate_citations
+from charlie.research.citations import assign_citations, strip_citation_markers, strip_invalid_citations, validate_citations
 from charlie.research.engine import ResearchEngine
 from charlie.research.fetch import validate_public_url
 from charlie.research.models import ResearchMode, ResearchReport, SearchResult, SourceDocument
-from charlie.research.router import route
+from charlie.research.router import is_briefing_query, route
 from charlie.research.search import build_plan, clean_query
 
 
@@ -22,6 +22,19 @@ def test_current_request_asking_for_sources_fetches_documents():
     decision = route("latest major AI developments today with sources")
     assert decision.should_research is True
     assert decision.mode is ResearchMode.STANDARD
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Give me today's intelligence briefing.",
+        "Prepare a news roundup for today.",
+        "Create a daily summary.",
+    ],
+)
+def test_briefing_intent_is_shared_by_research_and_presentation(query):
+    assert is_briefing_query(query)
+    assert route(query).should_research
 
 
 def test_research_router_routes_factual_and_comparison_queries():
@@ -85,6 +98,7 @@ def test_citation_validation_removes_unknown_source_ids():
     assert validate_citations("Claim [S1]", citations)
     assert not validate_citations("Claim [S99]", citations)
     assert strip_invalid_citations("Claim [S1] [S99]", citations) == "Claim [S1] "
+    assert strip_citation_markers("Claim [S1] [S99]") == "Claim"
 
 
 class _Provider:

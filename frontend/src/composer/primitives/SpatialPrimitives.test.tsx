@@ -2,10 +2,17 @@ import { describe, expect, test } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { SpatialMapPrimitive } from "./SpatialMapPrimitive";
 import { DensityHeatmapPrimitive } from "./DensityHeatmapPrimitive";
-import { TelemetryGaugesPrimitive } from "./TelemetryGaugesPrimitive";
+import { TelemetryGaugesPrimitive, formatGaugeValue } from "./TelemetryGaugesPrimitive";
 import { ProcessTelemetryPrimitive } from "./ProcessTelemetryPrimitive";
 
 describe("Phase 9 Spatial Primitives Suite", () => {
+  test("formats telemetry units truthfully", () => {
+    expect(formatGaugeValue(67.4, "percent_0_100")).toBe("67.4%");
+    expect(formatGaugeValue(0.674, "fraction_0_1")).toBe("67.4%");
+    expect(formatGaugeValue(67.4, "celsius")).toBe("67.4°C");
+    expect(formatGaugeValue(67.4, "unknown_unit")).toBe("67.4");
+  });
+
   test("SpatialMapPrimitive renders radar mode with distance rings and layer pills", () => {
     render(
       <SpatialMapPrimitive

@@ -210,6 +210,20 @@ class TestVoiceEngineInit:
         assert not engine.muted
         assert engine.volume == 1.0
 
+    def test_input_device_candidates_include_same_microphone_host_api_variants(self):
+        with patch("charlie.voice.sd") as mock_sd:
+            mock_sd.default.device = [1, 4]
+            mock_sd.query_devices.side_effect = [
+                {"name": "Microphone (NVIDIA Broadcast)", "max_input_channels": 2},
+                [
+                    {"name": "Microsoft Sound Mapper - Input", "max_input_channels": 2},
+                    {"name": "Microphone (NVIDIA Broadcast)", "max_input_channels": 2},
+                    {"name": "Microphone (Realtek(R) Audio)", "max_input_channels": 2},
+                    {"name": "Microphone (NVIDIA Broadcast)", "max_input_channels": 2},
+                ],
+            ]
+            assert VoiceEngine._input_device_candidates(-1) == [1, 3]
+
     def test_wake_word_disabled_by_default(self):
         engine = self._make_engine()
         assert engine._wake_word_detector is None

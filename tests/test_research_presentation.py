@@ -203,7 +203,7 @@ def test_resolver_fails_safe_for_future_wrong_and_incomplete_briefing_payloads()
     ):
         intent = PresentationResolver().resolve(
             ExecutionOutcome(
-                request="daily briefing",
+                request="Give me today's intelligence briefing.",
                 operation="news_briefing",
                 result="safe briefing fallback",
                 data=invalid,

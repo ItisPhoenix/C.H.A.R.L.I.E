@@ -21,6 +21,30 @@ export interface TelemetryGaugesData {
   stats?: TelemetryStatPair[];
 }
 
+export function formatGaugeValue(value: number, unit?: string): string {
+  const numeric = Number.isFinite(value) ? value : 0;
+  switch ((unit || "percent_0_100").toLowerCase()) {
+    case "percent_0_100":
+      return `${numeric}%`;
+    case "fraction_0_1":
+      return `${numeric * 100}%`;
+    case "celsius":
+      return `${numeric}°C`;
+    case "bytes": {
+      const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+      let scaled = numeric;
+      let index = 0;
+      while (scaled >= 1024 && index < units.length - 1) {
+        scaled /= 1024;
+        index += 1;
+      }
+      return `${scaled} ${units[index]}`;
+    }
+    default:
+      return String(numeric);
+  }
+}
+
 export function TelemetryGaugesPrimitive({
   primitive,
   data,
@@ -100,8 +124,7 @@ export function TelemetryGaugesPrimitive({
                 <div className="text-left">
                   <div className="text-[10px] text-cyan-400/80 font-bold">{g.label}</div>
                   <div className="text-[11px] text-slate-300">
-                    {g.value}
-                    {g.unit || "%"}
+                    {formatGaugeValue(g.value, g.unit)}
                   </div>
                 </div>
               </div>

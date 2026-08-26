@@ -87,8 +87,8 @@ export function SourceEvidencePrimitive({
       {items.length === 0 ? (
         <div className="text-xs text-slate-500 italic py-2">No evidence sources available.</div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
-          {items.map((item, idx) => {
+        <div className="charlie-evidence-deck grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+          {items.slice(0, 4).map((item, idx) => {
             const pub = item.publisher || item.domain || "INTELLIGENCE_SOURCE";
             const timeTag = item.time || item.timestamp || "RECENT";
 
@@ -98,7 +98,7 @@ export function SourceEvidencePrimitive({
                 variant="source"
                 interactive
                 onClick={() => setActiveModalItem(item)}
-                className="flex flex-col justify-between group"
+                className="charlie-evidence-card flex flex-col justify-between group"
               >
                 <div>
                   <ContextCardHeader

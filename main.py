@@ -492,7 +492,8 @@ def _safe_speak(voice, text: str, emotion: str, label: str = "") -> None:
     A mid-stream TTS error must never abort the answer generation loop --
     the UI token stream and message persistence downstream must still run.
     """
-    if not text or not text.strip():
+    text = re.sub(r"\[S\d+\]", "", text or "").replace("  ", " ").strip()
+    if not text:
         return
     try:
         voice.speak(text.strip(), emotion)
@@ -730,24 +731,18 @@ async def main():
         """Forward typed research cards with identity from owning chat turn."""
         if event_bus is None:
             return
+        from charlie.research.router import is_briefing_query
         from charlie.research.presentation import (
             build_briefing_workspace_payload,
             build_research_workspace_payload,
         )
 
-        payload = (
-            build_briefing_workspace_payload(report)
-            if any(k in report.query.lower() for k in ("what's happening today", "daily briefing", "news"))
-            else build_research_workspace_payload(report)
-        )
+        is_briefing = is_briefing_query(report.query)
+        payload = build_briefing_workspace_payload(report) if is_briefing else build_research_workspace_payload(report)
         payload["session_id"] = session_id
 
         from charlie.presentation import ExecutionOutcome, default_presentation_resolver
 
-        is_briefing = any(
-            k in report.query.lower()
-            for k in ("what's happening today", "daily briefing", "news")
-        )
         outcome = ExecutionOutcome(
             request=report.query,
             capability="research",

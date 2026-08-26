@@ -25,6 +25,7 @@ from charlie.presentation_contract_generated import (
     PresentationKind,
 )
 from charlie.utils import utc_now_iso
+from charlie.research.router import is_briefing_query
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -538,6 +539,23 @@ class PresentationResolver:
 
         # 6. Domain-specific Resolver Rules
 
+        # Full system requests use the canonical SystemWorkspace. Narrow metric
+        # requests remain compact system_metric widgets.
+        if outcome.operation == "system.workspace.read":
+            return self._build_surface_intent(
+                outcome,
+                taxonomy="workspace",
+                canonical_surface="system",
+                capability="system",
+                operation=outcome.operation,
+                title="Machine Diagnostics & System Telemetry",
+                summary=result_text,
+                content=outcome.data,
+                spoken_text=result_text,
+                caption_text=result_text,
+                replace_key="workspace:system",
+            )
+
         # System Telemetry (CPU / RAM / Disk / Battery / Health)
         if outcome.capability in ("system", "charlie.system") or (
             outcome.operation
@@ -573,10 +591,7 @@ class PresentationResolver:
             return self._resolve_desktop_action(outcome, ctx, result_text, effective_user_intent, is_verified)
 
         # Daily Briefing / News -> WORKSPACE (briefing)
-        if outcome.operation in ("news_briefing", "daily_summary") or (
-            outcome.request
-            and any(k in outcome.request.lower() for k in ("what's happening today", "daily briefing", "news"))
-        ):
+        if outcome.operation in ("news_briefing", "daily_summary") or is_briefing_query(outcome.request or ""):
             return self._resolve_briefing_workspace(outcome, ctx, result_text)
 
         # Research & Deep Analysis -> WORKSPACE (research)

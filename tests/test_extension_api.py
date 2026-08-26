@@ -3,11 +3,17 @@
 import pytest
 from starlette.testclient import TestClient
 
+from charlie.ipc import EventBus
 from charlie.web_server import app
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    async def isolated_send_command(self, command):
+        """Never forward self-extension tests into a concurrently running Charlie."""
+        return None
+
+    monkeypatch.setattr(EventBus, "send_command", isolated_send_command)
     with TestClient(app) as test_client:
         yield test_client
 

@@ -11,12 +11,22 @@ from charlie.fastpaths import (
     match_filesystem_basic,
     match_focus_app,
     match_media_volume,
+    match_system_workspace,
     match_system_telemetry,
     match_windows_settings,
 )
 
 
 class TestSystemTelemetryMatching:
+    def test_full_system_status_admits_system_workspace(self):
+        match = match_fast_path("Show me the full system status.")
+        assert match is not None
+        assert match.intent == "system_workspace"
+        assert match.semantic_op_id == "system.workspace.read"
+
+    def test_narrow_system_query_does_not_admit_workspace(self):
+        assert match_system_workspace("Show me the current CPU utilization.") is None
+
     def test_current_cpu_temperature_is_local_telemetry(self):
         for query in (
             "Show me the current CPU temperature.",

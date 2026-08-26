@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { ResearchWorkspace } from "./ResearchWorkspace";
 import { BriefingWorkspace } from "./BriefingWorkspace";
 import { SystemWorkspace } from "./SystemWorkspace";
@@ -61,6 +61,7 @@ describe("Phase 9 Workspaces Suite", () => {
     expect(screen.getByText("OPERATIONAL INTELLIGENCE BRIEFING")).toBeDefined();
     expect(screen.getByText("TOP HEADLINE")).toBeDefined();
     expect(screen.getByText("GLOBAL BRIEFING UPDATE")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Deep Dive" }));
     expect(screen.getByText("VERIFIED SOURCES")).toBeDefined();
   });
 
@@ -83,8 +84,9 @@ describe("Phase 9 Workspaces Suite", () => {
         }}
       />
     );
-    expect(screen.getByText("ACTIVE SYSTEM OPERATIONS")).toBeDefined();
     expect(screen.getByText("SYSTEM STATUS")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Processes" }));
+    expect(screen.getByText("ACTIVE SYSTEM OPERATIONS")).toBeDefined();
     expect(screen.getByText("INGESTION")).toBeDefined();
   });
 

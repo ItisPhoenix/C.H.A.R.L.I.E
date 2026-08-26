@@ -38,3 +38,8 @@ def validate_citations(text: str, citations: Iterable[Citation]) -> bool:
 def strip_invalid_citations(text: str, citations: Iterable[Citation]) -> str:
     valid = {item.source_id for item in citations}
     return _CITATION_RE.sub(lambda match: match.group(0) if match.group(1) in valid else "", text or "")
+
+
+def strip_citation_markers(text: str) -> str:
+    """Remove visual source markers from speech while retaining answer text."""
+    return _CITATION_RE.sub("", text or "").replace("  ", " ").strip()

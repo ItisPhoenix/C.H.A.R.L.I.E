@@ -19,6 +19,10 @@ _RESEARCH_SIGNALS = re.compile(
     r"look into|analyze current)\b",
     re.IGNORECASE,
 )
+_BRIEFING_SIGNALS = re.compile(
+    r"\b(?:briefing|news\s+roundup|news\s+digest|daily\s+summary|intelligence\s+briefing)\b",
+    re.IGNORECASE,
+)
 _FACTUAL_RESEARCH = re.compile(r"\bwhat\s+is\b.+\bused\s+for\b", re.IGNORECASE)
 _SPECIALIZED_FACTUAL = re.compile(
     r"\bwhat\s+is\b.+\b(status|proposal|protocol|canonicalization|specification|discovery)\b",
@@ -43,6 +47,11 @@ class ResearchDecision:
     interactive: bool = False
 
 
+def is_briefing_query(query: str) -> bool:
+    """Identify briefing intent consistently across routing and presentation."""
+    return bool(_BRIEFING_SIGNALS.search(query.strip()))
+
+
 def _coerce_mode(mode: str | ResearchMode | None) -> Optional[ResearchMode]:
     if mode is None or str(mode).lower() in {"", "auto"}:
         return None
@@ -60,6 +69,8 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
         return ResearchDecision(True, explicit, "explicit mode")
     if _INTERACTIVE_SIGNALS.search(text) and re.search(r"\bon\s+(youtube|amazon|x|twitter)\b", text, re.I):
         return ResearchDecision(False, None, "interactive site task", interactive=True)
+    if is_briefing_query(text):
+        return ResearchDecision(True, ResearchMode.STANDARD, "briefing requires fresh sources")
     if _RESEARCH_SIGNALS.search(text):
         mode = ResearchMode.DEEP if re.search(r"deep|in[- ]depth|thorough", text, re.I) else ResearchMode.STANDARD
         return ResearchDecision(True, mode, "explicit research intent")

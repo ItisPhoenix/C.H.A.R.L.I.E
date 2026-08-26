@@ -81,6 +81,78 @@ _PROCESSES_RE = re.compile(
     r"\b(?:list|show|what\s+are\s+the)\s+(?:top\s+)?(?:running\s+)?processes\b",
     re.IGNORECASE,
 )
+_FULL_SYSTEM_RE = re.compile(
+    r"\b(?:show|give|report|display)\s+(?:me\s+)?(?:the\s+)?(?:full\s+)?(?:system|machine)\s+"
+    r"(?:status|overview|health|diagnostics|telemetry|matrix)\b|"
+    r"\bfull\s+system\s+(?:status|overview|health|diagnostics|telemetry|matrix)\b",
+    re.IGNORECASE,
+)
+
+
+def _handle_full_system_status() -> FastPathResult:
+    """Collect the fields required by SystemWorkspace from live host state."""
+    try:
+        import psutil
+
+        cpu = float(psutil.cpu_percent(interval=0.1))
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage(os.path.abspath(os.sep))
+        process_rows = []
+        for process in sorted(
+            psutil.process_iter(["pid", "name", "status", "memory_percent"]),
+            key=lambda item: item.info.get("memory_percent") or 0.0,
+            reverse=True,
+        )[:8]:
+            info = process.info
+            process_rows.append(
+                {
+                    "id": str(info.get("pid")),
+                    "name": info.get("name") or "Unknown",
+                    "status": str(info.get("status") or "running").upper(),
+                    "memory_percent": round(float(info.get("memory_percent") or 0.0), 1),
+                }
+            )
+        return FastPathResult(
+            "Full system status collected from the live host.",
+            {
+                "title": "MACHINE DIAGNOSTICS & SYSTEM TELEMETRY",
+                "subtitle": "ACTIVE RUNTIME // HOST HEALTH // PROCESS MESH",
+                "vitals": {
+                    "title": "SYSTEM STATUS",
+                    "subtitle": "LIVE HOST TELEMETRY",
+                    "gauges": [
+                        {"id": "cpu", "label": "CPU", "value": cpu, "unit": "percent_0_100"},
+                        {"id": "memory", "label": "MEMORY", "value": float(memory.percent), "unit": "percent_0_100"},
+                        {"id": "disk", "label": "DISK", "value": float(disk.percent), "unit": "percent_0_100"},
+                    ],
+                },
+                "processes": {
+                    "title": "WHAT IS RUNNING",
+                    "subtitle": "TOP LIVE PROCESSES BY MEMORY",
+                    "processes": process_rows,
+                },
+                "operations": [],
+                "logs": [],
+            },
+        )
+    except Exception as exc:
+        logger.warning("Full system workspace telemetry unavailable: %s", exc)
+        return FastPathResult(
+            "Full system status is unavailable.",
+            {"vitals": None, "processes": None, "operations": [], "logs": []},
+        )
+
+
+def match_system_workspace(query: str) -> Optional[FastPathMatch]:
+    if not _FULL_SYSTEM_RE.search(query.strip()):
+        return None
+    return FastPathMatch(
+        intent="system_workspace",
+        semantic_op_id="system.workspace.read",
+        tool_name="system_diagnostics",
+        target_domain="system",
+        direct_handler=_handle_full_system_status,
+    )
 
 
 def _handle_system_diagnostics(check: str) -> str:
@@ -580,12 +652,17 @@ def match_fast_path(query: str) -> Optional[FastPathMatch]:
     if not query or len(query.strip()) == 0:
         return None
 
-    # 1. System Telemetry
+    # 1. Full system workspace before narrower telemetry matchers.
+    m = match_system_workspace(query)
+    if m:
+        return m
+
+    # 2. System Telemetry
     m = match_system_telemetry(query)
     if m:
         return m
 
-    # 2. Media / Volume
+    # 3. Media / Volume
     m = match_media_volume(query)
     if m:
         return m
