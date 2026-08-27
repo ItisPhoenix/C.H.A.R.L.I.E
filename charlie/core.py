@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+from functools import wraps
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
 
@@ -36,7 +37,14 @@ from charlie.streaming import (
 )
 from charlie.tools import ToolExecutionResult, pop_pending_vision_image
 from charlie.tools import registry as tool_registry
-from charlie.turn_contracts import ResultEnvelope, ResultStatus
+from charlie.turn_contracts import (
+    IntentDecision,
+    ResultEnvelope,
+    ResultStatus,
+    TurnContractError,
+    TurnRequest,
+    validate_turn_chain,
+)
 from charlie.utils import build_auth_headers, make_id, parse_json_object
 
 try:
@@ -868,6 +876,18 @@ _RESULT_FAILURE_STATUSES = frozenset(
     }
 )
 
+_FRESHNESS_REQUIREMENT_RE = re.compile(
+    r"\b(?:today|latest|currently|current|now|right\s+now|live|recent|breaking|trending|news|"
+    r"prices?|cost|availability|schedule|scores?|weather|sports|release|version)\b",
+    re.IGNORECASE,
+)
+
+
+def _freshness_requirement(query: str) -> Optional[str]:
+    """Record live-information semantics without changing research routing."""
+
+    return "live" if _FRESHNESS_REQUIREMENT_RE.search(query) else None
+
 
 def _tool_result_text(raw_result: Any) -> str:
     """Return the existing textual adapter representation for model-facing paths."""
@@ -1040,6 +1060,7 @@ class Brain:
         on_tool_call: Optional[callable] = None,
         on_tool_result: Optional[callable] = None,
         on_operation_result: Optional[Callable[[str, ResultEnvelope], None]] = None,
+        on_intent_decision: Optional[Callable[[IntentDecision], None]] = None,
         on_thinking_update: Optional[callable] = None,
         on_tool_approval_request: Optional[callable] = None,
         on_result_stored: Optional[callable] = None,
@@ -1057,6 +1078,7 @@ class Brain:
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
         self.on_operation_result = on_operation_result
+        self.on_intent_decision = on_intent_decision
         self.on_thinking_update = on_thinking_update
         self.on_tool_approval_request = on_tool_approval_request
         self.on_result_stored = on_result_stored
@@ -1090,6 +1112,8 @@ class Brain:
                 logger.warning("Failed to start desktop panic hotkey listener", exc_info=True)
         self._tool_locks: Dict[str, asyncio.Lock] = {}
         self.history: List[Dict[str, Any]] = []
+        self._intent_decisions: Dict[str, IntentDecision] = {}
+        self.last_intent_decision: Optional[IntentDecision] = None
         self._history_max_turns = 5
         self._turns_since_nudge: int = 0
         self._active_goal: Optional[str] = None
@@ -1327,6 +1351,63 @@ class Brain:
     def cancel_chat(self) -> None:
         """Cancel the current chat generation (barge-in support)."""
         self._chat_generation += 1
+
+    def _remember_intent_decision(self, decision: IntentDecision) -> IntentDecision:
+        """Retain one canonical decision per turn without persisting it."""
+
+        existing = self._intent_decisions.get(decision.turn_id)
+        if existing is not None:
+            if existing != decision:
+                logger.error(
+                    "Ignoring competing intent decision for turn %s: %s -> %s",
+                    decision.turn_id,
+                    existing.intent,
+                    decision.intent,
+                )
+            self.last_intent_decision = existing
+            return existing
+
+        self._intent_decisions[decision.turn_id] = decision
+        self.last_intent_decision = decision
+        if self.on_intent_decision is not None:
+            try:
+                self.on_intent_decision(decision)
+            except Exception:
+                logger.warning("Intent decision callback failed for turn %s", decision.turn_id, exc_info=True)
+        return decision
+
+    def finalize_intent_decision(self, turn_id: str) -> None:
+        """Release the temporary decision after its owning turn finishes."""
+
+        self._intent_decisions.pop(turn_id, None)
+        if self.last_intent_decision is not None and self.last_intent_decision.turn_id == turn_id:
+            self.last_intent_decision = None
+
+    def record_intent_decision(
+        self,
+        request: TurnRequest,
+        *,
+        intent: str,
+        capabilities: tuple[str, ...] = (),
+        freshness_requirement: Optional[str] = None,
+        routing_source: str = "deterministic",
+        confidence: Optional[float] = None,
+        rationale: str = "",
+        presentation_expectation: Optional[str] = None,
+    ) -> IntentDecision:
+        """Record the primary route selected for one ingress request."""
+
+        decision = IntentDecision.for_request(
+            request,
+            intent=intent,
+            capabilities=capabilities,
+            freshness_requirement=freshness_requirement,
+            routing_source=routing_source,
+            confidence=confidence,
+            rationale=rationale,
+            presentation_expectation=presentation_expectation,
+        )
+        return self._remember_intent_decision(decision)
 
     def _panic(self) -> None:
         """Global panic hotkey handler: halt desktop motion and cancel the turn."""
@@ -1852,6 +1933,8 @@ class Brain:
 
     async def close(self) -> None:
         """Close the HTTP client."""
+        self._intent_decisions.clear()
+        self.last_intent_decision = None
         await self.client.aclose()
         if self._vision_client:
             await self._vision_client.aclose()
@@ -1998,7 +2081,7 @@ class Brain:
             return router.RouteMatch(intent, {"app": app})
         return None
 
-    async def chat_stream(
+    async def _chat_stream_impl(
         self,
         user_input: str,
         platform: str = "voice",
@@ -2007,8 +2090,62 @@ class Brain:
         skip_tools: bool = False,
         task_id: Optional[str] = None,
         turn_id: Optional[str] = None,
+        turn_request: Optional[TurnRequest] = None,
+        intent_decision: Optional[IntentDecision] = None,
     ) -> AsyncGenerator[str, None]:
         from datetime import datetime
+
+        if turn_request is not None:
+            if user_input != turn_request.input:
+                raise TurnContractError("chat_stream input does not match TurnRequest")
+            if turn_id is not None and turn_id != turn_request.turn_id:
+                raise TurnContractError("chat_stream turn_id does not match TurnRequest")
+            if task_id is None and turn_request.task_id is not None:
+                task_id = turn_request.task_id
+            session_id = turn_request.session_id
+            platform = turn_request.channel
+            turn_id = turn_request.turn_id
+            if intent_decision is not None:
+                validate_turn_chain(turn_request, decision=intent_decision)
+        elif intent_decision is not None:
+            if turn_id is not None and turn_id != intent_decision.turn_id:
+                raise TurnContractError("intent_decision turn_id does not match chat_stream")
+            if session_id != "default" and session_id != intent_decision.session_id:
+                raise TurnContractError("intent_decision session_id does not match chat_stream")
+            turn_id = intent_decision.turn_id
+            if session_id == "default":
+                session_id = intent_decision.session_id
+
+        primary_decision = intent_decision
+        if primary_decision is not None:
+            primary_decision = self._remember_intent_decision(primary_decision)
+
+        def record_primary_decision(
+            *,
+            intent: str,
+            capabilities: tuple[str, ...] = (),
+            freshness_requirement: Optional[str] = None,
+            routing_source: str = "deterministic",
+            confidence: Optional[float] = None,
+            rationale: str = "",
+            presentation_expectation: Optional[str] = None,
+        ) -> Optional[IntentDecision]:
+            """Publish the first route decision; legacy calls remain uncorrelated."""
+
+            nonlocal primary_decision
+            if primary_decision is not None or turn_request is None:
+                return primary_decision
+            primary_decision = self.record_intent_decision(
+                turn_request,
+                intent=intent,
+                capabilities=capabilities,
+                freshness_requirement=freshness_requirement,
+                routing_source=routing_source,
+                confidence=confidence,
+                rationale=rationale,
+                presentation_expectation=presentation_expectation,
+            )
+            return primary_decision
 
         # Load session-specific history from SQLite store at the start of the turn
         if self.session_store:
@@ -2048,6 +2185,13 @@ class Brain:
         original_user_input = user_input
         explicit_memory = _detect_explicit_memory(user_input)
         if explicit_memory is not None:
+            record_primary_decision(
+                intent="memory",
+                capabilities=("memory",),
+                routing_source="deterministic",
+                confidence=1.0,
+                rationale="explicit memory request",
+            )
             result = await asyncio.to_thread(
                 tool_registry.execute_tool,
                 "vector_memory",
@@ -2058,6 +2202,13 @@ class Brain:
             return
         explicit_recall = _detect_explicit_recall(user_input)
         if explicit_recall is not None:
+            record_primary_decision(
+                intent="memory",
+                capabilities=("memory",),
+                routing_source="deterministic",
+                confidence=1.0,
+                rationale="explicit memory recall request",
+            )
             result = await asyncio.to_thread(
                 tool_registry.execute_tool,
                 "vector_memory",
@@ -2068,12 +2219,26 @@ class Brain:
             return
         fast = router.answer_time_date(user_input)
         if fast is not None:
+            record_primary_decision(
+                intent="time_date",
+                capabilities=("system",),
+                routing_source="deterministic",
+                confidence=1.0,
+                rationale="time/date matcher selected the system clock",
+            )
             logger.info("Fast-path time/date: %s -> %s", user_input, fast)
             yield fast
             return
         # --- Fast-path: opinion teaching (deterministic, no LLM needed) ---
         opinion = _detect_opinion_teaching(user_input)
         if opinion is not None:
+            record_primary_decision(
+                intent="memory",
+                capabilities=("memory",),
+                routing_source="deterministic",
+                confidence=1.0,
+                rationale="opinion teaching matcher selected memory update",
+            )
             logger.info("Opinion teaching detected: %s -> %s", user_input, opinion)
             try:
                 result = await asyncio.to_thread(
@@ -2095,6 +2260,13 @@ class Brain:
         # --- Fast-path: standing instruction (behavior rule, no LLM needed) ---
         instruction = _detect_standing_instruction(user_input)
         if instruction is not None:
+            record_primary_decision(
+                intent="memory",
+                capabilities=("memory",),
+                routing_source="deterministic",
+                confidence=1.0,
+                rationale="standing-instruction matcher selected memory update",
+            )
             self.world_model.add_rule(instruction, "teaching")
             from charlie.tools import emit_memory_updated
 
@@ -2104,6 +2276,13 @@ class Brain:
             return
         # --- Fast-path: review learned rules (deterministic, no LLM needed) ---
         if _detect_review_rules(user_input):
+            record_primary_decision(
+                intent="memory",
+                capabilities=("memory",),
+                routing_source="deterministic",
+                confidence=1.0,
+                rationale="learned-rule review matcher selected memory read",
+            )
             rules = self.world_model.list_rules(include_decayed=True)
             if not rules:
                 yield "I haven't learned anything from you yet."
@@ -2114,6 +2293,13 @@ class Brain:
         # --- Fast-path: forget a learned rule (deterministic, no LLM needed) ---
         forget_text = _detect_forget_rule(user_input)
         if forget_text is not None:
+            record_primary_decision(
+                intent="memory",
+                capabilities=("memory",),
+                routing_source="deterministic",
+                confidence=1.0,
+                rationale="forget-rule matcher selected memory update",
+            )
             matches = self.world_model.find_rules_matching(forget_text)
             for rule_id, _text in matches:
                 self.world_model.delete_rule(rule_id)
@@ -2126,6 +2312,12 @@ class Brain:
         # --- Fast-path: set goal (deterministic, no LLM needed) ---
         goal_text = _detect_set_goal(user_input)
         if goal_text is not None:
+            record_primary_decision(
+                intent="goal",
+                routing_source="control",
+                confidence=1.0,
+                rationale="explicit goal command selected local goal state",
+            )
             self._active_goal = goal_text
             self._goal_turns_remaining = 5
             logger.info("Goal set: %s", goal_text)
@@ -2159,6 +2351,13 @@ class Brain:
 
         # --- Fast-path: resume desktop control after the panic hotkey (deterministic, no LLM needed) ---
         if desktop_actions is not None and desktop_actions.is_halted() and _detect_desktop_resume(user_input):
+            record_primary_decision(
+                intent="desktop",
+                capabilities=("desktop",),
+                routing_source="control",
+                confidence=1.0,
+                rationale="desktop resume command selected halted-control recovery",
+            )
             desktop_actions.clear_halt()
             logger.info("Desktop control resumed by user command: %s", user_input)
             yield "Desktop control resumed."
@@ -2171,6 +2370,13 @@ class Brain:
 
             browser_media = router.match_browser_media_continuation(user_input, get_session().last_url)
             if browser_media is not None:
+                record_primary_decision(
+                    intent="browser",
+                    capabilities=("browser",),
+                    routing_source="browser_context",
+                    confidence=1.0,
+                    rationale="verified active browser media context selected browser control",
+                )
                 logger.info("Fast-path browser media continuation: %s", browser_media)
                 yield await self._browser_task_bounded(
                     browser_media,
@@ -2186,6 +2392,21 @@ class Brain:
 
         fp_match = match_fast_path(user_input)
         if fp_match is not None:
+            fastpath_capability = {"media": "system"}.get(fp_match.target_domain, fp_match.target_domain)
+            fastpath_intent = (
+                "system"
+                if fp_match.target_domain == "system"
+                else "browser"
+                if fp_match.target_domain == "browser"
+                else fp_match.target_domain
+            )
+            record_primary_decision(
+                intent=fastpath_intent,
+                capabilities=(fastpath_capability,),
+                routing_source="fastpath",
+                confidence=fp_match.confidence,
+                rationale=f"fastpath matched {fp_match.intent}",
+            )
             logger.info(
                 "Deterministic fast-path matched: %s -> %s (domain=%s)",
                 user_input,
@@ -2301,6 +2522,13 @@ class Brain:
         # --- Fast-path: close app (matcher pure, taskkill runs only after a confirmed match) ---
         close_match = await asyncio.to_thread(router.match_close_app, user_input)
         if close_match is not None:
+            record_primary_decision(
+                intent="desktop",
+                capabilities=("desktop",),
+                routing_source="deterministic",
+                confidence=1.0,
+                rationale="close-app matcher selected desktop app lifecycle",
+            )
             close_res = await asyncio.to_thread(router.execute_close_app, close_match[0], close_match[1])
             logger.info("Fast-path close app result: %s -> %s", user_input, close_res)
             self.world_model.record_event("app_close", close_res)
@@ -2313,6 +2541,13 @@ class Brain:
             open_apps, open_commands, open_remaining = open_match
             if not open_apps and open_remaining:
                 if self.config.browser_enabled:
+                    record_primary_decision(
+                        intent="browser",
+                        capabilities=("browser",),
+                        routing_source="browser_context",
+                        confidence=1.0,
+                        rationale="open-site matcher deferred execution to browser task",
+                    )
                     logger.info("Fast-path browser task (deferred open): %s", open_remaining)
                     yield await self._browser_task_bounded(
                         open_remaining,
@@ -2324,6 +2559,13 @@ class Brain:
                     return
                 user_input = open_remaining
             else:
+                record_primary_decision(
+                    intent="desktop",
+                    capabilities=("desktop",),
+                    routing_source="deterministic",
+                    confidence=1.0,
+                    rationale="open-app matcher selected desktop app lifecycle",
+                )
                 open_msg = await asyncio.to_thread(router.execute_open_app, open_apps, open_commands)
                 self.world_model.record_event("app_open", open_msg)
                 if open_remaining is None:
@@ -2343,6 +2585,13 @@ class Brain:
         # --- Fast-path: browser task ("play/watch/search X on <site>") bypasses the LLM's tool-call decision ---
         browser_task_query = router.match_browser_task(user_input)
         if browser_task_query is not None and self.config.browser_enabled:
+            record_primary_decision(
+                intent="browser",
+                capabilities=("browser",),
+                routing_source="browser_context",
+                confidence=1.0,
+                rationale="site-scoped browser matcher selected browser task",
+            )
             logger.info("Fast-path browser task: %s", browser_task_query)
             yield await self._browser_task_bounded(
                 browser_task_query,
@@ -2359,6 +2608,13 @@ class Brain:
 
             browser_continuation = router.match_browser_continuation(user_input, get_session().last_url)
             if browser_continuation is not None:
+                record_primary_decision(
+                    intent="browser",
+                    capabilities=("browser",),
+                    routing_source="browser_context",
+                    confidence=1.0,
+                    rationale="active browser page context selected browser continuation",
+                )
                 logger.info("Fast-path browser continuation: %s", browser_continuation)
                 yield await self._browser_task_bounded(
                     browser_continuation,
@@ -2372,6 +2628,13 @@ class Brain:
         # --- Fast-path: live background-task progress query (deterministic, no LLM needed) ---
         task_status_res = router.answer_background_task_status(user_input)
         if task_status_res is not None:
+            record_primary_decision(
+                intent="task",
+                capabilities=("task",),
+                routing_source="deterministic",
+                confidence=1.0,
+                rationale="background-task status matcher selected task status read",
+            )
             logger.info("Fast-path background-task status: %s -> %s", user_input, task_status_res)
             yield task_status_res
             return
@@ -2380,6 +2643,27 @@ class Brain:
         if self.config.router_classifier_enabled and router.is_router_classifier_candidate(user_input):
             classifier_match = await self._classify_router_intent(user_input)
             if classifier_match is not None:
+                classifier_capabilities = {
+                    "time_date": ("system",),
+                    "background_task_status": ("task",),
+                    "open_app": ("desktop",),
+                    "close_app": ("desktop",),
+                }.get(classifier_match.name, ())
+                classifier_intent = (
+                    "time_date"
+                    if classifier_match.name == "time_date"
+                    else "task"
+                    if classifier_match.name == "background_task_status"
+                    else "desktop"
+                    if classifier_match.name in {"open_app", "close_app"}
+                    else "conversation"
+                )
+                record_primary_decision(
+                    intent=classifier_intent,
+                    capabilities=classifier_capabilities,
+                    routing_source="model",
+                    rationale=f"router classifier selected {classifier_match.name}",
+                )
                 logger.info("Fast-path (classifier): %s -> %s", user_input, classifier_match.name)
                 if classifier_match.name in ("time_date", "background_task_status"):
                     yield classifier_match.args["answer"]
@@ -2396,6 +2680,35 @@ class Brain:
                     self.world_model.record_event("app_close", msg)
                     yield msg
                     return
+
+        research_route = (
+            route_research(user_input, getattr(self.config, "research_default_mode", "auto"))
+            if not skip_pre_search and getattr(self.config, "research_enabled", True)
+            else None
+        )
+        if research_route is not None and research_route.should_research:
+            record_primary_decision(
+                intent="research",
+                capabilities=("research",),
+                freshness_requirement=_freshness_requirement(user_input),
+                routing_source="research_router",
+                confidence=1.0,
+                rationale=research_route.reason,
+            )
+        elif router.SCREEN_QUERY_RE.search(user_input):
+            record_primary_decision(
+                intent="desktop",
+                capabilities=("desktop",),
+                routing_source="deterministic",
+                confidence=1.0,
+                rationale="screen query selected fresh desktop observation",
+            )
+        else:
+            record_primary_decision(
+                intent="conversation",
+                routing_source="model",
+                rationale="no deterministic capability route; delegated to the model",
+            )
 
         research_report: Optional[ResearchReport] = None
         turn_research_reports: List[ResearchReport] = []
@@ -3015,6 +3328,47 @@ class Brain:
             max_messages = self._history_max_turns * 2
             if len(self.history) > max_messages:
                 self.history = self.history[-max_messages:]
+
+    @wraps(_chat_stream_impl)
+    async def chat_stream(
+        self,
+        user_input: str,
+        platform: str = "voice",
+        skip_pre_search: bool = False,
+        session_id: str = "default",
+        skip_tools: bool = False,
+        task_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
+        turn_request: Optional[TurnRequest] = None,
+        intent_decision: Optional[IntentDecision] = None,
+    ) -> AsyncGenerator[str, None]:
+        decision_turn_id = (
+            turn_request.turn_id
+            if turn_request is not None
+            else intent_decision.turn_id
+            if intent_decision is not None
+            else None
+        )
+        stream = self._chat_stream_impl(
+            user_input,
+            platform=platform,
+            skip_pre_search=skip_pre_search,
+            session_id=session_id,
+            skip_tools=skip_tools,
+            task_id=task_id,
+            turn_id=turn_id,
+            turn_request=turn_request,
+            intent_decision=intent_decision,
+        )
+        try:
+            async for chunk in stream:
+                yield chunk
+        finally:
+            try:
+                await stream.aclose()
+            finally:
+                if decision_turn_id is not None:
+                    self.finalize_intent_decision(decision_turn_id)
 
     async def _extract_thread_update(self, user_input: str, response: str, session_id: str) -> None:
         """Fire-and-forget: ask the LLM whether this turn touches an open thread.

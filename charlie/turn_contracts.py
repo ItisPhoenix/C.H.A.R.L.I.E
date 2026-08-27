@@ -31,6 +31,28 @@ class ResultStatus(StrEnum):
     BLOCKED = "blocked"
 
 
+class RoutingSource(StrEnum):
+    """Small vocabulary describing which routing boundary selected a turn."""
+
+    DETERMINISTIC = "deterministic"
+    FASTPATH = "fastpath"
+    RESEARCH_ROUTER = "research_router"
+    BROWSER_CONTEXT = "browser_context"
+    MODEL = "model"
+    CONVERSATION = "conversation"
+    CONTROL = "control"
+
+
+class FreshnessRequirement(StrEnum):
+    """Freshness levels recorded when request wording requires live information."""
+
+    LIVE = "live"
+
+
+_ROUTING_SOURCE_VALUES = frozenset(item.value for item in RoutingSource)
+_FRESHNESS_REQUIREMENT_VALUES = frozenset(item.value for item in FreshnessRequirement)
+
+
 def _require_text(value: str, field_name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise TurnContractError(f"{field_name} must be a non-empty string")
@@ -120,7 +142,7 @@ class IntentDecision:
     intent: str
     capabilities: tuple[str, ...] = ()
     freshness_requirement: Optional[str] = None
-    routing_source: str = "deterministic"
+    routing_source: str = RoutingSource.DETERMINISTIC.value
     confidence: Optional[float] = None
     rationale: str = ""
     presentation_expectation: Optional[str] = None
@@ -131,9 +153,53 @@ class IntentDecision:
         _require_text(self.original_request, "original_request")
         _require_text(self.intent, "intent")
         _require_text(self.routing_source, "routing_source")
+        routing_source = (
+            self.routing_source.value if isinstance(self.routing_source, RoutingSource) else self.routing_source
+        )
+        if routing_source not in _ROUTING_SOURCE_VALUES:
+            raise TurnContractError(f"unsupported routing_source: {routing_source}")
+        object.__setattr__(self, "routing_source", routing_source)
+        if self.freshness_requirement is not None:
+            freshness = (
+                self.freshness_requirement.value
+                if isinstance(self.freshness_requirement, FreshnessRequirement)
+                else self.freshness_requirement
+            )
+            if freshness not in _FRESHNESS_REQUIREMENT_VALUES:
+                raise TurnContractError(f"unsupported freshness_requirement: {freshness}")
+            object.__setattr__(self, "freshness_requirement", freshness)
         if self.confidence is not None and not 0.0 <= self.confidence <= 1.0:
             raise TurnContractError("confidence must be between 0 and 1")
+        if any(not isinstance(capability, str) or not capability.strip() for capability in self.capabilities):
+            raise TurnContractError("capabilities must contain non-empty strings")
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
+
+    @classmethod
+    def for_request(cls, request: TurnRequest, **kwargs: Any) -> "IntentDecision":
+        """Build a decision while copying request identity and wording exactly."""
+
+        return cls(
+            turn_id=request.turn_id,
+            session_id=request.session_id,
+            original_request=request.input,
+            **kwargs,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the metadata-safe representation used by runtime observers."""
+
+        return {
+            "turn_id": self.turn_id,
+            "session_id": self.session_id,
+            "original_request": self.original_request,
+            "intent": self.intent,
+            "capabilities": list(self.capabilities),
+            "freshness_requirement": self.freshness_requirement,
+            "routing_source": self.routing_source,
+            "confidence": self.confidence,
+            "rationale": self.rationale,
+            "presentation_expectation": self.presentation_expectation,
+        }
 
 
 @dataclass
@@ -240,7 +306,9 @@ def validate_turn_chain(
         raise TurnContractError("TurnContext identity does not match TurnRequest")
 
     if decision is not None and (
-        decision.turn_id != request.turn_id or decision.session_id != request.session_id
+        decision.turn_id != request.turn_id
+        or decision.session_id != request.session_id
+        or decision.original_request != request.input
     ):
         raise TurnContractError("IntentDecision identity does not match TurnRequest")
 
@@ -256,8 +324,10 @@ def validate_turn_chain(
 
 __all__ = [
     "IntentDecision",
+    "FreshnessRequirement",
     "ResultEnvelope",
     "ResultStatus",
+    "RoutingSource",
     "TurnContext",
     "TurnContractError",
     "TurnRequest",

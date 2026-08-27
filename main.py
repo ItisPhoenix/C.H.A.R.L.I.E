@@ -108,7 +108,7 @@ from charlie.session_store import SessionStore
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus
 from charlie.task_journal import TaskOrigin, TaskPriority, TaskStatus, get_task_journal
-from charlie.turn_contracts import ResultEnvelope, TurnRequest
+from charlie.turn_contracts import IntentDecision, ResultEnvelope, TurnRequest
 from charlie.presentation import (
     AnchorTarget,
     AttentionLevel as PresentationAttention,
@@ -638,6 +638,18 @@ async def main():
             status = getattr(envelope.status, "value", envelope.status)
             active_audit_store.record(name, {}, str(status))
 
+    def on_intent_decision(decision: IntentDecision):
+        """Observe the one primary route selected for an interactive turn."""
+
+        logger.info(
+            "Intent decision: turn=%s session=%s intent=%s source=%s capabilities=%s",
+            decision.turn_id,
+            decision.session_id,
+            decision.intent,
+            decision.routing_source,
+            decision.capabilities,
+        )
+
     def on_thinking_update(name, args, *, turn_id=None, task_id=None, session_id=None):
         event_session_id = session_id or current_web_session_id
         if event_bus:
@@ -879,6 +891,7 @@ async def main():
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_operation_result=on_operation_result,
+            on_intent_decision=on_intent_decision,
             on_thinking_update=on_thinking_update,
             on_tool_approval_request=on_tool_approval_request,
             on_result_stored=on_result_stored,
@@ -1046,12 +1059,51 @@ async def main():
             return
         await _process(request, brain, voice)
 
+    def _cleanup_intent_decision(processor):
+        """Release interactive route metadata after every processing outcome."""
+
+        async def wrapped(request: TurnRequest, process_brain, process_voice):
+            try:
+                return await processor(request, process_brain, process_voice)
+            finally:
+                finalizer = getattr(process_brain, "finalize_intent_decision", None)
+                if callable(finalizer):
+                    finalizer(request.turn_id)
+
+        return wrapped
+
+    @_cleanup_intent_decision
     async def _process(request: TurnRequest, brain, voice):
         nonlocal speech_echo_cooldown, last_emotion, turn_active
         text = request.input
         session_id = request.session_id
         platform = request.channel
+
+        def record_primary_decision(
+            *,
+            intent: str,
+            capabilities: tuple[str, ...] = (),
+            routing_source: str = "control",
+            confidence: Optional[float] = 1.0,
+            rationale: str = "",
+        ) -> None:
+            recorder = getattr(brain, "record_intent_decision", None)
+            if recorder is not None:
+                recorder(
+                    request,
+                    intent=intent,
+                    capabilities=capabilities,
+                    routing_source=routing_source,
+                    confidence=confidence,
+                    rationale=rationale,
+                )
+
         if time.time() < speech_echo_cooldown:
+            record_primary_decision(
+                intent="control",
+                routing_source="control",
+                rationale="speech echo cooldown suppressed the incoming utterance",
+            )
             logger.info(f"Echo suppressed: {text}")
             return
 
@@ -1063,6 +1115,11 @@ async def main():
 
         pending_approval_id = get_active_voice_approval()
         if pending_approval_id:
+            record_primary_decision(
+                intent="control",
+                routing_source="control",
+                rationale="pending tool approval response handled by the control path",
+            )
             answer = parse_yes_no(text)
             if answer is None:
                 voice.speak("Sorry, I didn't catch that. Say yes to continue or no to cancel.", last_emotion)
@@ -1085,6 +1142,11 @@ async def main():
             }
             words = set(text.lower().strip().split())
             if words & _BARGE_COMMANDS:
+                record_primary_decision(
+                    intent="control",
+                    routing_source="control",
+                    rationale="barge-in lifecycle command interrupted active speech",
+                )
                 logger.info("Barge-in: Command word detected. Stopping TTS.")
                 voice.stop_tts()
                 brain.cancel_chat()
@@ -1102,6 +1164,12 @@ async def main():
 
         # Route !search command
         if text.strip().startswith("!search "):
+            record_primary_decision(
+                intent="memory",
+                capabilities=("memory",),
+                routing_source="control",
+                rationale="explicit history search command",
+            )
             query = text.strip()[len("!search ") :].strip()
             print("Searching history...", end="\r", flush=True)
             results = store.search(query)
@@ -1117,6 +1185,12 @@ async def main():
             return
         # Route /memory-review command
         if text.strip().lower() in ("/memory-review", "!memory-review"):
+            record_primary_decision(
+                intent="memory",
+                capabilities=("memory",),
+                routing_source="control",
+                rationale="explicit learned-memory review command",
+            )
             if brain is None:
                 response_str = "Brain not initialized."
             else:
@@ -1141,6 +1215,11 @@ async def main():
             return
         panel_intent = match_surface_request(text)
         if panel_intent is not None:
+            record_primary_decision(
+                intent="control",
+                routing_source="control",
+                rationale=f"presentation command selected {panel_intent.action}",
+            )
             result = get_presentation_controller().execute(
                 PresentationRequest(
                     action=panel_intent.action,
@@ -1153,6 +1232,11 @@ async def main():
 
         # Route conversation-only phrase to the normal HUD summon path.
         if _CONVERSATION_SUMMON_RE.search(text):
+            record_primary_decision(
+                intent="control",
+                routing_source="control",
+                rationale="conversation workspace command selected presentation control",
+            )
             await _open_conversation_workspace()
             voice.speak("Here you go.", last_emotion)
             return
@@ -1243,6 +1327,11 @@ async def main():
         # Voice command detection (before LLM call)
         cmd_emotion = parse_voice_command(text)
         if cmd_emotion is not None:
+            record_primary_decision(
+                intent="control",
+                routing_source="control",
+                rationale="voice preference command selected local voice control",
+            )
             last_emotion = cmd_emotion
             ack_map = {
                 "energetic": "Got it. Switching to energetic.",
@@ -1298,6 +1387,7 @@ async def main():
                 session_id=session_id,
                 task_id=task_id,
                 turn_id=request.turn_id,
+                turn_request=request,
             ):
                 if is_first_chunk:
                     print("\r" + " " * 30 + "\r", end="", flush=True)
