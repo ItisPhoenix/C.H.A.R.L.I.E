@@ -106,7 +106,7 @@ class EventBus:
     async def emit(self, event_type: str, payload: dict, meta: Optional[EventMeta] = None):
         """Producer only. Publishes an event to all subscribers.
 
-        meta is additive envelope metadata (source/task_id/rationale/ts, see
+        meta is additive envelope metadata (source/task_id/turn_id/rationale/ts, see
         charlie/events.py) -- kept a keyword arg with a default so callers
         that only pass (event_type, payload) are unaffected.
         """

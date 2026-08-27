@@ -77,6 +77,7 @@ export interface PresentationIntent {
   id: string;
   kind: "silent" | "caption" | "notification" | "widget" | "composed_surface" | "workspace" | "overlay" | "attention";
   sourceEventId?: string;
+  turnId?: string | null;
   taskId?: string | null;
   sessionId?: string | null;
   capability?: string | null;
@@ -408,6 +409,7 @@ function presentationIntentFromPayload(payload: Record<string, unknown>): Presen
     id: String(payload.id ?? ""),
     kind: (payload.kind as PresentationIntent["kind"]) ?? "silent",
     sourceEventId: (typeof payload.source_event_id === "string" ? payload.source_event_id : payload.sourceEventId) as string | undefined,
+    turnId: (payload.turn_id as string) ?? (payload.turnId as string) ?? null,
     taskId: (payload.task_id as string) ?? (payload.taskId as string) ?? null,
     sessionId: (payload.session_id as string) ?? (payload.sessionId as string) ?? null,
     capability: (payload.capability as string) ?? null,

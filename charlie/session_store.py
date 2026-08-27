@@ -229,7 +229,7 @@ class SessionStore:
 
     def append_tool(
         self,
-        turn_id: str,
+        turn_id: Optional[str],
         tool_name: str,
         args: dict,
         result: str,

@@ -145,6 +145,7 @@ class EventMeta:
     rationale: Optional[str] = None
     ts: str = field(default_factory=utc_now_iso)
     session_id: Optional[str] = None
+    turn_id: Optional[str] = None
 
 
 def event_spec(event_type: str) -> EventSpec:
@@ -185,6 +186,8 @@ def _validate_envelope(event: dict[str, Any], *, allow_unknown: bool = False) ->
         raise EventValidationError("event session_id must be string or null")
     if event.get("task_id") is not None and not isinstance(event["task_id"], str):
         raise EventValidationError("event task_id must be string or null")
+    if event.get("turn_id") is not None and not isinstance(event["turn_id"], str):
+        raise EventValidationError("event turn_id must be string or null")
     _require_payload(event.get("payload"), spec or EventSpec(event_type, EventCategory.TRANSIENT))
     return event
 
@@ -202,6 +205,7 @@ def build_event(event_type: str, payload: dict[str, Any], meta: Optional[EventMe
         "source": meta.source.value if meta is not None else EventSource.RUNTIME.value,
         "session_id": (meta.session_id if meta is not None else None) or payload.get("session_id"),
         "task_id": meta.task_id if meta is not None else None,
+        "turn_id": (meta.turn_id if meta is not None else None) or payload.get("turn_id"),
         "replay": False,
         "payload": payload,
     }
@@ -231,6 +235,7 @@ def normalize_event(event: Any, *, replay: Optional[bool] = None, allow_unknown:
         "source": event.get("source") or EventSource.RUNTIME.value,
         "session_id": event.get("session_id") or payload.get("session_id"),
         "task_id": event.get("task_id"),
+        "turn_id": event.get("turn_id") or payload.get("turn_id"),
         "replay": event.get("replay", False) if replay is None else replay,
         "payload": payload,
     }

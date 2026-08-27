@@ -20,7 +20,12 @@ def test_build_event_creates_versioned_envelope_with_metadata_and_unique_id():
     first = build_event(
         "charlie_state",
         {"state": "thinking", "session_id": "session-1"},
-        meta=EventMeta(source=EventSource.BRAIN, task_id="task-1", rationale="turn started"),
+        meta=EventMeta(
+            source=EventSource.BRAIN,
+            task_id="task-1",
+            turn_id="turn-1",
+            rationale="turn started",
+        ),
     )
     second = build_event("charlie_state", {"state": "idle"})
 
@@ -29,6 +34,7 @@ def test_build_event_creates_versioned_envelope_with_metadata_and_unique_id():
     assert first["timestamp"]
     assert first["source"] == "brain"
     assert first["task_id"] == "task-1"
+    assert first["turn_id"] == "turn-1"
     assert first["session_id"] == "session-1"
     assert first["replay"] is False
     assert first["rationale"] == "turn started"
@@ -54,6 +60,14 @@ def test_legacy_event_adapts_without_breaking_old_emitters():
     assert adapted["id"]
     assert adapted["replay"] is False
     assert adapted["payload"] == {"message": "hello"}
+
+
+def test_turn_id_round_trips_from_legacy_payload_shape():
+    adapted = normalize_event(
+        {"type": "token", "payload": {"text": "hello", "turn_id": "turn-2"}}
+    )
+
+    assert adapted["turn_id"] == "turn-2"
 
 
 def test_replay_event_preserves_identity_but_marks_event_as_replay():

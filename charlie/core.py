@@ -5,6 +5,7 @@ Tiered prompt assembly for API prompt caching: Stable > Context > Volatile.
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -58,6 +59,32 @@ except ImportError:  # pragma: no cover - guard mirrors charlie/browser/__init__
 logger = logging.getLogger("charlie.core")
 
 
+def _invoke_callback_with_identity(
+    callback: Any,
+    *args: Any,
+    turn_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> None:
+    """Call legacy callbacks while forwarding identity to aware callbacks."""
+
+    if callback is None:
+        return
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):
+        callback(*args)
+        return
+    accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    identity = {"turn_id": turn_id, "task_id": task_id, "session_id": session_id}
+    kwargs = {
+        name: value
+        for name, value in identity.items()
+        if accepts_kwargs or name in parameters
+    }
+    callback(*args, **kwargs)
+
+
 def publish_turn_research_reports(
     reports: List[ResearchReport],
     answer: str,
@@ -65,10 +92,11 @@ def publish_turn_research_reports(
     *,
     session_id: Optional[str] = None,
     task_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
 ) -> None:
     """Emit one authoritative report after a useful final synthesis exists.
 
-    Session/task identity belongs to the turn that collected the report. The
+    Session/task/turn identity belongs to the interaction that collected the report. The
     legacy one-argument callback form remains available for callers that do
     not have turn identity, but Brain always supplies it.
     """
@@ -81,10 +109,16 @@ def publish_turn_research_reports(
     if report is None:
         return
     report.answer = answer
-    if session_id is None and task_id is None:
+    if session_id is None and task_id is None and turn_id is None:
         callback(report)
     else:
-        callback(report, session_id=session_id, task_id=task_id)
+        _invoke_callback_with_identity(
+            callback,
+            report,
+            session_id=session_id,
+            task_id=task_id,
+            turn_id=turn_id,
+        )
 
 
 if TYPE_CHECKING:
@@ -1238,7 +1272,12 @@ class Brain:
             logger.warning("browser_task vision fallback failed: %s", exc, exc_info=True)
             return ""
 
-    def _on_research_progress(self, progress: ResearchProgress, session_id: Optional[str] = None) -> None:
+    def _on_research_progress(
+        self,
+        progress: ResearchProgress,
+        session_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
+    ) -> None:
         """Expose operational research status without exposing model reasoning."""
         payload = {
             "stage": progress.stage,
@@ -1249,13 +1288,22 @@ class Brain:
         }
         if session_id:
             payload["session_id"] = session_id
-        if self.on_thinking_update:
-            self.on_thinking_update("research", payload)
+        _invoke_callback_with_identity(
+            self.on_thinking_update,
+            "research",
+            payload,
+            turn_id=turn_id,
+            session_id=session_id,
+        )
         from charlie import recovery
 
         if recovery._event_bus:
             asyncio.create_task(
-                recovery._event_bus.emit("research_progress", payload, meta=EventMeta(source=EventSource.TASK))
+                recovery._event_bus.emit(
+                    "research_progress",
+                    payload,
+                    meta=EventMeta(source=EventSource.TASK, session_id=session_id, turn_id=turn_id),
+                )
             )
 
     async def _research_browser_fetch(self, result: SearchResult) -> Optional[SourceDocument]:
@@ -1282,16 +1330,37 @@ class Brain:
         self,
         query: str,
         session_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> Optional[ResearchReport]:
         """Route fresh-web questions through ResearchEngine before the main LLM call."""
         engine = ResearchEngine(
             self.config,
-            progress=lambda progress: self._on_research_progress(progress, session_id),
+            progress=lambda progress: self._on_research_progress(progress, session_id, turn_id),
             browser_fetch=self._research_browser_fetch,
         )
         report = await engine.run(query, getattr(self.config, "research_default_mode", "auto"))
         decision = engine.decide(query, getattr(self.config, "research_default_mode", "auto"))
         return report if decision.should_research else None
+
+    async def _run_research_for_turn(
+        self,
+        query: str,
+        session_id: Optional[str],
+        turn_id: Optional[str],
+    ) -> Optional[ResearchReport]:
+        """Preserve older research overrides while forwarding turn identity."""
+
+        runner = self._run_research
+        try:
+            parameters = inspect.signature(runner).parameters
+            accepts_turn_id = "turn_id" in parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+            )
+        except (TypeError, ValueError):
+            accepts_turn_id = False
+        if accepts_turn_id:
+            return await runner(query, session_id, turn_id=turn_id)
+        return await runner(query, session_id)
 
     async def _browser_task_bounded(
         self,
@@ -1300,6 +1369,7 @@ class Brain:
         *,
         task_id: Optional[str] = None,
         session_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> str:
         """Fast-path callers' safety net -- same timeout bound _exec_one already gives the LLM-dispatched path."""
         try:
@@ -1309,6 +1379,7 @@ class Brain:
                     platform=platform,
                     task_id=task_id,
                     session_id=session_id,
+                    turn_id=turn_id,
                 ),
                 timeout=_BROWSER_TASK_TIMEOUT_SEC,
             )
@@ -1323,6 +1394,7 @@ class Brain:
         *,
         task_id: Optional[str] = None,
         session_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> str:
         """Resolve `task` through charlie.browser's tier cascade and report back.
 
@@ -1411,11 +1483,20 @@ class Brain:
                 {"action": f'click "{name}"', "url": url},
                 f'click "{name}" on {url}',
                 platform=platform,
+                turn_id=turn_id,
+                task_id=task_id,
+                session_id=session_id,
             )
 
         def _on_progress() -> None:
-            if self.on_thinking_update:
-                self.on_thinking_update("browser_task", {"task": task})
+            _invoke_callback_with_identity(
+                self.on_thinking_update,
+                "browser_task",
+                {"task": task},
+                turn_id=turn_id,
+                task_id=task_id,
+                session_id=session_id,
+            )
 
         from charlie import recovery
 
@@ -1423,7 +1504,12 @@ class Brain:
             await recovery._event_bus.emit(
                 "browser_task_started",
                 {"task": task},
-                meta=EventMeta(source=EventSource.TASK, task_id=task_id, session_id=session_id),
+                meta=EventMeta(
+                    source=EventSource.TASK,
+                    task_id=task_id,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                ),
             )
 
         describe_image = self._describe_image if self._vision_client is not None else None
@@ -1435,7 +1521,11 @@ class Brain:
             max_steps,
             deadline_s,
             _on_progress,
-            owner_id=f"turn:{task_id}" if task_id else None,
+            owner_id=(
+                f"turn:{turn_id}"
+                if turn_id
+                else (f"task:{task_id}" if task_id else None)
+            ),
         )
 
         if recovery._event_bus:
@@ -1449,7 +1539,12 @@ class Brain:
                     "site": result.site,
                     "query": result.query,
                 },
-                meta=EventMeta(source=EventSource.TASK, task_id=task_id, session_id=session_id),
+                meta=EventMeta(
+                    source=EventSource.TASK,
+                    task_id=task_id,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                ),
             )
 
             from charlie.presentation import ExecutionOutcome, PresentationContext, default_presentation_resolver
@@ -1457,6 +1552,7 @@ class Brain:
             verification_status = "completed" if result.success else "unverified"
             outcome = ExecutionOutcome(
                 request=task,
+                turn_id=turn_id,
                 task_id=task_id,
                 session_id=session_id,
                 capability="browser",
@@ -1483,7 +1579,12 @@ class Brain:
             await recovery._event_bus.emit(
                 "presentation_intent",
                 presentation.to_dict(),
-                meta=EventMeta(source=EventSource.TASK, task_id=task_id, session_id=session_id),
+                meta=EventMeta(
+                    source=EventSource.TASK,
+                    task_id=task_id,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                ),
             )
 
         if result.success and result.url and open_intent:
@@ -1547,6 +1648,10 @@ class Brain:
         reason: str,
         platform: str = "voice",
         risk_class: Optional[str] = None,
+        *,
+        turn_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> bool:
         """Ask the user to approve/decline a gated tool call and wait for the
         answer. Web dashboard is primary: broadcasts a "tool_approval_request"
@@ -1573,11 +1678,21 @@ class Brain:
         pending_tool_approvals[request_id] = fut
 
         # Fires for every platform -- also drives the HUD modal, not just Telegram; callback checks `platform` itself.
-        if self.on_tool_approval_request:
-            self.on_tool_approval_request(request_id, tool_name, reason, platform, risk_class)
+        _invoke_callback_with_identity(
+            self.on_tool_approval_request,
+            request_id,
+            tool_name,
+            reason,
+            platform,
+            risk_class,
+            turn_id=turn_id,
+            task_id=task_id,
+            session_id=session_id,
+        )
 
         try:
             if recovery.get_active_ws_count() > 0 and recovery._event_bus:
+                approval_session_id = None if self._is_background else (session_id or recovery.get_active_session_id())
                 await recovery._event_bus.emit(
                     "tool_approval_request",
                     {
@@ -1586,9 +1701,15 @@ class Brain:
                         "arguments": arguments,
                         "reason": reason,
                         "risk_class": risk_class,
-                        "session_id": None if self._is_background else recovery.get_active_session_id(),
+                        "session_id": approval_session_id,
                     },
-                    meta=EventMeta(source=EventSource.BRAIN, rationale=reason),
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=task_id,
+                        session_id=approval_session_id,
+                        turn_id=turn_id,
+                        rationale=reason,
+                    ),
                 )
             elif self.on_thought_callback:
                 _active_voice_approval_id = request_id
@@ -1763,6 +1884,7 @@ class Brain:
         session_id: str = "default",
         skip_tools: bool = False,
         task_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         from datetime import datetime
 
@@ -1794,7 +1916,11 @@ class Brain:
                 )
 
         generation = self._chat_generation
-        turn_id = task_id or str(uuid4())
+        execution_owner_id = (
+            f"turn:{turn_id}"
+            if turn_id
+            else (f"task:{task_id}" if task_id else f"execution:{uuid4().hex}")
+        )
         # Preserved for history/memory even if a fast-path below rebinds user_input
         # to a compound instruction's leftover text (see the open-app fast-path).
         original_user_input = user_input
@@ -1927,8 +2053,9 @@ class Brain:
                 yield await self._browser_task_bounded(
                     browser_media,
                     platform,
-                    task_id=turn_id,
+                    task_id=task_id,
                     session_id=session_id,
+                    turn_id=turn_id,
                 )
                 return
 
@@ -1955,6 +2082,9 @@ class Brain:
                     reason=requirement_reason or f"Fast-path action '{fp_match.intent}' requires confirmation",
                     platform=platform,
                     risk_class=risk_class.value if hasattr(risk_class, "value") else str(risk_class),
+                    turn_id=turn_id,
+                    task_id=task_id,
+                    session_id=session_id,
                 )
                 if not approved:
                     msg = f"Operation '{fp_match.intent}' was declined."
@@ -2015,6 +2145,9 @@ class Brain:
             )
             outcome = ExecutionOutcome(
                 request=user_input,
+                turn_id=turn_id,
+                task_id=task_id,
+                session_id=session_id,
                 capability=fp_match.target_domain,
                 operation=fp_match.semantic_op_id,
                 result=str(fp_res),
@@ -2033,7 +2166,12 @@ class Brain:
                 await event_bus.emit(
                     "presentation_intent",
                     intent.to_dict(),
-                    meta=EventMeta(source=EventSource.BRAIN, task_id=turn_id, session_id=session_id),
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=task_id,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                    ),
                 )
 
             yield intent.spoken_text or fp_res
@@ -2058,8 +2196,9 @@ class Brain:
                     yield await self._browser_task_bounded(
                         open_remaining,
                         platform,
-                        task_id=turn_id,
+                        task_id=task_id,
                         session_id=session_id,
+                        turn_id=turn_id,
                     )
                     return
                 user_input = open_remaining
@@ -2087,8 +2226,9 @@ class Brain:
             yield await self._browser_task_bounded(
                 browser_task_query,
                 platform,
-                task_id=turn_id,
+                task_id=task_id,
                 session_id=session_id,
+                turn_id=turn_id,
             )
             return
 
@@ -2102,8 +2242,9 @@ class Brain:
                 yield await self._browser_task_bounded(
                     browser_continuation,
                     platform,
-                    task_id=turn_id,
+                    task_id=task_id,
                     session_id=session_id,
+                    turn_id=turn_id,
                 )
                 return
 
@@ -2139,7 +2280,7 @@ class Brain:
         turn_research_reports: List[ResearchReport] = []
         search_results = ""
         if not skip_pre_search:
-            research_report = await self._run_research(user_input, session_id)
+            research_report = await self._run_research_for_turn(user_input, session_id, turn_id)
             if research_report is not None:
                 turn_research_reports.append(research_report)
                 search_results = research_report.prompt_context()
@@ -2157,12 +2298,18 @@ class Brain:
                     )
 
         def publish_research_reports(answer: str) -> None:
+            # Direct legacy Brain callers may not have a TaskJournal record,
+            # but older research callbacks still require a non-empty task
+            # correlation. Keep that compatibility value separate from the
+            # optional interactive turn identity.
+            callback_task_id = task_id or f"legacy-task:{uuid4().hex}"
             publish_turn_research_reports(
                 turn_research_reports,
                 answer,
                 self.on_research_result,
                 session_id=session_id,
-                task_id=turn_id,
+                task_id=callback_task_id,
+                turn_id=turn_id,
             )
 
         def finalize_research_answer(answer: str) -> str:
@@ -2369,10 +2516,22 @@ class Brain:
                     executor, execute, call["name"], call["arguments"]
                 )
 
-            if self.on_thinking_update:
-                self.on_thinking_update(call["name"], call["arguments"])
-            if self.on_tool_call:
-                self.on_tool_call(call["name"], call["arguments"])
+            _invoke_callback_with_identity(
+                self.on_thinking_update,
+                call["name"],
+                call["arguments"],
+                turn_id=turn_id,
+                task_id=task_id,
+                session_id=session_id,
+            )
+            _invoke_callback_with_identity(
+                self.on_tool_call,
+                call["name"],
+                call["arguments"],
+                turn_id=turn_id,
+                task_id=task_id,
+                session_id=session_id,
+            )
 
             if tool_name == "shell_execute":
                 # voice_mode is derived from the real turn platform, never trusted from the LLM-supplied call args.
@@ -2389,7 +2548,14 @@ class Brain:
             approved = True
             if gate_reason:
                 approved = await self.request_tool_approval(
-                    tool_name, call["arguments"], gate_reason, platform=platform, risk_class=risk_class
+                    tool_name,
+                    call["arguments"],
+                    gate_reason,
+                    platform=platform,
+                    risk_class=risk_class,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                    session_id=session_id,
                 )
 
             if gate_reason and not approved:
@@ -2402,8 +2568,9 @@ class Brain:
                 r = await self.browser_task(
                     call["arguments"].get("task", ""),
                     platform=platform,
-                    task_id=turn_id,
+                    task_id=task_id,
                     session_id=session_id,
+                    turn_id=turn_id,
                 )
             elif tool_name in _DESKTOP_CONTROL_TOOLS and self._is_desktop_halted():
                 r = "Error: Desktop control is halted (panic or repeated failure). Say 'continue' to resume."
@@ -2419,7 +2586,7 @@ class Brain:
                         if required_leases:
                             from charlie.resource_locks import default_lease_manager
 
-                            async with await default_lease_manager.acquire_many(required_leases, f"turn:{turn_id}"):
+                            async with await default_lease_manager.acquire_many(required_leases, execution_owner_id):
                                 return await _run()
                         elif tool_registry.is_interactive(tool_name):
                             async with lock:
@@ -2514,8 +2681,14 @@ class Brain:
             if tool_name == "desktop_screenshot":
                 self._pending_vision_image_url = pop_pending_vision_image()
 
-            if self.on_tool_result:
-                self.on_tool_result(call["name"], r)
+            _invoke_callback_with_identity(
+                self.on_tool_result,
+                call["name"],
+                r,
+                turn_id=turn_id,
+                task_id=task_id,
+                session_id=session_id,
+            )
 
             # Persist tool result to session store (truncated)
             if self.session_store:

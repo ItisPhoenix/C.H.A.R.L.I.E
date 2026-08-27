@@ -5,7 +5,7 @@ WIDGET, COMPOSED_SURFACE, WORKSPACE, ATTENTION) from structured execution
 outcomes, tasks, and events.
 
 Presentation is completely decoupled from capability execution: capabilities
-produce canonical ExecutionOutcomes; the PresentationResolver determines the
+produce canonical ResultEnvelopes; the PresentationResolver determines the
 semantic PresentationIntent.
 """
 
@@ -24,8 +24,13 @@ from charlie.presentation_contract_generated import (
     PreferredZone,
     PresentationKind,
 )
-from charlie.utils import utc_now_iso
 from charlie.research.router import is_briefing_query
+from charlie.turn_contracts import ResultEnvelope
+from charlie.utils import utc_now_iso
+
+# Compatibility name retained for current callers while result ownership moves
+# out of the presentation module.
+ExecutionOutcome = ResultEnvelope
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -54,6 +59,7 @@ class PresentationIntent:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     kind: PresentationKind = PresentationKind.SILENT
     source_event_id: Optional[str] = None
+    turn_id: Optional[str] = None
     task_id: Optional[str] = None
     session_id: Optional[str] = None
     capability: Optional[str] = None
@@ -110,6 +116,8 @@ class PresentationIntent:
             data["source_event_id"] = self.source_event_id
         if self.task_id is not None:
             data["task_id"] = self.task_id
+        if self.turn_id is not None:
+            data["turn_id"] = self.turn_id
         if self.session_id is not None:
             data["session_id"] = self.session_id
         if self.capability is not None:
@@ -149,10 +157,11 @@ class PresentationIntent:
         event_type: str = EventType.PRESENTATION_INTENT.value,
         source: EventSource = EventSource.BRAIN,
     ) -> Dict[str, Any]:
-        """Convert into a typed Phase-1 event envelope."""
+        """Convert into a typed event envelope."""
         payload = self.to_dict()
         meta = EventMeta(
             source=source,
+            turn_id=self.turn_id,
             task_id=self.task_id,
             session_id=self.session_id,
             rationale=f"presentation.{self.kind}",
@@ -196,6 +205,7 @@ class PresentationIntent:
             id=data.get("id") or uuid.uuid4().hex,
             kind=kind,
             source_event_id=data.get("source_event_id"),
+            turn_id=data.get("turn_id"),
             task_id=data.get("task_id"),
             session_id=data.get("session_id"),
             capability=data.get("capability"),
@@ -233,28 +243,6 @@ class PresentationContext:
     platform: str = "voice"  # "voice", "chat", "desktop", "background"
     foreground: bool = True
     pinned_items: Set[str] = field(default_factory=set)
-
-
-@dataclass
-class ExecutionOutcome:
-    """Canonical structure representing an execution or lifecycle result."""
-
-    request: str = ""
-    task_id: Optional[str] = None
-    session_id: Optional[str] = None
-    capability: Optional[str] = None
-    operation: Optional[str] = None
-    # status: completed, failed, partially_completed, unverified, running, waiting, approval_required, cancelled
-    status: str = "completed"
-    progress: float = 1.0
-    result: Any = None
-    verification: Optional[Dict[str, Any]] = None  # {verified: bool, status: str, message: str}
-    risk_class: str = "safe"
-    requires_approval: bool = False
-    reason: str = ""
-    # source: deterministic_fastpath, tool_execution, task_lifecycle, proactive_watcher
-    source: str = "direct"
-    data: Dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +356,7 @@ class PresentationResolver:
             id=f"presentation:{resolved_taxonomy}:{resolved_surface}",
             kind=kind,
             task_id=outcome.task_id,
+            turn_id=outcome.turn_id,
             session_id=outcome.session_id,
             capability=capability or outcome.capability,
             operation=operation or outcome.operation,
@@ -416,6 +405,7 @@ class PresentationResolver:
         """Safe fallback for contract drift; never fabricate an unknown surface."""
         return PresentationIntent(
             kind=PresentationKind.NOTIFICATION,
+            turn_id=outcome.turn_id,
             task_id=outcome.task_id,
             session_id=outcome.session_id,
             capability=outcome.capability,
@@ -468,28 +458,19 @@ class PresentationResolver:
 
         ctx = context or PresentationContext()
         intent = self._evaluate_rules(outcome, ctx)
+        # Some legacy resolver branches construct intents directly. Keep the
+        # result correlation intact at this single boundary while those
+        # branches remain in place.
+        intent.turn_id = outcome.turn_id
+        intent.task_id = outcome.task_id
+        intent.session_id = outcome.session_id
 
         key = intent.replace_key or intent.id
         self._active_intents[key] = intent
         return intent
 
     def _dict_to_outcome(self, d: Dict[str, Any]) -> ExecutionOutcome:
-        return ExecutionOutcome(
-            request=str(d.get("request", "")),
-            task_id=d.get("task_id"),
-            session_id=d.get("session_id"),
-            capability=d.get("capability"),
-            operation=d.get("operation") or d.get("tool_name"),
-            status=str(d.get("status", "completed")),
-            progress=float(d.get("progress", 1.0)),
-            result=d.get("result"),
-            verification=d.get("verification"),
-            risk_class=str(d.get("risk_class", "safe")),
-            requires_approval=bool(d.get("requires_approval", False)),
-            reason=str(d.get("reason", "")),
-            source=str(d.get("source", "direct")),
-            data=d.get("data") or {},
-        )
+        return ResultEnvelope.from_dict(d)
 
     def _evaluate_rules(self, outcome: ExecutionOutcome, ctx: PresentationContext) -> PresentationIntent:
         # 1. Approval Gate / Destructive Action -> ATTENTION

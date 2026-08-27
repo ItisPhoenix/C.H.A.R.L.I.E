@@ -1,5 +1,8 @@
 {
   "contract_version": 1,
+  "envelope": {
+    "optional": ["rationale", "session_id", "task_id", "turn_id"]
+  },
   "event_types": {
     "transcript": {"category": "transient", "replay": false, "required": []},
     "thinking": {"category": "progress", "replay": false, "required": []},

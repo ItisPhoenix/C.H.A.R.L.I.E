@@ -108,6 +108,7 @@ from charlie.session_store import SessionStore
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus
 from charlie.task_journal import TaskOrigin, TaskPriority, TaskStatus, get_task_journal
+from charlie.turn_contracts import TurnRequest
 from charlie.presentation import (
     AnchorTarget,
     AttentionLevel as PresentationAttention,
@@ -131,6 +132,12 @@ from charlie.watchers import (
 logger = logging.getLogger("charlie.main")
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
 _state_machine = StateMachine()  # single authoritative CoreState instance for this process
+
+
+def _allocate_turn_request(text: str, session_id: str, channel: str) -> TurnRequest:
+    """Allocate one immutable request identity at normalized ingress."""
+
+    return TurnRequest.allocate(text, session_id, channel)
 
 
 def _watcher_surface_kind(level: AttentionLevel) -> tuple[PresentationKind, DismissPolicy, int | None, PreferredZone]:
@@ -556,7 +563,7 @@ async def main():
     telegram_bot = None
     # True while a chat turn's LLM/tool loop runs -- see _dispatch_or_queue.
     turn_active = False
-    pending_turns: list = []
+    pending_turns: list[TurnRequest] = []
 
     try:
         store = SessionStore(config.session_db_path)
@@ -581,7 +588,8 @@ async def main():
 
     loop = asyncio.get_running_loop()
 
-    def on_tool_call(name, args):
+    def on_tool_call(name, args, *, turn_id=None, task_id=None, session_id=None):
+        event_session_id = session_id or current_web_session_id
         try:
             active_audit_store = audit_store
         except NameError:
@@ -592,13 +600,19 @@ async def main():
             asyncio.run_coroutine_threadsafe(
                 event_bus.emit(
                     "tool_call",
-                    {"name": name, "args": args, "session_id": current_web_session_id},
-                    meta=EventMeta(source=EventSource.BRAIN),
+                    {"name": name, "args": args, "session_id": event_session_id},
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=task_id,
+                        session_id=event_session_id,
+                        turn_id=turn_id,
+                    ),
                 ),
                 loop,
             )
 
-    def on_tool_result(name, result):
+    def on_tool_result(name, result, *, turn_id=None, task_id=None, session_id=None):
+        event_session_id = session_id or current_web_session_id
         try:
             active_audit_store = audit_store
         except NameError:
@@ -609,13 +623,19 @@ async def main():
             asyncio.run_coroutine_threadsafe(
                 event_bus.emit(
                     "tool_result",
-                    {"name": name, "text": result, "session_id": current_web_session_id},
-                    meta=EventMeta(source=EventSource.BRAIN),
+                    {"name": name, "text": result, "session_id": event_session_id},
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=task_id,
+                        session_id=event_session_id,
+                        turn_id=turn_id,
+                    ),
                 ),
                 loop,
             )
 
-    def on_thinking_update(name, args):
+    def on_thinking_update(name, args, *, turn_id=None, task_id=None, session_id=None):
+        event_session_id = session_id or current_web_session_id
         if event_bus:
             desc = f"I'll use the {name} tool"
             if args:
@@ -624,8 +644,13 @@ async def main():
             asyncio.run_coroutine_threadsafe(
                 event_bus.emit(
                     "thinking_update",
-                    {"text": desc, "session_id": current_web_session_id},
-                    meta=EventMeta(source=EventSource.BRAIN),
+                    {"text": desc, "session_id": event_session_id},
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=task_id,
+                        session_id=event_session_id,
+                        turn_id=turn_id,
+                    ),
                 ),
                 loop,
             )
@@ -660,7 +685,17 @@ async def main():
                 loop,
             )
 
-    def on_tool_approval_request(request_id, tool_name, reason, platform, risk_class):
+    def on_tool_approval_request(
+        request_id,
+        tool_name,
+        reason,
+        platform,
+        risk_class,
+        *,
+        turn_id=None,
+        task_id=None,
+        session_id=None,
+    ):
         # telegram_bot is None until its startup block below runs -- read at call time, not def time.
         if platform == "telegram" and telegram_bot and should_relay_approval(True, config.telegram_user_id):
             asyncio.run_coroutine_threadsafe(
@@ -671,6 +706,9 @@ async def main():
         intent = PresentationIntent(
             id=request_id,
             kind=PresentationKind.ATTENTION,
+            turn_id=turn_id,
+            task_id=task_id,
+            session_id=session_id,
             title=f"Approval needed: {tool_name}",
             summary=reason,
             content={
@@ -692,7 +730,13 @@ async def main():
             event_bus.emit(
                 "presentation_intent",
                 intent.to_dict(),
-                meta=EventMeta(source=EventSource.BRAIN, rationale="tool approval requires attention"),
+                meta=EventMeta(
+                    source=EventSource.BRAIN,
+                    task_id=task_id,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    rationale="tool approval requires attention",
+                ),
             ),
             loop,
         )
@@ -727,7 +771,7 @@ async def main():
             loop,
         )
 
-    def on_research_result(report, *, session_id, task_id=None):
+    def on_research_result(report, *, session_id, task_id=None, turn_id=None):
         """Forward typed research cards with identity from owning chat turn."""
         if event_bus is None:
             return
@@ -752,6 +796,7 @@ async def main():
             data=payload,
             session_id=session_id,
             task_id=task_id,
+            turn_id=turn_id,
         )
         intent = default_presentation_resolver.resolve(outcome)
         logger.info(
@@ -769,7 +814,12 @@ async def main():
                     event_bus.emit(
                         "research_result",
                         payload,
-                        meta=EventMeta(source=EventSource.TASK, task_id=task_id, session_id=session_id),
+                        meta=EventMeta(
+                            source=EventSource.TASK,
+                            task_id=task_id,
+                            session_id=session_id,
+                            turn_id=turn_id,
+                        ),
                     )
                 )
                 cur_loop.create_task(
@@ -780,6 +830,7 @@ async def main():
                             source=EventSource.TASK,
                             task_id=task_id,
                             session_id=session_id,
+                            turn_id=turn_id,
                             rationale="research presentation intent",
                         ),
                     )
@@ -789,7 +840,12 @@ async def main():
                     event_bus.emit(
                         "research_result",
                         payload,
-                        meta=EventMeta(source=EventSource.TASK, task_id=task_id, session_id=session_id),
+                        meta=EventMeta(
+                            source=EventSource.TASK,
+                            task_id=task_id,
+                            session_id=session_id,
+                            turn_id=turn_id,
+                        ),
                     ),
                     loop,
                 )
@@ -801,6 +857,7 @@ async def main():
                             source=EventSource.TASK,
                             task_id=task_id,
                             session_id=session_id,
+                            turn_id=turn_id,
                             rationale="research presentation intent",
                         ),
                     ),
@@ -959,9 +1016,10 @@ async def main():
         if current_web_session_id not in (None, _voice_fallback_session_id, ""):
             session_id = current_web_session_id
         ensure_session_ready(session_id)
-        _schedule_process(_dispatch_or_queue(text, session_id), loop)
+        request = _allocate_turn_request(text, session_id, "voice")
+        _schedule_process(_dispatch_or_queue(request), loop)
 
-    async def _dispatch_or_queue(text, session_id, platform="voice"):
+    async def _dispatch_or_queue(request: TurnRequest):
         """Run the turn now, or queue it if one is already running tool calls.
 
         Only ever called via _schedule_process (run_coroutine_threadsafe), so
@@ -978,13 +1036,16 @@ async def main():
         # (it routes to resolve_tool_approval), never queued behind the
         # very turn it's meant to unblock.
         if turn_active and not voice.is_speaking.is_set() and not get_active_voice_approval():
-            pending_turns.append((text, session_id, platform))
-            logger.info(f"Queued utterance (a turn is already running tool calls): {text}")
+            pending_turns.append(request)
+            logger.info(f"Queued utterance (a turn is already running tool calls): {request.input}")
             return
-        await _process(text, brain, voice, session_id=session_id, platform=platform)
+        await _process(request, brain, voice)
 
-    async def _process(text, brain, voice, session_id="default", platform="voice"):
+    async def _process(request: TurnRequest, brain, voice):
         nonlocal speech_echo_cooldown, last_emotion, turn_active
+        text = request.input
+        session_id = request.session_id
+        platform = request.channel
         if time.time() < speech_echo_cooldown:
             logger.info(f"Echo suppressed: {text}")
             return
@@ -1091,7 +1152,7 @@ async def main():
             voice.speak("Here you go.", last_emotion)
             return
 
-        turn_task_id = uuid.uuid4().hex
+        task_id = uuid.uuid4().hex
         capability_requirements: tuple[str, ...] = ()
         try:
             from charlie import router as task_router
@@ -1123,7 +1184,7 @@ async def main():
         foreground_journal = get_task_journal()
         turn_task = foreground_journal.create_task(
             text,
-            task_id=turn_task_id,
+            task_id=task_id,
             origin=TaskOrigin.FOREGROUND,
             priority=TaskPriority.HIGH,
             status=TaskStatus.RUNNING,
@@ -1138,8 +1199,9 @@ async def main():
                     record.to_dict(),
                     meta=EventMeta(
                         source=EventSource.TASK,
-                        task_id=turn_task_id,
+                        task_id=task_id,
                         session_id=session_id,
+                        turn_id=request.turn_id,
                     ),
                 )
 
@@ -1157,13 +1219,18 @@ async def main():
                 event_bus.emit(
                     "transcript",
                     {"text": text, "source": platform, "session_id": session_id},
-                    meta=EventMeta(source=EventSource.VOICE),
+                    meta=EventMeta(
+                        source=EventSource.VOICE,
+                        task_id=task_id,
+                        session_id=session_id,
+                        turn_id=request.turn_id,
+                    ),
                 )
             )
 
         # Store user message
         try:
-            store.append("user", text, session_id=session_id)
+            store.append("user", text, session_id=session_id, turn_id=request.turn_id)
             store.touch_session(session_id)
             update_session_title_from_text(session_id, text)
         except Exception as e:
@@ -1197,7 +1264,16 @@ async def main():
         # Emit thinking event
         if event_bus:
             asyncio.create_task(
-                event_bus.emit("thinking", {"session_id": session_id}, meta=EventMeta(source=EventSource.BRAIN))
+                event_bus.emit(
+                    "thinking",
+                    {"session_id": session_id},
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=task_id,
+                        session_id=session_id,
+                        turn_id=request.turn_id,
+                    ),
+                )
             )
 
         print("Charlie is thinking...", end="\r", flush=True)
@@ -1215,7 +1291,8 @@ async def main():
                 text,
                 platform=platform,
                 session_id=session_id,
-                task_id=turn_task_id,
+                task_id=task_id,
+                turn_id=request.turn_id,
             ):
                 if is_first_chunk:
                     print("\r" + " " * 30 + "\r", end="", flush=True)
@@ -1245,7 +1322,12 @@ async def main():
                                         "text": safe if safe.endswith((".", "!", "?")) else safe + ". ",
                                         "session_id": session_id,
                                     },
-                                    meta=EventMeta(source=EventSource.BRAIN),
+                                    meta=EventMeta(
+                                        source=EventSource.BRAIN,
+                                        task_id=task_id,
+                                        session_id=session_id,
+                                        turn_id=request.turn_id,
+                                    ),
                                 )
                     web_buffer = parts[-1]
 
@@ -1304,7 +1386,12 @@ async def main():
                         "text": _strip_think(_strip_tool_lines(_strip_search_result_tags(web_buffer.strip()))),
                         "session_id": session_id,
                     },
-                    meta=EventMeta(source=EventSource.BRAIN),
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=task_id,
+                        session_id=session_id,
+                        turn_id=request.turn_id,
+                    ),
                 )
 
             # Final TTS
@@ -1315,7 +1402,7 @@ async def main():
             final_reply = full_reply_buffer.strip() or web_buffer.strip()
             if final_reply:
                 try:
-                    store.append("assistant", final_reply, session_id=session_id)
+                    store.append("assistant", final_reply, session_id=session_id, turn_id=request.turn_id)
                     store.touch_session(session_id)
                 except Exception as e:
                     logger.warning(f"Failed to archive assistant message or touch session: {e}")
@@ -1326,10 +1413,10 @@ async def main():
                         logger.warning("Failed to send Telegram reply", exc_info=True)
 
             # Emit response_done event so the UI can stop its typing indicator.
-            turn_task = foreground_journal.transition(turn_task_id, TaskStatus.VERIFYING)
+            turn_task = foreground_journal.transition(task_id, TaskStatus.VERIFYING)
             await _emit_foreground_task(turn_task)
             turn_task = foreground_journal.complete(
-                turn_task_id,
+                task_id,
                 result_reference=f"session:{session_id}",
             )
             await _emit_foreground_task(turn_task)
@@ -1337,12 +1424,17 @@ async def main():
                 await event_bus.emit(
                     "response_done",
                     {"session_id": session_id},
-                    meta=EventMeta(source=EventSource.BRAIN),
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=task_id,
+                        session_id=session_id,
+                        turn_id=request.turn_id,
+                    ),
                 )
         except Exception as exc:
             logger.error("Turn failed", exc_info=True)
             try:
-                turn_task = foreground_journal.fail(turn_task_id, error_summary=str(exc)[:500])
+                turn_task = foreground_journal.fail(task_id, error_summary=str(exc)[:500])
                 await _emit_foreground_task(turn_task)
             except Exception:
                 logger.warning("Failed to mark foreground task failed", exc_info=True)
@@ -1353,20 +1445,32 @@ async def main():
                 await event_bus.emit(
                     "alert",
                     {"severity": severity, "message": message},
-                    meta=EventMeta(source=EventSource.BRAIN, rationale=f"turn failed: {error_class.value}"),
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=task_id,
+                        session_id=session_id,
+                        turn_id=request.turn_id,
+                        rationale=f"turn failed: {error_class.value}",
+                    ),
                 )
                 await event_bus.emit(
                     "response_done",
                     {"session_id": session_id},
-                    meta=EventMeta(source=EventSource.BRAIN, rationale="turn failed with an unhandled exception"),
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=task_id,
+                        session_id=session_id,
+                        turn_id=request.turn_id,
+                        rationale="turn failed with an unhandled exception",
+                    ),
                 )
             raise
         finally:
             turn_active = False
             if pending_turns:
-                next_text, next_session, next_platform = pending_turns.pop(0)
-                logger.info(f"Dequeuing pending turn: {next_text}")
-                _schedule_process(_dispatch_or_queue(next_text, next_session, next_platform), loop)
+                next_request = pending_turns.pop(0)
+                logger.info(f"Dequeuing pending turn: {next_request.input}")
+                _schedule_process(_dispatch_or_queue(next_request), loop)
 
         # Learning loop: deferred to background -- doesn't block next turn.
         # Skipped for screen-content queries -- the reply is a description of
@@ -1525,7 +1629,8 @@ async def main():
 
                     set_active_session_id(current_web_session_id)
                     chat_text = cmd.get("text") or cmd.get("payload", {}).get("text", "")
-                    await _dispatch_or_queue(chat_text, current_web_session_id, platform="web")
+                    request = _allocate_turn_request(chat_text, current_web_session_id, "web")
+                    await _dispatch_or_queue(request)
                 elif cmd_type == "session_active":
                     payload_sid = cmd.get("payload", {}).get("session_id")
                     current_web_session_id = cmd.get("session_id") or payload_sid or _voice_fallback_session_id
@@ -1885,7 +1990,8 @@ async def main():
             from charlie.telegram_bot import TelegramBot, should_relay_approval
 
             async def on_telegram_message(text, chat_id):
-                await _dispatch_or_queue(text, current_web_session_id, platform="telegram")
+                request = _allocate_turn_request(text, current_web_session_id, "telegram")
+                await _dispatch_or_queue(request)
 
             def on_telegram_approval(request_id, approved):
                 _resolve_tool_approval_and_notify(request_id, approved)

@@ -12,6 +12,7 @@ export interface WSEvent {
   source?: string;
   session_id?: string | null;
   task_id?: string | null;
+  turn_id?: string | null;
   replay?: boolean;
   rationale?: string;
   payload?: Record<string, unknown>;
@@ -25,6 +26,7 @@ export interface ValidatedWSEvent extends WSEvent {
   source: string;
   session_id: string | null;
   task_id: string | null;
+  turn_id: string | null;
   replay: boolean;
   payload: Record<string, unknown>;
 }
@@ -74,8 +76,10 @@ export function adaptEvent(raw: unknown): ValidatedWSEvent | null {
   if (typeof source !== "string" || !source) return null;
   const sessionId = raw.session_id ?? (typeof payload.session_id === "string" ? payload.session_id : null);
   const taskId = raw.task_id ?? null;
+  const turnId = raw.turn_id ?? (typeof payload.turn_id === "string" ? payload.turn_id : null);
   if (sessionId !== null && typeof sessionId !== "string") return null;
   if (taskId !== null && typeof taskId !== "string") return null;
+  if (turnId !== null && typeof turnId !== "string") return null;
   if (raw.replay !== undefined && typeof raw.replay !== "boolean") return null;
 
   return {
@@ -86,6 +90,7 @@ export function adaptEvent(raw: unknown): ValidatedWSEvent | null {
     source,
     session_id: sessionId,
     task_id: taskId,
+    turn_id: turnId,
     replay: raw.replay ?? false,
     ...(typeof raw.rationale === "string" ? { rationale: raw.rationale } : {}),
     payload,

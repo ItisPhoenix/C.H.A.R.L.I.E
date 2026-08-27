@@ -28,13 +28,13 @@ describe("ResearchRichText DOM contract", () => {
     expectValidResearchMarkup(container);
   });
 
-  it("keeps block-producing summary outside paragraph wrappers in ResearchWorkspace", () => {
+  it("renders current visible objective content without invalid block nesting", () => {
     const workspace: WorkspaceInstance = {
       id: "research-dom-contract",
       presentationIntentId: "intent-research-dom-contract",
       taskId: "task-research-dom-contract",
       title: "RESEARCH",
-      summary: "# Summary\n\nParagraph with **bold** and `code`.\n\n- Finding one",
+      summary: "Workspace summary metadata",
       type: "research",
       status: "active",
       lifecycleState: "active",
@@ -44,13 +44,16 @@ describe("ResearchRichText DOM contract", () => {
       persistent: false,
       replayable: false,
       contentState: {
-        summary: "# Summary\n\nParagraph with **bold** and `code`.\n\n- Finding one",
+        objective: "Paragraph with **bold** and `code`.",
       },
     };
 
     const { container } = render(<ResearchWorkspace workspace={workspace} />);
     expectValidResearchMarkup(container);
-    expect(container.querySelector("h3")).toHaveTextContent("Summary");
+    const header = container.querySelector("header");
+    expect(header).toBeVisible();
+    expect(header).toHaveTextContent("RESEARCH OBJECTIVE");
+    expect(header).toHaveTextContent("Paragraph with bold and code.");
     expect(container.querySelectorAll("p").length).toBeGreaterThan(0);
   });
 

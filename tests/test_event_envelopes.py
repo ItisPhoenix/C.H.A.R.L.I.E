@@ -26,6 +26,7 @@ from typing import Any, Dict, List
 import pytest
 
 from charlie.events import EventMeta, EventSource
+from charlie.turn_contracts import TurnRequest
 
 MAIN_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"
@@ -41,7 +42,7 @@ def _extract_function_source(module_ast: ast.Module, name: str) -> str:
 
 
 def _run_callback(name: str, captured: List[Dict[str, Any]],
-                  session_id: str, args: tuple) -> None:
+                  session_id: str, args: tuple, identity=None) -> None:
     module_ast = ast.parse(_MAIN_SOURCE)  # module-level string with main.py source
     src = _extract_function_source(module_ast, name)
 
@@ -76,7 +77,7 @@ def _run_callback(name: str, captured: List[Dict[str, Any]],
     }
     exec(compile(src, f"<main.{name}>", "exec"), namespace)
     callback = namespace[name]
-    callback(*args)
+    callback(*args, **(identity or {}))
 
 
 def _load_main_source() -> str:
@@ -156,7 +157,7 @@ def _dict_has_session_id(node: ast.AST) -> bool:
     return False
 
 
-def test_foreground_turn_uses_one_task_id_for_journal_and_brain() -> None:
+def test_foreground_turn_separates_task_id_from_turn_id() -> None:
     module_ast = ast.parse(_MAIN_SOURCE)
     process_fn = next(
         node
@@ -168,7 +169,8 @@ def test_foreground_turn_uses_one_task_id_for_journal_and_brain() -> None:
     assert "get_task_journal" in process_source
     assert "create_task" in process_source
     assert "TaskStatus.VERIFYING" in process_source
-    assert "task_id=turn_task_id" in process_source
+    assert "task_id=task_id" in process_source
+    assert "turn_id=request.turn_id" in process_source
 
 
 @pytest.mark.asyncio
@@ -192,6 +194,23 @@ async def test_tool_callbacks_emit_populated_event_meta():
         assert isinstance(meta, EventMeta), f"{etype} did not pass an EventMeta"
         assert meta.source == source, f"{etype} expected source={source}, got {meta.source}"
         assert meta.ts, f"{etype} EventMeta has no timestamp"
+
+
+def test_tool_callback_preserves_the_owning_turn_identity():
+    captured: List[Dict[str, Any]] = []
+
+    _run_callback(
+        "on_tool_call",
+        captured,
+        "session_identity",
+        ("web_search", {"query": "identity"}),
+        identity={"turn_id": "turn_identity", "task_id": "task_identity", "session_id": "session_identity"},
+    )
+
+    event = captured[0]
+    assert event["meta"].turn_id == "turn_identity"
+    assert event["meta"].task_id == "task_identity"
+    assert event["meta"].session_id == "session_identity"
 
 
 def test_transcript_emit_gated_to_voice_platform():
@@ -305,6 +324,9 @@ def test_on_speech_dedupes_identical_text_within_window():
 
     namespace: Dict[str, Any] = {
         "_normalize_app_list": lambda t: t,
+        "_allocate_turn_request": lambda text, session_id, channel: TurnRequest.allocate(
+            text, session_id, channel
+        ),
         "logger": _NullLogger(),
         "time": time,
         "ensure_session_ready": lambda sid: None,
