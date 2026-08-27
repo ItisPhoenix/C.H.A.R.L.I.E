@@ -108,7 +108,7 @@ from charlie.session_store import SessionStore
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus
 from charlie.task_journal import TaskOrigin, TaskPriority, TaskStatus, get_task_journal
-from charlie.turn_contracts import TurnRequest
+from charlie.turn_contracts import ResultEnvelope, TurnRequest
 from charlie.presentation import (
     AnchorTarget,
     AttentionLevel as PresentationAttention,
@@ -613,12 +613,6 @@ async def main():
 
     def on_tool_result(name, result, *, turn_id=None, task_id=None, session_id=None):
         event_session_id = session_id or current_web_session_id
-        try:
-            active_audit_store = audit_store
-        except NameError:
-            active_audit_store = None
-        if active_audit_store is not None:
-            active_audit_store.record(name, {}, "completed" if not str(result).startswith("Error") else "failed")
         if event_bus:
             asyncio.run_coroutine_threadsafe(
                 event_bus.emit(
@@ -633,6 +627,16 @@ async def main():
                 ),
                 loop,
             )
+
+    def on_operation_result(name: str, envelope: ResultEnvelope):
+        """Record structured operation status while the legacy text callback stays unchanged."""
+        try:
+            active_audit_store = audit_store
+        except NameError:
+            active_audit_store = None
+        if active_audit_store is not None:
+            status = getattr(envelope.status, "value", envelope.status)
+            active_audit_store.record(name, {}, str(status))
 
     def on_thinking_update(name, args, *, turn_id=None, task_id=None, session_id=None):
         event_session_id = session_id or current_web_session_id
@@ -785,9 +789,9 @@ async def main():
         payload = build_briefing_workspace_payload(report) if is_briefing else build_research_workspace_payload(report)
         payload["session_id"] = session_id
 
-        from charlie.presentation import ExecutionOutcome, default_presentation_resolver
+        from charlie.presentation import default_presentation_resolver
 
-        outcome = ExecutionOutcome(
+        outcome = ResultEnvelope(
             request=report.query,
             capability="research",
             operation="news_briefing" if is_briefing else "research.web.execute",
@@ -874,6 +878,7 @@ async def main():
             memory_store=memory_store,
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
+            on_operation_result=on_operation_result,
             on_thinking_update=on_thinking_update,
             on_tool_approval_request=on_tool_approval_request,
             on_result_stored=on_result_stored,

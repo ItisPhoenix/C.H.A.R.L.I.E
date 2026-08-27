@@ -9,6 +9,7 @@ renderer behavior.  Existing runtime callers can adopt them incrementally;
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Mapping, Optional
 from uuid import uuid4
 
@@ -17,6 +18,17 @@ from charlie.utils import utc_now_iso
 
 class TurnContractError(ValueError):
     """Raised when a turn boundary object violates its correlation contract."""
+
+
+class ResultStatus(StrEnum):
+    """Supported statuses for a capability operation result."""
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+    PARTIALLY_COMPLETED = "partially_completed"
+    UNVERIFIED = "unverified"
+    CANCELLED = "cancelled"
+    BLOCKED = "blocked"
 
 
 def _require_text(value: str, field_name: str) -> None:
@@ -138,7 +150,7 @@ class ResultEnvelope:
     session_id: Optional[str] = None
     capability: Optional[str] = None
     operation: Optional[str] = None
-    status: str = "completed"
+    status: str = ResultStatus.COMPLETED.value
     progress: float = 1.0
     result: Any = None
     verification: Optional[dict[str, Any]] = None
@@ -245,6 +257,7 @@ def validate_turn_chain(
 __all__ = [
     "IntentDecision",
     "ResultEnvelope",
+    "ResultStatus",
     "TurnContext",
     "TurnContractError",
     "TurnRequest",

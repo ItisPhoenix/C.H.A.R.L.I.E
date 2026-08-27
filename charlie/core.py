@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import re
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 import httpx
@@ -36,6 +36,7 @@ from charlie.streaming import (
 )
 from charlie.tools import ToolExecutionResult, pop_pending_vision_image
 from charlie.tools import registry as tool_registry
+from charlie.turn_contracts import ResultEnvelope, ResultStatus
 from charlie.utils import build_auth_headers, make_id, parse_json_object
 
 try:
@@ -237,6 +238,11 @@ class _RepeatToolCallGuard:
         self._suppressed = 0
         if state_changed:
             self._blocked.clear()
+
+    def record_result(self, signature: str, envelope: ResultEnvelope, *, state_changed: bool = False) -> None:
+        """Record guard state from the canonical operation outcome."""
+
+        self.record(signature, failed=_operation_failed(envelope), state_changed=state_changed)
 
     @property
     def should_escape(self) -> bool:
@@ -854,6 +860,120 @@ def _assess_tool_result_relevance(tool_name: str, tool_result: str) -> bool:
     return True
 
 
+_RESULT_FAILURE_STATUSES = frozenset(
+    {
+        ResultStatus.FAILED.value,
+        ResultStatus.CANCELLED.value,
+        ResultStatus.BLOCKED.value,
+    }
+)
+
+
+def _tool_result_text(raw_result: Any) -> str:
+    """Return the existing textual adapter representation for model-facing paths."""
+
+    if isinstance(raw_result, ToolExecutionResult):
+        return str(raw_result.model_text)
+    return str(raw_result)
+
+
+def _legacy_tool_result_status(raw_result: Any) -> str:
+    """Classify legacy adapter text at the one compatibility boundary.
+
+    ToolRegistry adapters still return strings, including ``Error:`` messages.
+    This is the only compatibility parser used to turn that raw shape into an
+    operation status; callers downstream consume the resulting envelope.
+    """
+
+    return (
+        ResultStatus.FAILED.value
+        if _tool_result_text(raw_result).startswith("Error")
+        else ResultStatus.COMPLETED.value
+    )
+
+
+def _normalize_tool_result(
+    tool_name: str,
+    raw_result: Any,
+    *,
+    request: str,
+    turn_id: Optional[str],
+    task_id: Optional[str],
+    session_id: Optional[str],
+    status: Optional[str | ResultStatus] = None,
+    verification: Optional[dict[str, Any]] = None,
+    reason: str = "",
+    source: str = "brain.tool_loop",
+    risk_class: Optional[str] = None,
+    requires_approval: bool = False,
+    data: Optional[dict[str, Any]] = None,
+    evidence: Optional[List[Any]] = None,
+    artifacts: Optional[List[Any]] = None,
+    errors: Optional[List[str]] = None,
+) -> ResultEnvelope:
+    """Normalize one adapter result into the canonical operation envelope."""
+
+    result_text = _tool_result_text(raw_result)
+    status_value = status.value if isinstance(status, ResultStatus) else status
+    if status_value is None:
+        status_value = _legacy_tool_result_status(raw_result)
+
+    operation = capability_index.get_operation(tool_name)
+    structured_data = None
+    result_kind = None
+    if isinstance(raw_result, ToolExecutionResult):
+        structured_data = raw_result.structured_data
+        result_kind = raw_result.result_kind
+
+    envelope_data = dict(data or {})
+    envelope_artifacts = list(artifacts or [])
+    envelope_evidence = list(evidence or [])
+    if structured_data is not None:
+        envelope_data.setdefault("structured_data", structured_data)
+        if result_kind:
+            envelope_data.setdefault("result_kind", result_kind)
+        envelope_artifacts.append(structured_data)
+        if isinstance(structured_data, ResearchReport):
+            envelope_data.setdefault("research_report", structured_data)
+            envelope_evidence.extend(structured_data.evidence)
+
+    envelope_errors = [str(error) for error in (errors or [])]
+    if not envelope_errors and status_value in _RESULT_FAILURE_STATUSES and result_text.startswith("Error"):
+        envelope_errors.append(result_text)
+
+    return ResultEnvelope(
+        request=request,
+        turn_id=turn_id,
+        task_id=task_id,
+        session_id=session_id,
+        capability=capability_index.get_operation_domain(tool_name),
+        operation=operation.id if operation is not None else None,
+        status=status_value,
+        result=result_text,
+        verification=verification,
+        risk_class=risk_class or (operation.risk_class if operation is not None else "safe"),
+        requires_approval=requires_approval,
+        reason=reason,
+        source=source,
+        data=envelope_data,
+        evidence=envelope_evidence,
+        artifacts=envelope_artifacts,
+        errors=envelope_errors,
+    )
+
+
+def _operation_succeeded(envelope: ResultEnvelope) -> bool:
+    """Return whether execution completed, independent of display text or verification."""
+
+    return envelope.status == ResultStatus.COMPLETED.value
+
+
+def _operation_failed(envelope: ResultEnvelope) -> bool:
+    """Return whether the operation produced a terminal non-success outcome."""
+
+    return envelope.status in _RESULT_FAILURE_STATUSES
+
+
 def _should_queue_visual_screenshot(user_input: str, config: "Config") -> bool:
     """True if this turn should pre-call desktop_screenshot to queue a vision
     image for the follow-up (see _VISUAL_CONTENT_QUERY_RE). Also fires for the
@@ -919,6 +1039,7 @@ class Brain:
         memory_store=None,
         on_tool_call: Optional[callable] = None,
         on_tool_result: Optional[callable] = None,
+        on_operation_result: Optional[Callable[[str, ResultEnvelope], None]] = None,
         on_thinking_update: Optional[callable] = None,
         on_tool_approval_request: Optional[callable] = None,
         on_result_stored: Optional[callable] = None,
@@ -935,6 +1056,7 @@ class Brain:
         self.memory_store = memory_store
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
+        self.on_operation_result = on_operation_result
         self.on_thinking_update = on_thinking_update
         self.on_tool_approval_request = on_tool_approval_request
         self.on_result_stored = on_result_stored
@@ -1547,10 +1669,10 @@ class Brain:
                 ),
             )
 
-            from charlie.presentation import ExecutionOutcome, PresentationContext, default_presentation_resolver
+            from charlie.presentation import PresentationContext, default_presentation_resolver
 
             verification_status = "completed" if result.success else "unverified"
-            outcome = ExecutionOutcome(
+            outcome = ResultEnvelope(
                 request=task,
                 turn_id=turn_id,
                 task_id=task_id,
@@ -2129,7 +2251,6 @@ class Brain:
                 fp_res, v_res = await _run_fast_path()
 
             from charlie.presentation import (
-                ExecutionOutcome,
                 PresentationContext,
                 default_presentation_resolver,
             )
@@ -2143,7 +2264,7 @@ class Brain:
                 if v_res is not None
                 else None
             )
-            outcome = ExecutionOutcome(
+            outcome = ResultEnvelope(
                 request=user_input,
                 turn_id=turn_id,
                 task_id=task_id,
@@ -2474,7 +2595,7 @@ class Brain:
             return
 
         # --- Tool execution loop ---
-        _seen_tool_calls: Dict[str, str] = {}
+        _seen_tool_calls: Dict[str, ResultEnvelope] = {}
         _repeat_guard = _RepeatToolCallGuard()
         # Desktop clicks/types are not idempotent -- two identical calls are
         # two real actions, not a cache hit. Desktop perception (observe/
@@ -2487,7 +2608,7 @@ class Brain:
         _desktop_action_count = [0]  # mutable cell, closed over by _exec_one
         _turn_external_texts: List[str] = []  # tool_external results, fed to security_policy's injected-command check
 
-        async def _exec_one(call: Dict[str, Any]) -> str:
+        async def _exec_one(call: Dict[str, Any]) -> ResultEnvelope | str:
             nonlocal research_report
             tool_name = call["name"]
             ck = f"{call['name']}({json.dumps(call['arguments'], sort_keys=True)})"
@@ -2505,7 +2626,7 @@ class Brain:
             required_leases = op.required_leases if (op and op.required_leases) else ()
             lock = self._tool_locks.setdefault(tool_name, asyncio.Lock())
 
-            async def _run() -> str:
+            async def _run() -> Any:
                 executor = _UIA_EXECUTOR if is_com else None
                 execute = (
                     tool_registry.execute_tool_structured
@@ -2539,10 +2660,15 @@ class Brain:
 
             # Approve/decline gate only -- BLOCK-tier stays enforced inside shell_execute() itself.
             gate_reason: Optional[str] = None
+            policy_status: Optional[str] = None
+            policy_reason = ""
             requirement, risk_class, requirement_reason = autonomy_evaluate(
                 tool_name, call["arguments"], recent_external_texts=_turn_external_texts
             )
-            if requirement == Requirement.APPROVE:
+            if requirement == Requirement.BLOCK:
+                policy_status = ResultStatus.BLOCKED.value
+                policy_reason = requirement_reason
+            elif requirement == Requirement.APPROVE:
                 gate_reason = requirement_reason
 
             approved = True
@@ -2558,14 +2684,19 @@ class Brain:
                     session_id=session_id,
                 )
 
+            raw_result: Any
+            result_errors: List[str] = []
+            result_reason = policy_reason
             if gate_reason and not approved:
-                r = f"Error: Command declined by user (required approval: {gate_reason})."
+                raw_result = f"Error: Command declined by user (required approval: {gate_reason})."
+                policy_status = ResultStatus.CANCELLED.value
+                result_reason = gate_reason
             elif tool_name == "propose_new_tool":
-                r = await self._handle_propose_new_tool(call["arguments"])
+                raw_result = await self._handle_propose_new_tool(call["arguments"])
             elif tool_name == "start_background_task":
-                r = await self._handle_start_background_task(call["arguments"])
+                raw_result = await self._handle_start_background_task(call["arguments"])
             elif tool_name == "browser_task":
-                r = await self.browser_task(
+                raw_result = await self.browser_task(
                     call["arguments"].get("task", ""),
                     platform=platform,
                     task_id=task_id,
@@ -2573,9 +2704,13 @@ class Brain:
                     turn_id=turn_id,
                 )
             elif tool_name in _DESKTOP_CONTROL_TOOLS and self._is_desktop_halted():
-                r = "Error: Desktop control is halted (panic or repeated failure). Say 'continue' to resume."
+                raw_result = "Error: Desktop control is halted (panic or repeated failure). Say 'continue' to resume."
+                policy_status = ResultStatus.BLOCKED.value
+                result_reason = "Desktop control is halted for this turn."
             elif tool_name in _DESKTOP_CONTROL_TOOLS and _desktop_action_count[0] >= self.config.desktop_max_actions:
-                r = f"Error: Desktop action limit reached ({self.config.desktop_max_actions} for this turn)."
+                raw_result = f"Error: Desktop action limit reached ({self.config.desktop_max_actions} for this turn)."
+                policy_status = ResultStatus.BLOCKED.value
+                result_reason = "Desktop action limit reached for this turn."
                 self._turn_halted = True
             else:
                 if tool_name in _DESKTOP_CONTROL_TOOLS:
@@ -2599,25 +2734,23 @@ class Brain:
                         if isinstance(raw_result.structured_data, ResearchReport):
                             research_report = raw_result.structured_data
                             turn_research_reports.append(research_report)
-                        r = raw_result.model_text
-                    else:
-                        r = str(raw_result)
 
                     # Check for standard returned shell/file failures to attempt recovery
-                    if tool_name == "shell_execute" and r.startswith("Error"):
-                        logger.info("Shell execution returned an error. Running recovery pipeline...")
+                    if (
+                        tool_name in {"shell_execute", "file_write"}
+                        and _legacy_tool_result_status(raw_result) == ResultStatus.FAILED.value
+                    ):
+                        logger.info("Tool %s returned an error. Running recovery pipeline...", tool_name)
                         from charlie.recovery import recover_tool
 
-                        recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
+                        recovered_res = await recover_tool(
+                            self,
+                            tool_name,
+                            call["arguments"],
+                            RuntimeError(_tool_result_text(raw_result)),
+                        )
                         if recovered_res is not None:
-                            r = recovered_res
-                    elif tool_name == "file_write" and r.startswith("Error"):
-                        logger.info("File write returned an error. Running recovery pipeline...")
-                        from charlie.recovery import recover_tool
-
-                        recovered_res = await recover_tool(self, tool_name, call["arguments"], RuntimeError(r))
-                        if recovered_res is not None:
-                            r = recovered_res
+                            raw_result = recovered_res
                 except asyncio.TimeoutError as te:
                     if tool_name in ("shell_execute", "file_write"):
                         logger.info("Tool %s timed out. Running recovery pipeline...", tool_name)
@@ -2625,11 +2758,15 @@ class Brain:
 
                         recovered_res = await recover_tool(self, tool_name, call["arguments"], te)
                         if recovered_res is not None:
-                            r = recovered_res
+                            raw_result = recovered_res
                         else:
-                            r = f"Error: Tool '{tool_name}' timed out after {timeout}s"
+                            raw_result = f"Error: Tool '{tool_name}' timed out after {timeout}s"
+                            result_errors.append(_tool_result_text(raw_result))
+                            policy_status = ResultStatus.FAILED.value
                     else:
-                        r = f"Error: Tool '{tool_name}' timed out after {timeout}s"
+                        raw_result = f"Error: Tool '{tool_name}' timed out after {timeout}s"
+                        result_errors.append(_tool_result_text(raw_result))
+                        policy_status = ResultStatus.FAILED.value
                     logger.warning("Tool %s timed out", tool_name)
                 except Exception as e:
                     if tool_name in ("shell_execute", "file_write"):
@@ -2638,24 +2775,43 @@ class Brain:
 
                         recovered_res = await recover_tool(self, tool_name, call["arguments"], e)
                         if recovered_res is not None:
-                            r = recovered_res
+                            raw_result = recovered_res
                         else:
-                            r = f"Error executing tool '{tool_name}': {e}"
+                            raw_result = f"Error executing tool '{tool_name}': {e}"
+                            result_errors.append(_tool_result_text(raw_result))
+                            policy_status = ResultStatus.FAILED.value
                     else:
-                        r = f"Error executing tool '{tool_name}': {e}"
+                        raw_result = f"Error executing tool '{tool_name}': {e}"
+                        result_errors.append(_tool_result_text(raw_result))
+                        policy_status = ResultStatus.FAILED.value
                     logger.warning("Tool %s raised an exception: %s", tool_name, e)
 
-            if r.startswith("Error"):
-                self.world_model.record_event("tool_error", f"{tool_name}: {r[:200]}")
+            envelope = _normalize_tool_result(
+                tool_name,
+                raw_result,
+                request=original_user_input,
+                turn_id=turn_id,
+                task_id=task_id,
+                session_id=session_id,
+                status=policy_status,
+                reason=result_reason,
+                risk_class=getattr(risk_class, "value", risk_class),
+                requires_approval=bool(gate_reason),
+                errors=result_errors or None,
+            )
+            model_text = str(envelope.result)
 
-            if tool_name == "memory" and not r.startswith("Error"):
+            if _operation_failed(envelope):
+                self.world_model.record_event("tool_error", f"{tool_name}: {model_text[:200]}")
+
+            if tool_name == "memory" and _operation_succeeded(envelope):
                 self.reload_context()
 
-            _repeat_guard.record(
+            _repeat_guard.record_result(
                 ck,
-                failed=bool((gate_reason and not approved) or r.startswith("Error")),
+                envelope,
                 state_changed=(
-                    not r.startswith("Error")
+                    _operation_succeeded(envelope)
                     and tool_name
                     not in {"desktop_observe", "desktop_read_screen", "desktop_screenshot", "desktop_windows"}
                 ),
@@ -2663,7 +2819,7 @@ class Brain:
 
             # Anomaly auto-halt: repeated failure of the same call means looping, not progress.
             if tool_name in _DESKTOP_CONTROL_TOOLS:
-                if r.startswith("Error"):
+                if _operation_failed(envelope):
                     _desktop_fail_counts[ck] = _desktop_fail_counts.get(ck, 0) + 1
                     threshold = 1 if _is_low_confidence_desktop_call(tool_name, call["arguments"]) else 2
                     if _desktop_fail_counts[ck] >= threshold:
@@ -2684,11 +2840,17 @@ class Brain:
             _invoke_callback_with_identity(
                 self.on_tool_result,
                 call["name"],
-                r,
+                model_text,
                 turn_id=turn_id,
                 task_id=task_id,
                 session_id=session_id,
             )
+            operation_callback = getattr(self, "on_operation_result", None)
+            if operation_callback is not None:
+                try:
+                    operation_callback(tool_name, envelope)
+                except Exception:
+                    logger.warning("Operation result callback failed for %s", tool_name, exc_info=True)
 
             # Persist tool result to session store (truncated)
             if self.session_store:
@@ -2697,16 +2859,16 @@ class Brain:
                         turn_id=turn_id,
                         tool_name=call["name"],
                         args=call["arguments"],
-                        result=r,
+                        result=model_text,
                         session_id=session_id,
                     )
                 except Exception as persist_exc:
                     logger.debug("Tool result persist skipped: %s", persist_exc)
 
             if tool_name not in _DESKTOP_COM_TOOLS:
-                _seen_tool_calls[ck] = r
-            telemetry.record_tool_call(tool_name, success=not r.startswith("Error"))
-            return r
+                _seen_tool_calls[ck] = envelope
+            telemetry.record_tool_call(tool_name, success=_operation_succeeded(envelope))
+            return envelope
 
         while True:
             # Re-check cancellation at the top of every tool cycle so a turn
@@ -2735,7 +2897,7 @@ class Brain:
                 return
 
             tool_calls = allowed_calls
-            results_map: Dict[int, str] = {}
+            results_map: Dict[int, ResultEnvelope | str] = {}
             read_only_idxs = [i for i, call in enumerate(tool_calls) if not tool_registry.is_interactive(call["name"])]
             if read_only_idxs:
                 gathered = await asyncio.gather(*(_exec_one(tool_calls[i]) for i in read_only_idxs))
@@ -2747,7 +2909,7 @@ class Brain:
                 if tool_registry.is_interactive(call["name"]):
                     results_map[idx] = await _exec_one(call)
 
-            exec_results = [results_map[i] for i in range(len(tool_calls))]
+            operation_results = [results_map[i] for i in range(len(tool_calls))]
             if _repeat_guard.should_escape:
                 if any(c["name"] in _DESKTOP_CONTROL_TOOLS for c in tool_calls):
                     self._turn_halted = True
@@ -2755,6 +2917,13 @@ class Brain:
                 if self._turn_halted:
                     yield " Desktop control halted for this turn."
                 return
+            # Keep the model-facing tool text stable; structured operation outcomes stay in
+            # the typed callback/persistence boundary above.
+            exec_results = [
+                str(result.result) if isinstance(result, ResultEnvelope) else str(result)
+                for result in operation_results
+            ]
+
             # Step 3: Post-tool confidence gate - replace low-quality results
             exec_results = [
                 r
