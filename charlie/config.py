@@ -5,7 +5,11 @@ from typing import Any, Dict, List, Optional, Set
 
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+# Tests must never inherit or overwrite production configuration from the
+# repository .env. The pytest conftest sets this process-local guard before
+# importing Charlie modules; normal `uv run python run.py` keeps existing behavior.
+if os.getenv("CHARLIE_TEST_MODE", "").lower() != "true":
+    load_dotenv(override=True)
 
 # Restart tiers for editable-field metadata (see FieldMeta below):
 #   None      -- read fresh on every use; applying an update is instant, no reload.

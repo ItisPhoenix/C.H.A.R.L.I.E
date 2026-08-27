@@ -178,6 +178,7 @@ def build_research_workspace_payload(report: ResearchReport) -> dict[str, Any]:
         "schema": workspace_payload_spec("research")["schema"],
         "version": workspace_payload_spec("research")["version"],
         "query": _clean_text(report.query, 500),
+        "objective": _clean_text(report.query, 500),
         "mode": report.mode.value,
         "title": "Research & Synthesis",
         "summary": _summary(report, findings, "No grounded findings were returned."),
@@ -185,9 +186,15 @@ def build_research_workspace_payload(report: ResearchReport) -> dict[str, Any]:
         "confidence": round(float(report.confidence), 3),
         "findings": findings,
         "sources": sources,
-        "timeline_items": [],
         "stop_reason": _clean_text(report.stop_reason, 300) or None,
     }
+    dated_sources = [source for source in sources if source.get("published_at")]
+    if dated_sources:
+        payload["timeline_items"] = [
+            {"id": f"T{index}", "kind": "published", "timestamp": source["published_at"],
+             "time": source["published_at"], "title": source["title"], "summary": source["snippet"]}
+            for index, source in enumerate(dated_sources[:MAX_FINDINGS], start=1)
+        ]
     return _bounded(payload)
 
 

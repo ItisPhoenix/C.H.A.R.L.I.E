@@ -66,7 +66,7 @@ def publish_turn_research_reports(
     session_id: Optional[str] = None,
     task_id: Optional[str] = None,
 ) -> None:
-    """Emit each report once after a useful final synthesis exists.
+    """Emit one authoritative report after a useful final synthesis exists.
 
     Session/task identity belongs to the turn that collected the report. The
     legacy one-argument callback form remains available for callers that do
@@ -74,16 +74,17 @@ def publish_turn_research_reports(
     """
     if not callback or not answer or not answer.strip():
         return
-    seen: set[int] = set()
-    for report in reports:
-        if id(report) in seen:
-            continue
-        seen.add(id(report))
-        report.answer = answer
-        if session_id is None and task_id is None:
-            callback(report)
-        else:
-            callback(report, session_id=session_id, task_id=task_id)
+    # Tool results append in execution order. The final collected report owns
+    # the turn; publishing earlier reports creates competing workspace intents
+    # and lets stale evidence replace the authoritative result.
+    report = next((item for item in reversed(reports) if item is not None), None)
+    if report is None:
+        return
+    report.answer = answer
+    if session_id is None and task_id is None:
+        callback(report)
+    else:
+        callback(report, session_id=session_id, task_id=task_id)
 
 
 if TYPE_CHECKING:

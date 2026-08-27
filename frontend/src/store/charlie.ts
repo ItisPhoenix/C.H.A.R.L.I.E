@@ -474,7 +474,8 @@ function applyPresentationIntentDismiss(
   });
 }
 
-if (typeof window !== "undefined") {
+// Debug store handles are intentionally absent from production bundles.
+if (typeof window !== "undefined" && (import.meta.env.DEV || import.meta.env.MODE === "test")) {
   (window as unknown as Record<string, unknown>).__CHARLIE_STORE__ = useCharlieStore;
   (window as unknown as Record<string, unknown>).__WORKSPACE_STORE__ = useWorkspaceStore;
   (window as unknown as Record<string, unknown>).__WIDGET_STORE__ = useWidgetStore;

@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from "react";
+import { type ReactElement } from "react";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
 import { SpatialMapPrimitive, type SpatialMapData } from "../../composer/primitives/SpatialMapPrimitive";
 import { DensityHeatmapPrimitive, type DensityHeatmapData } from "../../composer/primitives/DensityHeatmapPrimitive";
@@ -24,10 +24,9 @@ function compactResearchText(value: string, maxLength: number): string {
 export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
   const content = workspace.contentState || {};
   const payload = normalizeResearchWorkspacePayload(content);
-  const [disclosureLevel, setDisclosureLevel] = useState<1 | 2 | 3>(3);
+  const disclosureLevel = 3;
   const title = String(payload.title || workspace.title || "RESEARCH & SYNTHESIS").replace(/^WORKSPACE\s*\/\/\s*/i, "");
-  const summary = String(payload.summary || workspace.summary || "No grounded findings were returned.");
-  const objective = compactResearchText(summary, 260);
+  const objective = compactResearchText(String(content.objective || payload.query || "No research objective reported."), 260);
   const findings = payload.findings as (ResearchFinding & FindingItem)[];
   const map = (content.radar || content.spatial_map || content.map_data || content.map) as SpatialMapData | undefined;
   const heatmap = (content.heatmap || content.heatmap_data || content.density) as DensityHeatmapData | undefined;
@@ -42,13 +41,6 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
 
   return (
     <div className="charlie-spatial-composition research-composition" data-disclosure-level={disclosureLevel}>
-      <div className="sr-only" aria-label="Research disclosure controls">
-        <span>PRIMARY RESEARCH SYNTHESIS</span>
-        <button type="button" onClick={() => setDisclosureLevel(1)}>Summary</button>
-        <button type="button" onClick={() => setDisclosureLevel(2)}>Synthesis</button>
-        <button type="button" onClick={() => setDisclosureLevel(3)}>Deep Dive</button>
-        {summary.match(/^#{1,3}\s+.+$/m)?.[0] && <ResearchRichText text={summary.match(/^#{1,3}\s+.+$/m)?.[0] || ""} />}
-      </div>
       <header className="spatial-heading research-heading">
         <div className="spatial-kicker">RESEARCH WORKSPACE</div>
         <h1>{title}</h1>

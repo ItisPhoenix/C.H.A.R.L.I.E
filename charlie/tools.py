@@ -834,6 +834,8 @@ def system_diagnostics(check: str) -> str:
             command, shell=True, capture_output=True, text=True, timeout=SHELL_TIMEOUT,
         )
         output = (process.stdout or "").strip() or (process.stderr or "").strip()
+        if process.returncode and output:
+            return f"Diagnostic '{check}' unavailable: host command returned exit code {process.returncode}."
         return output or f"Diagnostic '{check}' completed with no output."
     except subprocess.TimeoutExpired:
         return f"Error: diagnostic '{check}' timed out after {SHELL_TIMEOUT}s."

@@ -298,6 +298,29 @@ def test_research_callback_dedupe_is_turn_local_and_same_object_safe():
     assert report.answer == "answer-b"
 
 
+def test_research_publication_emits_only_latest_report_for_turn():
+    earlier = _isolated_report("old query", "OLD", "old finding")
+    authoritative = _isolated_report("authoritative query", "NEW", "new finding")
+    emitted = []
+
+    publish_turn_research_reports([earlier, authoritative], "final answer", emitted.append)
+
+    assert emitted == [authoritative]
+    assert earlier.answer == ""
+    assert authoritative.answer == "final answer"
+
+
+def test_research_objective_is_query_and_ungrounded_timeline_is_omitted():
+    report = _isolated_report("James Webb Space Telescope current status", "JWST", "finding")
+    report.sources[0].published_at = None
+    report.search_results[0] = SearchResult("JWST source", report.sources[0].url, "finding")
+
+    payload = build_research_workspace_payload(report)
+
+    assert payload["objective"] == report.query
+    assert "timeline_items" not in payload
+
+
 def test_concurrent_publication_boundary_preserves_turn_session_and_provenance():
     reports = {
         "session-a": _isolated_report("alpha research", "A1", "alpha finding"),

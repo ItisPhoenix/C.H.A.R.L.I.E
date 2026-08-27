@@ -6,15 +6,15 @@ from pathlib import Path
 # Add project root to sys.path so we can import charlie
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from charlie.ipc import EventBus
 from charlie.utils import make_id
+from tests.isolation import IsolatedEventBus
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("harness")
 
 async def main():
-    logger.info("Connecting to Charlie EventBus...")
-    async with EventBus(is_producer=False) as bus:
+    logger.info("Using isolated test EventBus recorder; live Charlie ports are unavailable.")
+    async with IsolatedEventBus() as bus:
 
         input("\n[1/4] Press Enter to show a Watcher Alert widget (role=warning)...")
         await bus.send_command({
@@ -73,24 +73,8 @@ async def main():
             }
         })
 
-        input("\n[4/4] Press Enter to exercise Phase D Desktop/Browser diagnostics...")
-        # Since we want to test the instrumented logs from Phase D, we can invoke a lightweight tool directly.
-        # This will emit logs to the harness output so the user can verify the instrumentation.
-        logger.info("Invoking desktop.actions.mouse_position() to trigger Phase D logs...")
-        from charlie.desktop import actions
-        try:
-            pos = actions.mouse_position()
-            logger.info(f"Mouse position returned: {pos}")
-        except Exception as e:
-            logger.error(f"Desktop action failed: {e}")
-
-        logger.info("Invoking browser.task._get_browser() to trigger Phase D logs...")
-        try:
-            # We just want to see the instrumentation logs, so we can resolve a quick dummy task
-            # We won't actually resolve, just show the module is imported and logs are ready.
-            logger.info("Browser module loaded successfully.")
-        except Exception as e:
-            logger.error(f"Browser action failed: {e}")
+        input("\n[4/4] Press Enter to finish isolated presentation recording...")
+        logger.info("No desktop, browser, EventBus, database, store, or live runtime access performed.")
 
         print("\nAll events emitted. Visual verification complete!")
 

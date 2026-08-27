@@ -69,6 +69,26 @@ describe("WorkspaceManager Store & Lifecycle", () => {
     expect(recent[0]?.taskId).toBe("task-99");
   });
 
+  test("fresh intent updates active workspace content without resetting lifecycle", () => {
+    useWorkspaceStore.getState().openWorkspace(mockIntent1);
+    const before = useWorkspaceStore.getState().getActiveWorkspace();
+    const updated = useWorkspaceStore.getState().openWorkspace({
+      ...mockIntent1,
+      title: "Updated Research",
+      summary: "Fresh evidence",
+      content: { query: "new query", findings: [{ id: "fresh" }] },
+      taskId: "task-100",
+    });
+
+    expect(updated.lifecycleState).toBe("active");
+    expect(updated.openedAt).toBe(before?.openedAt);
+    expect(updated.title).toBe("Updated Research");
+    expect(updated.summary).toBe("Fresh evidence");
+    expect(updated.taskId).toBe("task-100");
+    expect(updated.contentState).toEqual({ query: "new query", findings: [{ id: "fresh" }] });
+    expect(updated.lastFocusedAt).toBeTruthy();
+  });
+
   test("minimizeWorkspace clears active workspace and records in recent", () => {
     useWorkspaceStore.getState().openWorkspace(mockIntent1);
     useWorkspaceStore.getState().minimizeWorkspace("ws-research-1");

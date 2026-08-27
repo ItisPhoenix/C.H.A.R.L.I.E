@@ -54,8 +54,15 @@ export const useWorkspaceStore = create<WorkspaceStoreState>((set, get) => ({
     const now = new Date().toISOString();
     const currentActiveId = get().activeWorkspaceId;
 
-    if (currentActiveId === intent.id && get().workspaces[intent.id]?.lifecycleState === "active") {
-      return get().workspaces[intent.id]!;
+    const existing = get().workspaces[intent.id];
+    if (currentActiveId === intent.id && existing?.lifecycleState === "active") {
+      const resolvedType = (intent.workspaceType || (intent as any).workspace_type || (intent as any).type || existing.type).toLowerCase();
+      const resolvedContent = (intent.content || (intent as any).contentState || {}) as Record<string, unknown>;
+      const updated = { ...existing, type: resolvedType, title: intent.title || existing.title, summary: intent.summary || existing.summary,
+        taskId: intent.taskId ?? existing.taskId, replayable: intent.replayable, persistent: intent.dismissPolicy === "persistent",
+        contentState: resolvedContent, focused: true, lastFocusedAt: now };
+      set((state) => ({ workspaces: { ...state.workspaces, [intent.id]: updated } }));
+      return updated;
     }
 
     // If there's an existing active workspace, minimize it into Recent without destroying state

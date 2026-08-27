@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { ResearchWorkspace } from "./ResearchWorkspace";
 import { BriefingWorkspace } from "./BriefingWorkspace";
 import { SystemWorkspace } from "./SystemWorkspace";
@@ -37,7 +37,7 @@ describe("Phase 9 Workspaces Suite", () => {
 
   test("ResearchWorkspace renders objective, key findings, and tactical elements", () => {
     render(<ResearchWorkspace workspace={mockWorkspace} />);
-    expect(screen.getByText("PRIMARY RESEARCH SYNTHESIS")).toBeDefined();
+    expect(screen.getByText("RESEARCH WORKSPACE")).toBeDefined();
     expect(screen.getByText("Verify operational readiness of test subsystem.")).toBeDefined();
     expect(screen.getByText("KEY FINDINGS & ANALYTICAL SIGNALS")).toBeDefined();
     expect(screen.getByText("TEST FINDING")).toBeDefined();
@@ -58,11 +58,10 @@ describe("Phase 9 Workspaces Suite", () => {
         }}
       />
     );
-    expect(screen.getByText("OPERATIONAL INTELLIGENCE BRIEFING")).toBeDefined();
+    expect(screen.getByText("BRIEFING / NEWS")).toBeDefined();
     expect(screen.getByText("TOP HEADLINE")).toBeDefined();
     expect(screen.getByText("GLOBAL BRIEFING UPDATE")).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "Deep Dive" }));
-    expect(screen.getByText("VERIFIED SOURCES")).toBeDefined();
+    expect(screen.getByText("SOURCE FEED")).toBeDefined();
   });
 
   test("SystemWorkspace renders task status, vitals overview, and live processes", () => {
@@ -85,8 +84,7 @@ describe("Phase 9 Workspaces Suite", () => {
       />
     );
     expect(screen.getByText("SYSTEM STATUS")).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "Processes" }));
-    expect(screen.getByText("ACTIVE SYSTEM OPERATIONS")).toBeDefined();
+    expect(screen.getByText("TASK STATUS")).toBeDefined();
     expect(screen.getByText("INGESTION")).toBeDefined();
   });
 

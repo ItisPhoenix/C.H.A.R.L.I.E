@@ -299,11 +299,9 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Web plugin subsystem failed to initialize: %s", e)
 
-    event_bus = EventBus(
-        pub_port=DEFAULT_EVENT_PORT,
-        pull_port=DEFAULT_COMMAND_PORT,
-        is_producer=False,
-    )
+    # EventBus resolves test-mode ports from the central pytest isolation setup;
+    # production keeps its documented defaults.
+    event_bus = EventBus(is_producer=False)
     await event_bus.__aenter__()
     asyncio.create_task(_event_bridge())
     # The producer may publish its initial health snapshot before the

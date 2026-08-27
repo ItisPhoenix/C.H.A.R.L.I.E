@@ -112,9 +112,18 @@ def _handle_full_system_status() -> FastPathResult:
                     "memory_percent": round(float(info.get("memory_percent") or 0.0), 1),
                 }
             )
-        return FastPathResult(
-            "Full system status collected from the live host.",
-            {
+        operations = []
+        try:
+            from charlie.task_journal import get_task_journal
+            active_statuses = {"queued", "planning", "waiting", "running", "paused", "approval_required", "verifying"}
+            for task in get_task_journal().list(include_terminal=False):
+                if task.status.value not in active_statuses:
+                    continue
+                progress = round((task.current_step / task.total_steps) * 100) if task.total_steps else 0
+                operations.append({"id": task.id, "title": task.title, "subtitle": task.status.value.upper(), "status": task.status.value.upper(), "progress": progress})
+        except Exception as exc:
+            logger.debug("Task journal unavailable for system workspace: %s", exc)
+        data = {
                 "title": "MACHINE DIAGNOSTICS & SYSTEM TELEMETRY",
                 "subtitle": "ACTIVE RUNTIME // HOST HEALTH // PROCESS MESH",
                 "vitals": {
@@ -126,20 +135,19 @@ def _handle_full_system_status() -> FastPathResult:
                         {"id": "disk", "label": "DISK", "value": float(disk.percent), "unit": "percent_0_100"},
                     ],
                 },
-                "processes": {
-                    "title": "WHAT IS RUNNING",
-                    "subtitle": "TOP LIVE PROCESSES BY MEMORY",
-                    "processes": process_rows,
-                },
-                "operations": [],
-                "logs": [],
-            },
+                "processes": {"title": "WHAT IS RUNNING", "subtitle": "TOP LIVE PROCESSES BY MEMORY", "processes": process_rows},
+            }
+        if operations:
+            data["operations"] = operations
+        return FastPathResult(
+            "Full system status collected from the live host.",
+            data,
         )
     except Exception as exc:
         logger.warning("Full system workspace telemetry unavailable: %s", exc)
         return FastPathResult(
             "Full system status is unavailable.",
-            {"vitals": None, "processes": None, "operations": [], "logs": []},
+            {"vitals": None, "processes": None},
         )
 
 

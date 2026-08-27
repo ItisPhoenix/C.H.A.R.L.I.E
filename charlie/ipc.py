@@ -10,6 +10,7 @@ Default ports: 5555 (events), 5556 (commands).
 import asyncio
 import json
 import logging
+import os
 import sys
 
 # Windows: pyzmq needs Selector event loop, not Proactor
@@ -38,10 +39,19 @@ class EventBus:
 
     def __init__(
         self,
-        pub_port: int = DEFAULT_EVENT_PORT,
-        pull_port: int = DEFAULT_COMMAND_PORT,
+        pub_port: int | None = None,
+        pull_port: int | None = None,
         is_producer: bool = True,
     ):
+        test_mode = os.getenv("CHARLIE_TEST_MODE", "").lower() == "true"
+        if test_mode:
+            pub_port = int(os.getenv("CHARLIE_TEST_EVENT_PORT", "0")) if pub_port is None else pub_port
+            pull_port = int(os.getenv("CHARLIE_TEST_COMMAND_PORT", "0")) if pull_port is None else pull_port
+            if pub_port in {DEFAULT_EVENT_PORT, DEFAULT_COMMAND_PORT} or pull_port in {DEFAULT_EVENT_PORT, DEFAULT_COMMAND_PORT}:
+                raise RuntimeError("Test EventBus cannot use production ports 5555/5556")
+        else:
+            pub_port = DEFAULT_EVENT_PORT if pub_port is None else pub_port
+            pull_port = DEFAULT_COMMAND_PORT if pull_port is None else pull_port
         self.ctx = zmq.asyncio.Context()
         self.is_producer = is_producer
         self.pub_port = pub_port
