@@ -33,6 +33,7 @@ from charlie.results import ResultsStore
 from charlie.task_journal import (
     TaskOrigin,
     TaskPriority,
+    TaskRecord,
     TaskTransitionError,
     get_task_journal,
     normalize_task_status,
@@ -59,7 +60,8 @@ _REAL_DESKTOP_SESSION = desktop_session
 def _on_manual_takeover(owner_id: str, resources: tuple[str, ...]) -> None:
     task = _manager.get(owner_id) if "_manager" in globals() else None
     if task is not None:
-        task.cancel_requested = True
+        if task.status not in _TERMINAL_STATUSES:
+            _request_task_cancellation(task)
         logger.info("Manual takeover requested cancellation of task %s for %s", owner_id, resources)
 
 
@@ -152,49 +154,128 @@ def _priority_name(priority: int) -> TaskPriority:
     return TaskPriority.NORMAL
 
 
-def _sync_journal(task: BackgroundTask) -> None:
-    """Project a legacy background task into the canonical journal."""
-    status = normalize_task_status(task.status)
+def _legacy_status_for(status: CanonicalTaskStatus) -> str:
+    """Map canonical lifecycle values back to the scheduler's legacy vocabulary."""
+    if status is CanonicalTaskStatus.COMPLETED:
+        return "done"
+    if status is CanonicalTaskStatus.APPROVAL_REQUIRED:
+        return "awaiting_approval"
+    return status.value
+
+
+def _record_task_lifecycle(
+    task: BackgroundTask,
+    *,
+    status: str | CanonicalTaskStatus | None = None,
+) -> TaskRecord:
+    """Commit one background-task lifecycle snapshot to the canonical journal.
+
+    This is the only live background-task lifecycle adapter.  Callers provide
+    the status that the scheduler/domain path just selected; the journal
+    commits it first, then the legacy task is mirrored from the resulting
+    canonical record.  Event emission happens separately from the returned
+    immutable snapshot.
+    """
+    requested_status = normalize_task_status(task.status if status is None else status)
     try:
         current = _journal.get(task.id)
     except KeyError:
-        _journal.create_task(
+        current = _journal.create_task(
             task.text,
             task_id=task.id,
             origin=TaskOrigin.BACKGROUND,
             priority=_priority_name(task.priority),
-            status=status,
+            status=requested_status,
             session_id=task.session_id or None,
             capability_requirements=("desktop",),
             current_step=task.current_step,
             total_steps=len(task.steps),
         )
-        return
+    else:
+        if current.status is not requested_status:
+            try:
+                if requested_status is CanonicalTaskStatus.COMPLETED and current.status not in (
+                    CanonicalTaskStatus.VERIFYING,
+                    CanonicalTaskStatus.COMPLETED,
+                ):
+                    current = _journal.transition(task.id, CanonicalTaskStatus.VERIFYING)
+                current = _journal.transition(task.id, requested_status)
+            except TaskTransitionError:
+                # Restore the compatibility mirror to canonical truth before
+                # propagating/rejecting the invalid legacy mutation.
+                try:
+                    task.status = _legacy_status_for(_journal.get(task.id).status)
+                except KeyError:  # pragma: no cover - journal cannot disappear in-process
+                    pass
+                logger.error(
+                    "Rejected background task transition %s -> %s for %s",
+                    current.status,
+                    requested_status,
+                    task.id,
+                )
+                raise
+        elif current.status in (
+            CanonicalTaskStatus.COMPLETED,
+            CanonicalTaskStatus.FAILED,
+            CanonicalTaskStatus.CANCELLED,
+        ):
+            # Terminal records are immutable against later stale legacy payloads.
+            task.status = _legacy_status_for(current.status)
+            return current
 
-    if current.status is not status:
-        try:
-            if status is CanonicalTaskStatus.COMPLETED and current.status not in (
-                CanonicalTaskStatus.VERIFYING,
-                CanonicalTaskStatus.COMPLETED,
-            ):
-                _journal.transition(task.id, CanonicalTaskStatus.VERIFYING)
-            _journal.transition(task.id, status)
-        except TaskTransitionError:
-            logger.debug("Ignoring legacy task transition %s -> %s for %s", current.status, status, task.id)
-    _journal.update_progress(
+    progress = (task.current_step / len(task.steps)) if task.steps else None
+    current_action = task.steps[task.current_step] if task.current_step < len(task.steps) else None
+    current = _journal.update_progress(
         task.id,
-        progress=(task.current_step / len(task.steps)) if task.steps else None,
-        current_action=task.steps[task.current_step] if task.current_step < len(task.steps) else None,
+        progress=progress,
+        current_action=current_action,
         current_step=task.current_step,
         total_steps=len(task.steps),
-        waiting_reason="user_input" if status is CanonicalTaskStatus.PAUSED else None,
+        waiting_reason="user_input" if requested_status is CanonicalTaskStatus.PAUSED else None,
     )
+    task.status = _legacy_status_for(current.status)
+    return current
+
+
+def _request_task_cancellation(task: BackgroundTask) -> None:
+    """Record cancellation intent canonically before mirroring the legacy flag."""
+    try:
+        _journal.get(task.id)
+    except KeyError:
+        _record_task_lifecycle(task, status=task.status)
+    _journal.request_cancel(task.id)
+    task.cancel_requested = True
+
+
+def _public_event_from_record(record: TaskRecord) -> Dict[str, Any]:
+    """Project a canonical snapshot into the existing client-safe event shape."""
+    current_action = record.current_action if record.current_step < record.total_steps else None
+    return {
+        "id": record.id,
+        "title": record.title,
+        "status": record.status.value,
+        "current_step": record.current_step,
+        "total_steps": record.total_steps,
+        "origin": record.origin.value,
+        "priority": record.priority.value,
+        "session_id": record.session_id,
+        "progress": record.progress,
+        "current_action": current_action,
+        "capability_requirements": list(record.capability_requirements),
+    }
 
 
 def _on_manager_status_change(task: "BackgroundTask") -> None:
-    """TaskManager-driven transitions (queued/running/cancelled) have no emit of their own -- fire one here."""
+    """Commit manager status synchronously, then emit its captured snapshot."""
+    captured_status = task.status
+    try:
+        record = _record_task_lifecycle(task, status=captured_status)
+    except TaskTransitionError:
+        # The adapter already restored the compatibility mirror and logged the
+        # rejected transition. Never emit mutable legacy state as canonical.
+        return
     if _active_event_bus is not None:
-        asyncio.create_task(_emit_task_event(_active_event_bus, task))
+        asyncio.create_task(_emit_task_event(_active_event_bus, record, task=task))
 
 
 _manager = TaskManager(max_parallel=1, on_status_change=_on_manager_status_change)
@@ -221,14 +302,19 @@ def _save_state(task: BackgroundTask) -> None:
         logger.warning("Failed to persist background-task state", exc_info=True)
 
 
-async def _emit_task_event(event_bus, task: BackgroundTask) -> None:
-    """WS event plus on-disk persist -- single choke point, see check_interrupted_task()."""
-    _sync_journal(task)
+async def _emit_task_event(
+    event_bus,
+    record: TaskRecord,
+    *,
+    task: Optional[BackgroundTask] = None,
+) -> None:
+    """Emit a captured canonical task snapshot and preserve legacy state on disk."""
     await event_bus.emit(
-        "background_task", task.to_public_event(include_metadata=True),
-        meta=EventMeta(source=EventSource.TASK, task_id=task.id),
+        "background_task", _public_event_from_record(record),
+        meta=EventMeta(source=EventSource.TASK, task_id=record.id),
     )
-    _save_state(task)
+    if task is not None:
+        _save_state(task)
 
 
 def check_interrupted_task() -> Optional[Dict[str, Any]]:
@@ -352,16 +438,8 @@ async def start(
         on_result_stored=on_result_stored,
     )
 
-    _journal.create_task(
-        task.text,
-        task_id=task.id,
-        origin=TaskOrigin.BACKGROUND,
-        priority=_priority_name(task.priority),
-        status=CanonicalTaskStatus.PLANNING,
-        session_id=task.session_id,
-        capability_requirements=("desktop",),
-    )
-    await _emit_task_event(event_bus, task)
+    record = _record_task_lifecycle(task, status=CanonicalTaskStatus.PLANNING)
+    await _emit_task_event(event_bus, record, task=task)
 
     plan_prompt = (
         "Break the following task into a short numbered list of concrete steps. "
@@ -380,6 +458,9 @@ async def start(
 
 
 def cancel(task_id: str) -> bool:
+    task = _manager.get(task_id)
+    if task is not None and task.status not in _TERMINAL_STATUSES:
+        _request_task_cancellation(task)
     cancelled = _manager.cancel(task_id)
     task = _manager.get(task_id)
     if cancelled and task is not None and task.status == "running" and task.brain is not None:
@@ -407,13 +488,13 @@ async def _wait_until_clear(task: BackgroundTask, config: Config, event_bus) -> 
         )
         if clear:
             if paused:
-                task.status = "running"
-                await _emit_task_event(event_bus, task)
+                record = _record_task_lifecycle(task, status=CanonicalTaskStatus.RUNNING)
+                await _emit_task_event(event_bus, record, task=task)
             return True
         if not paused:
             paused = True
-            task.status = "paused"
-            await _emit_task_event(event_bus, task)
+            record = _record_task_lifecycle(task, status=CanonicalTaskStatus.PAUSED)
+            await _emit_task_event(event_bus, record, task=task)
         await asyncio.sleep(_POLL_INTERVAL_SEC)
 
 
@@ -450,17 +531,18 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
                 )
 
             if not await _wait_until_clear(task, config, event_bus):
-                task.status = "cancelled" if task.cancel_requested else "failed"
-                if task.status == "failed":
+                status = CanonicalTaskStatus.CANCELLED if task.cancel_requested else CanonicalTaskStatus.FAILED
+                if status is CanonicalTaskStatus.FAILED:
                     task.error = "Desktop control halted (panic hotkey)."
                     await _announce(event_bus, voice, "error", f"Background task failed: {task.error}")
-                await _emit_task_event(event_bus, task)
+                record = _record_task_lifecycle(task, status=status)
+                await _emit_task_event(event_bus, record, task=task)
                 await _store_result(task, event_bus, "\n".join(step_outputs) or task.error or "")
                 return
 
             if not await _wait_for_desktop(task):
-                task.status = "cancelled"
-                await _emit_task_event(event_bus, task)
+                record = _record_task_lifecycle(task, status=CanonicalTaskStatus.CANCELLED)
+                await _emit_task_event(event_bus, record, task=task)
                 await _store_result(task, event_bus, "\n".join(step_outputs))
                 return
 
@@ -478,17 +560,18 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
                     desktop_session.release_desktop(task.id)
 
             task.current_step += 1
-            await _emit_task_event(event_bus, task)
+            record = _record_task_lifecycle(task)
+            await _emit_task_event(event_bus, record, task=task)
 
-        task.status = "done"
-        await _emit_task_event(event_bus, task)
+        record = _record_task_lifecycle(task, status=CanonicalTaskStatus.COMPLETED)
+        await _emit_task_event(event_bus, record, task=task)
         await _announce(event_bus, voice, "success", f"Background task complete: {task.text}")
         await _store_result(task, event_bus, "\n".join(step_outputs))
     except Exception as e:
         logger.error("Background task %s failed at step %d: %s", task.id, task.current_step, e, exc_info=True)
-        task.status = "failed"
         task.error = str(e)
-        await _emit_task_event(event_bus, task)
+        record = _record_task_lifecycle(task, status=CanonicalTaskStatus.FAILED)
+        await _emit_task_event(event_bus, record, task=task)
         await _announce(event_bus, voice, "error", "Background task failed. Check task details.")
         await _store_result(task, event_bus, "\n".join(step_outputs) or task.error or "")
     finally:

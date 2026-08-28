@@ -6,13 +6,15 @@ import pytest
 from charlie import background_task, recovery
 from charlie.config import Config
 from charlie.core import _TOOL_APPROVAL_TIMEOUT_SEC, Brain
+from charlie.task_journal import TaskJournal, TaskStatus, TaskTransitionError
 from charlie.tasks import TaskManager
 
 
 @pytest.fixture(autouse=True)
-def _reset_state():
+def _reset_state(monkeypatch):
     background_task._current_task = None
     background_task._active_event_bus = None
+    monkeypatch.setattr(background_task, "_journal", TaskJournal())
     background_task._manager = TaskManager(max_parallel=1, on_status_change=background_task._on_manager_status_change)
     yield
     background_task._current_task = None
@@ -46,6 +48,171 @@ async def _fake_plan_chat_stream(
         yield "1. Step one\n2. Step two\n"
     else:
         yield ""
+
+
+def test_background_task_creation_records_canonical_journal_record():
+    task = background_task.BackgroundTask(
+        id="create-1",
+        text="Inspect deployment",
+        steps=["Inspect logs", "Report result"],
+        session_id="bg:session-1",
+        priority=2,
+    )
+
+    record = background_task._record_task_lifecycle(task, status=TaskStatus.PLANNING)
+
+    assert record.id == task.id
+    assert record.title == task.text
+    assert record.status is TaskStatus.PLANNING
+    assert record.origin.value == "background"
+    assert record.priority.value == "high"
+    assert record.session_id == task.session_id
+    assert record.total_steps == 2
+    assert background_task._journal.get(task.id).status is TaskStatus.PLANNING
+
+
+def test_manager_status_callback_commits_queued_and_running_synchronously():
+    task = background_task.BackgroundTask(id="manager-1", text="Run task")
+    background_task._record_task_lifecycle(task, status=TaskStatus.PLANNING)
+
+    # TaskManager mutates its compatibility object before invoking the callback.
+    task.status = "queued"
+    background_task._on_manager_status_change(task)
+    assert background_task._journal.get(task.id).status is TaskStatus.QUEUED
+
+    task.status = "running"
+    background_task._on_manager_status_change(task)
+    assert background_task._journal.get(task.id).status is TaskStatus.RUNNING
+    assert task.status == "running"
+
+
+def test_identical_lifecycle_update_is_idempotent():
+    task = background_task.BackgroundTask(id="idempotent-1", text="Run task")
+
+    first = background_task._record_task_lifecycle(task, status=TaskStatus.RUNNING)
+    second = background_task._record_task_lifecycle(task, status=TaskStatus.RUNNING)
+
+    assert second.status is first.status is TaskStatus.RUNNING
+    assert len(background_task._journal.list()) == 1
+
+
+@pytest.mark.asyncio
+async def test_manager_callback_emits_captured_canonical_snapshots():
+    bus = FakeEventBus()
+    background_task._active_event_bus = bus
+    task = background_task.BackgroundTask(
+        id="snapshot-1", text="Run two steps", steps=["one", "two"], current_step=0
+    )
+    background_task._record_task_lifecycle(task, status=TaskStatus.PLANNING)
+
+    task.status = "queued"
+    background_task._on_manager_status_change(task)
+    task.status = "running"
+    task.current_step = 1
+    background_task._on_manager_status_change(task)
+    await asyncio.sleep(0.01)
+
+    task_events = [payload for event_type, payload in bus.events if event_type == "background_task"]
+    assert [payload["status"] for payload in task_events] == ["queued", "running"]
+    assert task_events[0]["current_step"] == 0
+    assert task_events[0]["progress"] == 0.0
+    assert task_events[1]["current_step"] == 1
+    assert task_events[1]["progress"] == 0.5
+
+
+def test_progress_and_current_step_update_canonical_journal():
+    task = background_task.BackgroundTask(
+        id="progress-1", text="Run steps", steps=["one", "two", "three"], status="running", current_step=1
+    )
+
+    first = background_task._record_task_lifecycle(task, status=TaskStatus.RUNNING)
+    assert first.current_step == 1
+    assert first.total_steps == 3
+    assert first.progress == pytest.approx(1 / 3)
+    assert first.current_action == "two"
+
+    task.current_step = 2
+    second = background_task._record_task_lifecycle(task)
+    assert second.current_step == 2
+    assert second.progress == pytest.approx(2 / 3)
+    assert second.current_action == "three"
+
+
+def test_completion_uses_verifying_bridge_and_mirrors_legacy_done(monkeypatch):
+    changes = []
+    monkeypatch.setattr(background_task, "_journal", TaskJournal(on_change=changes.append))
+    task = background_task.BackgroundTask(id="complete-1", text="Complete task", steps=["one"], current_step=1)
+
+    background_task._record_task_lifecycle(task, status=TaskStatus.PLANNING)
+    background_task._record_task_lifecycle(task, status=TaskStatus.RUNNING)
+    record = background_task._record_task_lifecycle(task, status=TaskStatus.COMPLETED)
+
+    assert record.status is TaskStatus.COMPLETED
+    assert background_task._journal.get(task.id).status is TaskStatus.COMPLETED
+    assert task.status == "done"
+    assert any(change.status is TaskStatus.VERIFYING for change in changes)
+    assert changes[-1].status is TaskStatus.COMPLETED
+    assert background_task._public_event_from_record(record)["current_action"] is None
+
+
+def test_approval_status_keeps_legacy_awaiting_approval_mirror():
+    task = background_task.BackgroundTask(id="approval-1", text="Approve task")
+
+    background_task._record_task_lifecycle(task, status=TaskStatus.PLANNING)
+    record = background_task._record_task_lifecycle(task, status="awaiting_approval")
+
+    assert record.status is TaskStatus.APPROVAL_REQUIRED
+    assert task.status == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_canonical_event_projection_omits_raw_failure_text():
+    bus = FakeEventBus()
+    task = background_task.BackgroundTask(
+        id="failure-event-1", text="Inspect deployment", status="running", error="api-key=secret"
+    )
+    background_task._record_task_lifecycle(task, status=TaskStatus.RUNNING)
+    record = background_task._record_task_lifecycle(task, status=TaskStatus.FAILED)
+
+    await background_task._emit_task_event(bus, record, task=task)
+
+    payload = bus.events[0][1]
+    assert payload["status"] == "failed"
+    assert "error" not in payload
+    assert "api-key=secret" not in str(payload)
+
+
+def test_cancellation_reaches_canonical_journal_and_legacy_mirror():
+    task = background_task.BackgroundTask(id="cancel-1", text="Cancel task")
+    background_task._record_task_lifecycle(task, status=TaskStatus.PLANNING)
+    background_task._record_task_lifecycle(task, status=TaskStatus.RUNNING)
+    record = background_task._record_task_lifecycle(task, status=TaskStatus.CANCELLED)
+
+    assert record.status is TaskStatus.CANCELLED
+    assert background_task._journal.get(task.id).status is TaskStatus.CANCELLED
+    assert task.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_terminal_regression_is_rejected_and_not_emitted():
+    bus = FakeEventBus()
+    background_task._active_event_bus = bus
+    task = background_task.BackgroundTask(id="terminal-1", text="Terminal task")
+    background_task._record_task_lifecycle(task, status=TaskStatus.PLANNING)
+    background_task._record_task_lifecycle(task, status=TaskStatus.RUNNING)
+    background_task._record_task_lifecycle(task, status=TaskStatus.COMPLETED)
+
+    task.status = "running"
+    with pytest.raises(TaskTransitionError):
+        background_task._record_task_lifecycle(task)
+    assert task.status == "done"
+    assert background_task._journal.get(task.id).status is TaskStatus.COMPLETED
+
+    task.status = "running"
+    background_task._on_manager_status_change(task)
+    await asyncio.sleep(0.01)
+    assert bus.events == []
+    assert task.status == "done"
 
 
 # --- start() / plan / immediate-run wiring (no approval gate) ---
@@ -116,6 +283,9 @@ async def test_lifecycle_alerts_speak_and_emit_start_and_complete(monkeypatch, b
     assert any("Starting background task" in m for m in fake_voice.spoken)
     assert any("Background task complete" in m for m in fake_voice.spoken)
     assert task.status == "done"
+    assert background_task._journal.get(task.id).status is TaskStatus.COMPLETED
+    task_events = [payload for event_type, payload in bus.events if event_type == "background_task"]
+    assert task_events[-1]["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -136,6 +306,10 @@ async def test_failed_task_alert_omits_raw_exception_text(monkeypatch, bg_config
     assert task.status == "failed"
     alerts = [payload["message"] for event_type, payload in bus.events if event_type == "alert"]
     assert all("api-key=secret" not in message for message in alerts)
+    assert background_task._journal.get(task.id).status is TaskStatus.FAILED
+    task_events = [payload for event_type, payload in bus.events if event_type == "background_task"]
+    assert task_events[-1]["status"] == "failed"
+    assert all("api-key=secret" not in str(payload) for payload in task_events)
 
 
 @pytest.mark.asyncio
@@ -155,6 +329,143 @@ async def test_cancelling_running_task_cancels_its_active_brain_generation():
 
     release.set()
     await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_running_cancellation_records_canonical_request_without_event(bg_config):
+    release = asyncio.Event()
+    bus = FakeEventBus()
+    background_task._active_event_bus = bus
+    task = background_task.BackgroundTask(id="running-cancel-request", text="do the thing")
+    task.brain = Mock()
+
+    async def run():
+        await release.wait()
+
+    background_task._manager.submit(task, run)
+    await asyncio.sleep(0.01)
+    bus.events.clear()
+
+    assert background_task.cancel(task.id) is True
+
+    record = background_task._journal.get(task.id)
+    assert record.status is TaskStatus.RUNNING
+    assert record.cancel_requested is True
+    assert task.status == "running"
+    assert task.cancel_requested is True
+    task.brain.cancel_chat.assert_called_once_with()
+    assert bus.events == []
+
+    release.set()
+    await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_running_cancellation_eventually_emits_canonical_cancelled(bg_config, monkeypatch):
+    monkeypatch.setattr(background_task, "_DESKTOP_AVAILABLE", False)
+    bus = FakeEventBus()
+    background_task._active_event_bus = bus
+    task = background_task.BackgroundTask(
+        id="running-cancelled", text="do the thing", steps=["step"]
+    )
+    task.brain = Mock()
+    task.brain.config = bg_config
+
+    async def close_brain():
+        return None
+
+    task.brain.close = close_brain
+    background_task._manager.submit(task, lambda: background_task._run_loop(task, bus))
+
+    assert task.status == "running"
+    assert background_task.cancel(task.id) is True
+    await asyncio.sleep(0.05)
+
+    record = background_task._journal.get(task.id)
+    assert record.status is TaskStatus.CANCELLED
+    assert record.cancel_requested is True
+    assert task.status == "cancelled"
+    assert task.cancel_requested is True
+    task_events = [payload for event_type, payload in bus.events if event_type == "background_task"]
+    assert task_events[-1]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_queued_cancellation_records_canonical_terminal_request():
+    bus = FakeEventBus()
+    background_task._active_event_bus = bus
+    background_task._manager = TaskManager(
+        max_parallel=0, on_status_change=background_task._on_manager_status_change
+    )
+    task = background_task.BackgroundTask(id="queued-cancel", text="queued task")
+
+    async def run():
+        return None
+
+    background_task._manager.submit(task, run)
+    await asyncio.sleep(0.01)
+    bus.events.clear()
+
+    assert task.status == "queued"
+    assert background_task.cancel(task.id) is True
+    await asyncio.sleep(0.01)
+
+    record = background_task._journal.get(task.id)
+    assert background_task._manager.get(task.id).status == "cancelled"
+    assert record.status is TaskStatus.CANCELLED
+    assert record.cancel_requested is True
+    assert task.status == "cancelled"
+    assert task.cancel_requested is True
+    task_events = [payload for event_type, payload in bus.events if event_type == "background_task"]
+    assert [payload["status"] for payload in task_events] == ["cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_manual_takeover_records_canonical_request_and_legacy_signal():
+    release = asyncio.Event()
+    bus = FakeEventBus()
+    background_task._active_event_bus = bus
+    task = background_task.BackgroundTask(id="takeover-cancel", text="desktop task")
+
+    async def run():
+        await release.wait()
+
+    background_task._manager.submit(task, run)
+    await asyncio.sleep(0.01)
+    bus.events.clear()
+
+    background_task._on_manual_takeover(task.id, ("desktop",))
+
+    record = background_task._journal.get(task.id)
+    assert record.status is TaskStatus.RUNNING
+    assert record.cancel_requested is True
+    assert task.status == "running"
+    assert task.cancel_requested is True
+    assert bus.events == []
+
+    release.set()
+    await asyncio.sleep(0.01)
+
+
+def test_cancellation_missing_journal_record_reuses_lifecycle_adapter(monkeypatch):
+    background_task._manager = TaskManager(
+        max_parallel=0, on_status_change=background_task._on_manager_status_change
+    )
+    task = background_task.BackgroundTask(id="missing-cancel-journal", text="queued task")
+
+    async def run():
+        return None
+
+    background_task._manager.submit(task, run)
+    monkeypatch.setattr(background_task, "_journal", TaskJournal())
+
+    assert background_task.cancel(task.id) is True
+
+    record = background_task._journal.get(task.id)
+    assert record.status is TaskStatus.CANCELLED
+    assert record.cancel_requested is True
+    assert task.status == "cancelled"
+    assert task.cancel_requested is True
 
 
 @pytest.mark.asyncio
@@ -341,6 +652,8 @@ async def test_wait_until_clear_pauses_then_clears_on_real_input(monkeypatch, bg
     assert task.status == "running"
     statuses = [e[1]["status"] for e in bus.events]
     assert "paused" in statuses
+    assert "running" in statuses
+    assert background_task._journal.get(task.id).status is TaskStatus.RUNNING
 
 
 @pytest.mark.asyncio
