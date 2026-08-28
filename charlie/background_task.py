@@ -75,6 +75,12 @@ _STEP_RE = re.compile(r"^\s*\d+[.)]\s+(.+)$")
 _STATE_FILE = ".charlie_background_task_state.json"
 _JOURNAL_FILE = ".charlie_task_journal.json"
 _TERMINAL_STATUSES = ("done", "failed", "cancelled")
+_CANONICAL_TERMINAL_STATUSES = frozenset({
+    CanonicalTaskStatus.COMPLETED,
+    CanonicalTaskStatus.FAILED,
+    CanonicalTaskStatus.CANCELLED,
+})
+_RESTART_ERROR = "Charlie restarted while this task was still running."
 # Heuristic pre-scan over free-text plan steps, not a guarantee -- the real gate runs during execution.
 _DESKTOP_KEYWORD_RE = re.compile(
     r"\b(click|type|open|close|desktop|screen|window)\b", re.IGNORECASE
@@ -317,8 +323,136 @@ async def _emit_task_event(
         _save_state(task)
 
 
+def _write_legacy_state(state: Dict[str, Any]) -> None:
+    try:
+        with open(_STATE_FILE, "w", encoding="utf-8") as f:
+            f.write(json_dumps(state))
+    except Exception:
+        logger.warning("Failed to rewrite background-task state file", exc_info=True)
+
+
+def _reconcile_persisted_background_tasks() -> tuple[set[str], set[str]]:
+    """Fail every non-terminal background record left by the prior process."""
+    reconciled_ids: set[str] = set()
+    failed_transition_ids: set[str] = set()
+    for record in _journal.list():
+        if record.origin is not TaskOrigin.BACKGROUND or record.status in _CANONICAL_TERMINAL_STATUSES:
+            continue
+        try:
+            _journal.transition(
+                record.id,
+                CanonicalTaskStatus.FAILED,
+                error_summary=_RESTART_ERROR,
+            )
+            reconciled_ids.add(record.id)
+        except TaskTransitionError:
+            try:
+                current = _journal.get(record.id)
+            except KeyError:
+                current = None
+            if current is not None and current.status in _CANONICAL_TERMINAL_STATUSES:
+                logger.info(
+                    "Persisted background task %s became terminal during restart reconciliation",
+                    record.id,
+                )
+                continue
+            failed_transition_ids.add(record.id)
+            logger.error(
+                "Failed to reconcile persisted background task %s from %s to failed",
+                record.id,
+                record.status.value,
+                exc_info=True,
+            )
+    return reconciled_ids, failed_transition_ids
+
+
+def _legacy_task_id(state: Dict[str, Any]) -> Optional[str]:
+    task_id = state.get("id")
+    if task_id is None:
+        return None
+    task_id = str(task_id)
+    return task_id or None
+
+
+def _legacy_title(state: Dict[str, Any]) -> str:
+    title = state.get("text")
+    if not isinstance(title, str):
+        title = state.get("title", "")
+    return title if isinstance(title, str) else str(title)
+
+
+def _legacy_steps(state: Dict[str, Any]) -> List[str]:
+    steps = state.get("steps", [])
+    if not isinstance(steps, (list, tuple)):
+        return []
+    return [step if isinstance(step, str) else str(step) for step in steps]
+
+
+def _legacy_current_step(state: Dict[str, Any]) -> int:
+    try:
+        return max(0, int(state.get("current_step", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _legacy_initial_status(state: Dict[str, Any]) -> CanonicalTaskStatus:
+    raw_status = state.get("status")
+    try:
+        return normalize_task_status(raw_status) if isinstance(raw_status, str) else CanonicalTaskStatus.QUEUED
+    except ValueError:
+        logger.warning("Unknown legacy background-task status %r; reconstructing as queued", raw_status)
+        return CanonicalTaskStatus.QUEUED
+
+
+def _legacy_state_is_terminal(state: Dict[str, Any]) -> bool:
+    if state.get("status") in _TERMINAL_STATUSES:
+        return True
+    try:
+        return _legacy_initial_status(state) in _CANONICAL_TERMINAL_STATUSES
+    except (TypeError, ValueError):
+        return False
+
+
+def _mirror_legacy_terminal_state(state: Dict[str, Any], record: TaskRecord) -> None:
+    state["status"] = _legacy_status_for(record.status)
+    if record.error_summary:
+        state["error"] = record.error_summary
+    _write_legacy_state(state)
+
+
+def _reconstruct_legacy_task(state: Dict[str, Any]) -> TaskRecord:
+    """Create the smallest canonical background record for legacy-only state."""
+    task_id = _legacy_task_id(state) or make_id()
+
+    steps = _legacy_steps(state)
+    current_step = _legacy_current_step(state)
+    session_id = state.get("session_id")
+    if not isinstance(session_id, str):
+        session_id = None
+    _journal.create_task(
+        _legacy_title(state),
+        task_id=task_id,
+        origin=TaskOrigin.BACKGROUND,
+        status=_legacy_initial_status(state),
+        session_id=session_id,
+        current_step=current_step,
+        total_steps=len(steps),
+    )
+    current_action = steps[current_step] if current_step < len(steps) else None
+    progress = (current_step / len(steps)) if steps else None
+    _journal.update_progress(
+        task_id,
+        progress=progress,
+        current_action=current_action,
+        current_step=current_step,
+        total_steps=len(steps),
+    )
+    return _journal.transition(task_id, CanonicalTaskStatus.FAILED, error_summary=_RESTART_ERROR)
+
+
 def check_interrupted_task() -> Optional[Dict[str, Any]]:
-    """Call at startup: report+clear a non-terminal state left by a process restart mid-task."""
+    """Reconcile canonical background history, then preserve the legacy warning contract."""
+    reconciled_ids, failed_transition_ids = _reconcile_persisted_background_tasks()
     if not os.path.exists(_STATE_FILE):
         return None
     try:
@@ -327,16 +461,55 @@ def check_interrupted_task() -> Optional[Dict[str, Any]]:
     except Exception:
         logger.warning("Failed to read background-task state file", exc_info=True)
         return None
-    if not isinstance(state, dict) or state.get("status") in _TERMINAL_STATUSES:
+    if not isinstance(state, dict) or _legacy_state_is_terminal(state):
         return None
 
-    state["status"] = "failed"
-    state["error"] = "Charlie restarted while this task was still running."
+    task_id = _legacy_task_id(state)
+    canonical = None
+    if task_id is not None:
+        try:
+            canonical = _journal.get(task_id)
+        except KeyError:
+            pass
+
+    if canonical is not None:
+        if canonical.status in _CANONICAL_TERMINAL_STATUSES:
+            if task_id in reconciled_ids:
+                state["status"] = "failed"
+                state["error"] = _RESTART_ERROR
+                _write_legacy_state(state)
+                return state
+            _mirror_legacy_terminal_state(state, canonical)
+            return None
+        if canonical.origin is not TaskOrigin.BACKGROUND:
+            logger.error(
+                "Legacy background task %s conflicts with non-background canonical origin %s",
+                task_id,
+                canonical.origin.value,
+            )
+            return None
+        if task_id in failed_transition_ids:
+            return None
+        logger.error(
+            "Persisted background task %s remained non-terminal after restart reconciliation",
+            task_id,
+        )
+        return None
+
     try:
-        with open(_STATE_FILE, "w", encoding="utf-8") as f:
-            f.write(json_dumps(state))
-    except Exception:
-        logger.warning("Failed to rewrite background-task state file", exc_info=True)
+        reconstructed = _reconstruct_legacy_task(state)
+    except TaskTransitionError:
+        logger.error("Failed to reconcile reconstructed legacy background task %s", task_id, exc_info=True)
+        return None
+    except (KeyError, ValueError, TypeError):
+        logger.error("Failed to reconstruct legacy background task %s", task_id, exc_info=True)
+        return None
+
+    if task_id is None:
+        state["id"] = reconstructed.id
+    state["status"] = "failed"
+    state["error"] = _RESTART_ERROR
+    _write_legacy_state(state)
     return state
 
 

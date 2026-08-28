@@ -1,4 +1,5 @@
 import asyncio
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -6,15 +7,19 @@ import pytest
 from charlie import background_task, recovery
 from charlie.config import Config
 from charlie.core import _TOOL_APPROVAL_TIMEOUT_SEC, Brain
-from charlie.task_journal import TaskJournal, TaskStatus, TaskTransitionError
+from charlie.task_journal import TaskJournal, TaskOrigin, TaskStatus, TaskTransitionError
 from charlie.tasks import TaskManager
 
 
 @pytest.fixture(autouse=True)
-def _reset_state(monkeypatch):
+def _reset_state(monkeypatch, tmp_path):
     background_task._current_task = None
     background_task._active_event_bus = None
-    monkeypatch.setattr(background_task, "_journal", TaskJournal())
+    monkeypatch.setattr(
+        background_task,
+        "_journal",
+        TaskJournal(state_path=tmp_path / "task-journal.json"),
+    )
     background_task._manager = TaskManager(max_parallel=1, on_status_change=background_task._on_manager_status_change)
     yield
     background_task._current_task = None
@@ -48,6 +53,17 @@ async def _fake_plan_chat_stream(
         yield "1. Step one\n2. Step two\n"
     else:
         yield ""
+
+
+def _journal_with_path(monkeypatch, tmp_path):
+    journal = TaskJournal(state_path=tmp_path / "task-journal.json")
+    monkeypatch.setattr(background_task, "_journal", journal)
+    return journal
+
+
+def _write_legacy_state(state):
+    with open(background_task._STATE_FILE, "w", encoding="utf-8") as state_file:
+        json.dump(state, state_file)
 
 
 def test_background_task_creation_records_canonical_journal_record():
@@ -531,6 +547,327 @@ async def test_count_active_tasks_reflects_queue_depth(monkeypatch, bg_config):
 def _isolate_state_file(monkeypatch, tmp_path):
     """Never touch the real .charlie_background_task_state.json on disk."""
     monkeypatch.setattr(background_task, "_STATE_FILE", str(tmp_path / "bg_state.json"))
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        TaskStatus.PLANNING,
+        TaskStatus.QUEUED,
+        TaskStatus.PAUSED,
+        TaskStatus.WAITING,
+        TaskStatus.APPROVAL_REQUIRED,
+        TaskStatus.VERIFYING,
+        TaskStatus.RUNNING,
+    ],
+)
+def test_check_interrupted_task_reconciles_persisted_non_terminal_background_records(
+    monkeypatch, tmp_path, status
+):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    journal.create_task(
+        "Restarted task",
+        task_id=f"restart-{status.value}",
+        origin=TaskOrigin.BACKGROUND,
+        status=status,
+        current_step=1,
+        total_steps=3,
+    )
+
+    assert background_task.check_interrupted_task() is None
+
+    record = journal.get(f"restart-{status.value}")
+    assert record.status is TaskStatus.FAILED
+    assert record.error_summary == "Charlie restarted while this task was still running."
+    restored = TaskJournal(state_path=tmp_path / "task-journal.json")
+    assert restored.get(record.id).status is TaskStatus.FAILED
+
+
+@pytest.mark.parametrize(
+    ("canonical_status", "legacy_status"),
+    [
+        (TaskStatus.COMPLETED, "running"),
+        (TaskStatus.FAILED, "running"),
+        (TaskStatus.CANCELLED, "running"),
+    ],
+)
+def test_check_interrupted_task_preserves_canonical_terminal_truth(
+    monkeypatch, tmp_path, canonical_status, legacy_status
+):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    task_id = f"terminal-{canonical_status.value}"
+    journal.create_task(
+        "Already terminal",
+        task_id=task_id,
+        origin=TaskOrigin.BACKGROUND,
+        status=canonical_status,
+    )
+    _write_legacy_state({"id": task_id, "text": "Already terminal", "status": legacy_status})
+
+    assert background_task.check_interrupted_task() is None
+    assert journal.get(task_id).status is canonical_status
+    with open(background_task._STATE_FILE, "r", encoding="utf-8") as state_file:
+        mirrored = json.load(state_file)
+    assert mirrored["status"] == ("done" if canonical_status is TaskStatus.COMPLETED else canonical_status.value)
+
+
+def test_check_interrupted_task_reconciles_all_background_records_without_touching_other_origins(
+    monkeypatch, tmp_path
+):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    background_ids = []
+    for index, status in enumerate((TaskStatus.PLANNING, TaskStatus.QUEUED, TaskStatus.PAUSED)):
+        task_id = f"background-stale-{index}"
+        background_ids.append(task_id)
+        journal.create_task("Stale background", task_id=task_id, origin=TaskOrigin.BACKGROUND, status=status)
+    journal.create_task(
+        "Terminal background",
+        task_id="background-terminal",
+        origin=TaskOrigin.BACKGROUND,
+        status=TaskStatus.COMPLETED,
+    )
+    other_origins = {
+        origin: journal.create_task(
+            f"{origin.value} task",
+            task_id=f"{origin.value}-active",
+            origin=origin,
+            status=TaskStatus.RUNNING,
+        )
+        for origin in (
+            TaskOrigin.FOREGROUND,
+            TaskOrigin.BROWSER,
+            TaskOrigin.RESEARCH,
+            TaskOrigin.SYSTEM,
+            TaskOrigin.MAINTENANCE,
+            TaskOrigin.CHILD,
+        )
+    }
+
+    background_task.check_interrupted_task()
+
+    assert all(journal.get(task_id).status is TaskStatus.FAILED for task_id in background_ids)
+    assert journal.get("background-terminal").status is TaskStatus.COMPLETED
+    assert all(journal.get(task.id).status is TaskStatus.RUNNING for task in other_origins.values())
+
+
+def test_terminal_legacy_state_does_not_block_other_background_reconciliation(monkeypatch, tmp_path):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    journal.create_task(
+        "Another stale task",
+        task_id="another-stale",
+        origin=TaskOrigin.BACKGROUND,
+        status=TaskStatus.RUNNING,
+    )
+    _write_legacy_state({"id": "old-task", "text": "Old task", "status": "done"})
+
+    assert background_task.check_interrupted_task() is None
+    assert journal.get("another-stale").status is TaskStatus.FAILED
+
+
+def test_check_interrupted_task_returns_existing_legacy_interruption_after_canonical_failure(
+    monkeypatch, tmp_path
+):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    journal.create_task(
+        "Open deployment console",
+        task_id="matching-legacy",
+        origin=TaskOrigin.BACKGROUND,
+        status=TaskStatus.RUNNING,
+        session_id="bg:session-1",
+        current_step=1,
+        total_steps=3,
+    )
+    _write_legacy_state(
+        {
+            "id": "matching-legacy",
+            "text": "Open deployment console",
+            "steps": ["Open console", "Inspect logs", "Report"],
+            "current_step": 1,
+            "status": "running",
+            "session_id": "bg:session-1",
+        }
+    )
+
+    result = background_task.check_interrupted_task()
+
+    assert result is not None
+    assert result["text"] == "Open deployment console"
+    assert result["current_step"] == 1
+    assert result["steps"] == ["Open console", "Inspect logs", "Report"]
+    assert result["status"] == "failed"
+    assert result["error"] == "Charlie restarted while this task was still running."
+    assert journal.get("matching-legacy").status is TaskStatus.FAILED
+    assert background_task.check_interrupted_task() is None
+
+
+def test_absent_legacy_state_still_reconciles_persisted_background_records(monkeypatch, tmp_path):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    journal.create_task(
+        "No compatibility file",
+        task_id="no-legacy-file",
+        origin=TaskOrigin.BACKGROUND,
+        status=TaskStatus.RUNNING,
+    )
+
+    assert background_task.check_interrupted_task() is None
+    assert journal.get("no-legacy-file").status is TaskStatus.FAILED
+
+
+def test_active_legacy_state_without_canonical_record_is_reconstructed_and_failed(
+    monkeypatch, tmp_path
+):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    _write_legacy_state(
+        {
+            "id": "legacy-only",
+            "text": "Rebuild legacy task",
+            "steps": ["First", "Second", "Third"],
+            "current_step": 1,
+            "status": "running",
+            "session_id": "bg:legacy-session",
+        }
+    )
+
+    result = background_task.check_interrupted_task()
+
+    assert result is not None
+    record = journal.get("legacy-only")
+    assert record.id == "legacy-only"
+    assert record.title == "Rebuild legacy task"
+    assert record.origin is TaskOrigin.BACKGROUND
+    assert record.session_id == "bg:legacy-session"
+    assert record.current_step == 1
+    assert record.total_steps == 3
+    assert record.progress == pytest.approx(1 / 3)
+    assert record.status is TaskStatus.FAILED
+    assert record.error_summary == "Charlie restarted while this task was still running."
+
+
+def test_active_legacy_state_without_id_gets_generated_canonical_task(monkeypatch, tmp_path):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    _write_legacy_state(
+        {
+            "text": "Legacy task",
+            "steps": ["one", "two"],
+            "current_step": 1,
+            "status": "running",
+        }
+    )
+
+    result = background_task.check_interrupted_task()
+
+    assert result is not None
+    assert result["id"]
+    with open(background_task._STATE_FILE, "r", encoding="utf-8") as state_file:
+        persisted = json.load(state_file)
+    assert persisted["id"] == result["id"]
+    assert persisted["status"] == "failed"
+    assert result["status"] == "failed"
+    record = journal.get(result["id"])
+    assert record.id == result["id"]
+    assert record.origin is TaskOrigin.BACKGROUND
+    assert record.title == "Legacy task"
+    assert record.current_step == 1
+    assert record.total_steps == 2
+    assert record.status is TaskStatus.FAILED
+    assert record.error_summary == background_task._RESTART_ERROR
+
+    assert background_task.check_interrupted_task() is None
+    assert journal.get(result["id"]).status is TaskStatus.FAILED
+
+
+def test_active_legacy_state_with_empty_id_gets_generated_canonical_task(monkeypatch, tmp_path):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    _write_legacy_state(
+        {
+            "id": "",
+            "text": "Legacy empty-id task",
+            "steps": ["one", "two"],
+            "current_step": 1,
+            "status": "running",
+        }
+    )
+
+    result = background_task.check_interrupted_task()
+
+    assert result is not None
+    assert result["id"]
+    with open(background_task._STATE_FILE, "r", encoding="utf-8") as state_file:
+        persisted = json.load(state_file)
+    assert persisted["id"] == result["id"]
+    assert persisted["status"] == "failed"
+    assert result["status"] == "failed"
+    record = journal.get(result["id"])
+    assert record.origin is TaskOrigin.BACKGROUND
+    assert record.title == "Legacy empty-id task"
+    assert record.current_step == 1
+    assert record.total_steps == 2
+    assert record.status is TaskStatus.FAILED
+    assert record.error_summary == background_task._RESTART_ERROR
+
+
+def test_legacy_only_create_failure_does_not_report_success(monkeypatch, tmp_path, caplog):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    _write_legacy_state({"text": "Create failure", "status": "running"})
+
+    def reject_create(*args, **kwargs):
+        raise ValueError("forced legacy reconstruction create failure")
+
+    monkeypatch.setattr(journal, "create_task", reject_create)
+    with caplog.at_level("ERROR", logger="charlie.background_task"):
+        result = background_task.check_interrupted_task()
+
+    assert result is None
+    with open(background_task._STATE_FILE, "r", encoding="utf-8") as state_file:
+        persisted = json.load(state_file)
+    assert persisted["status"] == "running"
+    assert "id" not in persisted
+    assert "Failed to reconstruct legacy background task" in caplog.text
+
+
+def test_legacy_only_transition_failure_does_not_report_success(monkeypatch, tmp_path, caplog):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    _write_legacy_state({"text": "Transition failure", "status": "running"})
+
+    def reject_transition(*args, **kwargs):
+        raise TaskTransitionError("forced legacy reconstruction transition failure")
+
+    monkeypatch.setattr(journal, "transition", reject_transition)
+    with caplog.at_level("ERROR", logger="charlie.background_task"):
+        result = background_task.check_interrupted_task()
+
+    assert result is None
+    with open(background_task._STATE_FILE, "r", encoding="utf-8") as state_file:
+        persisted = json.load(state_file)
+    assert persisted["status"] == "running"
+    assert "id" not in persisted
+    assert "Failed to reconcile reconstructed legacy background task" in caplog.text
+
+
+def test_transition_failure_is_logged_without_fabricating_reconciliation(
+    monkeypatch, tmp_path, caplog
+):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    journal.create_task(
+        "Transition failure",
+        task_id="transition-failure",
+        origin=TaskOrigin.BACKGROUND,
+        status=TaskStatus.RUNNING,
+    )
+    _write_legacy_state({"id": "transition-failure", "text": "Transition failure", "status": "running"})
+
+    def reject_transition(*args, **kwargs):
+        raise TaskTransitionError("forced restart transition failure")
+
+    monkeypatch.setattr(journal, "transition", reject_transition)
+    with caplog.at_level("ERROR", logger="charlie.background_task"):
+        result = background_task.check_interrupted_task()
+
+    assert result is None
+    assert journal.get("transition-failure").status is TaskStatus.RUNNING
+    with open(background_task._STATE_FILE, "r", encoding="utf-8") as state_file:
+        assert json.load(state_file)["status"] == "running"
+    assert "Failed to reconcile persisted background task transition-failure" in caplog.text
 
 
 def test_check_interrupted_task_returns_none_when_no_file():
