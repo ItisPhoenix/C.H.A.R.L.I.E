@@ -1688,7 +1688,7 @@ async def main():
         from charlie.tools import registry
 
         for k in [k for k in registry._tools if k.startswith("mcp_")]:
-            registry._tools.pop(k, None)
+            registry.unregister_tool(k)
         try:
             mcp_client = await _restart_mcp_client(mcp_client, config)
         except Exception as ex:
@@ -1700,7 +1700,7 @@ async def main():
         from charlie.tools import registry
 
         for k in [k for k in registry._tools if k.startswith("plugin_")]:
-            registry._tools.pop(k, None)
+            registry.unregister_tool(k)
         if config.plugins_enabled:
             try:
                 from charlie.tools import register_plugin_tools

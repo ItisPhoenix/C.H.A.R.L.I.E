@@ -121,7 +121,7 @@ class SkillAdapter:
 
         if self._capability_index:
             if not enabled:
-                self._capability_index._capabilities.pop(ext_id, None)
+                self._capability_index.unregister_capability(ext_id)
             else:
                 # Re-read and re-register
                 skill_file = self._skills_dir / name / "SKILL.md"
@@ -147,7 +147,7 @@ class SkillAdapter:
                 logger.warning("Failed to delete skill directory %s: %s", skill_dir, e)
 
         if self._capability_index:
-            self._capability_index._capabilities.pop(ext_id, None)
+            self._capability_index.unregister_capability(ext_id)
 
         return SkillAdapterResult(
             success=True,

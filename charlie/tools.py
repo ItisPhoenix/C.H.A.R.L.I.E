@@ -120,44 +120,6 @@ _OSCRIPT_VOL_RE = re.compile(
     r"osascript\s.*[Ss]et\s+[Vv]olume\s+([\d.]+)", re.IGNORECASE
 )
 
-# Baseline (owner, risk_class) per tool, read by autonomy.classify_action() -- plain strings to avoid a circular import.
-_DEFAULT_TOOL_METADATA: Dict[str, tuple] = {
-    "web_search": ("tools", "safe"),
-    "web_research": ("research", "safe"),
-    "shell_execute": ("tools", "reversible"),
-    "system_diagnostics": ("tools", "safe"),
-    "file_read": ("tools", "safe"),
-    "file_write": ("tools", "reversible"),
-    "memory": ("memory", "reversible"),
-    "propose_new_tool": ("tools", "safe"),
-    "start_background_task": ("tools", "reversible"),
-    "vector_memory": ("memory", "safe"),
-    "session_search": ("memory", "safe"),
-    "recall_results": ("memory", "safe"),
-    "graph_add_fact": ("memory", "reversible"),
-    "graph_query": ("memory", "safe"),
-    "graph_consolidate": ("memory", "reversible"),
-    "desktop_observe": ("desktop", "safe"),
-    "desktop_read_screen": ("desktop", "safe"),
-    "desktop_click": ("desktop", "safe"),
-    "desktop_type": ("desktop", "safe"),
-    "desktop_invoke": ("desktop", "safe"),
-    "desktop_key": ("desktop", "safe"),
-    "desktop_click_at": ("desktop", "safe"),
-    "desktop_move": ("desktop", "safe"),
-    "desktop_drag": ("desktop", "safe"),
-    "desktop_scroll": ("desktop", "safe"),
-    "desktop_screenshot": ("desktop", "safe"),
-    "desktop_windows": ("desktop", "safe"),
-    "desktop_focus": ("desktop", "safe"),
-    "desktop_window": ("desktop", "safe"),
-    "desktop_move_window": ("desktop", "safe"),
-    "system_control": ("desktop", "safe"),
-    "browser_task": ("browser", "reversible"),
-    "browser_read": ("browser", "safe"),
-}
-
-
 class ToolRegistry:
     """Registry of tools the LLM can call."""
 
@@ -174,11 +136,14 @@ class ToolRegistry:
         risk_class: Optional[str] = None,
     ):
         """owner/risk_class are plain strings (not charlie.autonomy.RiskClass) so this module
-        never has to import autonomy.py, which already imports from here. A caller who omits
-        both falls back to _DEFAULT_TOOL_METADATA's per-name entry, if one exists."""
-        default_owner, default_risk = _DEFAULT_TOOL_METADATA.get(name, ("", None))
-        effective_owner = owner or default_owner
-        effective_risk = risk_class or default_risk
+        never has to import autonomy.py, which already imports from here. Known built-ins
+        mirror semantic metadata from charlie.capabilities; owner remains a compatibility
+        label for registry callers. Dynamic tools keep their explicit metadata."""
+        from charlie.capabilities import get_builtin_tool_metadata
+
+        canonical = get_builtin_tool_metadata(name)
+        effective_owner = owner or (canonical or {}).get("tool_registry_owner", "")
+        effective_risk = canonical["risk_class"] if canonical is not None else risk_class
         self._tools[name] = {
             "func": None,
             "description": description,
@@ -196,8 +161,8 @@ class ToolRegistry:
                 description=description,
                 schema=schema,
                 func=func,
-                owner=effective_owner,
-                risk_class=effective_risk,
+                owner=owner or effective_owner,
+                risk_class=risk_class,
                 is_interactive=is_interactive,
             )
             return func
@@ -341,8 +306,6 @@ registry = ToolRegistry()
         "required": ["action"],
         "additionalProperties": False,
     },
-    owner="presentation",
-    risk_class="safe",
     is_interactive=True,
 )
 def presentation_request(action: str, surface: Optional[str] = None) -> str:
@@ -2229,8 +2192,6 @@ def browser_read(url: str) -> str:
         },
         "required": ["question"],
     },
-    owner="system",
-    risk_class="safe",
 )
 def charlie_self_query(question: str) -> str:
     from charlie.self_knowledge import SelfKnowledgeService
@@ -2250,8 +2211,6 @@ def charlie_self_query(question: str) -> str:
         "type": "object",
         "properties": {},
     },
-    owner="system",
-    risk_class="safe",
 )
 def charlie_doctor_diagnose() -> str:
     from charlie.doctor import CharlieDoctor
@@ -2277,8 +2236,6 @@ def charlie_doctor_diagnose() -> str:
         },
         "required": ["prompt"],
     },
-    owner="extensions",
-    risk_class="reversible",
 )
 def charlie_self_extension_propose(prompt: str) -> str:
     if _self_extension_orchestrator is None:

@@ -1494,9 +1494,7 @@ async def get_tools():
 @app.get("/api/capabilities")
 async def get_capabilities():
     """Expose the live capability view used to describe Charlie to the model."""
-    from charlie.tools import registry
-
-    snapshot = build_capability_snapshot(registry, config)
+    snapshot = build_capability_snapshot(_shared_capability_index, config)
     snapshot["runtime"] = dict(_subsystem_health)
     return snapshot
 

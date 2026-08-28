@@ -159,10 +159,12 @@ _DESKTOP_CONTROL_TOOLS = frozenset(
         "system_control",
     }
 )
-# All tools that touch the UIA/comtypes COM apartment -- perception too, not
-# just the gated effectors -- must run on the single dedicated COM thread.
-_DESKTOP_COM_TOOLS = _DESKTOP_CONTROL_TOOLS | frozenset(
-    {"desktop_observe", "desktop_read_screen", "desktop_screenshot"}
+# Compatibility projection for callers that need the current COM-backed tool
+# set. Execution reads each operation's canonical executor_type live below.
+_DESKTOP_COM_TOOLS = frozenset(
+    operation.name
+    for operation in capability_index.find_operations(available_only=False)
+    if operation.executor_type == "com_thread"
 )
 # Narrower sibling of router.SCREEN_QUERY_RE: phrasing that implies the user wants
 # graphical/visual understanding (an icon, photo, game frame) that OCR/UIA
@@ -184,32 +186,13 @@ _VISUAL_CONTENT_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 _TOOL_TIMEOUTS = {
-    "web_search": 15.0,
-    "web_research": 130.0,
-    "file_read": 10.0,
-    "file_write": 10.0,
-    "shell_execute": 30.0,
-    "desktop_observe": 15.0,
-    "desktop_click": 15.0,
-    "desktop_type": 15.0,
-    "desktop_invoke": 15.0,
-    "desktop_key": 15.0,
-    "desktop_click_at": 15.0,
-    "desktop_move": 15.0,
-    "desktop_drag": 15.0,
-    "desktop_scroll": 15.0,
-    "desktop_windows": 15.0,
-    "desktop_focus": 15.0,
-    "desktop_window": 15.0,
-    "desktop_move_window": 15.0,
-    "system_control": 15.0,
     # Recursive filesystem search (esp. with PLUGIN_ALLOW_DIRS="*", full-disk
     # access) needs far more than the 15s default -- scanning a whole drive
-    # tree routinely takes longer than that.
+    # tree routinely takes longer than that. This dynamic tool is not a
+    # canonical built-in capability, so it remains a narrow compatibility
+    # fallback until its plugin descriptor carries timeout metadata.
     "plugin_fs_search": 120.0,
-    "browser_read": 20.0,
 }
-_BROWSER_TASK_TIMEOUT_SEC = 100.0  # headroom above browser_task's own internal deadline (up to 90s)
 _NON_VOICE_BROWSER_DEADLINE_MULTIPLIER = 3.6  # preserves the old hardcoded 90s at the 25s config default
 _TOOL_RESULT_MAX_CHARS = 2000
 # Router classifier fallback (0.1): must fit well inside the ~1s time-to-first-audio budget.
@@ -222,6 +205,16 @@ _REPEATED_TOOL_RESULT = (
     "Repeated identical tool call suppressed. Choose another valid capability or finish the response."
 )
 _REPEATED_TOOL_FAILURE = "I couldn't complete that because the model kept requesting an invalid or repeated action."
+
+
+def _tool_timeout(tool_name: str, operation: Any = None) -> float:
+    """Resolve canonical timeouts, retaining narrow dynamic-tool fallbacks."""
+    if tool_name in _TOOL_TIMEOUTS:
+        return _TOOL_TIMEOUTS[tool_name]
+    operation = operation or capability_index.get_operation(tool_name)
+    if operation is not None and operation.timeout_sec:
+        return operation.timeout_sec
+    return _TOOL_TIMEOUT_SEC
 
 
 class _RepeatToolCallGuard:
@@ -1136,7 +1129,7 @@ class Brain:
         presentation_block = get_presentation_registry().build_model_awareness_block()
         self._stable_tier: str = prompt_builder.build_stable_tier(
             soul_text,
-            build_capability_roster(tool_registry, config),
+            build_capability_roster(capability_index, config),
             self._use_native_tools,
             presentation_block=presentation_block,
         )
@@ -1214,7 +1207,7 @@ class Brain:
         presentation_block = get_presentation_registry().build_model_awareness_block()
         self._stable_tier = prompt_builder.build_stable_tier(
             soul_text,
-            build_capability_roster(tool_registry, self.config),
+            build_capability_roster(capability_index, self.config),
             self._use_native_tools,
             presentation_block=presentation_block,
         )
@@ -1584,10 +1577,10 @@ class Brain:
                     session_id=session_id,
                     turn_id=turn_id,
                 ),
-                timeout=_BROWSER_TASK_TIMEOUT_SEC,
+                timeout=_tool_timeout("browser_task"),
             )
         except asyncio.TimeoutError:
-            logger.warning("Fast-path browser_task timed out after %.0fs: %s", _BROWSER_TASK_TIMEOUT_SEC, task)
+            logger.warning("Fast-path browser_task timed out after %.0fs: %s", _tool_timeout("browser_task"), task)
             return "That's taking too long -- I gave up on it."
 
     async def browser_task(
@@ -1977,7 +1970,11 @@ class Brain:
             "stream": True,
         }
         if self._use_native_tools and not skip_tools:
-            payload["tools"] = capability_index.filter_schemas(domains=domain_hints, available_only=True)
+            payload["tools"] = capability_index.filter_schemas(
+                domains=domain_hints,
+                available_only=True,
+                registered_only=True,
+            )
             payload["tool_choice"] = "auto"
         if getattr(self.config, "llm_disable_reasoning", False):
             payload["reasoning"] = {"effort": "none"}
@@ -2928,14 +2925,12 @@ class Brain:
             if _repeat_guard.before(ck):
                 logger.warning("Suppressing repeated failed tool call: %s", ck)
                 return _REPEATED_TOOL_RESULT
-            if tool_name not in _DESKTOP_COM_TOOLS and ck in _seen_tool_calls:
+            op = capability_index.get_operation(tool_name)
+            is_com = bool(op and op.executor_type == "com_thread")
+            if not is_com and ck in _seen_tool_calls:
                 logger.info("Tool %s already executed, reusing result", call["name"])
                 return _seen_tool_calls[ck]
-            from charlie.capabilities import capability_index
-
-            op = capability_index.get_operation(tool_name)
-            timeout = op.timeout_sec if (op and op.timeout_sec) else _TOOL_TIMEOUTS.get(tool_name, _TOOL_TIMEOUT_SEC)
-            is_com = (op and op.executor_type == "com_thread") or tool_name in _DESKTOP_COM_TOOLS
+            timeout = _tool_timeout(tool_name, op)
             required_leases = op.required_leases if (op and op.required_leases) else ()
             lock = self._tool_locks.setdefault(tool_name, asyncio.Lock())
 
@@ -3178,7 +3173,7 @@ class Brain:
                 except Exception as persist_exc:
                     logger.debug("Tool result persist skipped: %s", persist_exc)
 
-            if tool_name not in _DESKTOP_COM_TOOLS:
+            if not is_com:
                 _seen_tool_calls[ck] = envelope
             telemetry.record_tool_call(tool_name, success=_operation_succeeded(envelope))
             return envelope

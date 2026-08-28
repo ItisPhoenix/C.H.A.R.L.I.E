@@ -43,6 +43,7 @@ _VALID_PROVENANCES = frozenset({
 })
 
 _OWNER_LABELS: Dict[str, str] = {
+    "presentation": "Presentation",
     "tools": "General tools",
     "memory": "Memory",
     "desktop": "Desktop control",
@@ -59,6 +60,7 @@ _OWNER_LABELS: Dict[str, str] = {
 }
 
 _DEFAULT_DOMAIN_OWNERS: Dict[str, str] = {
+    "presentation": "charlie.presentation",
     "system": "charlie.tools",
     "desktop": "charlie.desktop",
     "browser": "charlie.browser",
@@ -75,6 +77,7 @@ _DEFAULT_DOMAIN_OWNERS: Dict[str, str] = {
 }
 
 _DOMAIN_NAMES: Dict[str, str] = {
+    "presentation": "PresentationCapability",
     "system": "SystemCapability",
     "desktop": "DesktopCapability",
     "browser": "BrowserCapability",
@@ -91,6 +94,7 @@ _DOMAIN_NAMES: Dict[str, str] = {
 }
 
 _DOMAIN_DESCRIPTIONS: Dict[str, str] = {
+    "presentation": "Semantic HUD presentation control",
     "system": "System diagnostics, telemetry, app lifecycle, and OS controls",
     "desktop": "Desktop Windows UI Automation and mouse/keyboard effectors",
     "browser": "Headless browser navigation, page inspection, and web automation",
@@ -120,22 +124,33 @@ _ROSTER_HEADER = (
 )
 
 BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
+    # Presentation
+    "presentation_request": {
+        "id": "presentation.presentation_request",
+        "domain": "presentation",
+        "tool_registry_owner": "presentation",
+        "risk_class": "safe",
+        "timeout_sec": 15.0,
+    },
     # System
     "system_diagnostics": {
         "id": "system.metrics.read",
         "domain": "system",
+        "tool_registry_owner": "tools",
         "risk_class": "safe",
         "timeout_sec": 15.0,
     },
     "propose_new_tool": {
         "id": "system.tool.propose",
         "domain": "system",
+        "tool_registry_owner": "tools",
         "risk_class": "safe",
         "timeout_sec": 15.0,
     },
     "system_control": {
         "id": "system.control.execute",
         "domain": "system",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -144,6 +159,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "capabilities": {
         "id": "system.capabilities.roster",
         "domain": "system",
+        "tool_registry_owner": "",
         "risk_class": "safe",
         "timeout_sec": 15.0,
     },
@@ -151,6 +167,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_observe": {
         "id": "desktop.screen.observe",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -159,6 +176,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_read_screen": {
         "id": "desktop.screen.read",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -167,6 +185,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_click": {
         "id": "desktop.element.click",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -175,6 +194,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_type": {
         "id": "desktop.element.type",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -183,6 +203,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_invoke": {
         "id": "desktop.element.invoke",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -191,6 +212,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_key": {
         "id": "desktop.keyboard.press",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -199,6 +221,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_click_at": {
         "id": "desktop.cursor.click_at",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -207,6 +230,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_move": {
         "id": "desktop.cursor.move",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -215,6 +239,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_drag": {
         "id": "desktop.cursor.drag",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -223,6 +248,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_scroll": {
         "id": "desktop.cursor.scroll",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -231,14 +257,15 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_windows": {
         "id": "desktop.window.list",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
-        "executor_type": "com_thread",
     },
     "desktop_focus": {
         "id": "desktop.window.focus",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -247,6 +274,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_window": {
         "id": "desktop.window.control",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -255,6 +283,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_move_window": {
         "id": "desktop.window.move",
         "domain": "desktop",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -264,6 +293,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "desktop_screenshot": {
         "id": "vision.screen.capture",
         "domain": "vision",
+        "tool_registry_owner": "desktop",
         "risk_class": "safe",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
@@ -273,6 +303,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "browser_task": {
         "id": "browser.task.execute",
         "domain": "browser",
+        "tool_registry_owner": "browser",
         "risk_class": "reversible",
         "required_leases": ("browser",),
         "timeout_sec": 100.0,
@@ -280,6 +311,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "browser_read": {
         "id": "browser.page.read",
         "domain": "browser",
+        "tool_registry_owner": "browser",
         "risk_class": "safe",
         "required_leases": ("browser",),
         "timeout_sec": 20.0,
@@ -288,12 +320,14 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "web_search": {
         "id": "research.web.search",
         "domain": "research",
+        "tool_registry_owner": "tools",
         "risk_class": "safe",
         "timeout_sec": 15.0,
     },
     "web_research": {
         "id": "research.web.synthesize",
         "domain": "research",
+        "tool_registry_owner": "research",
         "risk_class": "safe",
         "timeout_sec": 130.0,
     },
@@ -301,6 +335,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "shell_execute": {
         "id": "terminal.shell.execute",
         "domain": "terminal",
+        "tool_registry_owner": "tools",
         "risk_class": "reversible",
         "required_leases": ("terminal",),
         "timeout_sec": 30.0,
@@ -309,12 +344,14 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "file_read": {
         "id": "file.system.read",
         "domain": "file",
+        "tool_registry_owner": "tools",
         "risk_class": "safe",
         "timeout_sec": 10.0,
     },
     "file_write": {
         "id": "file.system.write",
         "domain": "file",
+        "tool_registry_owner": "tools",
         "risk_class": "reversible",
         "timeout_sec": 10.0,
     },
@@ -322,42 +359,49 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "memory": {
         "id": "memory.core.manage",
         "domain": "memory",
+        "tool_registry_owner": "memory",
         "risk_class": "reversible",
         "timeout_sec": 15.0,
     },
     "vector_memory": {
         "id": "memory.vector.search",
         "domain": "memory",
+        "tool_registry_owner": "memory",
         "risk_class": "safe",
         "timeout_sec": 15.0,
     },
     "session_search": {
         "id": "memory.session.search",
         "domain": "memory",
+        "tool_registry_owner": "memory",
         "risk_class": "safe",
         "timeout_sec": 15.0,
     },
     "recall_results": {
         "id": "memory.results.recall",
         "domain": "memory",
+        "tool_registry_owner": "memory",
         "risk_class": "safe",
         "timeout_sec": 15.0,
     },
     "graph_add_fact": {
         "id": "memory.graph.add_fact",
         "domain": "memory",
+        "tool_registry_owner": "memory",
         "risk_class": "reversible",
         "timeout_sec": 15.0,
     },
     "graph_query": {
         "id": "memory.graph.query",
         "domain": "memory",
+        "tool_registry_owner": "memory",
         "risk_class": "safe",
         "timeout_sec": 15.0,
     },
     "graph_consolidate": {
         "id": "memory.graph.consolidate",
         "domain": "memory",
+        "tool_registry_owner": "memory",
         "risk_class": "reversible",
         "timeout_sec": 15.0,
     },
@@ -365,10 +409,38 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "start_background_task": {
         "id": "task.background.start",
         "domain": "task",
+        "tool_registry_owner": "tools",
+        "risk_class": "reversible",
+        "timeout_sec": 15.0,
+    },
+    "charlie_self_query": {
+        "id": "system.charlie_self_query",
+        "domain": "system",
+        "tool_registry_owner": "system",
+        "risk_class": "safe",
+        "timeout_sec": 15.0,
+    },
+    "charlie_doctor_diagnose": {
+        "id": "system.charlie_doctor_diagnose",
+        "domain": "system",
+        "tool_registry_owner": "system",
+        "risk_class": "safe",
+        "timeout_sec": 15.0,
+    },
+    "charlie_self_extension_propose": {
+        "id": "extensions.charlie_self_extension_propose",
+        "domain": "extensions",
+        "tool_registry_owner": "extensions",
         "risk_class": "reversible",
         "timeout_sec": 15.0,
     },
 }
+
+
+def get_builtin_tool_metadata(name: str) -> Optional[Dict[str, Any]]:
+    """Return a copy of canonical metadata for a known built-in tool."""
+    metadata = BUILTIN_TOOL_METADATA.get(name)
+    return dict(metadata) if metadata is not None else None
 
 
 @dataclass
@@ -485,11 +557,47 @@ class CapabilityIndex:
         # Secondary indexes for rapid O(1) lookup
         self._op_by_name: Dict[str, Tuple[str, CapabilityOperation]] = {}
         self._op_by_id: Dict[str, Tuple[str, CapabilityOperation]] = {}
+        # Names synchronized from ToolRegistry. Direct capability descriptors
+        # are useful for introspection/classification but are not model-callable
+        # tools unless they also arrive through register_tool_in_index().
+        self._tool_registry_names: set[str] = set()
+
+    def _detach_operation(
+        self,
+        operation: CapabilityOperation,
+        domain: Optional[str] = None,
+    ) -> None:
+        """Remove one operation without disturbing a newer replacement."""
+        descriptor = self._capabilities.get(domain) if domain is not None else None
+        if descriptor is not None and descriptor.operations.get(operation.name) is operation:
+            descriptor.operations.pop(operation.name, None)
+
+        current = self._op_by_name.get(operation.name)
+        if current is not None and current[1] is operation:
+            self._op_by_name.pop(operation.name, None)
+
+        current = self._op_by_id.get(operation.id)
+        if current is not None and current[1] is operation:
+            self._op_by_id.pop(operation.id, None)
+
+        if operation.name not in self._op_by_name:
+            self._tool_registry_names.discard(operation.name)
 
     def register_capability(self, descriptor: CapabilityDescriptor) -> None:
         """Register a new capability domain with its operations."""
         if descriptor.id in self._capabilities:
             raise ValueError(f"Capability with ID '{descriptor.id}' is already registered")
+
+        # A descriptor must not silently shadow an operation owned by another
+        # descriptor. The tool-registration helper performs explicit
+        # replacement cleanup for reloadable ToolRegistry operations.
+        for op in descriptor.operations.values():
+            existing = self._op_by_name.get(op.name)
+            if existing is not None:
+                raise ValueError(f"Operation with name '{op.name}' is already registered")
+            existing = self._op_by_id.get(op.id)
+            if existing is not None:
+                raise ValueError(f"Operation with ID '{op.id}' is already registered")
 
         self._capabilities[descriptor.id] = descriptor
         for op in descriptor.operations.values():
@@ -509,8 +617,7 @@ class CapabilityIndex:
             return False
 
         for op in desc.operations.values():
-            self._op_by_name.pop(op.name, None)
-            self._op_by_id.pop(op.id, None)
+            self._detach_operation(op, capability_id)
         logger.debug("Unregistered capability '%s'", capability_id)
         return True
 
@@ -536,6 +643,10 @@ class CapabilityIndex:
         if name_or_id in self._op_by_id:
             return self._op_by_id[name_or_id][0]
         return None
+
+    def is_tool_registered(self, name: str) -> bool:
+        """Return whether a callable tool was synchronized from ToolRegistry."""
+        return name in self._tool_registry_names
 
     def find_operations(
         self,
@@ -586,8 +697,14 @@ class CapabilityIndex:
         self,
         domains: Optional[Iterable[str]] = None,
         available_only: bool = True,
+        registered_only: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Return OpenAI-compatible function definition schemas for matching active capabilities."""
+        """Return OpenAI-compatible schemas for matching active capabilities.
+
+        ``registered_only`` is used by model-facing projections. Direct
+        capability descriptors can exist for introspection/classification
+        without representing a callable ToolRegistry operation.
+        """
         domain_set = set(domains) if domains is not None else None
         schemas: List[Dict[str, Any]] = []
         for cap_id, desc in self._capabilities.items():
@@ -596,6 +713,8 @@ class CapabilityIndex:
             if available_only and not desc.is_available():
                 continue
             for op in desc.operations.values():
+                if registered_only and not self.is_tool_registered(op.name):
+                    continue
                 schemas.append(op.to_tool_definition())
         return schemas
 
@@ -623,19 +742,28 @@ def register_tool_in_index(
     if index is None:
         index = capability_index
 
-    meta = BUILTIN_TOOL_METADATA.get(name, {})
-    domain = meta.get("domain", owner or "tools")
-    if owner.startswith("mcp"):
-        domain = owner
-    elif owner == "extensions":
-        domain = "extensions"
+    meta = get_builtin_tool_metadata(name)
+    if meta is not None:
+        domain = meta["domain"]
+        op_id = meta["id"]
+        eff_risk = meta["risk_class"]
+        required_leases = meta.get("required_leases", ())
+        timeout_sec = meta.get("timeout_sec", 15.0)
+        executor_type = meta.get("executor_type")
+        verifier = meta.get("verifier")
+    else:
+        domain = owner or "tools"
+        if owner.startswith("mcp"):
+            domain = owner
+        elif owner == "extensions":
+            domain = "extensions"
 
-    op_id = meta.get("id", f"{domain}.{name}")
-    eff_risk = risk_class or meta.get("risk_class", "safe")
-    required_leases = meta.get("required_leases", ())
-    timeout_sec = meta.get("timeout_sec", 15.0)
-    executor_type = meta.get("executor_type")
-    verifier = meta.get("verifier")
+        op_id = f"{domain}.{name}"
+        eff_risk = risk_class or "safe"
+        required_leases = ()
+        timeout_sec = 15.0
+        executor_type = None
+        verifier = None
 
     op = CapabilityOperation(
         id=op_id,
@@ -675,10 +803,18 @@ def register_tool_in_index(
         )
         index.register_capability(cap_desc)
 
-    cap_desc.add_operation(op)
     # Update secondary index lookup tables
+    existing = index._op_by_name.get(op.name)
+    if existing is not None:
+        index._detach_operation(existing[1], existing[0])
+    existing = index._op_by_id.get(op.id)
+    if existing is not None:
+        index._detach_operation(existing[1], existing[0])
+    cap_desc.add_operation(op)
     index._op_by_name[op.name] = (domain, op)
     index._op_by_id[op.id] = (domain, op)
+    if func is not None:
+        index._tool_registry_names.add(op.name)
     return op
 
 
@@ -689,16 +825,27 @@ def unregister_tool_from_index(name: str, index: Optional[CapabilityIndex] = Non
     if name not in index._op_by_name:
         return False
     domain, op = index._op_by_name.pop(name)
-    index._op_by_id.pop(op.id, None)
-    cap = index.get_capability(domain)
-    if cap and name in cap.operations:
-        cap.operations.pop(name, None)
+    index._detach_operation(op, domain)
     return True
 
 
 # ---------------------------------------------------------------------------
 # Roster & Snapshot views
 # ---------------------------------------------------------------------------
+
+
+def _operation_enabled_for_config(
+    operation: CapabilityOperation,
+    domain: str,
+    desktop_ok: bool,
+    browser_ok: bool,
+) -> bool:
+    """Apply runtime config gates to an operation projected from CapabilityIndex."""
+    if not desktop_ok and (domain in {"desktop", "vision"} or "desktop" in operation.required_leases):
+        return False
+    if not browser_ok and (domain == "browser" or "browser" in operation.required_leases):
+        return False
+    return True
 
 
 def build_capability_roster(
@@ -724,12 +871,16 @@ def build_capability_roster(
                 continue
             groups.setdefault(owner, []).append(f"{name} ({defn['function']['description']})")
     elif isinstance(registry_or_index, CapabilityIndex):
-        for desc in registry_or_index.list_capabilities(include_unavailable=True):
+        for desc in registry_or_index.list_capabilities(include_unavailable=False):
             if desc.id == "desktop" and not desktop_ok:
                 continue
             if desc.id == "browser" and not browser_ok:
                 continue
             for op in desc.operations.values():
+                if not registry_or_index.is_tool_registered(op.name):
+                    continue
+                if not _operation_enabled_for_config(op, desc.id, desktop_ok, browser_ok):
+                    continue
                 owner = desc.id
                 groups.setdefault(owner, []).append(f"{op.name} ({op.description})")
 
@@ -768,12 +919,16 @@ def build_capability_snapshot(
                 "risk_class": registry_or_index.get_risk_class(name),
             })
     elif isinstance(registry_or_index, CapabilityIndex):
-        for desc in registry_or_index.list_capabilities(include_unavailable=True):
+        for desc in registry_or_index.list_capabilities(include_unavailable=False):
             if desc.id == "desktop" and not desktop_ok:
                 continue
             if desc.id == "browser" and not browser_ok:
                 continue
             for op in desc.operations.values():
+                if not registry_or_index.is_tool_registered(op.name):
+                    continue
+                if not _operation_enabled_for_config(op, desc.id, desktop_ok, browser_ok):
+                    continue
                 tools.append({
                     "name": op.name,
                     "description": op.description,

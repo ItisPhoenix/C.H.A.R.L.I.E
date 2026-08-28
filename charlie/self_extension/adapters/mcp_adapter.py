@@ -186,7 +186,7 @@ class MCPAdapter:
         self._registry.unregister(ext_id)
 
         if self._capability_index:
-            self._capability_index._capabilities.pop(ext_id, None)
+            self._capability_index.unregister_capability(ext_id)
 
         return MCPAdapterResult(
             success=True,

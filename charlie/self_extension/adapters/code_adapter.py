@@ -243,7 +243,7 @@ class CodeAdapter:
                     logger.warning("Failed removing tool module %s: %s", module_path, exc)
 
         if self._capability_index:
-            self._capability_index._capabilities.pop(ext_id, None)
+            self._capability_index.unregister_capability(ext_id)
 
         return CodeAdapterResult(
             success=rollback.success if rollback is not None else True,

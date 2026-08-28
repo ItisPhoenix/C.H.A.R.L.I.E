@@ -6,10 +6,12 @@ import pytest
 
 from charlie.autonomy import Requirement, RiskClass, classify_action, evaluate
 from charlie.capabilities import (
+    BUILTIN_TOOL_METADATA,
     CapabilityDescriptor,
     CapabilityIndex,
     CapabilityOperation,
     capability_index,
+    register_tool_in_index,
 )
 from charlie.extensions.skills import SkillManifest, register_skill_scripts
 from charlie.mcp_client import MCPClient, MCPTool
@@ -233,6 +235,107 @@ def test_capability_index_provenance_and_mcp():
     assert op.id == "mcp.github.create_issue"
 
 
+def test_builtin_registration_uses_canonical_metadata_over_conflicting_values():
+    index = CapabilityIndex()
+    tool_name = "system_control"
+    canonical = BUILTIN_TOOL_METADATA[tool_name]
+
+    op = register_tool_in_index(
+        name=tool_name,
+        description="legacy description",
+        schema={"type": "object"},
+        owner="legacy-owner",
+        risk_class="irreversible",
+        index=index,
+    )
+
+    assert op.id == canonical["id"]
+    assert index.get_operation_domain(tool_name) == canonical["domain"]
+    assert op.risk_class == canonical["risk_class"]
+    assert op.required_leases == canonical["required_leases"]
+    assert op.timeout_sec == canonical["timeout_sec"]
+    assert op.executor_type == canonical["executor_type"]
+    assert op.verifier == canonical.get("verifier")
+
+
+def test_replacing_dynamic_operation_cleans_old_domain_indexes():
+    index = CapabilityIndex()
+
+    first = register_tool_in_index(
+        name="reloadable",
+        description="First registration",
+        schema={"type": "object"},
+        func=lambda: "first",
+        owner="mcp",
+        risk_class="safe",
+        index=index,
+    )
+    second = register_tool_in_index(
+        name="reloadable",
+        description="Replacement registration",
+        schema={"type": "object"},
+        func=lambda: "second",
+        owner="extensions",
+        risk_class="reversible",
+        index=index,
+    )
+
+    assert index.get_operation("reloadable") is second
+    assert index.get_operation(first.id) is None
+    assert index.get_capability("mcp").operations == {}
+    assert list(index.get_capability("extensions").operations) == ["reloadable"]
+
+
+def test_unregister_capability_cleans_operation_indexes():
+    index = CapabilityIndex()
+    operation = CapabilityOperation(
+        id="extension.demo.run",
+        name="run_demo",
+        description="Run demo",
+        parameters_schema={"type": "object"},
+    )
+    index.register_capability(
+        CapabilityDescriptor(
+            id="extension_demo",
+            name="Demo",
+            description="Demo extension",
+            owner="charlie.extensions",
+            provenance="extension",
+            operations={operation.name: operation},
+        )
+    )
+
+    assert index.get_operation(operation.name) is operation
+    assert index.get_operation(operation.id) is operation
+    assert index.unregister_capability("extension_demo") is True
+    assert index.get_operation(operation.name) is None
+    assert index.get_operation(operation.id) is None
+
+
+def test_tool_registry_mirrors_canonical_builtin_metadata(monkeypatch):
+    import charlie.capabilities as capabilities_module
+
+    isolated_index = CapabilityIndex()
+    monkeypatch.setattr(capabilities_module, "capability_index", isolated_index)
+
+    registry = ToolRegistry()
+    registry.register_tool(
+        name="system_control",
+        description="legacy description",
+        schema={"type": "object"},
+        owner="legacy-owner",
+        risk_class="irreversible",
+    )(lambda: "ok")
+
+    canonical = BUILTIN_TOOL_METADATA["system_control"]
+    operation = isolated_index.get_operation("system_control")
+    assert operation is not None
+    assert registry.get_owner("system_control") == "legacy-owner"
+    assert registry.get_risk_class("system_control") == canonical["risk_class"]
+    assert operation.risk_class == canonical["risk_class"]
+    assert isolated_index.get_operation_domain("system_control") == canonical["domain"]
+
+
 def test_capability_schema_filtering():
     index = CapabilityIndex()
     sys_op = CapabilityOperation(
@@ -272,6 +375,38 @@ def test_capability_schema_filtering():
     file_schemas = index.filter_schemas(domains=["file"])
     assert len(file_schemas) == 1
     assert file_schemas[0]["function"]["name"] == "file_read"
+
+
+def test_registered_schema_filtering_excludes_index_only_operations():
+    index = CapabilityIndex()
+    index.register_capability(
+        CapabilityDescriptor(
+            id="metadata_only",
+            name="Metadata only",
+            description="Metadata-only capability",
+            owner="charlie.extensions",
+            operations={
+                "inspect": CapabilityOperation(
+                    id="metadata_only.inspect",
+                    name="inspect",
+                    description="Inspection metadata",
+                    parameters_schema={"type": "object"},
+                )
+            },
+        )
+    )
+    register_tool_in_index(
+        name="callable",
+        description="Callable tool",
+        schema={"type": "object"},
+        func=lambda: "ok",
+        owner="tools",
+        index=index,
+    )
+
+    schemas = index.filter_schemas(registered_only=True)
+
+    assert [schema["function"]["name"] for schema in schemas] == ["callable"]
 
 
 @pytest.mark.asyncio
