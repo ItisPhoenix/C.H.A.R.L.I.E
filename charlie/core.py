@@ -1066,7 +1066,6 @@ class Brain:
         self._is_background = is_background
         self.session_store = session_store
         self.memory_store = memory_store
-        self.memory_service = memory_service
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
         self.on_operation_result = on_operation_result
@@ -1172,6 +1171,18 @@ class Brain:
             self.memory_graph = MemoryGraph(db_path=config.memory_graph_db)
         else:
             self.memory_graph = memory_graph
+
+        # Compatibility callers still get one facade around this exact graph;
+        # normal main-process callers retain the injected root service.
+        if memory_service is None:
+            from charlie.memory_service import MemoryService
+
+            self.memory_service = MemoryService(
+                graph=self.memory_graph,
+                memory_store=self.memory_store,
+            )
+        else:
+            self.memory_service = memory_service
 
         # --- World model: open threads + machine events ---
         from charlie.world_model import WorldModel
@@ -2855,15 +2866,15 @@ class Brain:
         # queries, and for screen-content queries -- past screen descriptions stored
         # as memories are never relevant to "what's on my screen right now" and have
         # been observed to override the freshly forced observation above).
-        if self.memory_store and self.memory_store.is_available:
+        if self.memory_service and self.memory_service.semantic_available():
             if (
                 not _is_followup(user_input)
                 and len(user_input.strip()) >= 10
                 and not router.SCREEN_QUERY_RE.search(user_input)
             ):
                 try:
-                    memory_results = self.memory_store.search(user_input, n_results=3)
-                    memory_block = self.memory_store.format_for_prompt(memory_results)
+                    memory_results = self.memory_service.search_semantic(user_input, n_results=3)
+                    memory_block = self.memory_service.format_semantic_for_prompt(memory_results)
                     if memory_block:
                         effective_input = memory_block + "\n\n" + effective_input
                 except Exception as mem_exc:
@@ -3468,15 +3479,15 @@ class Brain:
 
     def _save_to_memory(self, text: str, source: str) -> None:
         """Fire-and-forget: extract and store facts from assistant response."""
-        if not self.memory_store or not self.memory_store.is_available:
-            return
-        if len(text) < 30:
-            return
         try:
+            if not self.memory_service or not self.memory_service.semantic_available():
+                return
+            if len(text) < 30:
+                return
             loop = asyncio.get_running_loop()
             loop.run_in_executor(
                 None,
-                self.memory_store.add_memory,
+                self.memory_service.remember_semantic,
                 text,
                 source,
                 "auto",
@@ -3533,11 +3544,12 @@ class Brain:
                     parts = [p.strip() for p in line.split("|")]
                     if len(parts) == 3 and all(parts):
                         try:
-                            self.memory_graph.add_fact(parts[0], parts[1], parts[2])
-                            from charlie.tools import emit_memory_updated
+                            edge_id = self.memory_service.add_fact(parts[0], parts[1], parts[2])
+                            if edge_id is not None:
+                                from charlie.tools import emit_memory_updated
 
-                            emit_memory_updated("memory_graph", f"{parts[0]} -> {parts[1]} -> {parts[2]}")
-                            added += 1
+                                emit_memory_updated("memory_graph", f"{parts[0]} -> {parts[1]} -> {parts[2]}")
+                                added += 1
                         except Exception:
                             logger.debug("Failed to add fact: %s", line)
 
@@ -3546,7 +3558,7 @@ class Brain:
 
             # Periodically consolidate
             if self._reflect_turn_counter % (self._reflect_interval * 3) == 0:
-                removed = self.memory_graph.consolidate()
+                removed = self.memory_service.consolidate_graph()
                 if removed:
                     logger.info("Reflection: consolidated graph, removed %d stale facts", removed)
 

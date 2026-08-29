@@ -185,6 +185,7 @@ async def test_compatibility_brain_owns_and_closes_self_created_graph(monkeypatc
 
     assert brain.memory_graph is graph
     assert brain._owns_memory_graph is True
+    assert brain.memory_service._graph is graph
 
     await brain.close()
 
@@ -262,11 +263,9 @@ def test_main_wires_tool_registry_from_process_composition(monkeypatch):
     import charlie.tools as tools_module
 
     calls = []
-    monkeypatch.setattr(tools_module.registry, "set_memory_store", lambda value: calls.append(("store", value)))
-    monkeypatch.setattr(tools_module.registry, "set_memory_graph", lambda value: calls.append(("graph", value)))
+    monkeypatch.setattr(tools_module.registry, "set_memory_service", lambda value: calls.append(value))
 
-    store = object()
-    graph = object()
-    main._wire_memory_adapters(store, graph)
+    service = object()
+    main._wire_memory_service(service)
 
-    assert calls == [("store", store), ("graph", graph)]
+    assert calls == [service]

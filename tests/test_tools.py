@@ -907,31 +907,34 @@ def test_recall_results_reports_none_recorded(tmp_path, monkeypatch):
     assert recall_results() == "No task results recorded yet."
 
 
-class _FakeMemoryStore:
+class _FakeMemoryService:
     def __init__(self, search_result):
-        self.is_available = True
+        self._available = True
         self._search_result = search_result
 
-    def search(self, content, n_results=3):
+    def semantic_available(self):
+        return self._available
+
+    def search_semantic(self, content, n_results=3):
         return self._search_result
 
-    def add_memory(self, **kw):
+    def remember_semantic(self, **kw):
         return 1
 
 
 def test_vector_memory_recall_reports_search_failure_not_empty(monkeypatch):
-    monkeypatch.setattr(tools_module, "_memory_store", _FakeMemoryStore(None))
+    monkeypatch.setattr(tools_module, "_memory_service", _FakeMemoryService(None))
     result = vector_memory("recall", "anything")
     assert "failed" in result.lower()
 
 
 def test_vector_memory_recall_reports_no_matches(monkeypatch):
-    monkeypatch.setattr(tools_module, "_memory_store", _FakeMemoryStore([]))
+    monkeypatch.setattr(tools_module, "_memory_service", _FakeMemoryService([]))
     result = vector_memory("recall", "anything")
     assert result == "No relevant memories found."
 
 
 def test_vector_memory_recall_formats_results(monkeypatch):
-    monkeypatch.setattr(tools_module, "_memory_store", _FakeMemoryStore([{"text": "fact one"}]))
+    monkeypatch.setattr(tools_module, "_memory_service", _FakeMemoryService([{"text": "fact one"}]))
     result = vector_memory("recall", "anything")
     assert result == "- fact one"

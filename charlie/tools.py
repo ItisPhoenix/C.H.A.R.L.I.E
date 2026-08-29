@@ -31,10 +31,8 @@ from charlie.utils import is_process_running
 logger = logging.getLogger("charlie.tools")
 
 
-# --- Vector memory store (set via set_memory_store at init) ---
-_memory_store = None  # type: Optional[Any]
-# --- Knowledge graph store (set via set_memory_graph at init) ---
-_memory_graph = None  # type: Optional[Any]
+# --- Process-local facade (set via set_memory_service at init) ---
+_memory_service = None  # type: Optional[Any]
 # --- Pending vision-tier screenshot: written by desktop_screenshot, consumed
 # --- once by Brain._build_payload for the very next outgoing payload. ---
 _pending_vision_image = None  # type: Optional[str]
@@ -270,14 +268,10 @@ class ToolRegistry:
             return ToolExecutionResult(report.legacy_text(), report, "research_report")
         return ToolExecutionResult(self.execute_tool(name, arguments))
 
-    def set_memory_store(self, store: Any) -> None:
-        """Inject vector memory store for vector_memory tool."""
-        global _memory_store
-        _memory_store = store
-    def set_memory_graph(self, graph: Any) -> None:
-        """Inject knowledge graph store for graph tools."""
-        global _memory_graph
-        _memory_graph = graph
+    def set_memory_service(self, service: Any) -> None:
+        """Inject the process-composed long-term memory facade."""
+        global _memory_service
+        _memory_service = service
 
 
 # Global tool registry
@@ -1188,11 +1182,11 @@ def start_background_task(text: str, priority: int = 0, depends_on=None) -> str:
     },
 )
 def vector_memory(action: str, content: str) -> str:
-    if _memory_store is None or not _memory_store.is_available:
+    if _memory_service is None or not _memory_service.semantic_available():
         return "Vector memory is not available. Embedding service may be offline."
 
     if action == "remember":
-        count = _memory_store.add_memory(
+        count = _memory_service.remember_semantic(
             text=content,
             source="user",
             session_id="explicit",
@@ -1204,7 +1198,7 @@ def vector_memory(action: str, content: str) -> str:
         return "Failed to store memory."
 
     elif action == "recall":
-        results = _memory_store.search(content, n_results=3)
+        results = _memory_service.search_semantic(content, n_results=3)
         if results is None:
             return "Memory search failed -- the embedding service may be down. Try again shortly."
         if not results:
@@ -1316,11 +1310,6 @@ def capabilities() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _graph_available() -> bool:
-    """Check if the memory graph is loaded."""
-    return _memory_graph is not None
-
-
 @registry.register_tool(
     name="graph_add_fact",
     description=(
@@ -1338,10 +1327,12 @@ def _graph_available() -> bool:
     },
 )
 def graph_add_fact(subject: str, predicate: str, object: str) -> str:
-    if not _graph_available():
+    if _memory_service is None:
         return "Knowledge graph is not available."
     try:
-        _memory_graph.add_fact(subject, predicate, object)
+        edge_id = _memory_service.add_fact(subject, predicate, object)
+        if edge_id is None:
+            return "Knowledge graph is not available."
         emit_memory_updated("memory_graph", f"{subject} -> {predicate} -> {object}")
         return f"Added: {subject} -> {predicate} -> {object}"
     except Exception as e:
@@ -1362,10 +1353,12 @@ def graph_add_fact(subject: str, predicate: str, object: str) -> str:
     },
 )
 def graph_query(query: str, subject_filter: str = "") -> str:
-    if not _graph_available():
+    if _memory_service is None:
         return "Knowledge graph is not available."
     try:
-        results = _memory_graph.search_facts(query, subject_filter=subject_filter or None)
+        results = _memory_service.search_facts(query, subject_filter=subject_filter or None)
+        if results is None:
+            return "Knowledge graph is not available."
         if not results:
             return "No matching facts found."
         lines = []
@@ -1390,10 +1383,12 @@ def graph_query(query: str, subject_filter: str = "") -> str:
     },
 )
 def graph_consolidate() -> str:
-    if not _graph_available():
+    if _memory_service is None:
         return "Knowledge graph is not available."
     try:
-        removed = _memory_graph.consolidate()
+        removed = _memory_service.consolidate_graph()
+        if removed is None:
+            return "Knowledge graph is not available."
         return f"Consolidated graph. Removed {removed} stale/duplicate facts."
     except Exception as e:
         logger.exception("graph_consolidate error")

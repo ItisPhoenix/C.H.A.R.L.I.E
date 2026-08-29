@@ -570,12 +570,11 @@ def _compose_memory_dependencies(runtime_config: Config) -> tuple[MemoryGraph, O
     return memory_graph, memory_store, memory_service
 
 
-def _wire_memory_adapters(memory_store: Optional[MemoryStore], memory_graph: MemoryGraph) -> None:
-    """Wire transitional memory adapters from the composition root."""
+def _wire_memory_service(memory_service: MemoryService) -> None:
+    """Wire the process-composed memory facade into the tool registry."""
     from charlie.tools import registry as tool_registry
 
-    tool_registry.set_memory_store(memory_store)
-    tool_registry.set_memory_graph(memory_graph)
+    tool_registry.set_memory_service(memory_service)
 
 
 async def main():
@@ -946,8 +945,8 @@ async def main():
             store.close()
         return
 
-    # Transitional memory adapter wiring stays owned by main's composition root.
-    _wire_memory_adapters(memory_store, memory_graph)
+    # Canonical memory facade wiring stays owned by main's composition root.
+    _wire_memory_service(memory_service)
 
     # Wire the plugin system into the tool registry (no-op unless enabled).
     # The SAME registry the LLM calls, so when PLUGINS_ENABLED=true the

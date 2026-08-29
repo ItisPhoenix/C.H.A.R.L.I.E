@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from charlie.memory_graph import MemoryGraph
 from charlie.utils import make_id, utc_now_iso
@@ -58,6 +58,10 @@ class MemoryService:
         except Exception:
             return False
 
+    def semantic_available(self) -> bool:
+        """Return whether semantic memory is available to facade consumers."""
+        return self._semantic_available()
+
     def remember_semantic(
         self,
         text: str,
@@ -97,6 +101,32 @@ class MemoryService:
         if not self._semantic_available():
             return ""
         return self._memory_store.format_for_prompt(results)
+
+    def add_fact(self, subject: str, predicate: str, obj: str) -> Optional[str]:
+        """Add one graph-only relational fact and return its edge ID."""
+        graph = self._get_graph()
+        if graph is None:
+            return None
+        return graph.add_fact(subject, predicate, obj)
+
+    def search_facts(
+        self,
+        query: str,
+        subject_filter: Optional[str] = None,
+        limit: int = 20,
+    ) -> Optional[List[Tuple[str, str, str, float]]]:
+        """Search graph-only relational facts, preserving unavailable vs empty."""
+        graph = self._get_graph()
+        if graph is None:
+            return None
+        return graph.search_facts(query, subject_filter=subject_filter, limit=limit)
+
+    def consolidate_graph(self) -> Optional[int]:
+        """Consolidate graph-only relational facts and return removed count."""
+        graph = self._get_graph()
+        if graph is None:
+            return None
+        return graph.consolidate()
 
     def _semantic_stats(self) -> Dict[str, Any]:
         """Return safe semantic adapter statistics or its neutral state."""
