@@ -1054,13 +1054,19 @@ class Brain:
         register_panic_hotkey: bool = True,
         approval_timeout: Optional[float] = _TOOL_APPROVAL_TIMEOUT_SEC,
         is_background: bool = False,
+        memory_graph=None,
+        memory_service=None,
     ):
+        if memory_service is not None and memory_graph is None:
+            raise ValueError("memory_graph is required when memory_service is provided")
+
         self.config = config
         self.event_bus = None
         self.on_thought_callback = on_thought_callback
         self._is_background = is_background
         self.session_store = session_store
         self.memory_store = memory_store
+        self.memory_service = memory_service
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
         self.on_operation_result = on_operation_result
@@ -1159,9 +1165,13 @@ class Brain:
             logger.info("Vision LLM configured: %s", config.vision_llm_url)
 
         # --- Knowledge graph memory ---
-        from charlie.memory_graph import MemoryGraph
+        self._owns_memory_graph = memory_graph is None
+        if memory_graph is None:
+            from charlie.memory_graph import MemoryGraph
 
-        self.memory_graph = MemoryGraph(db_path=config.memory_graph_db)
+            self.memory_graph = MemoryGraph(db_path=config.memory_graph_db)
+        else:
+            self.memory_graph = memory_graph
 
         # --- World model: open threads + machine events ---
         from charlie.world_model import WorldModel
@@ -1424,6 +1434,8 @@ class Brain:
             text,
             session_store=self.session_store,
             memory_store=self.memory_store,
+            memory_graph=self.memory_graph,
+            memory_service=self.memory_service,
             priority=arguments.get("priority", 0),
             depends_on=arguments.get("depends_on") or [],
             on_result_stored=self.on_result_stored,
@@ -1918,14 +1930,19 @@ class Brain:
                 _active_voice_approval_id = None
 
     async def close(self) -> None:
-        """Close the HTTP client."""
-        self._intent_decisions.clear()
-        self.last_intent_decision = None
-        await self.client.aclose()
-        if self._vision_client:
-            await self._vision_client.aclose()
-        if self._panic_hotkey_listener is not None:
-            self._panic_hotkey_listener.stop()
+        """Close brain-owned clients and any compatibility-local graph."""
+        try:
+            self._intent_decisions.clear()
+            self.last_intent_decision = None
+            await self.client.aclose()
+            if self._vision_client:
+                await self._vision_client.aclose()
+            if self._panic_hotkey_listener is not None:
+                self._panic_hotkey_listener.stop()
+        finally:
+            if self._owns_memory_graph:
+                self.memory_graph.close()
+                self._owns_memory_graph = False
 
     async def _stream_completion(
         self,

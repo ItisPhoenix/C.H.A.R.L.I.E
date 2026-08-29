@@ -578,6 +578,7 @@ async def start(
     config: Config, event_bus, text: str, session_store=None, memory_store=None, voice=None,
     priority: int = 0, depends_on: Optional[List[str]] = None, visibility_hint: str = "",
     on_result_stored: Optional[Callable] = None,
+    memory_graph=None, memory_service=None,
 ) -> BackgroundTask:
     """Plan a background task and hand it to the TaskManager queue -- no
     upfront approval gate. Runs immediately if a slot is free (the common
@@ -605,6 +606,8 @@ async def start(
         bg_config,
         session_store=session_store,
         memory_store=memory_store,
+        memory_graph=memory_graph,
+        memory_service=memory_service,
         register_panic_hotkey=False,
         approval_timeout=None,
         is_background=True,

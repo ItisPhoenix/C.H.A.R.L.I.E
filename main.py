@@ -102,6 +102,8 @@ from charlie.presentation_control import PresentationRequest, get_presentation_c
 from charlie.surface_intent import match_surface_request
 from charlie.events import EventMeta, EventSource, EventType
 from charlie.ipc import EventBus
+from charlie.memory_graph import MemoryGraph
+from charlie.memory_service import MemoryService
 from charlie.memory_store import MemoryStore
 from charlie.personality import get_emotion_for_context, parse_voice_command, parse_yes_no
 from charlie.session_store import SessionStore
@@ -540,6 +542,42 @@ async def _restart_mcp_client(old_client, config):
     return await asyncio.to_thread(start_mcp, config)
 
 
+def _compose_memory_dependencies(runtime_config: Config) -> tuple[MemoryGraph, Optional[MemoryStore], MemoryService]:
+    """Compose process-owned long-term memory adapters and facade.
+
+    The graph is required for the main process, matching Brain's existing
+    fail-fast construction behavior. Vector memory remains optional and keeps
+    its existing graceful-degradation semantics.
+    """
+    try:
+        memory_graph = MemoryGraph(runtime_config.memory_graph_db)
+    except Exception:
+        logger.error("Failed to initialize knowledge graph memory", exc_info=True)
+        raise
+
+    memory_store = None
+    try:
+        memory_store = MemoryStore(runtime_config)
+        _set_subsystem_health("memory", HealthStatus.RUNNING)
+    except Exception as e:
+        logger.warning(f"Vector memory disabled: {e}")
+        _set_subsystem_health("memory", HealthStatus.DEGRADED)
+
+    memory_service = MemoryService(
+        graph=memory_graph,
+        memory_store=memory_store,
+    )
+    return memory_graph, memory_store, memory_service
+
+
+def _wire_memory_adapters(memory_store: Optional[MemoryStore], memory_graph: MemoryGraph) -> None:
+    """Wire transitional memory adapters from the composition root."""
+    from charlie.tools import registry as tool_registry
+
+    tool_registry.set_memory_store(memory_store)
+    tool_registry.set_memory_graph(memory_graph)
+
+
 async def main():
     loop = asyncio.get_running_loop()
     _orig_handler = loop.call_exception_handler
@@ -573,14 +611,15 @@ async def main():
     from charlie.audit_store import AuditStore
 
     audit_store = AuditStore(config.session_db_path)
-    # Initialize vector memory store (graceful degradation if no embedding backend)
-    memory_store = None
     try:
-        memory_store = MemoryStore(config)
-        _set_subsystem_health("memory", HealthStatus.RUNNING)
-    except Exception as e:
-        logger.warning(f"Vector memory disabled: {e}")
-        _set_subsystem_health("memory", HealthStatus.DEGRADED)
+        memory_graph, memory_store, memory_service = _compose_memory_dependencies(config)
+    except Exception:
+        # MemoryGraph was previously required by Brain construction. Stop
+        # startup explicitly rather than substituting a fabricated graph.
+        audit_store.close()
+        if store:
+            store.close()
+        return
 
     def speaking_callback(text):
         if voice:
@@ -888,6 +927,8 @@ async def main():
             on_thought_callback=speaking_callback,
             session_store=store,
             memory_store=memory_store,
+            memory_graph=memory_graph,
+            memory_service=memory_service,
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_operation_result=on_operation_result,
@@ -905,14 +946,8 @@ async def main():
             store.close()
         return
 
-    # Wire vector memory store into tool registry
-    from charlie.tools import registry as tool_registry
-
-    if memory_store is not None:
-        tool_registry.set_memory_store(memory_store)
-    # Wire knowledge graph into tool registry
-    if brain is not None and hasattr(brain, "memory_graph"):
-        tool_registry.set_memory_graph(brain.memory_graph)
+    # Transitional memory adapter wiring stays owned by main's composition root.
+    _wire_memory_adapters(memory_store, memory_graph)
 
     # Wire the plugin system into the tool registry (no-op unless enabled).
     # The SAME registry the LLM calls, so when PLUGINS_ENABLED=true the
@@ -2034,6 +2069,8 @@ async def main():
                             payload.get("text", ""),
                             session_store=store,
                             memory_store=memory_store,
+                            memory_graph=memory_graph,
+                            memory_service=memory_service,
                             voice=voice,
                         )
                     except RuntimeError as ex:

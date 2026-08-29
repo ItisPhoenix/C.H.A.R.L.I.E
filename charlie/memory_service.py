@@ -410,7 +410,3 @@ class MemoryService:
         stats["total_items"] = len(items)
         stats["semantic"] = self._semantic_stats()
         return stats
-
-
-# Global default instance
-memory_service = MemoryService()

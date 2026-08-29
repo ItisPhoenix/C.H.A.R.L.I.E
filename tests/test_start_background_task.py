@@ -27,7 +27,15 @@ class _FakeTask:
 class TestHandleStartBackgroundTask:
     @pytest.mark.asyncio
     async def test_valid_text_starts_task_and_confirms(self, monkeypatch, brain_config):
-        brain = Brain(brain_config)
+        sentinel_store = object()
+        sentinel_graph = object()
+        sentinel_service = object()
+        brain = Brain(
+            brain_config,
+            memory_store=sentinel_store,
+            memory_graph=sentinel_graph,
+            memory_service=sentinel_service,
+        )
 
         class _FakeBus:
             async def emit(self, *a, **kw):
@@ -39,10 +47,14 @@ class TestHandleStartBackgroundTask:
         captured = {}
 
         async def fake_start(config, event_bus, text, session_store=None, memory_store=None,
-                              voice=None, priority=0, depends_on=None, on_result_stored=None):
+                              voice=None, priority=0, depends_on=None, on_result_stored=None,
+                              memory_graph=None, memory_service=None):
             captured["text"] = text
             captured["priority"] = priority
             captured["depends_on"] = depends_on
+            captured["memory_store"] = memory_store
+            captured["memory_graph"] = memory_graph
+            captured["memory_service"] = memory_service
             return _FakeTask()
 
         monkeypatch.setattr(background_task, "start", fake_start)
@@ -50,6 +62,9 @@ class TestHandleStartBackgroundTask:
         result = await brain._handle_start_background_task({"text": "organize downloads folder"})
         assert "abc123" in result
         assert captured["text"] == "organize downloads folder"
+        assert captured["memory_store"] is sentinel_store
+        assert captured["memory_graph"] is sentinel_graph
+        assert captured["memory_service"] is sentinel_service
 
     @pytest.mark.asyncio
     async def test_missing_text_returns_error_without_starting(self, monkeypatch, brain_config):
@@ -95,7 +110,8 @@ class TestHandleStartBackgroundTask:
         captured = {}
 
         async def fake_start(config, event_bus, text, session_store=None, memory_store=None,
-                              voice=None, priority=0, depends_on=None, on_result_stored=None):
+                              voice=None, priority=0, depends_on=None, on_result_stored=None,
+                              memory_graph=None, memory_service=None):
             captured["priority"] = priority
             captured["depends_on"] = depends_on
             return _FakeTask()

@@ -1165,16 +1165,26 @@ async def test_foreground_approval_uses_active_session_id(monkeypatch, bg_config
 
 
 @pytest.mark.asyncio
-async def test_start_wires_session_store_and_memory_store_into_background_brain(monkeypatch, bg_config):
+async def test_start_wires_process_memory_dependencies_into_background_brain(monkeypatch, bg_config):
     monkeypatch.setattr(Brain, "chat_stream", _fake_plan_chat_stream)
     bus = FakeEventBus()
     sentinel_store = object()
     sentinel_memory = object()
+    sentinel_graph = object()
+    sentinel_service = object()
     task = await background_task.start(
-        bg_config, bus, "do the thing", session_store=sentinel_store, memory_store=sentinel_memory
+        bg_config,
+        bus,
+        "do the thing",
+        session_store=sentinel_store,
+        memory_store=sentinel_memory,
+        memory_graph=sentinel_graph,
+        memory_service=sentinel_service,
     )
     assert task.brain.session_store is sentinel_store
     assert task.brain.memory_store is sentinel_memory
+    assert task.brain.memory_graph is sentinel_graph
+    assert task.brain.memory_service is sentinel_service
     await task.brain.close()
 
 
