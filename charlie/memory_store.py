@@ -213,6 +213,19 @@ class MemoryStore:
     def is_available(self) -> bool:
         return self._collection is not None
 
+    def get_stats(self) -> Dict[str, Any]:
+        """Return safe semantic adapter status and document count."""
+        if not self.is_available:
+            return {"available": False, "document_count": 0}
+
+        try:
+            document_count = int(self._collection.count())
+        except Exception as e:
+            logger.warning("Could not read semantic memory statistics: %s", e)
+            return {"available": False, "document_count": 0}
+
+        return {"available": True, "document_count": document_count}
+
     def add_memory(
         self,
         text: str,

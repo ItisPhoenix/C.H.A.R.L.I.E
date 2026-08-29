@@ -116,6 +116,30 @@ class TestMemoryStore:
         store = MemoryStore(FakeConfig())
         assert store.is_available is False
 
+    def test_get_stats_when_available(self, monkeypatch):
+        store = self._make_store(monkeypatch)
+        store._collection = MagicMock()
+        store._collection.count.return_value = 3
+
+        assert store.get_stats() == {"available": True, "document_count": 3}
+
+    def test_get_stats_when_unavailable(self, monkeypatch):
+        monkeypatch.setattr(
+            "charlie.memory_store._build_embedding_function",
+            lambda _: None,
+        )
+        from charlie.memory_store import MemoryStore
+
+        store = MemoryStore(FakeConfig())
+        assert store.get_stats() == {"available": False, "document_count": 0}
+
+    def test_get_stats_when_collection_count_fails(self, monkeypatch):
+        store = self._make_store(monkeypatch)
+        store._collection = MagicMock()
+        store._collection.count.side_effect = RuntimeError("chroma unavailable")
+
+        assert store.get_stats() == {"available": False, "document_count": 0}
+
     def test_add_memory_stores_facts(self, monkeypatch):
         store = self._make_store(monkeypatch)
         store._collection = MagicMock()

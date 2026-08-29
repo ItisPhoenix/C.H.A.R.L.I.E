@@ -133,6 +133,23 @@ class TestNodeCrud:
             graph.close()
             _remove_db(db)
 
+    def test_update_node_preserves_id_and_edges(self):
+        graph, db = _make_graph()
+        try:
+            node_id = graph.add_node("person", "Alice")
+            other_id = graph.add_node("person", "Bob")
+            graph.add_edge(node_id, other_id, "knows")
+
+            updated = graph.update_node(node_id, "person", "Alicia")
+
+            assert updated is not None
+            assert updated["id"] == node_id
+            assert updated["content"] == "Alicia"
+            assert graph.query_neighbors(node_id)[0]["id"] == other_id
+        finally:
+            graph.close()
+            _remove_db(db)
+
 
 # ---------------------------------------------------------------------------
 # add_edge / query_neighbors / query_path
@@ -432,6 +449,41 @@ class TestFacts:
             assert ("Alice", "works_on", "graphs") in facts
             assert ("Bob", "knows", "Alice") in facts
             assert all(len(f) == 3 for f in facts)
+        finally:
+            graph.close()
+            _remove_db(db)
+
+    def test_remove_fact_only_deletes_requested_relation(self):
+        graph, db = _make_graph()
+        try:
+            graph.add_fact("Alice", "uses", "Python")
+            graph.add_fact("Alice", "mentions", "Python")
+
+            assert graph.remove_fact("Alice", "uses", "Python") is True
+            assert ("Alice", "uses", "Python") not in graph.get_all_facts()
+            assert ("Alice", "mentions", "Python") in graph.get_all_facts()
+        finally:
+            graph.close()
+            _remove_db(db)
+
+    def test_remove_fact_normalizes_unsupported_relation_to_mentions(self):
+        graph, db = _make_graph()
+        try:
+            graph.add_fact("Alice", "custom relation", "Python")
+            assert ("Alice", "mentions", "Python") in graph.get_all_facts()
+
+            assert graph.remove_fact("Alice", "custom relation", "Python") is True
+            assert graph.get_all_facts() == []
+        finally:
+            graph.close()
+            _remove_db(db)
+
+    def test_remove_missing_fact_reports_false(self):
+        graph, db = _make_graph()
+        try:
+            graph.add_fact("Alice", "mentions", "Python")
+            assert graph.remove_fact("Alice", "uses", "Python") is False
+            assert ("Alice", "mentions", "Python") in graph.get_all_facts()
         finally:
             graph.close()
             _remove_db(db)

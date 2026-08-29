@@ -1,11 +1,16 @@
-"""Unified Memory Management Service for Charlie.
+"""Long-term memory facade for Charlie.
 
-Coordinates SQLite Knowledge Graph, Vector Store, and memory files
-for search, inspection, CRUD, category purge, export, and auto-memory management.
+Coordinates the structured ``MemoryGraph`` adapter and the optional semantic
+``MemoryStore`` adapter.  Managed graph records and semantic memories have
+separate operations; graph mutations are not automatically mirrored into
+vector storage.  Prompt-profile files, prompt construction, and privacy
+policy remain outside this facade.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -15,8 +20,20 @@ from charlie.utils import make_id, utc_now_iso
 logger = logging.getLogger("charlie.memory_service")
 
 
+def fact_compatibility_id(subject: str, predicate: str, obj: str) -> str:
+    """Return a deterministic compatibility ID for a relational fact."""
+    serialized = json.dumps(
+        {"object": obj, "predicate": predicate, "subject": subject},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    return f"fact_{digest}"
+
+
 class MemoryService:
-    """Unified service for inspecting, searching, modifying, exporting, and purging memories."""
+    """Facade for managed structured memory and explicit semantic memory."""
 
     def __init__(self, graph: Optional[MemoryGraph] = None, memory_store: Optional[Any] = None) -> None:
         self._graph = graph
@@ -32,6 +49,100 @@ class MemoryService:
             logger.warning("Could not instantiate MemoryGraph: %s", e)
         return self._graph
 
+    def _semantic_available(self) -> bool:
+        """Return whether the configured semantic adapter can serve requests."""
+        if self._memory_store is None:
+            return False
+        try:
+            return bool(getattr(self._memory_store, "is_available", False))
+        except Exception:
+            return False
+
+    def remember_semantic(
+        self,
+        text: str,
+        source: str,
+        session_id: str,
+        auto_extract: bool = True,
+    ) -> int:
+        """Explicitly ingest semantic memory using the MemoryStore contract.
+
+        Zero is the neutral result when semantic storage is not configured or
+        unavailable, matching ``MemoryStore.add_memory``.
+        """
+        if not self._semantic_available():
+            return 0
+        return self._memory_store.add_memory(
+            text=text,
+            source=source,
+            session_id=session_id,
+            auto_extract=auto_extract,
+        )
+
+    def search_semantic(
+        self,
+        query: str,
+        n_results: int = 3,
+        threshold: Optional[float] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Search semantic memory, preserving ``[]`` versus ``None`` failures."""
+        if not self._semantic_available():
+            return []
+        if threshold is None:
+            return self._memory_store.search(query, n_results=n_results)
+        return self._memory_store.search(query, n_results=n_results, threshold=threshold)
+
+    def format_semantic_for_prompt(self, results: List[Dict[str, Any]]) -> str:
+        """Format semantic results without applying prompt policy."""
+        if not self._semantic_available():
+            return ""
+        return self._memory_store.format_for_prompt(results)
+
+    def _semantic_stats(self) -> Dict[str, Any]:
+        """Return safe semantic adapter statistics or its neutral state."""
+        if self._memory_store is None:
+            return {"available": False, "document_count": 0}
+
+        get_stats = getattr(self._memory_store, "get_stats", None)
+        if callable(get_stats):
+            try:
+                stats = get_stats()
+                if isinstance(stats, dict):
+                    return stats
+            except Exception as e:
+                logger.warning("Could not read semantic memory statistics: %s", e)
+
+        return {
+            "available": self._semantic_available(),
+            "document_count": 0,
+        }
+
+    @staticmethod
+    def _item_from_node(
+        node: Dict[str, Any],
+        fallback_category: str,
+        fallback_content: str,
+        fallback_subject: str = "",
+        fallback_predicate: str = "",
+        fallback_object: str = "",
+        fallback_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Project an actual persisted graph node into the managed-item shape."""
+        metadata = node.get("metadata") if "metadata" in node else fallback_metadata
+        metadata = metadata or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return {
+            "id": node.get("id"),
+            "category": node.get("node_type") or fallback_category,
+            "content": node.get("content", fallback_content),
+            "subject": metadata.get("subject", fallback_subject),
+            "predicate": metadata.get("predicate", fallback_predicate),
+            "object": metadata.get("object", fallback_object),
+            "created_at": node.get("created_at") or utc_now_iso(),
+            "metadata": metadata,
+        }
+
     def add_item(
         self,
         category: str = "fact",
@@ -41,16 +152,16 @@ class MemoryService:
         obj: str = "",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Add a memory item (triple or freeform content) to the graph and vector store."""
+        """Add a managed graph item without implicit semantic ingestion."""
         graph = self._get_graph()
-        now_iso = utc_now_iso()
-        item_id = f"mem_{make_id(8)}"
+        requested_id = f"mem_{make_id(8)}"
         node_type = (
             category
             if category in ("person", "place", "concept", "task", "preference", "fact", "event")
             else "fact"
         )
 
+        persisted_id: Optional[str] = None
         if subject and predicate and obj:
             if not content:
                 content = f"{subject} {predicate} {obj}"
@@ -64,40 +175,48 @@ class MemoryService:
                     "object": obj,
                     **(metadata or {}),
                 }
-                graph.add_node(
+                persisted_id = graph.add_node(
                     node_type=node_type,
                     content=content,
-                    node_id=item_id,
+                    node_id=requested_id,
                     metadata=node_meta,
                 )
         else:
             if graph:
-                graph.add_node(
+                persisted_id = graph.add_node(
                     node_type=node_type,
                     content=content,
-                    node_id=item_id,
+                    node_id=requested_id,
                     metadata=metadata,
                 )
 
-        if self._memory_store is not None and content:
-            try:
-                self._memory_store.add_memory(content, metadata={"category": category, "id": item_id})
-            except Exception as e:
-                logger.debug("Could not add to vector memory store: %s", e)
+        if graph is not None and persisted_id is not None:
+            persisted_node = graph.get_node(persisted_id)
+            if persisted_node is not None:
+                return self._item_from_node(
+                    persisted_node,
+                    fallback_category=node_type,
+                    fallback_content=content,
+                    fallback_subject=subject,
+                    fallback_predicate=predicate,
+                    fallback_object=obj,
+                    fallback_metadata=metadata,
+                )
 
+        logger.warning("Could not persist managed memory item")
         return {
-            "id": item_id,
-            "category": category,
+            "id": persisted_id,
+            "category": node_type,
             "content": content,
             "subject": subject,
             "predicate": predicate,
             "object": obj,
-            "created_at": now_iso,
+            "created_at": utc_now_iso(),
             "metadata": metadata or {},
         }
 
     def list_items(self, category: Optional[str] = None, limit: int = 300) -> List[Dict[str, Any]]:
-        """List all structured and unstructured memory items."""
+        """List managed graph items and graph-only relational projections."""
         graph = self._get_graph()
         if not graph:
             return []
@@ -145,7 +264,7 @@ class MemoryService:
                     it["content"] == fact_text or (it.get("subject") == s and it.get("object") == o)
                     for it in items
                 ):
-                    fact_id = f"fact_{abs(hash((s, p, o)))}"
+                    fact_id = fact_compatibility_id(s, p, o)
                     items.append({
                         "id": fact_id,
                         "category": "fact",
@@ -160,7 +279,7 @@ class MemoryService:
         return items[:limit]
 
     def search_items(self, query: str, category: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
-        """Search memory items by keyword and category."""
+        """Search managed graph items by keyword and category."""
         all_items = self.list_items(category=category, limit=500)
         q_lower = query.lower().strip()
         if not q_lower:
@@ -182,49 +301,47 @@ class MemoryService:
         category: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Update content and properties of an existing memory item."""
+        """Update content and properties of an existing managed graph item."""
         graph = self._get_graph()
         if not graph:
             return None
 
         node = graph.get_node(item_id)
-        current_type = category or (node.get("node_type") if node else "fact")
+        if node is None:
+            return None
+
+        current_type = category or node.get("node_type", "fact")
         node_type = (
             current_type
             if current_type in ("person", "place", "concept", "task", "preference", "fact", "event")
             else "fact"
         )
 
-        existing_meta = (node.get("metadata") if node else None) or {}
+        existing_meta = node.get("metadata") or {}
         if not isinstance(existing_meta, dict):
             existing_meta = {}
         if metadata:
             existing_meta.update(metadata)
 
-        # Delete old node if exists and recreate with updated content
-        if node:
-            graph.delete_node(item_id)
-
-        graph.add_node(
+        persisted_node = graph.update_node(
+            node_id=item_id,
             node_type=node_type,
             content=content,
-            node_id=item_id,
             metadata=existing_meta,
         )
+        if persisted_node is not None:
+            return self._item_from_node(
+                persisted_node,
+                fallback_category=node_type,
+                fallback_content=content,
+                fallback_metadata=existing_meta,
+            )
 
-        return {
-            "id": item_id,
-            "category": node_type,
-            "content": content,
-            "subject": existing_meta.get("subject", ""),
-            "predicate": existing_meta.get("predicate", ""),
-            "object": existing_meta.get("object", ""),
-            "created_at": node.get("created_at") if node else utc_now_iso(),
-            "metadata": existing_meta,
-        }
+        logger.warning("Could not update managed memory item %s", item_id)
+        return None
 
     def delete_item(self, item_id: str) -> bool:
-        """Delete an item by id or remove associated graph fact."""
+        """Delete a managed graph item or its associated graph fact."""
         graph = self._get_graph()
         if not graph:
             return False
@@ -240,9 +357,9 @@ class MemoryService:
             graph.delete_node(item_id)
             return True
 
-        # Check if item_id corresponds to a fact hash
+        # Check if item_id corresponds to a stable relational compatibility ID
         for s, p, o in graph.get_all_facts():
-            fact_id = f"fact_{abs(hash((s, p, o)))}"
+            fact_id = fact_compatibility_id(s, p, o)
             if fact_id == item_id or f"{s} {p} {o}" == item_id:
                 graph.remove_fact(s, p, o)
                 return True
@@ -250,7 +367,7 @@ class MemoryService:
         return False
 
     def clear_category(self, category: Optional[str] = None) -> int:
-        """Clear all items in a specific category, or all memories if category is None or 'all'."""
+        """Clear managed graph items in a category, or all graph memory."""
         graph = self._get_graph()
         if not graph:
             return 0
@@ -269,7 +386,7 @@ class MemoryService:
         return cleared
 
     def export_all(self) -> Dict[str, Any]:
-        """Export full memory dataset with metadata and graph statistics."""
+        """Export managed graph memory with metadata and graph statistics."""
         graph = self._get_graph()
         items = self.list_items(limit=1000)
         stats = graph.get_stats() if graph else {}
@@ -281,7 +398,7 @@ class MemoryService:
         }
 
     def get_stats(self) -> Dict[str, Any]:
-        """Return memory statistics."""
+        """Return graph statistics plus safe semantic adapter statistics."""
         graph = self._get_graph()
         stats = graph.get_stats() if graph else {}
         items = self.list_items(limit=1000)
@@ -291,6 +408,7 @@ class MemoryService:
             category_counts[cat] = category_counts.get(cat, 0) + 1
         stats["categories"] = category_counts
         stats["total_items"] = len(items)
+        stats["semantic"] = self._semantic_stats()
         return stats
 
 

@@ -27,6 +27,14 @@ NODE_TYPES = ("person", "place", "concept", "task", "preference", "fact", "event
 EDGE_TYPES = ("works_on", "knows", "prefers", "located_at", "created", "uses", "mentions")
 
 
+def normalize_relation(predicate: str) -> str:
+    """Normalize a fact predicate to a concrete graph relation."""
+    relation = predicate.lower().replace(" ", "_")
+    if relation not in EDGE_TYPES:
+        return "mentions"
+    return relation
+
+
 # ---------------------------------------------------------------------------
 # MemoryGraph
 # ---------------------------------------------------------------------------
@@ -111,7 +119,13 @@ class MemoryGraph:
             "SELECT id FROM nodes WHERE node_type = ? AND content = ?",
             (node_type, content),
         ).fetchone()
-        if existing:
+        managed_id_collision = bool(
+            existing
+            and node_id is not None
+            and node_id.startswith("mem_")
+            and not existing["id"].startswith("mem_")
+        )
+        if existing and not managed_id_collision:
             self.conn.execute(
                 "UPDATE nodes SET updated_at = ? WHERE id = ?",
                 (now, existing["id"]),
@@ -298,6 +312,36 @@ class MemoryGraph:
             logger.error("delete_node failed: %s", e)
             return False
 
+    def update_node(
+        self,
+        node_id: str,
+        node_type: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Update a node in place, preserving its ID and relationships."""
+        if node_type not in NODE_TYPES:
+            logger.warning("Unknown node_type '%s', storing as 'fact'", node_type)
+            node_type = "fact"
+
+        try:
+            now = utc_now_iso()
+            cursor = self.conn.execute(
+                """
+                UPDATE nodes
+                SET node_type = ?, content = ?, metadata = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (node_type, content, json_dumps(metadata) if metadata else None, now, node_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+            self.conn.commit()
+            return self.get_node(node_id)
+        except sqlite3.Error as e:
+            logger.error("update_node failed: %s", e)
+            return None
+
     def get_all_nodes(self, node_type: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         """List all nodes, optionally filtered by type."""
         sql = "SELECT id, node_type, content, created_at, updated_at FROM nodes"
@@ -353,10 +397,7 @@ class MemoryGraph:
         then adds an edge with the predicate as the relation.
         Returns the edge id.
         """
-        # Map predicate to a known edge type if possible, else 'mentions'
-        relation = predicate.lower().replace(" ", "_")
-        if relation not in EDGE_TYPES:
-            relation = "mentions"
+        relation = normalize_relation(predicate)
 
         subject_id = self.add_node("fact", subject)
         object_id = self.add_node("fact", obj)
@@ -364,9 +405,9 @@ class MemoryGraph:
 
     def remove_fact(self, subject: str, predicate: str, obj: str) -> bool:
         """Remove a fact triple (edge) from the memory graph."""
-        relation = predicate.lower().replace(" ", "_")
+        relation = normalize_relation(predicate)
         try:
-            self.conn.execute(
+            cursor = self.conn.execute(
                 """
                 DELETE FROM edges
                 WHERE relation = ?
@@ -375,18 +416,8 @@ class MemoryGraph:
                 """,
                 (relation, subject, obj),
             )
-            # Also handle the default/fallback relation mapping ('mentions' or others)
-            self.conn.execute(
-                """
-                DELETE FROM edges
-                WHERE (relation = 'mentions' OR relation = ?)
-                  AND from_node_id IN (SELECT id FROM nodes WHERE content = ?)
-                  AND to_node_id IN (SELECT id FROM nodes WHERE content = ?)
-                """,
-                (relation, subject, obj),
-            )
             self.conn.commit()
-            return True
+            return cursor.rowcount > 0
         except sqlite3.Error as e:
             logger.error("remove_fact failed: %s", e)
             return False
@@ -495,12 +526,14 @@ class MemoryGraph:
             )
             removed += row["cnt"] - 1
 
-        # Remove orphan nodes (no edges in or out)
+        # Remove orphan nodes (no edges in or out), except durable managed
+        # MemoryService nodes whose IDs intentionally use the mem_ prefix.
         orphans = self.conn.execute(
             """
             SELECT n.id FROM nodes n
             WHERE NOT EXISTS (SELECT 1 FROM edges WHERE from_node_id = n.id)
               AND NOT EXISTS (SELECT 1 FROM edges WHERE to_node_id = n.id)
+              AND substr(n.id, 1, 4) != 'mem_'
             """
         ).fetchall()
         for row in orphans:
