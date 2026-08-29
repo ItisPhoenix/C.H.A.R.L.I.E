@@ -698,6 +698,7 @@ class CapabilityIndex:
         domains: Optional[Iterable[str]] = None,
         available_only: bool = True,
         registered_only: bool = False,
+        config: Optional["Config"] = None,
     ) -> List[Dict[str, Any]]:
         """Return OpenAI-compatible schemas for matching active capabilities.
 
@@ -707,6 +708,8 @@ class CapabilityIndex:
         """
         domain_set = set(domains) if domains is not None else None
         schemas: List[Dict[str, Any]] = []
+        desktop_ok = config is None or (config.desktop_control_enabled and _DESKTOP_AVAILABLE)
+        browser_ok = config is None or (config.browser_enabled and _BROWSER_AVAILABLE)
         for cap_id, desc in self._capabilities.items():
             if domain_set is not None and cap_id not in domain_set:
                 continue
@@ -714,6 +717,10 @@ class CapabilityIndex:
                 continue
             for op in desc.operations.values():
                 if registered_only and not self.is_tool_registered(op.name):
+                    continue
+                if config is not None and not _operation_enabled_for_config(
+                    op, cap_id, desktop_ok, browser_ok
+                ):
                     continue
                 schemas.append(op.to_tool_definition())
         return schemas

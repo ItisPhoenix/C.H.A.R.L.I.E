@@ -159,13 +159,6 @@ _DESKTOP_CONTROL_TOOLS = frozenset(
         "system_control",
     }
 )
-# Compatibility projection for callers that need the current COM-backed tool
-# set. Execution reads each operation's canonical executor_type live below.
-_DESKTOP_COM_TOOLS = frozenset(
-    operation.name
-    for operation in capability_index.find_operations(available_only=False)
-    if operation.executor_type == "com_thread"
-)
 # Narrower sibling of router.SCREEN_QUERY_RE: phrasing that implies the user wants
 # graphical/visual understanding (an icon, photo, game frame) that OCR/UIA
 # marks can't describe. When this matches and a vision model is configured,
@@ -1974,6 +1967,7 @@ class Brain:
                 domains=domain_hints,
                 available_only=True,
                 registered_only=True,
+                config=self.config,
             )
             payload["tool_choice"] = "auto"
         if getattr(self.config, "llm_disable_reasoning", False):

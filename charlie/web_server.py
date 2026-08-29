@@ -38,6 +38,10 @@ from charlie.media_adapter import WindowsMediaAdapter
 from charlie.audit_store import AuditStore
 from charlie.backup_service import export_snapshot
 from charlie.capabilities import build_capability_snapshot, get_capability_index
+# Importing charlie.tools registers built-in callables and synchronizes their
+# semantic operations before this process captures its capability index. It
+# does not start plugins or MCP; those remain lazy in lifespan/endpoints.
+import charlie.tools  # noqa: F401
 from charlie.events import EventValidationError, build_event, normalize_event, replay_event
 from charlie.settings_service import SettingsService, SettingValidationError
 from charlie.memory_service import MemoryService

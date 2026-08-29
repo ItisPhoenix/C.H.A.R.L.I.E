@@ -1306,8 +1306,9 @@ def recall_results(limit: int = 5) -> str:
     schema={"type": "object", "properties": {}, "required": []},
 )
 def capabilities() -> str:
-    from charlie.capabilities import build_capability_roster
-    return build_capability_roster(registry, config)
+    from charlie.capabilities import build_capability_roster, capability_index
+
+    return build_capability_roster(capability_index, config)
 
 
 # ---------------------------------------------------------------------------

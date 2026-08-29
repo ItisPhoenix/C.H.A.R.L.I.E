@@ -1,4 +1,8 @@
 import asyncio
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import charlie.web_server as web_server
 from charlie.capabilities import (
@@ -106,6 +110,147 @@ def test_capabilities_endpoint_projects_shared_capability_index(monkeypatch):
     assert "runtime" in snapshot
 
 
+def test_capabilities_tool_uses_canonical_index_grouping(monkeypatch):
+    import charlie.capabilities as capabilities_module
+    import charlie.tools as tools_module
+
+    isolated_index = CapabilityIndex()
+    register_tool_in_index(
+        name="web_search",
+        description="Search the web",
+        schema={"type": "object"},
+        func=lambda: "ok",
+        owner="tools",
+        index=isolated_index,
+    )
+    monkeypatch.setattr(capabilities_module, "capability_index", isolated_index)
+
+    roster = tools_module.capabilities()
+
+    assert "- Web research: web_search (Search the web)" in roster
+    assert "- General tools: web_search (Search the web)" not in roster
+
+
+def test_brain_native_schema_projection_applies_live_config_and_registry_gates(monkeypatch):
+    import charlie.capabilities as capabilities_module
+    import charlie.core as core
+
+    isolated_index = CapabilityIndex()
+    for name in ("desktop_click", "desktop_screenshot", "browser_task", "live_custom"):
+        owner = "tools" if name == "live_custom" else "tools"
+        register_tool_in_index(
+            name=name,
+            description=name,
+            schema={"type": "object"},
+            func=lambda: "ok",
+            owner=owner,
+            index=isolated_index,
+        )
+    isolated_index.register_capability(
+        CapabilityDescriptor(
+            id="metadata_only",
+            name="Metadata only",
+            description="Not a callable ToolRegistry operation",
+            owner="charlie.extensions",
+            provenance="extension",
+            operations={
+                "inspect": CapabilityOperation(
+                    id="metadata_only.inspect",
+                    name="metadata_only",
+                    description="Metadata only",
+                    parameters_schema={"type": "object"},
+                )
+            },
+        )
+    )
+    monkeypatch.setattr(core, "capability_index", isolated_index)
+    monkeypatch.setattr(capabilities_module, "_DESKTOP_AVAILABLE", True)
+    monkeypatch.setattr(capabilities_module, "_BROWSER_AVAILABLE", True)
+
+    cfg = Config(
+        llm_url="https://example.com/v1",
+        llm_key="test-key",
+        llm_model="test-model",
+        desktop_control_enabled=False,
+        browser_enabled=False,
+    )
+    brain = core.Brain.__new__(core.Brain)
+    brain.config = cfg
+    brain._use_native_tools = True
+    brain._pending_vision_image_url = None
+
+    disabled_names = {
+        item["function"]["name"]
+        for item in brain._build_payload([])["tools"]
+    }
+    assert "desktop_click" not in disabled_names
+    assert "desktop_screenshot" not in disabled_names
+    assert "browser_task" not in disabled_names
+    assert "live_custom" in disabled_names
+    assert "metadata_only" not in disabled_names
+
+    cfg.desktop_control_enabled = True
+    cfg.browser_enabled = True
+    enabled_names = {
+        item["function"]["name"]
+        for item in brain._build_payload([])["tools"]
+    }
+    assert {"desktop_click", "desktop_screenshot", "browser_task", "live_custom"} <= enabled_names
+    assert "metadata_only" not in enabled_names
+
+
+def test_web_server_bootstraps_builtins_without_tools_endpoint_or_extensions(tmp_path):
+    env = os.environ.copy()
+    env.update(
+        {
+            "CHARLIE_TEST_MODE": "true",
+            "MCP_ENABLED": "false",
+            "MCP_SERVERS": "",
+            "PLUGINS_ENABLED": "false",
+            "SESSION_DB_PATH": str(tmp_path / "sessions.db"),
+            "WORLD_MODEL_DB_PATH": str(tmp_path / "world_model.db"),
+        }
+    )
+    script = """
+import asyncio
+import builtins
+import sys
+
+bootstrap_imports = []
+_original_import = builtins.__import__
+
+
+def _trace_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "charlie.tools" and globals and globals.get("__name__") == "charlie.web_server":
+        bootstrap_imports.append(name)
+    return _original_import(name, globals, locals, fromlist, level)
+
+
+builtins.__import__ = _trace_import
+import charlie.web_server as server
+from charlie.capabilities import capability_index
+
+assert bootstrap_imports
+assert "charlie.tools" in sys.modules
+assert capability_index is server._shared_capability_index
+assert capability_index.get_operation("web_search") is not None
+assert server.mcp_client is None
+assert not server.plugin_manager._plugins
+snapshot = asyncio.run(server.get_capabilities())
+assert any(tool["name"] == "web_search" for tool in snapshot["tools"])
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_capability_views_hide_operations_requiring_disabled_desktop():
     isolated_index = CapabilityIndex()
     isolated_index.register_capability(
@@ -198,14 +343,3 @@ def test_dynamic_plugin_timeout_fallback_survives_capability_registration():
     )
 
     assert core._tool_timeout("plugin_fs_search", operation) == core._TOOL_TIMEOUTS["plugin_fs_search"]
-
-
-def test_core_com_compatibility_projection_matches_canonical_operations():
-    from charlie.core import _DESKTOP_COM_TOOLS
-
-    expected = {
-        operation.name
-        for operation in capability_index.find_operations(available_only=False)
-        if operation.executor_type == "com_thread"
-    }
-    assert _DESKTOP_COM_TOOLS == expected

@@ -10,7 +10,6 @@ import pytest
 
 from charlie.config import Config
 from charlie.core import (
-    _DESKTOP_COM_TOOLS,
     _DESKTOP_CONTROL_TOOLS,
     _VISION_SYSTEM_PROMPT,
     Brain,
@@ -324,11 +323,16 @@ def test_screen_query_phrase_matches():
     assert not _SCREEN_QUERY_RE.search("open notepad and type hello")
 
 
-def test_desktop_com_tools_covers_perception_and_effectors():
-    assert _DESKTOP_CONTROL_TOOLS <= _DESKTOP_COM_TOOLS
-    assert _DESKTOP_COM_TOOLS == _DESKTOP_CONTROL_TOOLS | {
+def test_desktop_operations_use_canonical_com_dispatch_metadata():
+    from charlie.capabilities import capability_index
+
+    desktop_com_names = _DESKTOP_CONTROL_TOOLS | {
         "desktop_observe", "desktop_read_screen", "desktop_screenshot",
     }
+    for tool_name in desktop_com_names:
+        operation = capability_index.get_operation(tool_name)
+        assert operation is not None
+        assert operation.executor_type == "com_thread"
 
 
 def test_uia_executor_matches_desktop_availability():
@@ -382,7 +386,7 @@ if __name__ == "__main__":
     test_with_vision_image_drops_tool_call_history_and_full_system_prompt()
     test_select_followup_route_prefers_vision_when_payload_carries_image(brain_config())
     test_select_followup_route_uses_llm_without_image(brain_config())
-    test_desktop_com_tools_covers_perception_and_effectors()
+    test_desktop_operations_use_canonical_com_dispatch_metadata()
     test_uia_executor_matches_desktop_availability()
     test_vision_annotate_unavailable_without_pillow()
     test_vision_annotate_handles_negative_and_swapped_bounds()
