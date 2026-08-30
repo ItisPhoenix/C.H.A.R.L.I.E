@@ -42,7 +42,7 @@ from charlie.capabilities import build_capability_snapshot, get_capability_index
 # semantic operations before this process captures its capability index. It
 # does not start plugins or MCP; those remain lazy in lifespan/endpoints.
 import charlie.tools  # noqa: F401
-from charlie.events import EventValidationError, build_event, normalize_event, replay_event
+from charlie.events import CONTRACT_VERSION, EventValidationError, build_event, normalize_event, replay_event
 from charlie.settings_service import SettingsService, SettingValidationError
 from charlie.memory_service import MemoryService
 from charlie.privacy_service import PrivacyService
@@ -58,7 +58,47 @@ _memory_service = MemoryService()
 _privacy_service = PrivacyService()
 _code_index = CodeIndex()
 _shared_capability_index = get_capability_index()
-_runtime_introspector = RuntimeIntrospector(config=config, capability_index=_shared_capability_index)
+
+
+class _IpcTaskProjection:
+    """Read-only RuntimeIntrospector source backed by the IPC task cache."""
+
+    def snapshot(self) -> list[dict]:
+        return _projected_task_list()
+
+
+class _IpcHealthProjection:
+    """Read-only RuntimeIntrospector source backed by IPC health events."""
+
+    def snapshot(self) -> dict:
+        return dict(_subsystem_health)
+
+
+class _UnavailableLeaseProjection:
+    """Prevent RuntimeIntrospector from falling back to web-local lease state."""
+
+    def snapshot(self) -> dict:
+        return {}
+
+
+def _unavailable_lease_info() -> dict[str, Any]:
+    """Describe the main-process lease authority without inventing a count."""
+    return {
+        "status": "unavailable",
+        "authority": "main_runtime",
+        "detail": "Main-process lease state is unavailable over IPC.",
+        "active_leases": {},
+        "leased_resources_count": None,
+    }
+
+
+_runtime_introspector = RuntimeIntrospector(
+    config,
+    _shared_capability_index,
+    _IpcHealthProjection(),
+    _IpcTaskProjection(),
+    _UnavailableLeaseProjection(),
+)
 _self_knowledge_service = SelfKnowledgeService(
     runtime_introspector=_runtime_introspector,
     code_index=_code_index,
@@ -470,6 +510,16 @@ async def _event_bridge():
         return
 
     async def on_event(event: dict):
+        if (
+            isinstance(event, dict)
+            and event.get("type") == "task_snapshot"
+            and (
+                type(event.get("version")) is not int
+                or event.get("version") != CONTRACT_VERSION
+            )
+        ):
+            logger.warning("Dropping task snapshot with invalid raw contract version")
+            return
         try:
             event = normalize_event(event, allow_unknown=True)
         except EventValidationError as exc:
@@ -488,6 +538,8 @@ async def _event_bridge():
         if etype == "charlie_state":
             global _charlie_state
             _charlie_state = event.get("payload", {})
+        elif etype == "task_snapshot":
+            _apply_task_snapshot_event(_background_tasks, event)
         elif etype == "background_task":
             _apply_background_task_event(_background_tasks, event)
         elif etype == "system_status":
@@ -917,16 +969,18 @@ async def metrics():
 @app.get("/api/background_task")
 async def background_task_status():
     """Current background-task state, for dashboard resync (otherwise push-only over WS)."""
-    from charlie import background_task
-
-    task = background_task.get_current_task()
-    return {"task": task.to_public_event() if task is not None else None}
+    tasks = _projected_task_list()
+    if not tasks:
+        return {"task": None}
+    active_statuses = {"planning", "queued", "running", "paused", "waiting", "verifying", "approval_required"}
+    task = next((item for item in reversed(tasks) if item.get("status") in active_statuses), tasks[-1])
+    return {"task": task}
 
 
 @app.get("/api/tasks")
 async def list_tasks():
     """Replayable public task snapshot from the runtime event bridge."""
-    return {"tasks": list(_background_tasks.values())}
+    return {"tasks": _projected_task_list()}
 
 
 @app.get("/api/sessions")
@@ -1082,6 +1136,31 @@ def _initial_state_events() -> List[dict]:
     return [replay_event(event, allow_unknown=True) for event in events]
 
 
+def _projected_task_list() -> list[dict]:
+    """Return copies of the read-only task projection for API consumers."""
+    return [dict(task) for task in _background_tasks.values()]
+
+
+_PROJECTED_TASK_STATUSES = frozenset(
+    {
+        "queued",
+        "planning",
+        "waiting",
+        "running",
+        "paused",
+        "approval_required",
+        "verifying",
+        "completed",
+        "failed",
+        "cancelled",
+    }
+)
+_PROJECTED_TASK_STATUS_ALIASES = {
+    "done": "completed",
+    "awaiting_approval": "approval_required",
+}
+
+
 def _apply_presentation_event(cache: dict, event: dict) -> None:
     """Cache active presentation intents for reconnection replay."""
     etype = event.get("type", "")
@@ -1120,32 +1199,91 @@ def _apply_approval_event(cache: dict, event: dict) -> None:
 
 def _apply_background_task_event(cache: dict, event: dict) -> None:
     """Cache the latest safe event for each background task."""
-    payload = event.get("payload", {})
-    task_id = payload.get("id")
-    if task_id:
-        status = str(payload.get("status", ""))
-        if event.get("schema_version"):
-            from charlie.task_journal import normalize_task_status
+    projected = _project_background_task_event(event)
+    if projected is None:
+        return
+    task_id, safe = projected
+    existing = cache.get(task_id)
+    existing_status = existing.get("status") if isinstance(existing, dict) else None
+    if existing_status in {"completed", "failed", "cancelled", "done"} and safe["status"] not in {
+        "completed", "failed", "cancelled",
+    }:
+        return
+    cache[task_id] = safe
 
-            try:
-                status = normalize_task_status(status).value
-            except ValueError:
-                pass
-        safe = {
-            "id": str(task_id),
-            "title": str(payload.get("title", "")),
-            "status": status,
-            "current_step": int(payload.get("current_step", 0)),
-            "total_steps": int(payload.get("total_steps", 0)),
-        }
-        for key in (
-            "origin", "priority", "session_id", "parent_task_id", "progress",
-            "current_action", "waiting_reason", "result_reference", "approval_reference",
-            "capability_requirements",
-        ):
-            if key in payload:
-                safe[key] = payload[key]
-        cache[task_id] = safe
+
+def _project_background_task_event(event: object) -> Optional[tuple[str, dict]]:
+    """Validate one IPC task event without importing task ownership modules."""
+    if not isinstance(event, dict):
+        return None
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+
+    raw_task_id = payload.get("id")
+    if not isinstance(raw_task_id, str) or not raw_task_id.strip():
+        return None
+    raw_status = payload.get("status")
+    if not isinstance(raw_status, str) or not raw_status.strip():
+        return None
+    if raw_status not in _PROJECTED_TASK_STATUSES and raw_status not in _PROJECTED_TASK_STATUS_ALIASES:
+        return None
+
+    try:
+        current_step = int(payload.get("current_step", 0))
+        total_steps = int(payload.get("total_steps", 0))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if current_step < 0 or total_steps < 0:
+        return None
+
+    status = raw_status
+    if event.get("schema_version"):
+        status = {
+            "done": "completed",
+            "awaiting_approval": "approval_required",
+        }.get(status, status)
+    safe = {
+        "id": raw_task_id,
+        "title": str(payload.get("title", "")),
+        "status": status,
+        "current_step": current_step,
+        "total_steps": total_steps,
+    }
+    for key in (
+        "origin", "priority", "session_id", "parent_task_id", "progress",
+        "current_action", "waiting_reason", "result_reference", "approval_reference",
+        "capability_requirements",
+    ):
+        if key in payload:
+            safe[key] = payload[key]
+    return raw_task_id, safe
+
+
+def _apply_task_snapshot_event(cache: dict, event: dict) -> None:
+    """Atomically replace read-only task projection from a canonical snapshot."""
+    if (
+        not isinstance(event, dict)
+        or event.get("type") != "task_snapshot"
+        or type(event.get("version")) is not int
+        or event.get("version") != CONTRACT_VERSION
+    ):
+        return
+    payload = event.get("payload")
+    if not isinstance(payload, dict) or "tasks" not in payload or not isinstance(payload["tasks"], list):
+        return
+
+    replacement: dict = {}
+    projection_event = {"schema_version": event.get("version") or event.get("schema_version")}
+    for row in payload["tasks"]:
+        projected = _project_background_task_event({**projection_event, "payload": row})
+        if projected is None:
+            return
+        task_id, safe = projected
+        replacement[task_id] = safe
+
+    cache.clear()
+    cache.update(replacement)
 
 
 @app.get("/api/audio")
@@ -1347,23 +1485,18 @@ _DEV_LOGS_PATH = Path("logs/charlie.log")
 
 @app.get("/api/developer/diagnostics")
 async def get_developer_diagnostics():
-    """Developer-only detailed diagnostics: task journal, capability leases, telemetry, system metrics."""
+    """Developer-only diagnostics over the web process's read-only projections."""
     dev_enabled = getattr(config, "developer_mode_enabled", False)
 
-    journal_snapshot = []
-    try:
-        from charlie.task_journal import TaskJournal
-        journal = TaskJournal()
-        journal_snapshot = journal.snapshot()
-    except Exception:
-        pass
-
+    journal_snapshot = _projected_task_list()
+    # Preserve legacy `leases` mapping while refusing to present web-local
+    # locks as main-process truth. No cross-process lease snapshot contract
+    # exists yet, so authority remains explicitly unavailable.
     leases = {}
-    try:
-        from charlie.resource_locks import get_all_leases
-        leases = get_all_leases()
-    except Exception:
-        pass
+    lease_authority = {
+        "status": "unavailable",
+        "detail": "Main-process lease state is unavailable over IPC.",
+    }
 
     telemetry_data = {}
     try:
@@ -1390,6 +1523,7 @@ async def get_developer_diagnostics():
         "diagnostics": {
             "tasks": journal_snapshot,
             "leases": leases,
+            "lease_authority": lease_authority,
             "telemetry": telemetry_data,
             "system": system_metrics,
         },
@@ -1419,7 +1553,9 @@ async def get_developer_logs(limit: int = 100):
 @app.get("/api/self/introspect")
 async def get_self_introspection():
     """Return live runtime introspection snapshot with strict secret masking."""
-    return _runtime_introspector.get_snapshot()
+    snapshot = _runtime_introspector.get_snapshot()
+    snapshot["leases"] = _unavailable_lease_info()
+    return snapshot
 
 
 @app.post("/api/self/query")

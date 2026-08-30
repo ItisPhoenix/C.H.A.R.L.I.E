@@ -135,18 +135,19 @@ async def test_tasks_api_reads_runtime_event_snapshot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_legacy_task_status_api_omits_raw_failure_text() -> None:
-    from charlie import background_task, web_server
+async def test_legacy_task_status_api_reads_projection_and_omits_raw_failure_text() -> None:
+    from charlie import web_server
 
-    task = BackgroundTask(
-        id="task-1",
-        text="Check deployment",
-        steps=["Inspect logs"],
-        status="failed",
-        error="ConnectionError: api-key=secret",
-    )
-    original = background_task.get_current_task
-    background_task.get_current_task = lambda: task
+    old_tasks = web_server._background_tasks
+    web_server._background_tasks = {
+        "task-1": {
+            "id": "task-1",
+            "title": "Check deployment",
+            "status": "failed",
+            "current_step": 0,
+            "total_steps": 1,
+        }
+    }
     try:
         assert await web_server.background_task_status() == {
             "task": {
@@ -158,4 +159,4 @@ async def test_legacy_task_status_api_omits_raw_failure_text() -> None:
             }
         }
     finally:
-        background_task.get_current_task = original
+        web_server._background_tasks = old_tasks

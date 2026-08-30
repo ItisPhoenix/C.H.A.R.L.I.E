@@ -205,6 +205,21 @@ _runtime_health = HealthRegistry(
 )
 
 
+def _build_runtime_introspector(*, config: Any, capability_index: Any, mcp_client: Any) -> Any:
+    """Compose introspection around this process's canonical runtime owners."""
+    from charlie.resource_locks import get_capability_lease_manager
+    from charlie.runtime_introspector import RuntimeIntrospector
+
+    return RuntimeIntrospector(
+        config=config,
+        capability_index=capability_index,
+        health_registry=_runtime_health,
+        task_journal=get_task_journal(),
+        lease_manager=get_capability_lease_manager(),
+        mcp_client=mcp_client,
+    )
+
+
 hud_visible: bool = True
 hud_client_count: int = 0
 _main_event_bus: Optional[Any] = None
@@ -272,6 +287,37 @@ async def _publish_subsystem_health(bus: Optional[EventBus] = None) -> None:
         return
     event = _runtime_health.event()
     await bus.emit(event["type"], event["payload"], meta=EventMeta(source=EventSource.VOICE))
+
+
+async def _publish_task_snapshot(bus: Optional[EventBus] = None) -> None:
+    """Publish the canonical main-process task journal as a safe public snapshot."""
+    if bus is None:
+        return
+    tasks = [background_task._public_event_from_record(record) for record in get_task_journal().list()]
+    await bus.emit(
+        EventType.TASK_SNAPSHOT.value,
+        {"tasks": tasks},
+        meta=EventMeta(source=EventSource.TASK),
+    )
+
+
+async def _publish_runtime_state(bus: Optional[EventBus] = None) -> None:
+    """Replay public operational state owned by this main process."""
+    await _publish_subsystem_health(bus)
+    await _publish_task_snapshot(bus)
+
+
+async def _dispatch_web_command(cmd: dict, bus: Optional[EventBus] = None) -> bool:
+    """Dispatch the runtime-state command from the live web command consumer."""
+    if not isinstance(cmd, dict) or cmd.get("type") != "runtime_state_request":
+        return False
+    await _publish_runtime_state(bus)
+    return True
+
+
+async def _handle_runtime_state_request(cmd_type: str, bus: Optional[EventBus] = None) -> bool:
+    """Handle the command-loop runtime replay branch and report whether it matched."""
+    return await _dispatch_web_command({"type": cmd_type}, bus)
 
 
 def _set_subsystem_health(name: str, status: HealthStatus, public_detail: Optional[str] = None) -> None:
@@ -1774,7 +1820,7 @@ async def main():
 
                     set_active_ws_count(hud_client_count)
                 elif cmd_type == "runtime_state_request":
-                    await _publish_subsystem_health(event_bus)
+                    await _dispatch_web_command(cmd, event_bus)
                 elif cmd_type == "recovery_approve":
                     payload = cmd.get("payload", {})
                     proposal_id = payload.get("proposal_id")
@@ -2369,13 +2415,12 @@ async def main():
             from charlie.capabilities import get_capability_index
             from charlie.code_index import CodeIndex
             from charlie.doctor import CharlieDoctor
-            from charlie.runtime_introspector import RuntimeIntrospector
             from charlie.self_extension import SelfExtensionOrchestrator
             from charlie.self_knowledge import SelfKnowledgeService
             from charlie.settings_service import SettingsService
 
             shared_capability_index = get_capability_index()
-            runtime_introspector = RuntimeIntrospector(
+            runtime_introspector = _build_runtime_introspector(
                 config=config,
                 capability_index=shared_capability_index,
                 mcp_client=mcp_client,
