@@ -193,43 +193,12 @@ from charlie.extensions import ExtensionManager, InstalledExtension  # noqa: E40
 _extension_manager = ExtensionManager()
 
 
-def _builtin_plugin(name: str):
-    from charlie.extensions.install import builtin_plugin
-
-    return builtin_plugin(name, config.plugin_allow_dirs)
-
-
 def _declared_tools_for(kind: str, name: str, source: str, raw_text: str) -> List[str]:
     """Parse (without registering) so propose() can show real declared
     tools in the SkillCard before anything activates."""
     from charlie.extensions.install import declared_tools_for
 
     return declared_tools_for(kind, name, source, raw_text, config.plugin_allow_dirs)
-
-
-def _install_extension(kind: str, name: str, source: str, raw_text: str) -> List[str]:
-    """Parse and register an approved extension into this process's shared
-    registry. Returns the registered tool names.
-
-    This only ever touches the web-server process's own ToolRegistry --
-    callers (confirm/enable/disable/uninstall handlers below) are
-    responsible for also forwarding the same install/enable/disable/
-    uninstall over the EventBus (see _forward_to_voice) so the voice
-    process's Brain -- where the real chat tool-calling loop runs -- picks
-    it up too. Without that forward, an extension installed here would only
-    ever be visible to /api/extensions' introspection endpoints, never
-    actually usable in a real conversation.
-    """
-    global mcp_client
-    from charlie.extensions.install import install_extension
-    from charlie.tools import registry
-
-    tool_names, mcp_client = install_extension(
-        kind, name, source, raw_text,
-        registry=registry, plugin_manager=plugin_manager, mcp_client=mcp_client,
-        plugin_allow_dirs=config.plugin_allow_dirs,
-    )
-    return tool_names
 
 
 async def _stage_proposed_extension(payload: dict) -> None:
@@ -258,23 +227,6 @@ async def _stage_proposed_extension(payload: dict) -> None:
     })
 
 
-async def _forward_to_voice(command_type: str, payload: dict) -> None:
-    """Best-effort mirror of an extension install/enable/disable/uninstall
-    into the voice process, so Charlie's actual chat Brain -- which runs in
-    that separate process and never shares memory with this one -- learns
-    about it too. Never raises: a voice process that isn't up yet (or a
-    dropped socket) shouldn't fail the dashboard's REST response, since the
-    extension is still correctly installed here for introspection either way.
-    """
-    if not event_bus:
-        logger.debug("No event_bus -- skipping voice-process mirror of %s", command_type)
-        return
-    try:
-        await event_bus.send_command({"type": command_type, "payload": payload})
-    except Exception:
-        logger.warning("Failed to mirror %s to voice process", command_type, exc_info=True)
-
-
 # Per-turn events must only reach clients subscribed to their session.
 # The process-level thinking indicator is intentionally broadcast to all clients.
 _SESSION_SCOPED_EVENTS = (
@@ -283,6 +235,8 @@ _SESSION_SCOPED_EVENTS = (
     "response_done", "speaking_start", "speaking_stop",
 )
 event_bus: EventBus | None = None
+EXTENSION_OPERATION_TIMEOUT_SECONDS = 10.0
+_pending_extension_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
 LAUNCH_ID: str = config.charlie_launch_id
 _store: SessionStore | None = None
 _memory_graph_cache: "MemoryGraph | None" = None
@@ -574,6 +528,8 @@ async def _event_bridge():
                     task_id=task_id,
                     command=cmd,
                 )
+        elif etype == "extension_operation_result":
+            _resolve_extension_operation_result(event.get("payload", {}))
         elif etype == "extension_proposed":
             await _stage_proposed_extension(event.get("payload", {}))
             return
@@ -1195,6 +1151,128 @@ def _apply_approval_event(cache: dict, event: dict) -> None:
         cache[rid] = event
     else:
         cache.pop(rid, None)
+
+
+def _resolve_extension_operation_result(payload: object) -> None:
+    """Resolve only the web request identified by the result's request_id."""
+    if not isinstance(payload, dict):
+        return
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return
+    future = _pending_extension_operations.get(request_id)
+    if future is None or future.done():
+        return
+    future.set_result(dict(payload))
+
+
+def _extension_operation_error(
+    request_id: str,
+    operation: str,
+    runtime_status: str,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "request_id": request_id,
+        "operation": operation,
+        "runtime_status": runtime_status,
+        "error": message,
+    }
+
+
+def _extension_api_error(result: dict[str, Any]) -> dict[str, Any]:
+    """Return safe REST failure semantics for a non-authoritative result."""
+    message = str(result.get("error") or "Main runtime did not apply extension operation")
+    return {
+        "status": "error",
+        "request_id": result.get("request_id"),
+        "operation": result.get("operation"),
+        "runtime_status": result.get("runtime_status", "failed"),
+        "message": message[:500],
+    }
+
+
+def _result_tool_names(result: dict[str, Any]) -> Optional[List[str]]:
+    names = result.get("tool_names")
+    if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+        return None
+    return list(names)
+
+
+async def _request_authoritative_extension_operation(
+    operation: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Send one extension mutation to main and wait for its correlated result."""
+    request_id = uuid.uuid4().hex
+    request_payload = dict(payload)
+    request_payload["request_id"] = request_id
+    request_payload["operation"] = operation
+
+    if event_bus is None:
+        return _extension_operation_error(
+            request_id,
+            operation,
+            "unavailable",
+            "Main runtime is unavailable; extension operation was not applied.",
+        )
+
+    loop = asyncio.get_running_loop()
+    result_future: asyncio.Future[dict[str, Any]] = loop.create_future()
+    _pending_extension_operations[request_id] = result_future
+    try:
+        try:
+            await event_bus.send_command({"type": "extension_operation", "payload": request_payload})
+        except Exception:
+            logger.warning("Failed to send extension operation to main", exc_info=True)
+            return _extension_operation_error(
+                request_id,
+                operation,
+                "unavailable",
+                "Main runtime is unavailable; extension operation was not applied.",
+            )
+
+        try:
+            result = await asyncio.wait_for(result_future, timeout=EXTENSION_OPERATION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return _extension_operation_error(
+                request_id,
+                operation,
+                "timeout",
+                "Main runtime did not acknowledge extension operation before timeout.",
+            )
+    finally:
+        _pending_extension_operations.pop(request_id, None)
+
+    if not isinstance(result, dict):
+        return _extension_operation_error(
+            request_id,
+            operation,
+            "invalid_result",
+            "Main runtime returned an invalid extension operation result.",
+        )
+    result = dict(result)
+    for key in ("request_id", "operation", "kind", "name"):
+        if result.get(key) != request_payload.get(key):
+            return _extension_operation_error(
+                request_id,
+                operation,
+                "invalid_result",
+                "Main runtime returned a mismatched extension operation result.",
+            )
+    if result.get("success") is not True:
+        result.setdefault("runtime_status", "failed")
+        result.setdefault("error", "Main runtime rejected extension operation.")
+        return result
+    if _result_tool_names(result) is None:
+        return _extension_operation_error(
+            request_id,
+            operation,
+            "invalid_result",
+            "Main runtime returned invalid extension tool names.",
+        )
+    return result
 
 
 def _apply_background_task_event(cache: dict, event: dict) -> None:
@@ -1835,8 +1913,7 @@ async def propose_extension(data: dict):
 
 @app.post("/api/extensions/confirm")
 async def confirm_extension(data: dict):
-    """Approve (or decline) a proposed install. Only on approval does the
-    extension get parsed into live tools and registered -- the gate."""
+    """Approve a proposal, then ask main to perform the authoritative install."""
     pending_id = data.get("pending_id", "")
     approved = bool(data.get("approved", False))
     kind = data.get("kind", "")
@@ -1849,102 +1926,130 @@ async def confirm_extension(data: dict):
     if not approved:
         return {"status": "ok", "installed": False}
 
-    try:
-        tool_names = _install_extension(kind, card.name, source, raw_text)
-    except ValueError as exc:
-        return {"status": "error", "message": str(exc)}
+    if not kind:
+        return {"status": "error", "message": "kind is required for an approved extension"}
+
+    result = await _request_authoritative_extension_operation(
+        "install",
+        {
+            "kind": kind,
+            "name": card.name,
+            "source": source or card.source,
+            "raw_text": raw_text,
+        },
+    )
+    if result.get("success") is not True:
+        return _extension_api_error(result)
+
+    tool_names = _result_tool_names(result)
+    if tool_names is None:
+        return _extension_api_error(
+            _extension_operation_error(
+                str(result.get("request_id", "")),
+                "install",
+                "invalid_result",
+                "Main runtime returned invalid extension tool names.",
+            )
+        )
 
     _extension_manager.record(
         InstalledExtension(
-            name=card.name, kind=kind, source=source, card=card, tool_names=tool_names
+            name=card.name,
+            kind=kind,
+            source=source or card.source,
+            card=card,
+            tool_names=tool_names,
         )
     )
-    await _forward_to_voice(
-        "extension_installed",
-        {"kind": kind, "name": card.name, "source": source, "raw_text": raw_text},
-    )
-    return {"status": "ok", "installed": True, "tool_names": tool_names}
+    return {
+        "status": "ok",
+        "installed": True,
+        "request_id": result.get("request_id"),
+        "tool_names": tool_names,
+    }
 
 
 @app.post("/api/extensions/{name}/enable")
 async def enable_extension(name: str):
-    """Re-activate a disabled extension's tools without reinstalling it."""
-    from charlie.tools import registry
-
+    """Ask main to re-activate an installed extension before updating the mirror."""
     ext = _extension_manager.get(name)
     if ext is None:
         return {"status": "error", "message": f"Unknown extension '{name}'"}
 
-    if ext.kind == "mcp":
-        await _ensure_mcp_client_async()
-    if ext.kind == "mcp" and mcp_client is not None:
-        tool_names = mcp_client.enable_server(registry, name)
-    elif ext.kind == "plugin":
-        from charlie.tools import enable_plugin
-
-        tool_names = enable_plugin(registry, plugin_manager, _builtin_plugin(name))
-    else:
-        # skill/openapi: disable_extension() doesn't drop these tools (see
-        # its comment), so re-enabling is a no-op restoring the same names.
-        tool_names = ext.tool_names
-
+    result = await _request_authoritative_extension_operation(
+        "enable",
+        {"kind": ext.kind, "name": name, "source": ext.source, "tool_names": list(ext.tool_names)},
+    )
+    if result.get("success") is not True:
+        return _extension_api_error(result)
+    tool_names = _result_tool_names(result)
+    if tool_names is None:
+        return _extension_api_error(
+            _extension_operation_error(
+                str(result.get("request_id", "")),
+                "enable",
+                "invalid_result",
+                "Main runtime returned invalid extension tool names.",
+            )
+        )
     ext.enabled = True
     ext.tool_names = tool_names
-    await _forward_to_voice("extension_enabled", {"kind": ext.kind, "name": name})
-    return {"status": "ok", "tool_names": tool_names}
+    return {"status": "ok", "request_id": result.get("request_id"), "tool_names": tool_names}
 
 
 @app.post("/api/extensions/{name}/disable")
 async def disable_extension(name: str):
-    """Deactivate an extension's tools while keeping its install record, so
-    enable_extension() can bring it back without re-parsing the source."""
-    from charlie.tools import registry
-
+    """Ask main to deactivate an extension before updating the mirror."""
     ext = _extension_manager.get(name)
     if ext is None:
         return {"status": "error", "message": f"Unknown extension '{name}'"}
 
-    if ext.kind == "mcp" and mcp_client is not None:
-        mcp_client.disable_server(registry, name)
-    elif ext.kind == "plugin":
-        from charlie.tools import disable_plugin
-
-        disable_plugin(registry, plugin_manager, name)
-    # skill/openapi tools are left registered on disable -- they're stateless
-    # wrappers (no subprocess/connection to tear down like MCP or a plugin
-    # instance), so unregistering and immediately re-registering on the next
-    # enable_extension() would be pure overhead with no resource actually
-    # freed. Re-parsing would need raw_text persisted, which this pass
-    # doesn't do (see ExtensionManager's docstring).
-
+    result = await _request_authoritative_extension_operation(
+        "disable",
+        {"kind": ext.kind, "name": name, "source": ext.source, "tool_names": list(ext.tool_names)},
+    )
+    if result.get("success") is not True:
+        return _extension_api_error(result)
+    tool_names = _result_tool_names(result)
+    if tool_names is None:
+        return _extension_api_error(
+            _extension_operation_error(
+                str(result.get("request_id", "")),
+                "disable",
+                "invalid_result",
+                "Main runtime returned invalid extension tool names.",
+            )
+        )
     ext.enabled = False
-    await _forward_to_voice("extension_disabled", {"kind": ext.kind, "name": name})
-    return {"status": "ok"}
+    ext.tool_names = tool_names
+    return {"status": "ok", "request_id": result.get("request_id"), "tool_names": tool_names}
 
 
 @app.delete("/api/extensions/{name}")
 async def uninstall_extension(name: str):
-    """Fully remove an extension: disable its tools, drop it from the
-    registry, and forget it (unlike disable, cannot be re-enabled)."""
-    from charlie.tools import registry
-
+    """Ask main to remove runtime activation before deleting the web mirror."""
     ext = _extension_manager.get(name)
     if ext is None:
         return {"status": "error", "message": f"Unknown extension '{name}'"}
 
-    if ext.enabled:
-        await disable_extension(name)
-    if ext.kind == "mcp" and mcp_client is not None:
-        mcp_client.remove_server(registry, name)
-    elif ext.kind in ("skill", "openapi"):
-        for tool_name in ext.tool_names:
-            registry.unregister_tool(tool_name)
-
-    _extension_manager.remove(name)
-    await _forward_to_voice(
-        "extension_uninstalled", {"kind": ext.kind, "name": name, "tool_names": ext.tool_names}
+    result = await _request_authoritative_extension_operation(
+        "uninstall",
+        {"kind": ext.kind, "name": name, "source": ext.source, "tool_names": list(ext.tool_names)},
     )
-    return {"status": "ok"}
+    if result.get("success") is not True:
+        return _extension_api_error(result)
+    tool_names = _result_tool_names(result)
+    if tool_names is None:
+        return _extension_api_error(
+            _extension_operation_error(
+                str(result.get("request_id", "")),
+                "uninstall",
+                "invalid_result",
+                "Main runtime returned invalid extension tool names.",
+            )
+        )
+    _extension_manager.remove(name)
+    return {"status": "ok", "request_id": result.get("request_id"), "tool_names": tool_names}
 
 
 @app.post("/api/extensions/request")

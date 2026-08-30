@@ -35,6 +35,7 @@
     "recovery_proposal": {"category": "request", "replay": false, "required": []},
     "extension_proposed": {"category": "request", "replay": false, "required": []},
     "extension_pending": {"category": "snapshot", "replay": true, "required": []},
+    "extension_operation_result": {"category": "result", "replay": false, "required": ["request_id", "operation", "kind", "name", "success", "tool_names"]},
     "background_task": {"category": "progress", "replay": true, "required": []},
     "task_snapshot": {"category": "snapshot", "replay": true, "required": []},
     "charlie_state": {"category": "snapshot", "replay": true, "required": []},

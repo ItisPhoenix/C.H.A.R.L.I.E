@@ -95,10 +95,9 @@ async def request_extension_install(brain: "Brain", card: SkillCard) -> bool:
     """Route an LLM-tool-call-initiated extension install/enable through the
     existing HITL approval channel -- no extension activates silently. Use
     this only where a live Brain instance is reachable (the normal chat tool
-    loop). The web dashboard has no Brain in its process; ExtensionManager's
-    propose()/confirm() below is the equivalent gate for that path -- the
-    approval dialog itself is a REST round-trip within the dashboard's own
-    process instead of a cross-process voice/IPC round-trip."""
+    loop). The web dashboard has no Brain in its process; its
+    ExtensionManager stores proposals and the REST approval path asks main to
+    perform the operation before recording the web mirror."""
     return await brain.request_tool_approval(
         "install_extension",
         {"command": f"{card.name} (source: {card.source})", "skill_card": card.describe()},
@@ -108,9 +107,7 @@ async def request_extension_install(brain: "Brain", card: SkillCard) -> bool:
 
 @dataclass
 class InstalledExtension:
-    """A live extension entry -- one of the four adapter kinds, tracked so
-    the web dashboard's list/enable/disable/uninstall endpoints have
-    something to act on."""
+    """A web read/UI mirror entry for one of the supported adapter kinds."""
 
     name: str
     kind: str  # "mcp" | "skill" | "openapi" | "plugin"
@@ -123,8 +120,9 @@ class InstalledExtension:
 class ExtensionManager:
     """In-process registry of installed extensions plus pending (proposed
     but not yet confirmed) installs -- the web dashboard's gate: propose()
-    returns a SkillCard for the user to review, confirm() only then calls
-    the caller-supplied installer. Not persisted across restarts; each
+    returns a SkillCard for the user to review, and the approval endpoint
+    records an entry only after main acknowledges the mutation. Not persisted
+    across restarts; each
     process starts with an empty registry (a known gap, see
     plans/PHASE_5_plugin_skill_system.md's REST section)."""
 

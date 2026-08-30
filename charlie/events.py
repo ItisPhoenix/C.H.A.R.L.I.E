@@ -50,6 +50,7 @@ class EventType(StrEnum):
     RECOVERY_PROPOSAL = "recovery_proposal"
     EXTENSION_PROPOSED = "extension_proposed"
     EXTENSION_PENDING = "extension_pending"
+    EXTENSION_OPERATION_RESULT = "extension_operation_result"
     BACKGROUND_TASK = "background_task"
     TASK_SNAPSHOT = "task_snapshot"
     CHARLIE_STATE = "charlie_state"

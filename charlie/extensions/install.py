@@ -1,12 +1,10 @@
 """Shared extension-install logic (adapters: mcp/skill/openapi/plugin).
 
-Extracted from charlie/web_server.py so the exact same parse-and-register
-code can run in both OS processes: the web server (where the dashboard's
-propose/confirm/enable/disable/uninstall REST flow lives) and the voice
-process (where the actual chat Brain and its tool-calling loop live). Each
-process holds its own ToolRegistry/MCPClient/PluginManager instances --
-these are plain functions, not methods on shared state, so a caller in
-either process can run them against its own local instances.
+Extracted from charlie/web_server.py so adapter parsing and registration stay
+in one place. Runtime lifecycle mutations are applied by main against its
+authoritative ToolRegistry/MCPClient/PluginManager owners; the web server
+keeps only proposal and read/UI mirror state. These remain plain functions
+for focused adapter tests and the main runtime seam.
 """
 
 from __future__ import annotations

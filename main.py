@@ -320,6 +320,170 @@ async def _handle_runtime_state_request(cmd_type: str, bus: Optional[EventBus] =
     return await _dispatch_web_command({"type": cmd_type}, bus)
 
 
+def _extension_operation_result(
+    payload: dict[str, Any],
+    *,
+    success: bool,
+    tool_names: list[str],
+    error: Optional[str] = None,
+) -> dict[str, Any]:
+    result = {
+        "request_id": str(payload.get("request_id", "")),
+        "operation": str(payload.get("operation", "")),
+        "kind": str(payload.get("kind", "")),
+        "name": str(payload.get("name", "")),
+        "success": success,
+        "tool_names": list(tool_names),
+    }
+    if error:
+        result["error"] = error[:500]
+    return result
+
+
+def apply_extension_operation(
+    payload: dict[str, Any],
+    *,
+    brain: Any,
+    plugin_manager: Any,
+    mcp_client: Any,
+    runtime_config: Any,
+    tool_registry: Any = None,
+) -> tuple[dict[str, Any], Any]:
+    """Apply one extension transition against main's live runtime owners."""
+    if not isinstance(payload, dict):
+        payload = {}
+    operation = payload.get("operation")
+    kind = payload.get("kind")
+    name = payload.get("name")
+    allowed_operations = {"install", "enable", "disable", "uninstall"}
+    allowed_kinds = {"mcp", "skill", "openapi", "plugin", "generated"}
+    if (
+        not isinstance(payload.get("request_id"), str)
+        or not payload["request_id"]
+        or not isinstance(operation, str)
+        or operation not in allowed_operations
+        or not isinstance(kind, str)
+        or kind not in allowed_kinds
+        or not isinstance(name, str)
+        or not name
+    ):
+        return (
+            _extension_operation_result(
+                payload,
+                success=False,
+                tool_names=[],
+                error="Invalid extension operation request.",
+            ),
+            mcp_client,
+        )
+
+    known_tool_names = payload.get("tool_names", [])
+    if not isinstance(known_tool_names, list) or any(not isinstance(item, str) for item in known_tool_names):
+        return (
+            _extension_operation_result(
+                payload,
+                success=False,
+                tool_names=[],
+                error="Invalid extension tool names.",
+            ),
+            mcp_client,
+        )
+
+    if tool_registry is None:
+        from charlie.tools import registry as tool_registry
+
+    try:
+        if operation == "install":
+            from charlie.extensions.install import install_extension
+
+            tool_names, mcp_client = install_extension(
+                kind,
+                name,
+                str(payload.get("source", "")),
+                str(payload.get("raw_text", "")),
+                registry=tool_registry,
+                plugin_manager=plugin_manager,
+                mcp_client=mcp_client,
+                plugin_allow_dirs=list(getattr(runtime_config, "plugin_allow_dirs", []) or []),
+            )
+            if kind == "skill":
+                from charlie.extensions.skills import format_skill_block, parse_skill_md
+
+                manifest = parse_skill_md(str(payload.get("raw_text", "")))
+                brain.add_installed_skill_block(name, format_skill_block(manifest))
+        elif operation == "enable":
+            if kind == "mcp":
+                if mcp_client is None:
+                    raise RuntimeError("Main MCP client is unavailable.")
+                tool_names = mcp_client.enable_server(tool_registry, name)
+            elif kind == "plugin":
+                from charlie.extensions.install import builtin_plugin
+                from charlie.tools import enable_plugin
+
+                tool_names = enable_plugin(
+                    tool_registry,
+                    plugin_manager,
+                    builtin_plugin(name, list(getattr(runtime_config, "plugin_allow_dirs", []) or [])),
+                )
+            else:
+                # Skill/OpenAPI/generated adapters retain their registered
+                # tools while disabled; main still owns the lifecycle ACK and
+                # stable-tier rebuild for these transitions.
+                tool_names = list(known_tool_names)
+        elif operation == "disable":
+            if kind == "mcp":
+                if mcp_client is None or not mcp_client.disable_server(tool_registry, name):
+                    raise KeyError(f"MCP server '{name}' is not registered in main runtime.")
+            elif kind == "plugin":
+                from charlie.tools import disable_plugin
+
+                if plugin_manager.get_plugin(name) is None:
+                    raise KeyError(f"Plugin '{name}' is not registered in main runtime.")
+                disable_plugin(tool_registry, plugin_manager, name)
+            # Skill/OpenAPI/generated tools remain registered by design.
+            tool_names = list(known_tool_names)
+        else:  # uninstall
+            if kind == "mcp":
+                if mcp_client is None or not mcp_client.remove_server(tool_registry, name):
+                    raise KeyError(f"MCP server '{name}' is not registered in main runtime.")
+            elif kind == "plugin":
+                from charlie.tools import disable_plugin
+
+                if plugin_manager.get_plugin(name) is None:
+                    raise KeyError(f"Plugin '{name}' is not registered in main runtime.")
+                disable_plugin(tool_registry, plugin_manager, name)
+            else:
+                for tool_name in known_tool_names:
+                    tool_registry.unregister_tool(tool_name)
+                if kind == "skill":
+                    brain.remove_installed_skill_block(name)
+            tool_names = []
+
+        if not isinstance(tool_names, list) or any(not isinstance(item, str) for item in tool_names):
+            raise ValueError("Extension owner returned invalid tool names.")
+        brain.rebuild_stable_tier()
+        return (
+            _extension_operation_result(
+                payload,
+                success=True,
+                tool_names=list(tool_names),
+            ),
+            mcp_client,
+        )
+    except Exception as exc:
+        reason = str(exc).strip() or type(exc).__name__
+        logger.warning("Main extension operation failed: %s", reason)
+        return (
+            _extension_operation_result(
+                payload,
+                success=False,
+                tool_names=[],
+                error=reason,
+            ),
+            mcp_client,
+        )
+
+
 def _set_subsystem_health(name: str, status: HealthStatus, public_detail: Optional[str] = None) -> None:
     """Record one safe public subsystem transition."""
     _runtime_health.set(name, status, public_detail=public_detail)
@@ -1013,11 +1177,9 @@ async def main():
         plugin_manager = None
         _set_subsystem_health("plugins", HealthStatus.DEGRADED)
     if plugin_manager is None:
-        # Always keep a manager available so a mirrored "extension_enabled"/
-        # "extension_disabled" command (see consume_web_commands below) can
-        # enable/disable one built-in plugin even when the blanket
-        # PLUGINS_ENABLED flag is off -- matches charlie/web_server.py's
-        # identical fallback, needed for the same per-plugin-control reason.
+        # Always keep a manager available so the main-authoritative
+        # extension_operation handler can enable/disable one built-in plugin
+        # even when the blanket PLUGINS_ENABLED flag is off.
         from charlie.plugins import PluginManager
 
         plugin_manager = PluginManager()
@@ -1980,101 +2142,26 @@ async def main():
                 elif cmd_type == "ptt_cancel":
                     voice.cancel_ptt()
                     await event_bus.emit("ptt_cancel", {}, meta=EventMeta(source=EventSource.VOICE))
-                elif cmd_type == "extension_installed":
-                    # Mirrors charlie/web_server.py's confirm_extension(): the
-                    # dashboard's Extensions tab only registers tools into that
-                    # process's own registry, which the actual chat loop here
-                    # never sees. Re-run the same install against this
-                    # process's registry/mcp_client/plugin_manager so Charlie
-                    # can actually call the extension in a real conversation.
+                elif cmd_type == "extension_operation":
                     payload = cmd.get("payload", {})
-                    try:
-                        from charlie.extensions.install import install_extension
-                        from charlie.tools import registry as _ext_registry
+                    from charlie.tools import registry as _extension_registry
 
-                        tool_names, mcp_client = install_extension(
-                            payload.get("kind", ""),
-                            payload.get("name", ""),
-                            payload.get("source", ""),
-                            payload.get("raw_text", ""),
-                            registry=_ext_registry,
-                            plugin_manager=plugin_manager,
-                            mcp_client=mcp_client,
-                            plugin_allow_dirs=config.plugin_allow_dirs,
-                        )
-                        if payload.get("kind") == "skill":
-                            from charlie.extensions.skills import format_skill_block, parse_skill_md
-
-                            manifest = parse_skill_md(payload.get("raw_text", ""))
-                            brain.add_installed_skill_block(payload.get("name", ""), format_skill_block(manifest))
-                        logger.info(
-                            "Mirrored extension install '%s' (%s) into voice process: %s",
-                            payload.get("name"),
-                            payload.get("kind"),
-                            tool_names,
-                        )
-                    except Exception as ex:
-                        logger.warning(
-                            f"Failed to mirror extension install '{payload.get('name')}': {ex}",
-                            exc_info=True,
-                        )
-                    brain.rebuild_stable_tier()
-                elif cmd_type == "extension_enabled":
-                    payload = cmd.get("payload", {})
-                    kind = payload.get("kind", "")
-                    ext_name = payload.get("name", "")
-                    try:
-                        from charlie.tools import registry as _ext_registry
-
-                        if kind == "mcp" and mcp_client is not None:
-                            mcp_client.enable_server(_ext_registry, ext_name)
-                        elif kind == "plugin":
-                            from charlie.extensions.install import builtin_plugin
-                            from charlie.tools import enable_plugin
-
-                            enable_plugin(
-                                _ext_registry,
-                                plugin_manager,
-                                builtin_plugin(ext_name, config.plugin_allow_dirs),
-                            )
-                        # skill/openapi: nothing to do, disable_extension() never
-                        # unregisters those tools (see web_server.py's comment).
-                    except Exception as ex:
-                        logger.warning(f"Failed to mirror extension enable '{ext_name}': {ex}", exc_info=True)
-                    brain.rebuild_stable_tier()
-                elif cmd_type == "extension_disabled":
-                    payload = cmd.get("payload", {})
-                    kind = payload.get("kind", "")
-                    ext_name = payload.get("name", "")
-                    try:
-                        from charlie.tools import registry as _ext_registry
-
-                        if kind == "mcp" and mcp_client is not None:
-                            mcp_client.disable_server(_ext_registry, ext_name)
-                        elif kind == "plugin":
-                            from charlie.tools import disable_plugin
-
-                            disable_plugin(_ext_registry, plugin_manager, ext_name)
-                    except Exception as ex:
-                        logger.warning(f"Failed to mirror extension disable '{ext_name}': {ex}", exc_info=True)
-                    brain.rebuild_stable_tier()
-                elif cmd_type == "extension_uninstalled":
-                    payload = cmd.get("payload", {})
-                    kind = payload.get("kind", "")
-                    ext_name = payload.get("name", "")
-                    try:
-                        from charlie.tools import registry as _ext_registry
-
-                        if kind == "mcp" and mcp_client is not None:
-                            mcp_client.remove_server(_ext_registry, ext_name)
-                        elif kind in ("skill", "openapi"):
-                            for tool_name in payload.get("tool_names", []):
-                                _ext_registry.unregister_tool(tool_name)
-                        if kind == "skill":
-                            brain.remove_installed_skill_block(ext_name)
-                    except Exception as ex:
-                        logger.warning(f"Failed to mirror extension uninstall '{ext_name}': {ex}", exc_info=True)
-                    brain.rebuild_stable_tier()
+                    result, mcp_client = apply_extension_operation(
+                        payload,
+                        brain=brain,
+                        plugin_manager=plugin_manager,
+                        mcp_client=mcp_client,
+                        runtime_config=config,
+                        tool_registry=_extension_registry,
+                    )
+                    await event_bus.emit(
+                        "extension_operation_result",
+                        result,
+                        meta=EventMeta(
+                            source=EventSource.BRAIN,
+                            rationale="authoritative main-runtime extension operation result",
+                        ),
+                    )
                 elif cmd_type == "system_restart":
                     logger.info("System restart command received. Reloading configuration and engine...")
 
