@@ -58,39 +58,31 @@ def test_mcp_client_server_management_methods():
 
 
 @pytest.mark.asyncio
-async def test_web_server_mcp_endpoints(monkeypatch):
-    client = MCPClient()
-    cfg = MCPServerConfig(name="test_srv", command="echo", args=["hi"])
-    client._servers["test_srv"] = _MockManagedServer(cfg)
-
-    monkeypatch.setattr(web_server, "mcp_client", client)
+async def test_web_server_mcp_endpoints_read_main_projection_only(monkeypatch):
+    monkeypatch.setattr(
+        web_server,
+        "_mcp_snapshot",
+        {
+            "authority": "main_runtime",
+            "enabled": True,
+            "servers": [
+                {
+                    "name": "test_srv",
+                    "command": "echo",
+                    "args": ["hi"],
+                    "running": True,
+                    "status": "connected",
+                    "tools_count": 1,
+                    "tools": [{"name": "test_tool", "description": "A test tool"}],
+                }
+            ],
+        },
+    )
 
     res = await web_server.get_mcp_servers()
-    assert "servers" in res
-    assert len(res["servers"]) == 1
+    assert res["synchronized"] is True
     assert res["servers"][0]["name"] == "test_srv"
+    assert res["servers"][0]["tools"][0]["name"] == "test_tool"
 
-    conn_res = await web_server.connect_mcp_server("test_srv")
-    assert conn_res["status"] == "ok"
-
-    res2 = await web_server.get_mcp_servers()
-    assert res2["servers"][0]["status"] == "connected"
-    assert len(res2["servers"][0]["tools"]) == 1
-
-    restart_res = await web_server.restart_mcp_server("test_srv")
-    assert restart_res["status"] == "ok"
-
-    disc_res = await web_server.disconnect_mcp_server("test_srv")
-    assert disc_res["status"] == "ok"
-
-    add_res = await web_server.add_mcp_server({
-        "name": "new_srv",
-        "command": "python",
-        "args": ["-m", "server"],
-    })
-    assert add_res["status"] == "ok"
-    assert len(client.list_servers_detailed()) == 2
-
-    del_res = await web_server.delete_mcp_server("test_srv")
-    assert del_res["status"] == "ok"
-    assert len(client.list_servers_detailed()) == 1
+    status = await web_server.get_mcp_status()
+    assert status["servers"] == {"test_srv": True}

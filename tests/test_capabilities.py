@@ -101,12 +101,17 @@ def test_capabilities_endpoint_projects_shared_capability_index(monkeypatch):
     )
     monkeypatch.setattr(web_server, "_shared_capability_index", isolated_index)
     monkeypatch.setattr(web_server, "config", Config())
+    monkeypatch.setattr(
+        web_server,
+        "_tool_snapshot",
+        {"authority": "main_runtime", "tools": [{"name": "main_live", "owner": "tools"}]},
+    )
 
     snapshot = asyncio.run(web_server.get_capabilities())
 
-    assert [tool["name"] for tool in snapshot["tools"]] == ["live"]
-    assert snapshot["tools"][0]["owner"] == "tools"
-    assert snapshot["tools"][0]["risk_class"] == "reversible"
+    assert [tool["name"] for tool in snapshot["tools"]] == ["main_live"]
+    assert snapshot["tool_authority"] == "main_runtime"
+    assert snapshot["tool_status"] == "available"
     assert "runtime" in snapshot
 
 
@@ -234,10 +239,12 @@ assert bootstrap_imports
 assert "charlie.tools" in sys.modules
 assert capability_index is server._shared_capability_index
 assert capability_index.get_operation("web_search") is not None
-assert server.mcp_client is None
+assert not hasattr(server, "mcp_client")
 assert not server.plugin_manager._plugins
 snapshot = asyncio.run(server.get_capabilities())
-assert any(tool["name"] == "web_search" for tool in snapshot["tools"])
+assert snapshot["tools"] == []
+assert snapshot["tool_authority"] == "main_runtime"
+assert snapshot["tool_status"] == "unavailable"
 """
 
     result = subprocess.run(

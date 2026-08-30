@@ -81,6 +81,29 @@ class _UnavailableLeaseProjection:
         return {}
 
 
+class _IpcMcpProjection:
+    """Read-only MCP projection hydrated from main-runtime IPC events."""
+
+    def list_servers_detailed(self) -> list[dict[str, Any]]:
+        snapshot = _mcp_snapshot
+        if snapshot is None:
+            return []
+        return [
+            {
+                **server,
+                "args": list(server.get("args", [])),
+                "tools": [dict(tool) for tool in server.get("tools", [])],
+            }
+            for server in snapshot["servers"]
+        ]
+
+    def health_check(self) -> dict[str, bool]:
+        return {
+            server["name"]: bool(server["running"])
+            for server in self.list_servers_detailed()
+        }
+
+
 def _unavailable_lease_info() -> dict[str, Any]:
     """Describe the main-process lease authority without inventing a count."""
     return {
@@ -98,6 +121,7 @@ _runtime_introspector = RuntimeIntrospector(
     _IpcHealthProjection(),
     _IpcTaskProjection(),
     _UnavailableLeaseProjection(),
+    _IpcMcpProjection(),
 )
 _self_knowledge_service = SelfKnowledgeService(
     runtime_introspector=_runtime_introspector,
@@ -121,10 +145,10 @@ active_connections: Set[WebSocket] = set()
 # connected browsers.
 ws_sessions: dict[WebSocket, str] = {}
 
-# MCP/plugin registration can spawn subprocesses -- never at import time, only in lifespan()/_ensure_mcp_client().
+# Plugin registration remains a web-local proposal mirror; executable MCP
+# ownership and all MCP runtime state stay in main and cross IPC.
 from charlie.plugins import PluginManager
 
-mcp_client = None
 plugin_manager = PluginManager()
 
 
@@ -162,27 +186,6 @@ def validate_ws_origin(origin: Optional[str]) -> bool:
     except Exception:
         return False
 
-
-def _ensure_mcp_client():
-    """Lazily start this process's own MCP client on first need, not a redundant second one at every launch."""
-    global mcp_client
-    if mcp_client is not None or not config.mcp_enabled:
-        return mcp_client
-    try:
-        from charlie.mcp_client import start_mcp
-
-        mcp_client = start_mcp(config)
-        if mcp_client is None:
-            logger.info("Web MCP subsystem not started (no servers configured)")
-    except Exception as e:
-        logger.warning("Web MCP subsystem failed to initialize: %s", e)
-        mcp_client = None
-    return mcp_client
-
-
-async def _ensure_mcp_client_async():
-    """Runs the lazy MCP start on a thread so it doesn't freeze this process's event loop."""
-    return await asyncio.to_thread(_ensure_mcp_client)
 
 # In-process registry of installed extensions -- see
 # charlie/extensions/__init__.py's ExtensionManager docstring for the
@@ -237,6 +240,8 @@ _SESSION_SCOPED_EVENTS = (
 event_bus: EventBus | None = None
 EXTENSION_OPERATION_TIMEOUT_SECONDS = 10.0
 _pending_extension_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
+MCP_OPERATION_TIMEOUT_SECONDS = 10.0
+_pending_mcp_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
 LAUNCH_ID: str = config.charlie_launch_id
 _store: SessionStore | None = None
 _memory_graph_cache: "MemoryGraph | None" = None
@@ -283,19 +288,18 @@ pipeline_state: str = "idle"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init EventBus + ZMQ guard + plugin tools. MCP starts lazily,
-    see _ensure_mcp_client(). Shutdown: tear down EventBus."""
+    """Startup: init EventBus + ZMQ guard. Executable tools and MCP state
+    arrive from main over IPC.
+    Shutdown: tear down EventBus."""
     # --- startup ---
     global event_bus, plugin_manager, _calendar_store, _audit_store
-    if config.plugins_enabled:
-        try:
-            from charlie.tools import register_plugin_tools
-
-            real_plugin_manager = register_plugin_tools(config)
-            if real_plugin_manager is not None:
-                plugin_manager = real_plugin_manager
-        except Exception as e:
-            logger.warning("Web plugin subsystem failed to initialize: %s", e)
+    global _tool_snapshot, _tool_snapshot_event, _mcp_snapshot, _mcp_snapshot_event
+    # This process never owns executable tool activation. Start each web
+    # lifecycle without a stale projection and wait for main's replay.
+    _tool_snapshot = None
+    _tool_snapshot_event = None
+    _mcp_snapshot = None
+    _mcp_snapshot_event = None
 
     # EventBus resolves test-mode ports from the central pytest isolation setup;
     # production keeps its documented defaults.
@@ -307,10 +311,6 @@ async def lifespan(app: FastAPI):
     # once the consumer is ready so REST/WebSocket health is authoritative.
     await event_bus.send_command({"type": "runtime_state_request"})
     logger.info("Web server started, event bridge active")
-
-    await _ensure_mcp_client_async()
-    _runtime_introspector._mcp_client = mcp_client
-    _doctor._mcp_client = mcp_client
 
     # ZMQ guard -- suppress CancelledError traceback on Windows shutdown
     loop = asyncio.get_event_loop()
@@ -494,6 +494,12 @@ async def _event_bridge():
             _charlie_state = event.get("payload", {})
         elif etype == "task_snapshot":
             _apply_task_snapshot_event(_background_tasks, event)
+        elif etype == "tool_snapshot":
+            if not _apply_tool_snapshot_event(event):
+                logger.warning("Ignoring malformed main tool snapshot")
+        elif etype == "mcp_snapshot":
+            if not _apply_mcp_snapshot_event(event):
+                logger.warning("Ignoring malformed main MCP snapshot")
         elif etype == "background_task":
             _apply_background_task_event(_background_tasks, event)
         elif etype == "system_status":
@@ -530,6 +536,8 @@ async def _event_bridge():
                 )
         elif etype == "extension_operation_result":
             _resolve_extension_operation_result(event.get("payload", {}))
+        elif etype == "mcp_operation_result":
+            _resolve_mcp_operation_result(event.get("payload", {}))
         elif etype == "extension_proposed":
             await _stage_proposed_extension(event.get("payload", {}))
             return
@@ -1051,6 +1059,10 @@ _system_status: dict = {}
 _subsystem_health: dict = {}
 _charlie_state: dict = {"state": "idle", "activities": []}
 _background_tasks: dict = {}
+_tool_snapshot: dict[str, Any] | None = None
+_tool_snapshot_event: dict[str, Any] | None = None
+_mcp_snapshot: dict[str, Any] | None = None
+_mcp_snapshot_event: dict[str, Any] | None = None
 _active_frontend_session: str | None = None
 _audio_state: dict = {
     "muted": False,
@@ -1087,6 +1099,10 @@ def _initial_state_events() -> List[dict]:
         build_event("mic_state", _mic_state),
         build_event("hud_visibility", {"visible": _hud_visible}),
     ]
+    if _tool_snapshot_event is not None:
+        events.append(replay_event(_tool_snapshot_event, allow_unknown=True))
+    if _mcp_snapshot_event is not None:
+        events.append(replay_event(_mcp_snapshot_event, allow_unknown=True))
     events.extend(_pending_approvals.values())
     events.extend(_active_presentation_intents.values())
     return [replay_event(event, allow_unknown=True) for event in events]
@@ -1166,6 +1182,19 @@ def _resolve_extension_operation_result(payload: object) -> None:
     future.set_result(dict(payload))
 
 
+def _resolve_mcp_operation_result(payload: object) -> None:
+    """Resolve only the web request identified by the MCP result request_id."""
+    if not isinstance(payload, dict):
+        return
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return
+    future = _pending_mcp_operations.get(request_id)
+    if future is None or future.done():
+        return
+    future.set_result(dict(payload))
+
+
 def _extension_operation_error(
     request_id: str,
     operation: str,
@@ -1198,6 +1227,121 @@ def _result_tool_names(result: dict[str, Any]) -> Optional[List[str]]:
     if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
         return None
     return list(names)
+
+
+def _mcp_operation_error(
+    request_id: str,
+    operation: str,
+    server_name: str,
+    runtime_status: str,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "request_id": request_id,
+        "operation": operation,
+        "server_name": server_name,
+        "runtime_status": runtime_status,
+        "error": message,
+    }
+
+
+def _mcp_api_error(result: dict[str, Any]) -> dict[str, Any]:
+    """Return safe REST failure semantics for a non-authoritative result."""
+    return {
+        "status": "error",
+        "request_id": result.get("request_id"),
+        "operation": result.get("operation"),
+        "server_name": result.get("server_name"),
+        "runtime_status": result.get("runtime_status", "failed"),
+        "message": str(result.get("error") or "Main runtime did not apply MCP operation")[:500],
+    }
+
+
+async def _request_authoritative_mcp_operation(
+    operation: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Send one MCP mutation to main and wait for its correlated result."""
+    request_id = uuid.uuid4().hex
+    request_payload = dict(payload)
+    request_payload["request_id"] = request_id
+    request_payload["operation"] = operation
+    server_name = str(request_payload.get("server_name", ""))
+
+    if event_bus is None:
+        return _mcp_operation_error(
+            request_id,
+            operation,
+            server_name,
+            "unavailable",
+            "Main runtime is unavailable; MCP operation was not applied.",
+        )
+
+    loop = asyncio.get_running_loop()
+    result_future: asyncio.Future[dict[str, Any]] = loop.create_future()
+    _pending_mcp_operations[request_id] = result_future
+    try:
+        try:
+            sent = await event_bus.send_command({"type": "mcp_operation", "payload": request_payload})
+            if sent is False:
+                return _mcp_operation_error(
+                    request_id,
+                    operation,
+                    server_name,
+                    "unavailable",
+                    "Main runtime is unavailable; MCP operation was not applied.",
+                )
+        except Exception:
+            logger.warning("Failed to send MCP operation to main", exc_info=True)
+            return _mcp_operation_error(
+                request_id,
+                operation,
+                server_name,
+                "unavailable",
+                "Main runtime is unavailable; MCP operation was not applied.",
+            )
+
+        try:
+            result = await asyncio.wait_for(result_future, timeout=MCP_OPERATION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return _mcp_operation_error(
+                request_id,
+                operation,
+                server_name,
+                "timeout",
+                "Main runtime did not acknowledge MCP operation before timeout.",
+            )
+    finally:
+        _pending_mcp_operations.pop(request_id, None)
+
+    if not isinstance(result, dict):
+        return _mcp_operation_error(
+            request_id,
+            operation,
+            server_name,
+            "unknown",
+            "Main runtime returned an invalid MCP operation result.",
+        )
+    result = dict(result)
+    if (
+        result.get("request_id") != request_id
+        or result.get("operation") != operation
+        or result.get("server_name") != server_name
+        or type(result.get("success")) is not bool
+    ):
+        return _mcp_operation_error(
+            request_id,
+            operation,
+            server_name,
+            "unknown",
+            "Main runtime returned a mismatched MCP operation result.",
+        )
+    if result.get("success") is not True:
+        result.setdefault("runtime_status", "failed")
+        result.setdefault("error", "Main runtime rejected MCP operation.")
+        return result
+    return result
 
 
 async def _request_authoritative_extension_operation(
@@ -1362,6 +1506,154 @@ def _apply_task_snapshot_event(cache: dict, event: dict) -> None:
 
     cache.clear()
     cache.update(replacement)
+
+
+def _project_tool_snapshot_payload(payload: Any) -> dict[str, Any] | None:
+    """Validate and reduce a main tool snapshot to safe public metadata."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("tools"), list):
+        return None
+    if "authority" in payload and payload["authority"] != "main_runtime":
+        return None
+
+    replacement: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for item in payload["tools"]:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip() or name in seen_names:
+            return None
+        seen_names.add(name)
+
+        safe_item: dict[str, Any] = {"name": name}
+        for key in ("description", "owner"):
+            if key in item:
+                value = item[key]
+                if not isinstance(value, str):
+                    return None
+                safe_item[key] = value
+        if "risk_class" in item:
+            risk_class = item["risk_class"]
+            if risk_class is not None and not isinstance(risk_class, str):
+                return None
+            safe_item["risk_class"] = risk_class
+        replacement.append(safe_item)
+
+    return {"authority": "main_runtime", "tools": replacement}
+
+
+def _apply_tool_snapshot_event(event: dict) -> bool:
+    """Atomically replace the web's IPC-derived tool projection."""
+    if (
+        not isinstance(event, dict)
+        or event.get("type") != "tool_snapshot"
+        or type(event.get("version")) is not int
+        or event.get("version") != CONTRACT_VERSION
+    ):
+        return False
+    projection = _project_tool_snapshot_payload(event.get("payload"))
+    if projection is None:
+        return False
+
+    global _tool_snapshot, _tool_snapshot_event
+    _tool_snapshot = projection
+    stored_event = dict(event)
+    stored_event["payload"] = projection
+    _tool_snapshot_event = stored_event
+    return True
+
+
+def _project_mcp_snapshot_payload(payload: Any) -> dict[str, Any] | None:
+    """Validate and reduce the main MCP snapshot to safe UI metadata."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("servers"), list):
+        return None
+    if "authority" in payload and payload["authority"] != "main_runtime":
+        return None
+    enabled = payload.get("enabled", True)
+    if type(enabled) is not bool:
+        return None
+
+    replacement: list[dict[str, Any]] = []
+    seen_server_names: set[str] = set()
+    for item in payload["servers"]:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        command = item.get("command", "")
+        args = item.get("args", [])
+        running = item.get("running")
+        status = item.get("status")
+        tools = item.get("tools", [])
+        tools_count = item.get("tools_count")
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or name in seen_server_names
+            or not isinstance(command, str)
+            or not isinstance(args, list)
+            or any(not isinstance(arg, str) for arg in args)
+            or type(running) is not bool
+            or not isinstance(status, str)
+            or not status.strip()
+            or not isinstance(tools, list)
+            or type(tools_count) is not int
+            or tools_count < 0
+            or tools_count != len(tools)
+        ):
+            return None
+
+        safe_tools: list[dict[str, str]] = []
+        seen_tool_names: set[str] = set()
+        for tool in tools:
+            if not isinstance(tool, dict):
+                return None
+            tool_name = tool.get("name")
+            description = tool.get("description", "")
+            if (
+                not isinstance(tool_name, str)
+                or not tool_name.strip()
+                or tool_name in seen_tool_names
+                or not isinstance(description, str)
+            ):
+                return None
+            seen_tool_names.add(tool_name)
+            safe_tools.append({"name": tool_name, "description": description})
+
+        replacement.append(
+            {
+                "name": name,
+                "command": command,
+                "args": list(args),
+                "running": running,
+                "status": status,
+                "tools_count": tools_count,
+                "tools": safe_tools,
+            }
+        )
+        seen_server_names.add(name)
+
+    return {"authority": "main_runtime", "enabled": enabled, "servers": replacement}
+
+
+def _apply_mcp_snapshot_event(event: dict) -> bool:
+    """Atomically replace the web's IPC-derived MCP projection."""
+    if (
+        not isinstance(event, dict)
+        or event.get("type") != "mcp_snapshot"
+        or type(event.get("version")) is not int
+        or event.get("version") != CONTRACT_VERSION
+    ):
+        return False
+    projection = _project_mcp_snapshot_payload(event.get("payload"))
+    if projection is None:
+        return False
+
+    global _mcp_snapshot, _mcp_snapshot_event
+    _mcp_snapshot = projection
+    stored_event = dict(event)
+    stored_event["payload"] = projection
+    _mcp_snapshot_event = stored_event
+    return True
 
 
 @app.get("/api/audio")
@@ -1676,43 +1968,73 @@ async def execute_doctor_repair(payload: Dict[str, Any]):
 
 @app.get("/api/mcp/tools")
 async def get_mcp_tools():
-    """Return discovered MCP tool definitions.
-
-    When MCP is disabled this returns an empty list rather than every tool in
-    the shared registry, so the endpoint honestly reflects the toggle. When
-    enabled it returns the tools auto-registered with the ``mcp_`` prefix.
-    """
-    try:
-        from charlie.tools import registry
-
-        if not config.mcp_enabled:
-            return {"tools": []}
-        await _ensure_mcp_client_async()
-        defs = [
-            d for d in registry.get_tool_definitions()
-            if d.get("function", {}).get("name", "").startswith("mcp_")
-        ]
-        return {"tools": defs}
-    except Exception as e:
-        logger.error(f"Error fetching tools: {e}")
-    return {"tools": []}
+    """Return the main-runtime IPC projection of active MCP tool metadata."""
+    if _tool_snapshot is None:
+        return {
+            "status": "unavailable",
+            "runtime_status": "unavailable",
+            "synchronized": False,
+            "authority": "main_runtime",
+            "detail": "Main runtime tool snapshot has not arrived over IPC.",
+            "tools": [],
+        }
+    if _mcp_snapshot is not None and not _mcp_snapshot.get("enabled", True):
+        return {
+            "status": "disabled",
+            "runtime_status": "available",
+            "synchronized": True,
+            "authority": "main_runtime",
+            "tools": [],
+        }
+    return {
+        "status": "ok",
+        "runtime_status": "available",
+        "synchronized": True,
+        "authority": "main_runtime",
+        "tools": [
+            dict(tool)
+            for tool in _tool_snapshot["tools"]
+            if tool.get("owner") == "mcp"
+        ],
+    }
 
 
 @app.get("/api/tools")
 async def get_tools():
-    """Full tool roster (built-in + MCP + plugin + extension) for the Tools-grid HUD widget."""
-    try:
-        from charlie.tools import registry
-        return {"tools": registry.list_metadata()}
-    except Exception as e:
-        logger.error(f"Error fetching tool roster: {e}", exc_info=True)
-        return {"tools": []}
+    """Return only the main-runtime IPC projection of executable tools."""
+    if _tool_snapshot is None:
+        return {
+            "status": "unavailable",
+            "runtime_status": "unavailable",
+            "synchronized": False,
+            "authority": "main_runtime",
+            "detail": "Main runtime tool snapshot has not arrived over IPC.",
+            "tools": [],
+        }
+    return {
+        "status": "ok",
+        "runtime_status": "available",
+        "synchronized": True,
+        "authority": "main_runtime",
+        "tools": [dict(tool) for tool in _tool_snapshot["tools"]],
+    }
 
 
 @app.get("/api/capabilities")
 async def get_capabilities():
     """Expose the live capability view used to describe Charlie to the model."""
     snapshot = build_capability_snapshot(_shared_capability_index, config)
+    # CapabilityIndex remains useful for static domain/subsystem metadata, but
+    # its web-process tool list is not executable runtime truth. Replace that
+    # list with the main-owned IPC projection and make the synchronization
+    # state explicit when the producer has not replayed it yet.
+    snapshot["tool_authority"] = "main_runtime"
+    if _tool_snapshot is None:
+        snapshot["tool_status"] = "unavailable"
+        snapshot["tools"] = []
+    else:
+        snapshot["tool_status"] = "available"
+        snapshot["tools"] = [dict(tool) for tool in _tool_snapshot["tools"]]
     snapshot["runtime"] = dict(_subsystem_health)
     return snapshot
 
@@ -1720,61 +2042,58 @@ async def get_capabilities():
 @app.get("/api/mcp/status")
 async def get_mcp_status():
     """Per-server MCP connection status for the Connections HUD widget."""
-    if not config.mcp_enabled or mcp_client is None:
-        return {"servers": {}}
-    try:
-        return {"servers": mcp_client.health_check()}
-    except Exception as e:
-        logger.error(f"Error fetching MCP status: {e}", exc_info=True)
-        return {"servers": {}}
+    if _mcp_snapshot is None:
+        return {
+            "status": "unavailable",
+            "runtime_status": "unavailable",
+            "synchronized": False,
+            "authority": "main_runtime",
+            "detail": "Main runtime MCP snapshot has not arrived over IPC.",
+            "servers": {},
+        }
+    return {
+        "status": "ok" if _mcp_snapshot.get("enabled", True) else "disabled",
+        "runtime_status": "available",
+        "synchronized": True,
+        "authority": "main_runtime",
+        "servers": {
+            server["name"]: bool(server["running"])
+            for server in _mcp_snapshot["servers"]
+        },
+    }
 
 
 @app.get("/api/mcp/servers")
 async def get_mcp_servers():
     """List configured MCP servers with connection state and exposed tools."""
-    client = mcp_client
-    if client is None and config.mcp_enabled:
-        client = await _ensure_mcp_client_async()
-    if client is None:
-        from charlie.mcp_client import load_config_file, parse_server_spec
-        configured = []
-        for spec in config.mcp_servers:
-            try:
-                cfg = parse_server_spec(spec)
-                configured.append({
-                    "name": cfg.name,
-                    "command": cfg.command,
-                    "args": cfg.args,
-                    "running": False,
-                    "status": "disconnected",
-                    "tools_count": 0,
-                    "tools": [],
-                })
-            except Exception:
-                pass
-        for cfg in load_config_file(config.mcp_config_path):
-            if not any(c["name"] == cfg.name for c in configured):
-                configured.append({
-                    "name": cfg.name,
-                    "command": cfg.command,
-                    "args": cfg.args,
-                    "running": False,
-                    "status": "disconnected",
-                    "tools_count": 0,
-                    "tools": [],
-                })
-        return {"servers": configured}
-
-    try:
-        return {"servers": client.list_servers_detailed()}
-    except Exception as e:
-        logger.error(f"Error fetching MCP servers: {e}", exc_info=True)
-        return {"servers": []}
+    if _mcp_snapshot is None:
+        return {
+            "status": "unavailable",
+            "runtime_status": "unavailable",
+            "synchronized": False,
+            "authority": "main_runtime",
+            "detail": "Main runtime MCP snapshot has not arrived over IPC.",
+            "servers": [],
+        }
+    return {
+        "status": "ok" if _mcp_snapshot.get("enabled", True) else "disabled",
+        "runtime_status": "available",
+        "synchronized": True,
+        "authority": "main_runtime",
+        "servers": [
+            {
+                **server,
+                "args": list(server.get("args", [])),
+                "tools": [dict(tool) for tool in server.get("tools", [])],
+            }
+            for server in _mcp_snapshot["servers"]
+        ],
+    }
 
 
 @app.post("/api/mcp/servers")
 async def add_mcp_server(data: dict):
-    """Add or update an MCP server configuration."""
+    """Ask main to add one MCP server to its canonical runtime client."""
     name = str(data.get("name", "")).strip()
     command = str(data.get("command", "")).strip()
     args_raw = data.get("args", [])
@@ -1788,78 +2107,55 @@ async def add_mcp_server(data: dict):
     if not name or not command:
         raise HTTPException(status_code=400, detail="Server name and command are required")
 
-    from charlie.mcp_client import MCPServerConfig
-    srv_config = MCPServerConfig(name=name, command=command, args=args)
-
-    global mcp_client
-    if mcp_client is None:
-        from charlie.mcp_client import MCPClient
-        mcp_client = MCPClient()
-
-    mcp_client.add_server(srv_config)
-    return {"status": "ok", "message": f"Server '{name}' configured"}
+    result = await _request_authoritative_mcp_operation(
+        "add",
+        {"server_name": name, "command": command, "args": args},
+    )
+    if result.get("success") is not True:
+        return _mcp_api_error(result)
+    return {
+        "status": "ok",
+        "message": f"Server '{name}' configured",
+        "request_id": result.get("request_id"),
+        "operation": result.get("operation"),
+        "server_name": result.get("server_name"),
+    }
 
 
 @app.post("/api/mcp/servers/{name}/connect")
 async def connect_mcp_server(name: str):
-    """Connect/enable a registered MCP server."""
-    global mcp_client
-    if mcp_client is None:
-        await _ensure_mcp_client_async()
-    if mcp_client is None:
-        raise HTTPException(status_code=500, detail="MCP client unavailable")
-
-    from charlie.tools import registry
-
-    try:
-        mcp_client.enable_server(registry, name)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
-    return {"status": "ok"}
+    """Ask main to connect one registered MCP server."""
+    result = await _request_authoritative_mcp_operation("connect", {"server_name": name})
+    if result.get("success") is not True:
+        return _mcp_api_error(result)
+    return {"status": "ok", "request_id": result.get("request_id"), "server_name": name}
 
 
 @app.post("/api/mcp/servers/{name}/disconnect")
 async def disconnect_mcp_server(name: str):
-    """Disconnect/disable a registered MCP server."""
-    global mcp_client
-    if mcp_client is None:
-        return {"status": "ok"}
-
-    from charlie.tools import registry
-
-    if not mcp_client.disable_server(registry, name):
-        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
-    return {"status": "ok"}
+    """Ask main to disconnect one registered MCP server."""
+    result = await _request_authoritative_mcp_operation("disconnect", {"server_name": name})
+    if result.get("success") is not True:
+        return _mcp_api_error(result)
+    return {"status": "ok", "request_id": result.get("request_id"), "server_name": name}
 
 
 @app.post("/api/mcp/servers/{name}/restart")
 async def restart_mcp_server(name: str):
-    """Restart a registered MCP server."""
-    global mcp_client
-    if mcp_client is None:
-        await _ensure_mcp_client_async()
-    if mcp_client is None:
-        raise HTTPException(status_code=500, detail="MCP client unavailable")
-
-    from charlie.tools import registry
-
-    if not mcp_client.restart_server(registry, name):
-        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
-    return {"status": "ok"}
+    """Ask main to restart one registered MCP server."""
+    result = await _request_authoritative_mcp_operation("restart", {"server_name": name})
+    if result.get("success") is not True:
+        return _mcp_api_error(result)
+    return {"status": "ok", "request_id": result.get("request_id"), "server_name": name}
 
 
 @app.delete("/api/mcp/servers/{name}")
 async def delete_mcp_server(name: str):
-    """Remove an MCP server."""
-    global mcp_client
-    if mcp_client is None:
-        return {"status": "ok"}
-
-    from charlie.tools import registry
-
-    if not mcp_client.remove_server(registry, name):
-        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
-    return {"status": "ok"}
+    """Ask main to remove one registered MCP server."""
+    result = await _request_authoritative_mcp_operation("delete", {"server_name": name})
+    if result.get("success") is not True:
+        return _mcp_api_error(result)
+    return {"status": "ok", "request_id": result.get("request_id"), "server_name": name}
 
 
 @app.get("/api/extensions")

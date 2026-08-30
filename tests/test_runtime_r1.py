@@ -74,11 +74,18 @@ async def test_runtime_state_replay_publishes_health_and_canonical_task_snapshot
     bus = _RecordingBus()
     await main._publish_runtime_state(bus)
 
-    assert [event[0] for event in bus.events] == ["subsystem_health", "task_snapshot"]
+    assert [event[0] for event in bus.events] == [
+        "subsystem_health",
+        "task_snapshot",
+        "tool_snapshot",
+        "mcp_snapshot",
+    ]
     assert bus.events[0][1] == health.snapshot()
     assert bus.events[1][1]["tasks"][0]["id"] == "task-r1"
     assert bus.events[1][1]["tasks"][0]["status"] == "running"
     assert bus.events[1][2].source is EventSource.TASK
+    assert bus.events[2][1]["authority"] == "main_runtime"
+    assert bus.events[3][1] == {"authority": "main_runtime", "enabled": False, "servers": []}
 
 
 @pytest.mark.asyncio
@@ -96,7 +103,12 @@ async def test_runtime_state_request_dispatch_publishes_health_and_task_snapshot
     handled = await main._handle_runtime_state_request("runtime_state_request", bus)
 
     assert handled is True
-    assert [event[0] for event in bus.events] == ["subsystem_health", "task_snapshot"]
+    assert [event[0] for event in bus.events] == [
+        "subsystem_health",
+        "task_snapshot",
+        "tool_snapshot",
+        "mcp_snapshot",
+    ]
     assert bus.events[1][1]["tasks"][0]["id"] == "task-dispatch"
 
 
@@ -117,7 +129,12 @@ async def test_runtime_state_request_uses_actual_command_consumer_dispatch_seam(
     handled = await dispatcher({"type": "runtime_state_request"}, bus)
 
     assert handled is True
-    assert [event[0] for event in bus.events] == ["subsystem_health", "task_snapshot"]
+    assert [event[0] for event in bus.events] == [
+        "subsystem_health",
+        "task_snapshot",
+        "tool_snapshot",
+        "mcp_snapshot",
+    ]
     assert bus.events[1][1]["tasks"][0]["id"] == "task-command-seam"
 
 

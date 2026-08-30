@@ -47,7 +47,10 @@ class EventBus:
         if test_mode:
             pub_port = int(os.getenv("CHARLIE_TEST_EVENT_PORT", "0")) if pub_port is None else pub_port
             pull_port = int(os.getenv("CHARLIE_TEST_COMMAND_PORT", "0")) if pull_port is None else pull_port
-            if pub_port in {DEFAULT_EVENT_PORT, DEFAULT_COMMAND_PORT} or pull_port in {DEFAULT_EVENT_PORT, DEFAULT_COMMAND_PORT}:
+            if (
+                pub_port in {DEFAULT_EVENT_PORT, DEFAULT_COMMAND_PORT}
+                or pull_port in {DEFAULT_EVENT_PORT, DEFAULT_COMMAND_PORT}
+            ):
                 raise RuntimeError("Test EventBus cannot use production ports 5555/5556")
         else:
             pub_port = DEFAULT_EVENT_PORT if pub_port is None else pub_port
@@ -145,12 +148,19 @@ class EventBus:
             event = json.loads(data)
             await callback(event)
 
-    async def send_command(self, command: dict):
-        """Consumer only. Sends a command to the voice process."""
+    async def send_command(self, command: dict) -> bool:
+        """Consumer only. Sends a command to the voice process.
+
+        Return a transport-level boolean so correlated command APIs can
+        distinguish an unavailable producer from a command that was sent.
+        Existing callers may ignore the return value.
+        """
         if self.is_producer or not self._push_socket:
-            return
+            return False
         data = json.dumps(command)
         try:
             await self._push_socket.send_string(data)
+            return True
         except zmq.ZMQError:
             logger.debug("send_command_dropped_socket_closed")
+            return False

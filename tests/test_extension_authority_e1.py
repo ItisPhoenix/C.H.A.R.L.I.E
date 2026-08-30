@@ -492,10 +492,14 @@ async def test_main_command_loop_calls_authoritative_mutation_seam() -> None:
         async def emit(self, event_type, payload, meta=None):
             self.events.append((event_type, payload, meta))
 
+    async def publish_tool_snapshot(bus, tool_registry):
+        bus.events.append(("tool_snapshot", {"registry": tool_registry}, None))
+
     namespace = {
         "asyncio": asyncio,
         "logger": _NullLogger(),
         "apply_extension_operation": apply,
+        "_publish_tool_snapshot": publish_tool_snapshot,
         "EventMeta": EventMeta,
         "EventSource": EventSource,
     }
@@ -520,8 +524,8 @@ async def test_main_command_loop_calls_authoritative_mutation_seam() -> None:
 
     assert len(calls) == 1
     assert calls[0]["payload"]["request_id"] == "req-1"
-    assert bus.events[0][0] == "extension_operation_result"
-    assert bus.events[0][1]["success"] is True
+    assert [event[0] for event in bus.events] == ["tool_snapshot", "extension_operation_result"]
+    assert bus.events[1][1]["success"] is True
 
 
 def test_main_exposes_one_authoritative_extension_mutation_seam() -> None:

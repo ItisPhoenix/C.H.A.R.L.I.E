@@ -5,19 +5,23 @@ from unittest.mock import patch
 import pytest
 
 import charlie.web_server as web_server
-from charlie.tools import ToolRegistry
 
 
 @pytest.mark.asyncio
 async def test_get_tools_returns_registered_metadata(monkeypatch):
-    registry = ToolRegistry()
-    registry.register_tool(
-        "web_search", "search the web", {"type": "object", "properties": {}}, owner="core", risk_class="safe"
+    monkeypatch.setattr(
+        web_server,
+        "_tool_snapshot",
+        {
+            "authority": "main_runtime",
+            "tools": [{"name": "web_search", "description": "search the web", "owner": "core", "risk_class": "safe"}],
+        },
     )
-    monkeypatch.setattr("charlie.tools.registry", registry)
 
     result = await web_server.get_tools()
 
+    assert result["status"] == "ok"
+    assert result["authority"] == "main_runtime"
     assert result["tools"] == [
         {"name": "web_search", "description": "search the web", "owner": "core", "risk_class": "safe"}
     ]
@@ -25,47 +29,76 @@ async def test_get_tools_returns_registered_metadata(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_mcp_status_disabled_returns_empty(monkeypatch):
-    monkeypatch.setattr(web_server.config, "mcp_enabled", False)
+    monkeypatch.setattr(
+        web_server,
+        "_mcp_snapshot",
+        {"authority": "main_runtime", "enabled": False, "servers": []},
+    )
 
     result = await web_server.get_mcp_status()
 
-    assert result == {"servers": {}}
+    assert result["status"] == "disabled"
+    assert result["synchronized"] is True
+    assert result["servers"] == {}
 
 
 @pytest.mark.asyncio
 async def test_get_mcp_status_returns_health_check(monkeypatch):
-    class _FakeClient:
-        def health_check(self):
-            return {"filesystem": True, "notion": False}
-
-    monkeypatch.setattr(web_server.config, "mcp_enabled", True)
-    monkeypatch.setattr(web_server, "mcp_client", _FakeClient())
+    monkeypatch.setattr(
+        web_server,
+        "_mcp_snapshot",
+        {
+            "authority": "main_runtime",
+            "enabled": True,
+            "servers": [
+                {
+                    "name": "filesystem",
+                    "command": "",
+                    "args": [],
+                    "running": True,
+                    "status": "connected",
+                    "tools_count": 0,
+                    "tools": [],
+                },
+                {
+                    "name": "notion",
+                    "command": "",
+                    "args": [],
+                    "running": False,
+                    "status": "disconnected",
+                    "tools_count": 0,
+                    "tools": [],
+                },
+            ],
+        },
+    )
 
     result = await web_server.get_mcp_status()
 
-    assert result == {"servers": {"filesystem": True, "notion": False}}
+    assert result["status"] == "ok"
+    assert result["servers"] == {"filesystem": True, "notion": False}
 
 
 @pytest.mark.asyncio
 async def test_get_mcp_tools_returns_registered_mcp_definitions(monkeypatch):
-    registry = ToolRegistry()
-    registry.register_tool(
-        "mcp_files_read", "Read a permitted file", {"type": "object", "properties": {}}, owner="mcp"
-    )(lambda: "ok")
-    registry.register_tool(
-        "web_search", "Search the web", {"type": "object", "properties": {}}, owner="tools"
-    )(lambda: "ok")
-    monkeypatch.setattr("charlie.tools.registry", registry)
+    monkeypatch.setattr(
+        web_server,
+        "_tool_snapshot",
+        {
+            "authority": "main_runtime",
+            "tools": [
+                {"name": "mcp_files_read", "description": "Read a permitted file", "owner": "mcp"},
+                {"name": "web_search", "description": "Search the web", "owner": "tools"},
+            ],
+        },
+    )
     monkeypatch.setattr(web_server.config, "mcp_enabled", True)
-
-    async def no_start():
-        return None
-
-    monkeypatch.setattr(web_server, "_ensure_mcp_client_async", no_start)
 
     result = await web_server.get_mcp_tools()
 
-    assert [tool["function"]["name"] for tool in result["tools"]] == ["mcp_files_read"]
+    assert result["status"] == "ok"
+    assert result["authority"] == "main_runtime"
+    assert [tool["name"] for tool in result["tools"]] == ["mcp_files_read"]
 
 
 @pytest.mark.asyncio

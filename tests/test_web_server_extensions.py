@@ -15,7 +15,6 @@ def _fresh_extension_state(monkeypatch):
     before = set(registry._tools.keys())
     monkeypatch.setattr(web_server, "_extension_manager", ExtensionManager())
     monkeypatch.setattr(web_server, "plugin_manager", PluginManager())
-    monkeypatch.setattr(web_server, "mcp_client", None)
     monkeypatch.setattr(web_server, "event_bus", _AuthoritativeEventBus())
     yield
     for name in set(registry._tools.keys()) - before:

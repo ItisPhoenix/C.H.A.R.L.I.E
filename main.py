@@ -301,23 +301,220 @@ async def _publish_task_snapshot(bus: Optional[EventBus] = None) -> None:
     )
 
 
-async def _publish_runtime_state(bus: Optional[EventBus] = None) -> None:
+def _build_tool_snapshot(tool_registry: Any = None) -> dict[str, Any]:
+    """Build a safe public roster from the registry that Brain actually executes."""
+    if tool_registry is None:
+        from charlie.tools import registry as tool_registry
+
+    metadata = tool_registry.list_metadata()
+    if not isinstance(metadata, list):
+        raise ValueError("Main tool registry returned an invalid metadata list.")
+
+    tools: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for item in metadata:
+        if not isinstance(item, dict):
+            raise ValueError("Main tool registry returned invalid tool metadata.")
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip() or name in seen_names:
+            raise ValueError("Main tool registry returned invalid or duplicate tool names.")
+        seen_names.add(name)
+
+        safe_item: dict[str, Any] = {"name": name}
+        for key in ("description", "owner"):
+            if key in item:
+                value = item[key]
+                if not isinstance(value, str):
+                    raise ValueError(f"Main tool registry returned invalid {key} metadata.")
+                safe_item[key] = value
+        if "risk_class" in item:
+            risk_class = item["risk_class"]
+            if risk_class is not None and not isinstance(risk_class, str):
+                raise ValueError("Main tool registry returned invalid risk metadata.")
+            safe_item["risk_class"] = risk_class
+        tools.append(safe_item)
+
+    return {"authority": "main_runtime", "tools": tools}
+
+
+async def _publish_tool_snapshot(
+    bus: Optional[EventBus] = None,
+    tool_registry: Any = None,
+) -> None:
+    """Publish the current main-owned executable-tool projection over IPC."""
+    if bus is None:
+        return
+    await bus.emit(
+        EventType.TOOL_SNAPSHOT.value,
+        _build_tool_snapshot(tool_registry),
+        meta=EventMeta(
+            source=EventSource.RUNTIME,
+            rationale="authoritative main-runtime tool registry snapshot",
+        ),
+    )
+
+
+_MCP_SENSITIVE_ARGUMENT_MARKERS = frozenset(
+    {
+        "api-key",
+        "api_key",
+        "apikey",
+        "auth",
+        "authorization",
+        "credential",
+        "env",
+        "header",
+        "headers",
+        "password",
+        "private-key",
+        "private_key",
+        "secret",
+        "token",
+    }
+)
+
+
+def _sanitize_mcp_args(args: Any) -> list[str]:
+    """Keep public MCP command arguments useful without exposing secrets."""
+    if args is None:
+        return []
+    if not isinstance(args, list) or any(not isinstance(arg, str) for arg in args):
+        raise ValueError("MCP server arguments must be a list of strings.")
+
+    safe_args: list[str] = []
+    redact_next = False
+    for arg in args:
+        lowered = arg.strip().lower()
+        if redact_next:
+            safe_args.append("<redacted>")
+            redact_next = False
+            continue
+        if "=" in arg:
+            option, _value = arg.split("=", 1)
+            marker = option.lstrip("-").strip().lower()
+            if marker in _MCP_SENSITIVE_ARGUMENT_MARKERS:
+                safe_args.append(f"{option}=<redacted>")
+                continue
+        marker = lowered.lstrip("-")
+        if marker in _MCP_SENSITIVE_ARGUMENT_MARKERS:
+            safe_args.append(arg)
+            redact_next = True
+            continue
+        if "authorization:" in lowered or lowered.startswith("bearer "):
+            safe_args.append("<redacted>")
+            continue
+        safe_args.append(arg)
+    return safe_args
+
+
+def _build_mcp_snapshot(mcp_client: Any = None, *, enabled: Optional[bool] = None) -> dict[str, Any]:
+    """Build a safe MCP projection from main's canonical MCP client only."""
+    detailed = [] if mcp_client is None else mcp_client.list_servers_detailed()
+    if not isinstance(detailed, list):
+        raise ValueError("Main MCP client returned an invalid server list.")
+
+    servers: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for item in detailed:
+        if not isinstance(item, dict):
+            raise ValueError("Main MCP client returned invalid server metadata.")
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip() or name in seen_names:
+            raise ValueError("Main MCP client returned invalid or duplicate server names.")
+        running = item.get("running")
+        if type(running) is not bool:
+            raise ValueError("Main MCP client returned invalid server running state.")
+        status = item.get("status")
+        if not isinstance(status, str) or not status.strip():
+            raise ValueError("Main MCP client returned invalid server status.")
+
+        raw_tools = item.get("tools", [])
+        if not isinstance(raw_tools, list):
+            raise ValueError("Main MCP client returned invalid server tools.")
+        tools: list[dict[str, str]] = []
+        seen_tool_names: set[str] = set()
+        for tool in raw_tools:
+            if not isinstance(tool, dict):
+                raise ValueError("Main MCP client returned invalid tool metadata.")
+            tool_name = tool.get("name")
+            description = tool.get("description", "")
+            if (
+                not isinstance(tool_name, str)
+                or not tool_name.strip()
+                or tool_name in seen_tool_names
+                or not isinstance(description, str)
+            ):
+                raise ValueError("Main MCP client returned invalid or duplicate tool metadata.")
+            seen_tool_names.add(tool_name)
+            tools.append({"name": tool_name, "description": description})
+
+        command = item.get("command", "")
+        if not isinstance(command, str):
+            raise ValueError("Main MCP client returned invalid server command.")
+        servers.append(
+            {
+                "name": name,
+                "command": command,
+                "args": _sanitize_mcp_args(item.get("args", [])),
+                "running": running,
+                "status": status,
+                "tools_count": len(tools),
+                "tools": tools,
+            }
+        )
+        seen_names.add(name)
+
+    if enabled is None:
+        enabled = bool(getattr(config, "mcp_enabled", False))
+    return {"authority": "main_runtime", "enabled": bool(enabled), "servers": servers}
+
+
+async def _publish_mcp_snapshot(
+    bus: Optional[EventBus] = None,
+    mcp_client: Any = None,
+    *,
+    enabled: Optional[bool] = None,
+) -> None:
+    """Publish current main-owned MCP state over IPC."""
+    if bus is None:
+        return
+    await bus.emit(
+        EventType.MCP_SNAPSHOT.value,
+        _build_mcp_snapshot(mcp_client, enabled=enabled),
+        meta=EventMeta(
+            source=EventSource.RUNTIME,
+            rationale="authoritative main-runtime MCP snapshot",
+        ),
+    )
+
+
+async def _publish_runtime_state(bus: Optional[EventBus] = None, mcp_client: Any = None) -> None:
     """Replay public operational state owned by this main process."""
     await _publish_subsystem_health(bus)
     await _publish_task_snapshot(bus)
+    await _publish_tool_snapshot(bus)
+    await _publish_mcp_snapshot(bus, mcp_client)
 
 
-async def _dispatch_web_command(cmd: dict, bus: Optional[EventBus] = None) -> bool:
+async def _dispatch_web_command(
+    cmd: dict,
+    bus: Optional[EventBus] = None,
+    mcp_client: Any = None,
+) -> bool:
     """Dispatch the runtime-state command from the live web command consumer."""
     if not isinstance(cmd, dict) or cmd.get("type") != "runtime_state_request":
         return False
-    await _publish_runtime_state(bus)
+    await _publish_runtime_state(bus, mcp_client)
     return True
 
 
-async def _handle_runtime_state_request(cmd_type: str, bus: Optional[EventBus] = None) -> bool:
+async def _handle_runtime_state_request(
+    cmd_type: str,
+    bus: Optional[EventBus] = None,
+    mcp_client: Any = None,
+) -> bool:
     """Handle the command-loop runtime replay branch and report whether it matched."""
-    return await _dispatch_web_command({"type": cmd_type}, bus)
+    return await _dispatch_web_command({"type": cmd_type}, bus, mcp_client)
 
 
 def _extension_operation_result(
@@ -482,6 +679,191 @@ def apply_extension_operation(
             ),
             mcp_client,
         )
+
+
+def _mcp_operation_result(
+    payload: dict[str, Any],
+    *,
+    success: bool,
+    error: Optional[str] = None,
+) -> dict[str, Any]:
+    """Build the safe correlated acknowledgement for one MCP command."""
+    result = {
+        "request_id": str(payload.get("request_id", "")),
+        "operation": str(payload.get("operation", "")),
+        "success": success,
+        "server_name": str(payload.get("server_name", "")),
+    }
+    if error:
+        result["error"] = error[:500]
+    return result
+
+
+def apply_mcp_operation(
+    payload: dict[str, Any],
+    *,
+    mcp_client: Any,
+    brain: Any = None,
+    tool_registry: Any = None,
+) -> tuple[dict[str, Any], Any]:
+    """Apply one MCP transition against main's canonical client and registry."""
+    if not isinstance(payload, dict):
+        payload = {}
+    operation = payload.get("operation")
+    server_name = payload.get("server_name")
+    allowed_operations = {"add", "connect", "disconnect", "restart", "delete"}
+    if (
+        not isinstance(payload.get("request_id"), str)
+        or not payload["request_id"]
+        or not isinstance(operation, str)
+        or operation not in allowed_operations
+        or not isinstance(server_name, str)
+        or not server_name.strip()
+    ):
+        return (
+            _mcp_operation_result(
+                payload,
+                success=False,
+                error="Invalid MCP operation request.",
+            ),
+            mcp_client,
+        )
+
+    command = payload.get("command")
+    args = payload.get("args", [])
+    if operation == "add" and (
+        not isinstance(command, str)
+        or not command.strip()
+        or not isinstance(args, list)
+        or any(not isinstance(arg, str) for arg in args)
+    ):
+        return (
+            _mcp_operation_result(
+                payload,
+                success=False,
+                error="MCP add requires a command and a list of string arguments.",
+            ),
+            mcp_client,
+        )
+
+    try:
+        if operation == "add":
+            from charlie.mcp_client import MCPClient, MCPServerConfig
+
+            if mcp_client is None:
+                mcp_client = MCPClient()
+            existing = {
+                item.get("name")
+                for item in mcp_client.list_servers_detailed()
+                if isinstance(item, dict)
+            }
+            if server_name in existing:
+                raise ValueError(f"MCP server '{server_name}' is already registered.")
+            mcp_client.add_server(
+                MCPServerConfig(
+                    name=server_name,
+                    command=command.strip(),
+                    args=list(args),
+                )
+            )
+        else:
+            if mcp_client is None:
+                raise RuntimeError("Main MCP client is unavailable.")
+            if tool_registry is None:
+                from charlie.tools import registry as tool_registry
+            if operation == "connect":
+                mcp_client.enable_server(tool_registry, server_name)
+            elif operation == "disconnect":
+                if not mcp_client.disable_server(tool_registry, server_name):
+                    raise KeyError(f"MCP server '{server_name}' is not registered in main runtime.")
+            elif operation == "restart":
+                if not mcp_client.restart_server(tool_registry, server_name):
+                    raise KeyError(f"MCP server '{server_name}' is not registered in main runtime.")
+            else:  # delete
+                if not mcp_client.remove_server(tool_registry, server_name):
+                    raise KeyError(f"MCP server '{server_name}' is not registered in main runtime.")
+            if brain is not None:
+                brain.rebuild_stable_tier()
+        return _mcp_operation_result(payload, success=True), mcp_client
+    except Exception as exc:
+        reason = str(exc).strip() or type(exc).__name__
+        logger.warning("Main MCP operation failed: %s", reason)
+        return (
+            _mcp_operation_result(payload, success=False, error=reason),
+            mcp_client,
+        )
+
+
+def _try_build_mcp_snapshot(mcp_client: Any) -> Optional[dict[str, Any]]:
+    """Build a snapshot for operation accounting without inventing state."""
+    try:
+        return _build_mcp_snapshot(mcp_client)
+    except Exception as exc:
+        logger.error("Could not build authoritative MCP snapshot: %s", exc, exc_info=True)
+        return None
+
+
+async def _dispatch_mcp_operation(
+    payload: dict[str, Any],
+    bus: Optional[EventBus],
+    *,
+    mcp_client: Any,
+    brain: Any,
+    tool_registry: Any = None,
+) -> tuple[dict[str, Any], Any]:
+    """Run one MCP command, publish truthful projections, then emit its ACK."""
+    if tool_registry is None:
+        from charlie.tools import registry as tool_registry
+
+    before_tools = _build_tool_snapshot(tool_registry)
+    before_mcp = _try_build_mcp_snapshot(mcp_client)
+    result, updated_client = apply_mcp_operation(
+        payload,
+        mcp_client=mcp_client,
+        brain=brain,
+        tool_registry=tool_registry,
+    )
+    after_tools = _build_tool_snapshot(tool_registry)
+    after_mcp = _try_build_mcp_snapshot(updated_client)
+    operation = result.get("operation")
+    tools_changed = before_tools is None or after_tools != before_tools
+    mcp_changed = before_mcp is None or after_mcp != before_mcp
+
+    if result.get("success") is True and after_mcp is None:
+        result = _mcp_operation_result(
+            payload,
+            success=False,
+            error="MCP operation changed runtime but its authoritative snapshot could not be built.",
+        )
+        result["partial"] = True
+
+    if result.get("success") is True:
+        if operation in {"connect", "disconnect", "restart"}:
+            await _publish_tool_snapshot(bus, tool_registry)
+        elif operation == "delete" and tools_changed:
+            await _publish_tool_snapshot(bus, tool_registry)
+        await _publish_mcp_snapshot(bus, updated_client)
+    else:
+        # Failed operations normally leave both projections untouched. If a
+        # client partially mutated before raising, publish the truthful state
+        # before the correlated failure acknowledgement.
+        if tools_changed:
+            await _publish_tool_snapshot(bus, tool_registry)
+        if mcp_changed and after_mcp is not None:
+            await _publish_mcp_snapshot(bus, updated_client)
+        if tools_changed or mcp_changed:
+            result["partial"] = True
+
+    if bus is not None:
+        await bus.emit(
+            EventType.MCP_OPERATION_RESULT.value,
+            result,
+            meta=EventMeta(
+                source=EventSource.BRAIN,
+                rationale="authoritative main-runtime MCP operation result",
+            ),
+        )
+    return result, updated_client
 
 
 def _set_subsystem_health(name: str, status: HealthStatus, public_detail: Optional[str] = None) -> None:
@@ -1982,7 +2364,7 @@ async def main():
 
                     set_active_ws_count(hud_client_count)
                 elif cmd_type == "runtime_state_request":
-                    await _dispatch_web_command(cmd, event_bus)
+                    await _dispatch_web_command(cmd, event_bus, mcp_client)
                 elif cmd_type == "recovery_approve":
                     payload = cmd.get("payload", {})
                     proposal_id = payload.get("proposal_id")
@@ -2154,6 +2536,8 @@ async def main():
                         runtime_config=config,
                         tool_registry=_extension_registry,
                     )
+                    if result.get("success") is True:
+                        await _publish_tool_snapshot(event_bus, _extension_registry)
                     await event_bus.emit(
                         "extension_operation_result",
                         result,
@@ -2161,6 +2545,14 @@ async def main():
                             source=EventSource.BRAIN,
                             rationale="authoritative main-runtime extension operation result",
                         ),
+                    )
+                elif cmd_type == "mcp_operation":
+                    payload = cmd.get("payload", {})
+                    _, mcp_client = await _dispatch_mcp_operation(
+                        payload,
+                        event_bus,
+                        mcp_client=mcp_client,
+                        brain=brain,
                     )
                 elif cmd_type == "system_restart":
                     logger.info("System restart command received. Reloading configuration and engine...")
@@ -2181,6 +2573,10 @@ async def main():
                     await _reload_voice_engine()
                     brain.rebuild_stable_tier()
                     await _publish_subsystem_health(event_bus)
+                    from charlie.tools import registry as _reloaded_registry
+
+                    await _publish_tool_snapshot(event_bus, _reloaded_registry)
+                    await _publish_mcp_snapshot(event_bus, mcp_client)
 
                     await event_bus.emit(
                         "alert",
@@ -2498,7 +2894,7 @@ async def main():
             await mcp_start_task
             # Replay after web subscriber and producer command sockets have had
             # time to connect; initial PUB events can be lost during startup.
-            await _publish_subsystem_health(bus)
+            await _publish_runtime_state(bus, mcp_client)
             from charlie.capabilities import get_capability_index
             from charlie.code_index import CodeIndex
             from charlie.doctor import CharlieDoctor
