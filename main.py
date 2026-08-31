@@ -205,7 +205,13 @@ _runtime_health = HealthRegistry(
 )
 
 
-def _build_runtime_introspector(*, config: Any, capability_index: Any, mcp_client: Any) -> Any:
+def _build_runtime_introspector(
+    *,
+    config: Any,
+    capability_index: Any,
+    mcp_client: Any,
+    memory_service: Any = None,
+) -> Any:
     """Compose introspection around this process's canonical runtime owners."""
     from charlie.resource_locks import get_capability_lease_manager
     from charlie.runtime_introspector import RuntimeIntrospector
@@ -217,6 +223,7 @@ def _build_runtime_introspector(*, config: Any, capability_index: Any, mcp_clien
         task_journal=get_task_journal(),
         lease_manager=get_capability_lease_manager(),
         mcp_client=mcp_client,
+        memory_service=memory_service,
     )
 
 
@@ -1134,6 +1141,25 @@ async def _restart_mcp_client(old_client, config):
     return await asyncio.to_thread(start_mcp, config)
 
 
+def _semantic_memory_expected(runtime_config: Config) -> bool:
+    """Treat an explicitly configured embedding service as an expected component."""
+    return bool(str(getattr(runtime_config, "memory_embedding_url", "") or "").strip())
+
+
+def _set_memory_health_from_service(memory_service: MemoryService) -> None:
+    """Project canonical memory health into the runtime HealthRegistry."""
+    health = memory_service.get_health()
+    status = health.get("status")
+    if status == "available":
+        _set_subsystem_health("memory", HealthStatus.RUNNING)
+    elif status == "degraded":
+        _set_subsystem_health("memory", HealthStatus.DEGRADED)
+    elif status == "unavailable":
+        _set_subsystem_health("memory", HealthStatus.STOPPED)
+    else:
+        _set_subsystem_health("memory", HealthStatus.DEGRADED)
+
+
 def _compose_memory_dependencies(runtime_config: Config) -> tuple[MemoryGraph, Optional[MemoryStore], MemoryService]:
     """Compose process-owned long-term memory adapters and facade.
 
@@ -1148,17 +1174,21 @@ def _compose_memory_dependencies(runtime_config: Config) -> tuple[MemoryGraph, O
         raise
 
     memory_store = None
+    semantic_expected = _semantic_memory_expected(runtime_config)
     try:
         memory_store = MemoryStore(runtime_config)
-        _set_subsystem_health("memory", HealthStatus.RUNNING)
     except Exception as e:
         logger.warning(f"Vector memory disabled: {e}")
-        _set_subsystem_health("memory", HealthStatus.DEGRADED)
+        # A failed construction is an attempted required adapter, even when
+        # no object can be handed to the facade for later health inspection.
+        semantic_expected = True
 
     memory_service = MemoryService(
         graph=memory_graph,
         memory_store=memory_store,
+        semantic_expected=semantic_expected,
     )
+    _set_memory_health_from_service(memory_service)
     return memory_graph, memory_store, memory_service
 
 
@@ -2907,6 +2937,7 @@ async def main():
                 config=config,
                 capability_index=shared_capability_index,
                 mcp_client=mcp_client,
+                memory_service=memory_service,
             )
             code_index = CodeIndex()
             self_knowledge = SelfKnowledgeService(

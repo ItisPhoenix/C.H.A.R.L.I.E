@@ -35,9 +35,18 @@ def fact_compatibility_id(subject: str, predicate: str, obj: str) -> str:
 class MemoryService:
     """Facade for managed structured memory and explicit semantic memory."""
 
-    def __init__(self, graph: Optional[MemoryGraph] = None, memory_store: Optional[Any] = None) -> None:
+    def __init__(
+        self,
+        graph: Optional[MemoryGraph] = None,
+        memory_store: Optional[Any] = None,
+        semantic_expected: Optional[bool] = None,
+    ) -> None:
         self._graph = graph
         self._memory_store = memory_store
+        # A supplied adapter normally means semantic memory is expected.  The
+        # composition root can override this when vector memory is optional and
+        # no embedding service is configured.
+        self._semantic_expected = memory_store is not None if semantic_expected is None else bool(semantic_expected)
 
     def _get_graph(self) -> Optional[MemoryGraph]:
         if self._graph is not None:
@@ -145,6 +154,89 @@ class MemoryService:
         return {
             "available": self._semantic_available(),
             "document_count": 0,
+        }
+
+    @staticmethod
+    def _health_error(component: str, error: Exception) -> Dict[str, Any]:
+        """Return a public-safe component error without exposing exception text."""
+        return {
+            "status": "error",
+            "available": False,
+            "error": f"{component} memory adapter error ({type(error).__name__}).",
+        }
+
+    def _structured_health(self) -> Dict[str, Any]:
+        """Verify structured memory through its canonical graph adapter."""
+        graph = self._get_graph()
+        if graph is None:
+            return {"status": "unavailable", "available": False}
+
+        get_stats = getattr(graph, "get_stats", None)
+        if not callable(get_stats):
+            return self._health_error("Structured", TypeError("get_stats unavailable"))
+        try:
+            stats = get_stats()
+        except Exception as exc:
+            logger.warning("Could not verify structured memory: %s", type(exc).__name__)
+            return self._health_error("Structured", exc)
+        if not isinstance(stats, dict):
+            return self._health_error("Structured", TypeError("invalid stats"))
+        return {"status": "available", "available": True}
+
+    def _semantic_health(self) -> Dict[str, Any]:
+        """Verify semantic memory while preserving configured-vs-optional state."""
+        expected = self._semantic_expected
+        base = {"available": False, "configured": expected, "document_count": 0}
+        if self._memory_store is None:
+            return {
+                **base,
+                "status": "unavailable" if expected else "disabled",
+            }
+
+        get_stats = getattr(self._memory_store, "get_stats", None)
+        try:
+            raw_stats = get_stats() if callable(get_stats) else {}
+            if not isinstance(raw_stats, dict):
+                raise TypeError("invalid semantic stats")
+            available = raw_stats.get("available")
+            if type(available) is not bool:
+                available = self._semantic_available()
+            document_count = raw_stats.get("document_count", 0)
+            if type(document_count) is not int or document_count < 0:
+                document_count = 0
+        except Exception as exc:
+            logger.warning("Could not verify semantic memory: %s", type(exc).__name__)
+            return {**base, **self._health_error("Semantic", exc)}
+
+        return {
+            **base,
+            "available": available,
+            "document_count": document_count,
+            "status": "available" if available else ("unavailable" if expected else "disabled"),
+        }
+
+    def get_health(self) -> Dict[str, Any]:
+        """Return component health and deterministic aggregate memory state."""
+        structured = self._structured_health()
+        semantic = self._semantic_health()
+        structured_status = structured.get("status")
+        semantic_status = semantic.get("status")
+
+        if structured_status == "error" or semantic_status == "error":
+            status = "error"
+        elif structured_status != "available":
+            status = "unavailable"
+        elif semantic_status == "unavailable":
+            status = "degraded"
+        else:
+            # Optional semantic memory being disabled does not make the
+            # structured memory subsystem unhealthy.
+            status = "available"
+
+        return {
+            "status": status,
+            "structured": structured,
+            "semantic": semantic,
         }
 
     @staticmethod
@@ -439,4 +531,7 @@ class MemoryService:
         stats["categories"] = category_counts
         stats["total_items"] = len(items)
         stats["semantic"] = self._semantic_stats()
+        health = self.get_health()
+        stats["status"] = health["status"]
+        stats["health"] = health
         return stats

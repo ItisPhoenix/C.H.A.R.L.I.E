@@ -72,9 +72,13 @@ async def test_main_composition_constructs_one_graph_and_one_service(monkeypatch
             super().__init__(db_path)
 
     class TrackingMemoryService(MemoryService):
-        def __init__(self, graph=None, memory_store=None) -> None:
+        def __init__(self, graph=None, memory_store=None, semantic_expected=None) -> None:
             service_instances.append(self)
-            super().__init__(graph=graph, memory_store=memory_store)
+            super().__init__(
+                graph=graph,
+                memory_store=memory_store,
+                semantic_expected=semantic_expected,
+            )
 
     sentinel_store = object()
     monkeypatch.setattr(main, "MemoryGraph", TrackingMemoryGraph)

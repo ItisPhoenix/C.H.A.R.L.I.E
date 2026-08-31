@@ -7,6 +7,8 @@ import pytest
 from charlie.capabilities import CapabilityDescriptor, CapabilityIndex, CapabilityOperation
 from charlie.config import Config
 from charlie.doctor import CharlieDoctor, CheckSeverity, CheckStatus, DiagnosticCheck, DoctorReport
+from charlie.memory_graph import MemoryGraph
+from charlie.memory_service import MemoryService
 from charlie.resource_locks import CapabilityLeaseManager
 from charlie.runtime_introspector import RuntimeIntrospector
 from charlie.subsystem_health import HealthRegistry, HealthStatus
@@ -56,6 +58,8 @@ def mock_doctor_env():
         # Task journal & lease manager
         journal = TaskJournal()
         lease_mgr = CapabilityLeaseManager()
+        memory_graph = MemoryGraph(":memory:")
+        memory_service = MemoryService(graph=memory_graph, semantic_expected=False)
 
         introspector = RuntimeIntrospector(
             config=cfg,
@@ -63,6 +67,7 @@ def mock_doctor_env():
             health_registry=health,
             task_journal=journal,
             lease_manager=lease_mgr,
+            memory_service=memory_service,
         )
 
         doctor = CharlieDoctor(
@@ -74,7 +79,10 @@ def mock_doctor_env():
             health_registry=health,
         )
 
-        yield doctor, cfg, health, lease_mgr, journal
+        try:
+            yield doctor, cfg, health, lease_mgr, journal
+        finally:
+            memory_graph.close()
 
 
 def test_doctor_healthy_report(mock_doctor_env):

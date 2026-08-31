@@ -363,7 +363,53 @@ class CharlieDoctor:
 
     def _check_memory_subsystem(self) -> DiagnosticCheck:
         mem = self._introspector.get_memory_info()
-        status = mem.get("status", "available")
+        if not isinstance(mem, dict):
+            mem = {"status": "error"}
+
+        health = mem.get("health") if isinstance(mem.get("health"), dict) else {}
+        structured = health.get("structured") or mem.get("structured")
+        semantic = health.get("semantic") or mem.get("semantic_health") or mem.get("semantic")
+        status = mem.get("status", "unavailable")
+        if not isinstance(status, str):
+            status = "error"
+        if status not in {"available", "degraded", "unavailable", "error", "disabled"}:
+            status = "error"
+
+        def component_state(label: str, component: Any) -> str:
+            if not isinstance(component, dict):
+                return f"{label} state unavailable"
+            component_status = component.get("status")
+            if component_status == "available":
+                return f"{label} available"
+            if component_status == "disabled":
+                return f"{label} intentionally disabled"
+            if component_status == "unavailable":
+                return f"{label} unavailable"
+            if component_status == "error":
+                return f"{label} error"
+            return f"{label} state unknown"
+
+        structured_evidence = component_state("Structured memory", structured)
+        semantic_evidence = component_state("Semantic memory", semantic)
+        evidence = f"{structured_evidence}; {semantic_evidence}."
+        total_items = mem.get("total_items", 0)
+        if not isinstance(total_items, int) or total_items < 0:
+            total_items = 0
+
+        # Protect callers that still provide legacy stats without component
+        # status: an explicitly unavailable semantic adapter cannot be called
+        # healthy merely because the wrapper returned statistics.
+        semantic_unavailable = isinstance(semantic, dict) and (
+            semantic.get("status") == "unavailable"
+            or (
+                semantic.get("status") is None
+                and semantic.get("available") is False
+                and semantic.get("configured") is not False
+            )
+        )
+        if status == "available" and semantic_unavailable:
+            status = "degraded"
+
         if status == "error":
             return DiagnosticCheck(
                 check_id="memory_subsystem",
@@ -371,8 +417,58 @@ class CharlieDoctor:
                 status=CheckStatus.ERROR,
                 severity=CheckSeverity.HIGH,
                 summary="Memory subsystem error",
-                evidence=f"Memory service reported error: {mem.get('error')}",
+                evidence=f"{evidence} Memory service reported an adapter error without exposing internal details.",
                 fix_hint="Check SQLite database permissions and schema.",
+            )
+
+        if status == "unavailable":
+            return DiagnosticCheck(
+                check_id="memory_subsystem",
+                category="memory",
+                status=CheckStatus.ERROR,
+                severity=CheckSeverity.HIGH,
+                summary="Memory subsystem unavailable",
+                evidence=f"{evidence} Required memory backend is not available.",
+                fix_hint="Check SQLite database permissions and configured memory adapters.",
+            )
+
+        if status == "degraded":
+            return DiagnosticCheck(
+                check_id="memory_subsystem",
+                category="memory",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.MEDIUM,
+                summary="Memory subsystem degraded",
+                evidence=f"{evidence} Structured memory remains available with reduced semantic capability.",
+                fix_hint="Check the semantic embedding service or disable optional vector memory.",
+            )
+
+        if status == "disabled":
+            return DiagnosticCheck(
+                check_id="memory_subsystem",
+                category="memory",
+                status=CheckStatus.INFO,
+                severity=CheckSeverity.LOW,
+                summary="Memory subsystem disabled",
+                evidence=f"{evidence} Memory is intentionally disabled.",
+            )
+
+        semantic_disabled = isinstance(semantic, dict) and (
+            semantic.get("status") == "disabled"
+            or (
+                semantic.get("status") is None
+                and semantic.get("available") is False
+                and semantic.get("configured") is False
+            )
+        )
+        if semantic_disabled:
+            return DiagnosticCheck(
+                check_id="memory_subsystem",
+                category="memory",
+                status=CheckStatus.INFO,
+                severity=CheckSeverity.LOW,
+                summary="Memory subsystem available; semantic memory disabled",
+                evidence=f"{evidence} Structured memory contains {total_items} managed item(s).",
             )
 
         return DiagnosticCheck(
@@ -380,8 +476,15 @@ class CharlieDoctor:
             category="memory",
             status=CheckStatus.OK,
             severity=CheckSeverity.LOW,
-            summary="Memory subsystem healthy",
-            evidence=f"Knowledge graph and memory stores available ({mem.get('total_items', 0)} items).",
+            summary=(
+                "Memory subsystem healthy"
+                if isinstance(structured, dict)
+                and structured.get("status") == "available"
+                and isinstance(semantic, dict)
+                and semantic.get("status") == "available"
+                else "Memory subsystem available"
+            ),
+            evidence=f"{evidence} {total_items} managed item(s) reported.",
         )
 
     def _check_terminal_subsystem(self) -> DiagnosticCheck:

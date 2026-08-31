@@ -302,17 +302,160 @@ class RuntimeIntrospector:
         }
 
     def get_memory_info(self) -> Dict[str, Any]:
-        """Query MemoryService for memory graph and store stats."""
+        """Query MemoryService without overriding its component health truth."""
         mem = self._get_memory_service()
         if mem is None:
-            return {"status": "unavailable", "total_items": 0}
+            return {
+                "status": "unavailable",
+                "total_items": 0,
+                "structured": {"status": "unavailable", "available": False},
+                "semantic": {
+                    "status": "disabled",
+                    "available": False,
+                    "configured": False,
+                    "document_count": 0,
+                },
+            }
 
         try:
             stats = mem.get_stats()
-            stats["status"] = "available"
-            return stats
-        except Exception as e:
-            return {"status": "error", "error": str(e), "total_items": 0}
+        except Exception as exc:
+            return {
+                "status": "error",
+                "error": self._safe_memory_error(exc),
+                "total_items": 0,
+                "structured": {"status": "error", "available": False},
+                "semantic": {"status": "error", "available": False},
+            }
+        if not isinstance(stats, dict):
+            error = TypeError("MemoryService returned invalid statistics")
+            return {
+                "status": "error",
+                "error": self._safe_memory_error(error),
+                "total_items": 0,
+                "structured": {"status": "error", "available": False},
+                "semantic": {"status": "error", "available": False},
+            }
+
+        health_method = getattr(mem, "get_health", None)
+        if callable(health_method):
+            try:
+                health = health_method()
+            except Exception as exc:
+                health = {
+                    "status": "error",
+                    "error": self._safe_memory_error(exc),
+                    "structured": {"status": "error", "available": False},
+                    "semantic": {"status": "error", "available": False},
+                }
+        else:
+            health = self._derive_memory_health(stats)
+
+        safe_health = self._sanitize_memory_health(health)
+        result = dict(stats)
+        result["status"] = safe_health["status"]
+        result["health"] = safe_health
+        result["structured"] = safe_health["structured"]
+        raw_semantic = stats.get("semantic")
+        semantic_stats = {}
+        if isinstance(raw_semantic, dict):
+            if type(raw_semantic.get("available")) is bool:
+                semantic_stats["available"] = raw_semantic["available"]
+            if type(raw_semantic.get("document_count")) is int and raw_semantic["document_count"] >= 0:
+                semantic_stats["document_count"] = raw_semantic["document_count"]
+        semantic_stats.update(safe_health["semantic"])
+        result["semantic"] = semantic_stats
+        result["semantic_health"] = safe_health["semantic"]
+        if "error" in result:
+            result["error"] = "Memory service reported an error."
+        return result
+
+    @staticmethod
+    def _safe_memory_error(error: Exception) -> str:
+        """Return type-only memory error evidence; never expose exception text."""
+        return f"Memory service error ({type(error).__name__})."
+
+    @staticmethod
+    def _derive_memory_health(stats: Dict[str, Any]) -> Dict[str, Any]:
+        """Conservatively derive health for compatibility adapters without get_health()."""
+        raw_structured = stats.get("structured")
+        if isinstance(raw_structured, dict) and raw_structured.get("status") in {
+            "available", "unavailable", "error", "disabled", "unknown"
+        }:
+            structured = dict(raw_structured)
+        elif any(key in stats for key in ("nodes", "edges", "by_type", "categories", "total_items")):
+            structured = {"status": "available", "available": True}
+        else:
+            structured = {"status": "unavailable", "available": False}
+
+        raw_semantic = stats.get("semantic")
+        if isinstance(raw_semantic, dict):
+            available = raw_semantic.get("available") is True
+            configured = raw_semantic.get("configured")
+            if type(configured) is not bool:
+                # Compatibility adapters do not expose optionality. Treat an
+                # unavailable semantic adapter as expected rather than
+                # claiming the aggregate is healthy from incomplete data.
+                configured = True
+            semantic = {
+                "status": "available" if available else ("unavailable" if configured else "disabled"),
+                "available": available,
+                "configured": configured,
+                "document_count": raw_semantic.get("document_count", 0)
+                if isinstance(raw_semantic.get("document_count", 0), int)
+                else 0,
+            }
+        else:
+            semantic = {"status": "disabled", "available": False, "configured": False, "document_count": 0}
+
+        if structured["status"] == "error" or semantic["status"] == "error":
+            status = "error"
+        elif structured["status"] != "available":
+            status = "unavailable"
+        elif semantic["status"] == "unavailable":
+            status = "degraded"
+        else:
+            status = "available"
+        return {"status": status, "structured": structured, "semantic": semantic}
+
+    @classmethod
+    def _sanitize_memory_health(cls, health: Any) -> Dict[str, Any]:
+        """Keep only typed health fields and replace arbitrary error text."""
+        if not isinstance(health, dict):
+            error = TypeError("MemoryService returned invalid health")
+            return {
+                "status": "error",
+                "error": cls._safe_memory_error(error),
+                "structured": {"status": "error", "available": False},
+                "semantic": {"status": "error", "available": False},
+            }
+
+        allowed_statuses = {"available", "degraded", "unavailable", "error", "disabled"}
+        component_statuses = allowed_statuses | {"unknown"}
+
+        def clean_component(raw: Any, name: str) -> Dict[str, Any]:
+            if not isinstance(raw, dict) or raw.get("status") not in component_statuses:
+                return {"status": "error", "available": False, "error": f"{name} memory health invalid."}
+            component = {"status": raw["status"], "available": raw.get("available") is True}
+            if "configured" in raw and type(raw["configured"]) is bool:
+                component["configured"] = raw["configured"]
+            if type(raw.get("document_count")) is int and raw["document_count"] >= 0:
+                component["document_count"] = raw["document_count"]
+            if raw["status"] == "error":
+                component["error"] = f"{name} memory adapter reported an error."
+            return component
+
+        status = health.get("status")
+        if status not in allowed_statuses:
+            status = "error"
+        safe = {
+            "status": status,
+            "structured": clean_component(health.get("structured"), "Structured"),
+            "semantic": clean_component(health.get("semantic"), "Semantic"),
+        }
+        if status == "error":
+            safe["error"] = "Memory service reported an error."
+        return safe
 
     def get_subsystem_info(self) -> Dict[str, Any]:
         """Inspect Desktop, Browser, Terminal, Voice, and Telemetry availability."""

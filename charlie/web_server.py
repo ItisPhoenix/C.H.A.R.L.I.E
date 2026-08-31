@@ -74,6 +74,43 @@ class _IpcHealthProjection:
         return dict(_subsystem_health)
 
 
+class _IpcMemoryProjection:
+    """Read-only memory aggregate backed by main's subsystem-health event."""
+
+    def _health(self) -> dict[str, Any]:
+        raw = _subsystem_health.get("memory")
+        source_status = raw.get("status") if isinstance(raw, dict) else None
+        status_map = {
+            "running": "available",
+            "degraded": "degraded",
+            "stopped": "unavailable",
+            "disabled": "disabled",
+        }
+        status = status_map.get(source_status, "unavailable")
+        component_status = {
+            "available": "unknown",
+            "degraded": "unknown",
+            "unavailable": "unavailable",
+            "disabled": "disabled",
+        }[status]
+        component = {
+            "status": component_status,
+            "available": component_status == "available",
+        }
+        return {
+            "status": status,
+            "structured": dict(component),
+            "semantic": dict(component),
+        }
+
+    def get_stats(self) -> dict[str, Any]:
+        health = self._health()
+        return {"status": health["status"], "total_items": 0, "health": health}
+
+    def get_health(self) -> dict[str, Any]:
+        return self._health()
+
+
 class _UnavailableLeaseProjection:
     """Prevent RuntimeIntrospector from falling back to web-local lease state."""
 
@@ -122,6 +159,7 @@ _runtime_introspector = RuntimeIntrospector(
     _IpcTaskProjection(),
     _UnavailableLeaseProjection(),
     _IpcMcpProjection(),
+    _IpcMemoryProjection(),
 )
 _self_knowledge_service = SelfKnowledgeService(
     runtime_introspector=_runtime_introspector,
@@ -1817,7 +1855,7 @@ async def get_memory_stats():
         return service.get_stats()
     except Exception as e:
         logger.error(f"Error fetching memory stats: {e}", exc_info=True)
-        return {"stats": {}}
+        return {"status": "error", "error": "Memory statistics unavailable.", "stats": {}}
 
 
 @app.get("/api/privacy/summary")
