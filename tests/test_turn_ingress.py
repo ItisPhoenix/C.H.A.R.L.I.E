@@ -65,6 +65,7 @@ def _load_voice_ingress(allocator: Callable[..., TurnRequest], dispatched: list[
         "_schedule_process": lambda _result, _loop: None,
         "_dispatch_or_queue": dispatch,
         "loop": None,
+        "voice_diagnostic_traces": {},
     }
     wrapper_source = (
         "def _wrapper():\n"
@@ -188,11 +189,16 @@ async def test_queue_and_dequeue_preserve_the_authoritative_request(monkeypatch:
         "logger": _NullLogger(),
         "processed": processed,
         "asyncio": asyncio,
+        "time": __import__("time"),
     }
     wrapper_source = (
         "def _wrapper():\n"
         "    turn_active = True\n"
         "    pending_turns = []\n"
+        "    pending_turn_times = {}\n"
+        "    voice_diagnostic_traces = {}\n"
+        "    active_turn_id = None\n"
+        "    active_task_id = None\n"
         "    brain = object()\n"
         "    voice = SimpleNamespace(is_speaking=SimpleNamespace(is_set=lambda: False))\n"
         "    async def _process(request, _brain, _voice):\n"
@@ -230,6 +236,7 @@ def test_process_accepts_only_the_existing_request_and_dequeues_it_unchanged() -
     assert "brain.chat_stream(" in process_source
     assert "task_id=task_id" in process_source
     assert "turn_id=request.turn_id" in process_source
+    assert "diagnostic_trace=trace" in process_source
     assert "next_request = pending_turns.pop(0)" in process_source
     assert "_dispatch_or_queue(next_request)" in process_source
     assert "turn_task_id" not in process_source

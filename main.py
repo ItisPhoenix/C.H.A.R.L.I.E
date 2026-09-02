@@ -1223,6 +1223,10 @@ async def main():
     # True while a chat turn's LLM/tool loop runs -- see _dispatch_or_queue.
     turn_active = False
     pending_turns: list[TurnRequest] = []
+    pending_turn_times: Dict[str, float] = {}
+    voice_diagnostic_traces: Dict[str, Any] = {}
+    active_turn_id: Optional[str] = None
+    active_task_id: Optional[str] = None
 
     try:
         store = SessionStore(config.session_db_path)
@@ -1669,7 +1673,7 @@ async def main():
         except Exception as exc:
             logger.debug(f"update_session_title_from_text skipped: {exc}")
 
-    def on_speech(text: str):
+    def on_speech(text: str, diagnostic_metadata=None):
         nonlocal current_web_session_id
         text = _normalize_app_list(text)
         logger.info(f"Speech detected: {text}")
@@ -1689,6 +1693,10 @@ async def main():
             session_id = current_web_session_id
         ensure_session_ready(session_id)
         request = _allocate_turn_request(text, session_id, "voice")
+        trace = diagnostic_metadata.get("trace") if isinstance(diagnostic_metadata, dict) else None
+        if trace is not None:
+            trace.bind(turn_id=request.turn_id, session_id=session_id)
+            voice_diagnostic_traces[request.turn_id] = trace
         _schedule_process(_dispatch_or_queue(request), loop)
 
     async def _dispatch_or_queue(request: TurnRequest):
@@ -1703,14 +1711,44 @@ async def main():
         nonlocal turn_active
         from charlie.core import get_active_voice_approval
 
+        trace = voice_diagnostic_traces.get(request.turn_id)
+        blocked_by_active_turn = turn_active and not voice.is_speaking.is_set() and not get_active_voice_approval()
+
         # A gated tool call inside the still-running turn is waiting on a
         # spoken yes/no -- that answer must reach _process() immediately
         # (it routes to resolve_tool_approval), never queued behind the
         # very turn it's meant to unblock.
-        if turn_active and not voice.is_speaking.is_set() and not get_active_voice_approval():
+        if blocked_by_active_turn:
             pending_turns.append(request)
+            pending_turn_times[request.turn_id] = time.monotonic()
+            if request.channel == "voice":
+                logger.info(
+                    "voice_turn_schedule | utterance_id=%s | turn_id=%s | session_id=%s "
+                    "| scheduling=queued | queue_depth=%s | blocked_by_active_turn=%s "
+                    "| active_turn_id=%s | active_task_id=%s",
+                    getattr(trace, "utterance_id", None),
+                    request.turn_id,
+                    request.session_id,
+                    len(pending_turns),
+                    blocked_by_active_turn,
+                    active_turn_id,
+                    active_task_id,
+                )
             logger.info(f"Queued utterance (a turn is already running tool calls): {request.input}")
             return
+        if request.channel == "voice":
+            logger.info(
+                "voice_turn_schedule | utterance_id=%s | turn_id=%s | session_id=%s "
+                "| scheduling=immediate | queue_depth=%s | blocked_by_active_turn=%s "
+                "| active_turn_id=%s | active_task_id=%s",
+                getattr(trace, "utterance_id", None),
+                request.turn_id,
+                request.session_id,
+                len(pending_turns),
+                blocked_by_active_turn,
+                active_turn_id,
+                active_task_id,
+            )
         await _process(request, brain, voice)
 
     def _cleanup_intent_decision(processor):
@@ -1728,10 +1766,44 @@ async def main():
 
     @_cleanup_intent_decision
     async def _process(request: TurnRequest, brain, voice):
-        nonlocal speech_echo_cooldown, last_emotion, turn_active
+        nonlocal speech_echo_cooldown, last_emotion, turn_active, active_turn_id, active_task_id
         text = request.input
         session_id = request.session_id
         platform = request.channel
+        trace = voice_diagnostic_traces.get(request.turn_id)
+        queued_at = pending_turn_times.pop(request.turn_id, None)
+        dispatch_timestamp = time.monotonic()
+        active_turn_id = request.turn_id
+        active_task_id = None
+        if trace is not None:
+            trace.bind(turn_id=request.turn_id, session_id=session_id)
+            trace.mark_once(
+                "turn_dispatch",
+                fields={
+                    "platform": platform,
+                    "queue_status": "queued" if queued_at is not None else "immediate",
+                    "queue_age_ms": (
+                        (dispatch_timestamp - queued_at) * 1000 if queued_at is not None else 0.0
+                    ),
+                    "pending_queue_depth": len(pending_turns),
+                },
+                timestamp=dispatch_timestamp,
+            )
+        set_diagnostic_context = getattr(voice, "set_diagnostic_context", None)
+        if callable(set_diagnostic_context):
+            set_diagnostic_context(trace)
+
+        def mark_response_complete(status: str = "completed") -> None:
+            if trace is not None:
+                trace.mark_once(
+                    "response_complete",
+                    fields={
+                        "status": status,
+                        "platform": platform,
+                        "completion_boundary": "response_done_or_early_return",
+                    },
+                    timestamp=time.monotonic(),
+                )
 
         def record_primary_decision(
             *,
@@ -1751,6 +1823,16 @@ async def main():
                     confidence=confidence,
                     rationale=rationale,
                 )
+            if trace is not None:
+                trace.mark_once(
+                    "intent_decision",
+                    fields={
+                        "intent": intent,
+                        "capabilities": capabilities,
+                        "routing_source": routing_source,
+                        "confidence": confidence,
+                    },
+                )
 
         if time.time() < speech_echo_cooldown:
             record_primary_decision(
@@ -1759,6 +1841,7 @@ async def main():
                 rationale="speech echo cooldown suppressed the incoming utterance",
             )
             logger.info(f"Echo suppressed: {text}")
+            mark_response_complete("suppressed_echo")
             return
 
         # A gated tool call (destructive shell command / sensitive file path)
@@ -1777,9 +1860,11 @@ async def main():
             answer = parse_yes_no(text)
             if answer is None:
                 voice.speak("Sorry, I didn't catch that. Say yes to continue or no to cancel.", last_emotion)
+                mark_response_complete()
                 return
             _resolve_tool_approval_and_notify(pending_approval_id, answer)
             voice.speak("Okay, running it." if answer else "Cancelled.", last_emotion)
+            mark_response_complete()
             return
 
         print(f"\rHeard: {text}", flush=True)
@@ -1809,6 +1894,7 @@ async def main():
                 # Echo detection: is this a subset of what Charlie is currently saying?
                 if voice.is_echo(text):
                     logger.info(f"Echo suppressed (during TTS): {text}")
+                    mark_response_complete("suppressed_echo")
                     return
                 # New content during TTS -- barge in (cancel current turn)
                 logger.info("Barge-in: New user input during TTS. Canceling.")
@@ -1836,6 +1922,7 @@ async def main():
                     response_str += f"- [{role}]: {truncated}\n"
             print(f"\n{response_str}", flush=True)
             voice.speak(response_str, last_emotion)
+            mark_response_complete()
             return
         # Route /memory-review command
         if text.strip().lower() in ("/memory-review", "!memory-review"):
@@ -1866,6 +1953,7 @@ async def main():
                             response_str += f"    ... +{len(preds) - 3} more\n"
             print(f"\n{response_str}", flush=True)
             voice.speak(response_str, last_emotion)
+            mark_response_complete()
             return
         panel_intent = match_surface_request(text)
         if panel_intent is not None:
@@ -1882,6 +1970,7 @@ async def main():
                 )
             )
             voice.speak(result.message, last_emotion)
+            mark_response_complete()
             return
 
         # Route conversation-only phrase to the normal HUD summon path.
@@ -1893,9 +1982,11 @@ async def main():
             )
             await _open_conversation_workspace()
             voice.speak("Here you go.", last_emotion)
+            mark_response_complete()
             return
 
         task_id = uuid.uuid4().hex
+        active_task_id = task_id
         capability_requirements: tuple[str, ...] = ()
         try:
             from charlie import router as task_router
@@ -2042,6 +2133,7 @@ async def main():
                 task_id=task_id,
                 turn_id=request.turn_id,
                 turn_request=request,
+                diagnostic_trace=trace,
             ):
                 if is_first_chunk:
                     print("\r" + " " * 30 + "\r", end="", flush=True)
@@ -2180,6 +2272,7 @@ async def main():
                         turn_id=request.turn_id,
                     ),
                 )
+            mark_response_complete()
         except Exception as exc:
             logger.error("Turn failed", exc_info=True)
             try:
@@ -2216,6 +2309,13 @@ async def main():
             raise
         finally:
             turn_active = False
+            if active_turn_id == request.turn_id:
+                active_turn_id = None
+                active_task_id = None
+            voice_diagnostic_traces.pop(request.turn_id, None)
+            clear_diagnostic_context = getattr(voice, "set_diagnostic_context", None)
+            if callable(clear_diagnostic_context):
+                clear_diagnostic_context(None)
             if pending_turns:
                 next_request = pending_turns.pop(0)
                 logger.info(f"Dequeuing pending turn: {next_request.input}")

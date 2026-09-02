@@ -5,6 +5,7 @@ phonemization. This is the single control point for prosody and pacing.
 """
 
 import asyncio
+import inspect
 import logging
 import multiprocessing as mp
 import os
@@ -23,6 +24,7 @@ from kokoro_onnx import Kokoro
 from charlie.asr_worker import asr_worker_process
 from charlie.core import strip_internal_reasoning
 from charlie.events import EventMeta, EventSource
+from charlie.voice_diagnostics import VoiceDiagnostics, VoiceDiagnosticTrace
 from charlie.wake_word import WakeWordDetector
 
 logger = logging.getLogger("charlie.voice")
@@ -105,12 +107,13 @@ class VoiceEngine:
     def __init__(
         self,
         config,
-        on_speech: Callable[[str], None],
+        on_speech: Callable[..., None],
         on_tts_start: Optional[Callable[[], None]] = None,
         on_tts_stop: Optional[Callable[[], None]] = None,
     ):
         self.config = config
         self.on_speech = on_speech
+        self._speech_callback_mode = self._resolve_speech_callback_mode(on_speech)
         self._on_tts_start = on_tts_start
         self._on_tts_stop = on_tts_stop
         self.is_speaking = threading.Event()
@@ -153,6 +156,14 @@ class VoiceEngine:
         self._ptt_active = False
         self._ptt_stop_requested = False
         self._ptt_chunks: list[np.ndarray] = []
+        self._ptt_trace: Optional[VoiceDiagnosticTrace] = None
+
+        # Voice diagnostics are a sidecar. They never write to session/memory
+        # stores and remain inactive unless explicitly enabled at runtime.
+        self.voice_diagnostics = VoiceDiagnostics.from_env()
+        self._utterance_traces: dict[str, VoiceDiagnosticTrace] = {}
+        self._diagnostic_context_lock = threading.Lock()
+        self._diagnostic_context: Optional[VoiceDiagnosticTrace] = None
 
         # ASR state
         self.asr_input_queue: mp.Queue = mp.Queue(maxsize=8)
@@ -175,6 +186,34 @@ class VoiceEngine:
         self._wake_word_active: bool = False  # True = in active session after wake word
         self._last_activity_time: float = 0.0
         self._on_wake_word: Optional[Callable[[], None]] = None
+
+    @staticmethod
+    def _resolve_speech_callback_mode(callback: Callable[..., None]) -> str:
+        """Select compatibility-preserving metadata delivery for on_speech."""
+
+        try:
+            signature = inspect.signature(callback)
+        except (TypeError, ValueError):
+            return "text"
+        try:
+            signature.bind("text", {})
+            return "positional"
+        except TypeError:
+            try:
+                signature.bind("text", diagnostic_metadata={})
+                return "keyword"
+            except TypeError:
+                return "text"
+
+    def set_diagnostic_context(self, trace: Optional[VoiceDiagnosticTrace]) -> None:
+        """Associate future TTS enqueues with the currently active voice turn."""
+
+        with self._diagnostic_context_lock:
+            self._diagnostic_context = trace
+
+    def _current_diagnostic_context(self) -> Optional[VoiceDiagnosticTrace]:
+        with self._diagnostic_context_lock:
+            return self._diagnostic_context
 
     def set_widget_callback(self, cb: Callable[[str], None]) -> None:
         """Register callback for mode changes (listening/speaking/idle)."""
@@ -310,6 +349,7 @@ class VoiceEngine:
 
     def start(self):
         logger.info("Starting voice engine loops")
+        self.voice_diagnostics.prime_gpu_async()
         self.input_thread = threading.Thread(
             target=self._run, daemon=True, name="VoiceInputLoop"
         )
@@ -443,6 +483,12 @@ class VoiceEngine:
             self._ptt_chunks.clear()
             self._ptt_stop_requested = False
             self._ptt_active = True
+            self._ptt_trace = self.voice_diagnostics.new_trace()
+            self._ptt_trace.mark_once(
+                "voice_capture_onset",
+                fields={"capture_mode": "ptt", "onset_rms": None},
+                include_resource=self.voice_diagnostics.enabled,
+            )
 
     def stop_ptt(self) -> None:
         """Stop PTT; the capture loop submits the collected audio to existing ASR."""
@@ -456,6 +502,7 @@ class VoiceEngine:
             self._ptt_active = False
             self._ptt_stop_requested = False
             self._ptt_chunks.clear()
+            self._ptt_trace = None
 
     # -----------------------------------------------------------------------
     # Text humanization -- the single control point for TTS prosody
@@ -615,14 +662,28 @@ class VoiceEngine:
         if len(text) > _LONG_SENTENCE_CHARS:
             self.stop_tts_event.clear()
             chunks = _SENTENCE_SPLIT_RE.split(text)
+            trace = self._current_diagnostic_context()
+            if trace is not None:
+                trace.mark_once(
+                    "tts_enqueue",
+                    fields={"text_length": len(text), "emotional_state": emotional_state},
+                )
             for chunk in chunks:
                 chunk = chunk.strip()
                 if chunk and len(chunk) >= _MIN_TEXT_LEN:
-                    self.tts_queue.put((chunk, emotional_state))
+                    item = (chunk, emotional_state, trace) if trace is not None else (chunk, emotional_state)
+                    self.tts_queue.put(item)
             return
 
         self.stop_tts_event.clear()
-        self.tts_queue.put((text, emotional_state))
+        trace = self._current_diagnostic_context()
+        if trace is not None:
+            trace.mark_once(
+                "tts_enqueue",
+                fields={"text_length": len(text), "emotional_state": emotional_state},
+            )
+        item = (text, emotional_state, trace) if trace is not None else (text, emotional_state)
+        self.tts_queue.put(item)
 
     # -----------------------------------------------------------------------
     # TTS synthesis
@@ -693,7 +754,8 @@ class VoiceEngine:
                     self.stop_tts_event.clear()
 
                 item = self.tts_queue.get(timeout=0.01)
-                text, emotional_state = item
+                trace = item[2] if isinstance(item, tuple) and len(item) >= 3 else None
+                text, emotional_state = item[:2]
 
                 speed = 1.0
                 if emotional_state == "energetic":
@@ -701,13 +763,19 @@ class VoiceEngine:
                 elif emotional_state in ("sad", "calm"):
                     speed = 0.95
 
-                asyncio.run(self._tts_stream_and_queue(text, speed))
+                asyncio.run(self._tts_stream_and_queue(text, speed, trace=trace))
             except queue.Empty:
                 continue
             except Exception as e:
                 logger.error(f"tts_worker_error | {e}")
 
-    async def _tts_stream_and_queue(self, text: str, speed: float):
+    async def _tts_stream_and_queue(
+        self,
+        text: str,
+        speed: float,
+        *,
+        trace: Optional[VoiceDiagnosticTrace] = None,
+    ):
         """Consume _synth_stream and push each chunk to playback_queue.
 
         A _TTS_RUN_END sentinel is pushed after all chunks of a single TTS
@@ -715,12 +783,27 @@ class VoiceEngine:
         span multiple chunks) is fully drained, rather than clearing
         is_speaking on the momentary gaps between chunks.
         """
-        async for samples, sr in self._synth_stream(text, speed):
-            if self.stop_tts_event.is_set():
-                break
-            self.playback_queue.put((samples, sr, []))
-        if not self.stop_tts_event.is_set():
-            self.playback_queue.put(_TTS_RUN_END)
+        if trace is not None:
+            trace.mark_once(
+                "tts_synthesis_start",
+                fields={"text_length": len(text), "speed": speed},
+            )
+        synthesis_completed = False
+        try:
+            async for samples, sr in self._synth_stream(text, speed):
+                if self.stop_tts_event.is_set():
+                    break
+                item = (samples, sr, [], trace) if trace is not None else (samples, sr, [])
+                self.playback_queue.put(item)
+            synthesis_completed = not self.stop_tts_event.is_set()
+            if synthesis_completed:
+                self.playback_queue.put(_TTS_RUN_END)
+        finally:
+            if trace is not None and synthesis_completed:
+                trace.mark_once(
+                    "tts_synthesis_complete",
+                    fields={"text_length": len(text), "speed": speed},
+                )
 
     def _playback_worker(self):
         """Dedicated playback thread."""
@@ -764,7 +847,8 @@ class VoiceEngine:
                         tts_started_fired = False
                     continue
 
-                samples, sample_rate, mouth_values = item
+                trace = item[3] if isinstance(item, tuple) and len(item) >= 4 else None
+                samples, sample_rate, mouth_values = item[:3]
 
                 # Chime: gain already applied by caller, skip TTS state.
                 if mouth_values is _CHIME_ITEM:
@@ -793,6 +877,14 @@ class VoiceEngine:
                             pass
 
                 sd.play(samples, samplerate=sample_rate)
+                if trace is not None:
+                    trace.mark_once(
+                        "playback_first_sample",
+                        fields={
+                            "sample_rate": sample_rate,
+                            "sample_count": len(samples),
+                        },
+                    )
                 while sd.get_stream() and sd.get_stream().active:
                     if self.stop_tts_event.is_set():
                         sd.stop()
@@ -1103,11 +1195,104 @@ class VoiceEngine:
                             stream.close()
                         except Exception:
                             pass
-                    errors.append(f"{candidate_index if candidate_index is not None else 'default'}: {self._safe_audio_error(error)}")
+                    errors.append(
+                        f"{candidate_index if candidate_index is not None else 'default'}: "
+                        f"{self._safe_audio_error(error)}"
+                    )
                     if attempt == 0:
                         time.sleep(0.25)
         detail = "; ".join(errors[-4:]) or "no input devices available"
         raise RuntimeError(f"all microphone open attempts failed ({detail})")
+
+    @staticmethod
+    def _queue_depth(audio_queue) -> Optional[int]:
+        try:
+            return int(audio_queue.qsize())
+        except (AttributeError, NotImplementedError, OSError):
+            return None
+
+    def _submit_asr(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        trace: VoiceDiagnosticTrace,
+        capture_fields: dict,
+    ) -> None:
+        """Submit one phrase while recording queue/backpressure evidence."""
+
+        audio_bytes = np.asarray(audio, dtype=np.float32).reshape(-1).tobytes()
+        enqueue_started = time.monotonic()
+        depth_before = self._queue_depth(self.asr_input_queue)
+        dropped_utterance_id = None
+        outcome = "enqueued"
+        try:
+            self._utterance_traces[trace.utterance_id] = trace
+            self.asr_input_queue.put_nowait(
+                (
+                    audio_bytes,
+                    sample_rate,
+                    {
+                        "utterance_id": trace.utterance_id,
+                        "diagnostic_enabled": self.voice_diagnostics.enabled,
+                        "voice_capture_onset_monotonic": trace.onset_timestamp(),
+                        "asr_enqueue_monotonic": enqueue_started,
+                        "capture": dict(capture_fields),
+                    },
+                )
+            )
+        except queue.Full:
+            outcome = "drop_oldest"
+            try:
+                dropped_payload = self.asr_input_queue.get_nowait()
+                if isinstance(dropped_payload, tuple) and len(dropped_payload) >= 3:
+                    dropped_flags = dropped_payload[2]
+                    if isinstance(dropped_flags, dict):
+                        dropped_utterance_id = dropped_flags.get("utterance_id")
+            except queue.Empty:
+                pass
+            if dropped_utterance_id:
+                dropped_trace = self._utterance_traces.pop(dropped_utterance_id, None)
+                if dropped_trace is not None:
+                    dropped_trace.mark(
+                        "asr_input_dropped",
+                        fields={"reason": "drop_oldest", "replaced_by": trace.utterance_id},
+                    )
+            try:
+                self.asr_input_queue.put_nowait(
+                    (
+                        audio_bytes,
+                        sample_rate,
+                        {
+                            "utterance_id": trace.utterance_id,
+                            "diagnostic_enabled": self.voice_diagnostics.enabled,
+                            "voice_capture_onset_monotonic": trace.onset_timestamp(),
+                            "asr_enqueue_monotonic": enqueue_started,
+                            "capture": dict(capture_fields),
+                        },
+                    )
+                )
+            except queue.Full:
+                outcome = "drop_new"
+                self._utterance_traces.pop(trace.utterance_id, None)
+
+        enqueue_finished = time.monotonic()
+        depth_after = self._queue_depth(self.asr_input_queue)
+        trace.mark_once(
+            "asr_enqueue",
+            fields={
+                **capture_fields,
+                "queue_depth_before": depth_before,
+                "queue_depth_after": depth_after,
+                "enqueue_wait_ms": (enqueue_finished - enqueue_started) * 1000,
+                "enqueue_outcome": outcome,
+                "dropped_utterance_id": dropped_utterance_id,
+            },
+            timestamp=enqueue_finished,
+            include_resource=self.voice_diagnostics.enabled,
+            asr_worker_pid=self.asr_process.pid if self.asr_process is not None else None,
+        )
+        if outcome != "drop_new":
+            self.voice_diagnostics.capture_audio(trace, audio, sample_rate)
 
     def _run(self):
         samplerate = 16000
@@ -1267,6 +1452,11 @@ class VoiceEngine:
         # ~64ms keyboard click transient can't trigger it -- real speech sustains across frames.
         _onset_debounce_frames = 2
         _consecutive_loud_frames = 0
+        speech_trace: Optional[VoiceDiagnosticTrace] = None
+        speech_onset_rms: Optional[float] = None
+        speech_start_monotonic: Optional[float] = None
+        last_speech_monotonic: Optional[float] = None
+        speech_pre_roll_samples = 0
 
         # Wake word sliding buffer (~2s at 16kHz for inference)
         _ww_buffer_samples = samplerate * 2  # 32000 samples = 2s
@@ -1285,22 +1475,68 @@ class VoiceEngine:
             with self._ptt_lock:
                 ptt_active = self._ptt_active
                 ptt_stop = self._ptt_stop_requested
+                ptt_trace = self._ptt_trace
                 if ptt_active:
                     self._ptt_chunks.append(data.copy())
                 ptt_audio = np.concatenate(self._ptt_chunks) if ptt_stop and self._ptt_chunks else None
                 if ptt_stop:
                     self._ptt_chunks.clear()
                     self._ptt_stop_requested = False
+                    self._ptt_trace = None
             if ptt_active or ptt_stop:
                 # Do not carry a VAD phrase across a PTT turn boundary.
                 is_speech = False
                 speech_buffer = []
                 _consecutive_loud_frames = 0
                 if ptt_audio is not None and len(ptt_audio) >= block_size:
-                    try:
-                        self.asr_input_queue.put_nowait((ptt_audio.tobytes(), samplerate))
-                    except queue.Full:
-                        logger.debug("ptt_asr_queue_full")
+                    if ptt_trace is None:
+                        ptt_trace = self.voice_diagnostics.new_trace()
+                        ptt_trace.mark_once(
+                            "voice_capture_onset",
+                            fields={"capture_mode": "ptt", "onset_rms": None},
+                        )
+                    ptt_trace.mark_once(
+                        "voice_capture_endpoint",
+                        fields={
+                            "capture_mode": "ptt",
+                            "configured_sample_rate": samplerate,
+                            "submitted_sample_count": int(len(ptt_audio)),
+                            "submitted_duration_ms": len(ptt_audio) / samplerate * 1000,
+                            "vad_measured_speech_duration_ms": None,
+                            "effective_pre_roll_ms": 0.0,
+                            "speech_onset_rms": None,
+                            "vad_threshold": _vad_threshold,
+                            "vad_min_speech_duration_ms": self.config.vad_min_speech_duration_ms,
+                            "vad_min_silence_duration_ms": self.config.vad_min_silence_duration_ms,
+                            "vad_speech_pad_ms": self.config.vad_speech_pad_ms,
+                            "endpoint_silence_duration_ms": None,
+                            "phrase_min_duration_ms": _phrase_min_duration * 1000,
+                            "phrase_max_duration_s": _phrase_max_duration,
+                        },
+                        include_resource=self.voice_diagnostics.enabled,
+                        asr_worker_pid=self.asr_process.pid if self.asr_process is not None else None,
+                    )
+                    self._submit_asr(
+                        ptt_audio,
+                        samplerate,
+                        ptt_trace,
+                        {
+                            "capture_mode": "ptt",
+                            "configured_sample_rate": samplerate,
+                            "submitted_sample_count": int(len(ptt_audio)),
+                            "submitted_duration_ms": len(ptt_audio) / samplerate * 1000,
+                            "vad_measured_speech_duration_ms": None,
+                            "effective_pre_roll_ms": 0.0,
+                            "speech_onset_rms": None,
+                            "vad_threshold": _vad_threshold,
+                            "vad_min_speech_duration_ms": self.config.vad_min_speech_duration_ms,
+                            "vad_min_silence_duration_ms": self.config.vad_min_silence_duration_ms,
+                            "vad_speech_pad_ms": self.config.vad_speech_pad_ms,
+                            "endpoint_silence_duration_ms": None,
+                            "phrase_min_duration_ms": _phrase_min_duration * 1000,
+                            "phrase_max_duration_s": _phrase_max_duration,
+                        },
+                    )
                 continue
 
             # -- Wake word gating --
@@ -1363,9 +1599,32 @@ class VoiceEngine:
                     _consecutive_loud_frames = 0
                     speech_start_time = time.time()
                     last_speech_time = time.time()
+                    speech_start_monotonic = time.monotonic()
+                    last_speech_monotonic = speech_start_monotonic
+                    speech_onset_rms = rms
+                    speech_trace = self.voice_diagnostics.new_trace()
                     logger.info(
                         f"vad_speech_onset | rms={rms:.4f} threshold={_vad_threshold}"
                     )
+                    speech_trace.mark_once(
+                        "voice_capture_onset",
+                        fields={
+                            "capture_mode": "vad",
+                            "configured_sample_rate": samplerate,
+                            "speech_onset_rms": rms,
+                            "vad_threshold": _vad_threshold,
+                            "onset_debounce_frames": _onset_debounce_frames,
+                            "pre_roll_configured_ms": 800.0,
+                            "pre_roll_buffer_samples": len(_pre_roll_buffer) * block_size,
+                            "effective_pre_roll_ms": len(_pre_roll_buffer) * block_size / samplerate * 1000,
+                            "vad_min_speech_duration_ms": self.config.vad_min_speech_duration_ms,
+                            "vad_min_silence_duration_ms": self.config.vad_min_silence_duration_ms,
+                            "vad_speech_pad_ms": self.config.vad_speech_pad_ms,
+                        },
+                        include_resource=self.voice_diagnostics.enabled,
+                        asr_worker_pid=self.asr_process.pid if self.asr_process is not None else None,
+                    )
+                    speech_pre_roll_samples = len(_pre_roll_buffer) * block_size
                     self._emit_vad_start()
                     # Prepend pre-roll buffer to prevent clipping first words
                     speech_buffer = list(_pre_roll_buffer)
@@ -1378,6 +1637,7 @@ class VoiceEngine:
 
             if rms > _vad_threshold:
                 last_speech_time = now
+                last_speech_monotonic = time.monotonic()
 
             duration = now - speech_start_time
             silence_duration = now - last_speech_time
@@ -1396,30 +1656,58 @@ class VoiceEngine:
                 audio = np.concatenate(speech_buffer)
                 speech_buffer = []
                 duration_ms = duration * 1000
+                endpoint_monotonic = time.monotonic()
                 logger.info(
                     f"vad_speech_offset | duration_ms={duration_ms:.0f} samples={len(audio)}"
                 )
-
-                # Send to ASR (must be tuple: bytes, sample_rate). Use
-                # put_nowait with drop-oldest backpressure so the capture
-                # thread never blocks on a full ASR queue.
-                try:
-                    self.asr_input_queue.put_nowait((audio.tobytes(), samplerate))
-                except queue.Full:
-                    try:
-                        self.asr_input_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    try:
-                        self.asr_input_queue.put_nowait((audio.tobytes(), samplerate))
-                    except queue.Full:
-                        pass  # drop oldest phrase on overflow
+                if speech_trace is not None:
+                    capture_fields = {
+                        "capture_mode": "vad",
+                        "configured_sample_rate": samplerate,
+                        "submitted_sample_count": int(len(audio)),
+                        "submitted_duration_ms": len(audio) / samplerate * 1000,
+                        "vad_measured_speech_duration_ms": (
+                            (endpoint_monotonic - speech_start_monotonic) * 1000
+                            if speech_start_monotonic is not None
+                            else duration_ms
+                        ),
+                        "effective_pre_roll_ms": speech_pre_roll_samples / samplerate * 1000,
+                        "pre_roll_configured_ms": 800.0,
+                        "pre_roll_buffer_samples": speech_pre_roll_samples,
+                        "speech_onset_rms": speech_onset_rms,
+                        "vad_threshold": _vad_threshold,
+                        "vad_min_speech_duration_ms": self.config.vad_min_speech_duration_ms,
+                        "vad_min_silence_duration_ms": self.config.vad_min_silence_duration_ms,
+                        "vad_speech_pad_ms": self.config.vad_speech_pad_ms,
+                        "endpoint_silence_duration_ms": (
+                            (endpoint_monotonic - last_speech_monotonic) * 1000
+                            if last_speech_monotonic is not None
+                            else silence_duration * 1000
+                        ),
+                        "phrase_min_duration_ms": _phrase_min_duration * 1000,
+                        "phrase_max_duration_s": _phrase_max_duration,
+                        "onset_frame_duplicated_in_buffer": True,
+                    }
+                    speech_trace.mark_once(
+                        "voice_capture_endpoint",
+                        fields=capture_fields,
+                        timestamp=endpoint_monotonic,
+                        include_resource=self.voice_diagnostics.enabled,
+                        asr_worker_pid=self.asr_process.pid if self.asr_process is not None else None,
+                    )
+                    self._submit_asr(audio, samplerate, speech_trace, capture_fields)
+                speech_trace = None
+                speech_onset_rms = None
+                speech_start_monotonic = None
+                last_speech_monotonic = None
+                speech_pre_roll_samples = 0
 
     def _asr_poller_loop(self):
         """Poll ASR results and forward to on_speech callback."""
         while not self.stop_event.is_set():
             try:
                 result = self.asr_output_queue.get(timeout=0.1)
+                receive_timestamp = time.monotonic()
                 if isinstance(result, dict):
                     if result.get("type") == "ready":
                         self._set_asr_readiness("ready")
@@ -1427,18 +1715,62 @@ class VoiceEngine:
                     elif result.get("type") == "failed":
                         self._set_asr_readiness("failed", str(result.get("error") or "worker initialization failed"))
                     continue
-                if result and self.on_speech:
-                    # Worker sends (text, confidence, flags_dict) tuples
-                    text = (
-                        result[0].strip()
-                        if isinstance(result, tuple)
-                        else str(result).strip()
+                flags = result[2] if isinstance(result, tuple) and len(result) >= 3 else {}
+                if not isinstance(flags, dict):
+                    flags = {}
+                utterance_id = flags.get("utterance_id")
+                trace = self._utterance_traces.pop(utterance_id, None) if utterance_id else None
+                if trace is not None:
+                    trace.import_stage_events(flags.get("diagnostic_stages"))
+                    complete_timestamp = flags.get("asr_complete_monotonic")
+                    try:
+                        result_age_ms = (receive_timestamp - float(complete_timestamp)) * 1000
+                    except (TypeError, ValueError):
+                        result_age_ms = None
+                    trace.mark(
+                        "asr_poller_receive",
+                        fields={
+                            "result_age_ms": result_age_ms,
+                            "output_queue_depth": self._queue_depth(self.asr_output_queue),
+                            "worker_pid": self.asr_process.pid if self.asr_process is not None else None,
+                            "confidence_semantics": flags.get("confidence_semantics"),
+                        },
+                        timestamp=receive_timestamp,
+                        include_resource=self.voice_diagnostics.enabled,
+                        asr_worker_pid=self.asr_process.pid if self.asr_process is not None else None,
                     )
+                if result and self.on_speech:
+                    # Worker sends (text, legacy_language_probability, flags_dict) tuples.
+                    text = result[0].strip() if isinstance(result, tuple) else str(result).strip()
                     if text:
                         # Reset wake word activity timer on user speech
                         if self._wake_word_detector is not None:
                             self._last_activity_time = time.time()
-                        self.on_speech(text)
+                        if trace is not None:
+                            trace.mark_once(
+                                "speech_callback",
+                                fields={
+                                    "transcript_length": len(text),
+                                    "language_probability": flags.get("language_probability"),
+                                    "confidence_semantics": flags.get("confidence_semantics"),
+                                },
+                                timestamp=time.monotonic(),
+                            )
+                        metadata = {
+                            "utterance_id": utterance_id,
+                            "trace": trace,
+                            "asr_quality": flags.get("asr_quality", {}),
+                            "audio": flags.get("capture", {}),
+                            "confidence": result[1] if isinstance(result, tuple) and len(result) >= 2 else None,
+                            "language_probability": flags.get("language_probability"),
+                            "confidence_semantics": flags.get("confidence_semantics"),
+                        }
+                        if trace is not None and self._speech_callback_mode == "positional":
+                            self.on_speech(text, metadata)
+                        elif trace is not None and self._speech_callback_mode == "keyword":
+                            self.on_speech(text, diagnostic_metadata=metadata)
+                        else:
+                            self.on_speech(text)
             except queue.Empty:
                 if self.asr_process is not None and not self.asr_process.is_alive() and not self.asr_ready:
                     self._set_asr_readiness("failed", "ASR worker exited before readiness")

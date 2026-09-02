@@ -4,7 +4,10 @@ Mocks sounddevice, Kokoro, and multiprocessing to avoid audio hardware.
 Focuses on the text humanization pipeline, RMS calculation, and init logic.
 """
 
+import queue
+import sys
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -12,6 +15,7 @@ import pytest
 
 import charlie.voice
 from charlie.voice import VoiceEngine
+from charlie.voice_diagnostics import VoiceDiagnostics
 
 
 class FakeConfig:
@@ -228,6 +232,17 @@ class TestVoiceEngineInit:
         engine = self._make_engine()
         assert engine._wake_word_detector is None
 
+    def test_ptt_state_uses_existing_capture_path(self):
+        engine = self._make_engine()
+        engine.start_ptt()
+        assert engine._ptt_active is True
+        assert engine._ptt_trace is not None
+        engine.stop_ptt()
+        assert engine._ptt_active is False
+        assert engine._ptt_stop_requested is True
+        engine.cancel_ptt()
+        assert engine._ptt_trace is None
+
     def test_stop_tts_sets_event(self):
         engine = self._make_engine()
         assert not engine.stop_tts_event.is_set()
@@ -322,6 +337,198 @@ class TestVoiceEngineInit:
     def test_rms_static_method(self):
         samples = np.zeros(100, dtype=np.float32)
         assert VoiceEngine._rms(samples) == 0.0
+
+    def test_asr_poller_preserves_utterance_id_and_sidecar_trace(self):
+        received = []
+
+        def on_speech(text, diagnostic_metadata=None):
+            received.append((text, diagnostic_metadata))
+            engine.stop_event.set()
+
+        engine = self._make_engine()
+        engine.on_speech = on_speech
+        engine._speech_callback_mode = "keyword"
+        engine.asr_output_queue = queue.Queue()
+        trace = engine.voice_diagnostics.new_trace("utterance-test")
+        trace.mark_once("voice_capture_onset", timestamp=10.0)
+        engine._utterance_traces[trace.utterance_id] = trace
+        engine.asr_output_queue.put(
+            (
+                " hello",
+                0.88,
+                {
+                    "utterance_id": trace.utterance_id,
+                    "language_probability": 0.88,
+                    "confidence_semantics": "language_probability",
+                    "asr_quality": {"segment_count": 1},
+                    "asr_complete_monotonic": time.monotonic(),
+                    "diagnostic_stages": [],
+                },
+            )
+        )
+
+        engine._asr_poller_loop()
+
+        assert received[0][0] == "hello"
+        assert received[0][1]["utterance_id"] == "utterance-test"
+        assert received[0][1]["trace"] is trace
+        assert received[0][1]["confidence_semantics"] == "language_probability"
+
+    def test_asr_enqueue_keeps_legacy_payload_prefix_and_adds_diagnostics(self):
+        engine = self._make_engine()
+        engine.asr_input_queue = queue.Queue(maxsize=8)
+        trace = engine.voice_diagnostics.new_trace("utterance-enqueue")
+        trace.mark_once("voice_capture_onset", timestamp=10.0)
+        audio = np.zeros(32, dtype=np.float32)
+
+        engine._submit_asr(
+            audio,
+            16000,
+            trace,
+            {
+                "capture_mode": "ptt",
+                "submitted_sample_count": len(audio),
+                "submitted_duration_ms": 2.0,
+            },
+        )
+
+        payload = engine.asr_input_queue.get_nowait()
+        assert payload[:2] == (audio.tobytes(), 16000)
+        assert payload[2]["utterance_id"] == "utterance-enqueue"
+        assert payload[2]["capture"]["capture_mode"] == "ptt"
+
+    def test_asr_queue_drop_oldest_semantics_remain_observable(self):
+        engine = self._make_engine()
+        engine.asr_input_queue = queue.Queue(maxsize=1)
+        first = engine.voice_diagnostics.new_trace("utterance-first")
+        first.mark_once("voice_capture_onset", timestamp=10.0)
+        second = engine.voice_diagnostics.new_trace("utterance-second")
+        second.mark_once("voice_capture_onset", timestamp=20.0)
+        fields = {"capture_mode": "vad", "submitted_sample_count": 8}
+
+        engine._submit_asr(np.zeros(8, dtype=np.float32), 16000, first, fields)
+        engine._submit_asr(np.ones(8, dtype=np.float32), 16000, second, fields)
+
+        payload = engine.asr_input_queue.get_nowait()
+        assert payload[2]["utterance_id"] == "utterance-second"
+        assert first.events()[-1]["stage"] == "asr_input_dropped"
+        assert first.events()[-1]["fields"]["reason"] == "drop_oldest"
+
+    @pytest.mark.asyncio
+    async def test_tts_and_playback_keep_the_same_sidecar_trace(self):
+        engine = self._make_engine()
+        trace = engine.voice_diagnostics.new_trace("utterance-tts")
+        engine.set_diagnostic_context(trace)
+        engine.speak("Hello there")
+        queued = engine.tts_queue.get_nowait()
+        assert queued[2] is trace
+        assert trace.events()[-1]["stage"] == "tts_enqueue"
+
+        async def fake_synth(_text, _speed):
+            yield np.ones(16, dtype=np.float32), 16000
+
+        engine._synth_stream = fake_synth
+        await engine._tts_stream_and_queue("Hello there", 1.0, trace=trace)
+        playback = engine.playback_queue.get_nowait()
+        assert playback[3] is trace
+        engine.playback_queue.put(playback)
+        assert [event["stage"] for event in trace.events()] == [
+            "tts_enqueue",
+            "tts_synthesis_start",
+            "tts_synthesis_complete",
+        ]
+
+        with patch("charlie.voice.sd") as mock_sd:
+            mock_sd.get_stream.side_effect = lambda: (engine.stop_event.set() or None)
+            engine._playback_worker()
+
+        assert trace.events()[-1]["stage"] == "playback_first_sample"
+        assert engine.stop_event.is_set()
+
+
+def test_diagnostic_trace_uses_monotonic_stage_deltas():
+    diagnostics = VoiceDiagnostics(enabled=True, wav_enabled=False)
+    trace = diagnostics.new_trace("utterance-timing")
+    trace.mark("voice_capture_onset", timestamp=100.0)
+    trace.mark("voice_capture_endpoint", timestamp=100.25)
+    trace.mark("asr_enqueue", timestamp=100.30)
+
+    events = trace.events()
+    assert [event["stage"] for event in events] == [
+        "voice_capture_onset",
+        "voice_capture_endpoint",
+        "asr_enqueue",
+    ]
+    assert events[1]["delta_from_previous_stage_ms"] == pytest.approx(250.0)
+    assert events[2]["delta_from_onset_ms"] == pytest.approx(300.0)
+    assert all("monotonic_timestamp" in event for event in events)
+
+
+def test_diagnostic_wav_capture_defaults_off(tmp_path, monkeypatch):
+    monkeypatch.delenv("CHARLIE_VOICE_DIAGNOSTICS", raising=False)
+    monkeypatch.delenv("CHARLIE_VOICE_DIAGNOSTIC_WAV", raising=False)
+    diagnostics = VoiceDiagnostics.from_env()
+    trace = diagnostics.new_trace("utterance-off")
+
+    assert diagnostics.enabled is False
+    assert diagnostics.wav_enabled is False
+    assert diagnostics.capture_audio(trace, np.ones(8, dtype=np.float32), 16000) is None
+    assert list(Path(tmp_path).glob("*.wav")) == []
+
+
+def test_diagnostic_wav_preserves_float32_buffer_and_uses_id_only_filename(tmp_path):
+    diagnostics = VoiceDiagnostics(
+        enabled=True,
+        wav_enabled=True,
+        directory=tmp_path,
+        max_wav_files=2,
+    )
+    trace = diagnostics.new_trace("utterance-wav")
+    samples = np.array([0.0, -0.25, 0.5], dtype=np.float32)
+
+    path = diagnostics.capture_audio(trace, samples, 16000)
+
+    assert path is not None
+    output = Path(path)
+    assert output.name.startswith("utterance-utterance-wav-")
+    assert "hello" not in output.name
+    assert output.read_bytes()[-samples.nbytes:] == np.ascontiguousarray(samples.astype("<f4")).tobytes()
+
+
+def test_resource_telemetry_failure_is_nonfatal(monkeypatch):
+    class FailingPsutil:
+        Error = RuntimeError
+
+        @staticmethod
+        def Process(_pid):
+            raise OSError("process unavailable")
+
+        @staticmethod
+        def virtual_memory():
+            raise OSError("memory unavailable")
+
+        @staticmethod
+        def cpu_percent(*_args, **_kwargs):
+            raise OSError("cpu unavailable")
+
+        @staticmethod
+        def process_iter(*_args, **_kwargs):
+            raise OSError("process list unavailable")
+
+    monkeypatch.setitem(sys.modules, "psutil", FailingPsutil())
+    monkeypatch.setattr(VoiceDiagnostics, "_read_gpu_snapshot", staticmethod(lambda: {"gpu_metrics": "unavailable"}))
+
+    snapshot = VoiceDiagnostics(enabled=True, wav_enabled=False).resource_snapshot(asr_worker_pid=1234)
+
+    assert snapshot["resource_telemetry"] == "degraded"
+    assert snapshot["gpu_metrics"] == "unavailable"
+    assert "resource_telemetry_error" in snapshot
+
+
+def test_voice_diagnostics_has_no_memory_or_session_store_writer():
+    source = Path("charlie/voice_diagnostics.py").read_text(encoding="utf-8")
+    assert "SessionStore" not in source
+    assert "MemoryStore" not in source
 
 
 # ---------------------------------------------------------------------------

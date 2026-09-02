@@ -1959,13 +1959,24 @@ class Brain:
         self,
         payload: Dict[str, Any],
         generation: int,
+        diagnostic_trace: Optional[Any] = None,
     ) -> tuple:
         """Stream a chat completion. Returns (accumulated_text, tool_calls_list)."""
         try:
             async with self.client.stream("POST", "chat/completions", json=payload) as response:
                 response.raise_for_status()
                 accumulated, tc_by_index, cancelled = await parse_sse_stream(
-                    response, generation, lambda: self._chat_generation
+                    response,
+                    generation,
+                    lambda: self._chat_generation,
+                    on_content=(
+                        lambda _content: diagnostic_trace.mark_once(
+                            "first_llm_token",
+                            fields={"route": "primary", "token_length": len(_content)},
+                        )
+                        if diagnostic_trace is not None
+                        else None
+                    ),
                 )
         except httpx.TransportError:
             # No response ever arrived, so the client's "response" event hook never fires -- record it here.
@@ -2024,6 +2035,7 @@ class Brain:
         payload: Dict[str, Any],
         generation: int,
         state: FollowupStreamState,
+        diagnostic_trace: Optional[Any] = None,
     ) -> AsyncGenerator[str, None]:
         """Run one tool-followup completion attempt against `client`.
 
@@ -2036,16 +2048,65 @@ class Brain:
         """
         payload = dict(payload, model=model)
         stream_filter = TextStreamFilter()
-        async with client.stream("POST", "chat/completions", json=payload) as response:
-            response.raise_for_status()
-            async for content in stream_followup_content(response, generation, lambda: self._chat_generation, state):
-                filtered = stream_filter.push(content)
+        is_vision_request = _payload_is_vision(payload)
+        if is_vision_request and diagnostic_trace is not None:
+            diagnostic_trace.mark(
+                "vision_request_start",
+                fields={"model": model, "route": "vision"},
+                include_resource=True,
+            )
+        try:
+            async with client.stream("POST", "chat/completions", json=payload) as response:
+                if is_vision_request and diagnostic_trace is not None:
+                    diagnostic_trace.mark(
+                        "vision_first_response_or_headers",
+                        fields={"status_code": getattr(response, "status_code", None)},
+                        include_resource=True,
+                    )
+                response.raise_for_status()
+                async for content in stream_followup_content(
+                    response,
+                    generation,
+                    lambda: self._chat_generation,
+                    state,
+                ):
+                    if diagnostic_trace is not None:
+                        diagnostic_trace.mark_once(
+                            "first_llm_token",
+                            fields={
+                                "route": "vision" if is_vision_request else "followup",
+                                "token_length": len(content),
+                            },
+                        )
+                    filtered = stream_filter.push(content)
+                    if filtered:
+                        yield filtered
+            if not state.cancelled:
+                filtered = stream_filter.flush()
                 if filtered:
                     yield filtered
-        if not state.cancelled:
-            filtered = stream_filter.flush()
-            if filtered:
-                yield filtered
+            if is_vision_request and diagnostic_trace is not None:
+                diagnostic_trace.mark(
+                    "vision_complete",
+                    fields={"status": "cancelled" if state.cancelled else "completed"},
+                    include_resource=True,
+                )
+        except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
+            if is_vision_request and diagnostic_trace is not None:
+                diagnostic_trace.mark(
+                    "vision_timeout_error",
+                    fields={"error": type(exc).__name__, "kind": "timeout"},
+                    include_resource=True,
+                )
+            raise
+        except Exception as exc:
+            if is_vision_request and diagnostic_trace is not None:
+                diagnostic_trace.mark(
+                    "vision_timeout_error",
+                    fields={"error": type(exc).__name__, "kind": "error"},
+                    include_resource=True,
+                )
+            raise
 
     async def _classify_router_intent(self, user_input: str) -> Optional[router.RouteMatch]:
         """One bounded LLM call for short phrasings that miss every router.py regex.
@@ -2111,8 +2172,16 @@ class Brain:
         turn_id: Optional[str] = None,
         turn_request: Optional[TurnRequest] = None,
         intent_decision: Optional[IntentDecision] = None,
+        diagnostic_trace: Optional[Any] = None,
     ) -> AsyncGenerator[str, None]:
         from datetime import datetime
+
+        if diagnostic_trace is not None:
+            diagnostic_trace.mark_once(
+                "brain_start",
+                fields={"platform": platform, "model": self.config.llm_model},
+                include_resource=True,
+            )
 
         if turn_request is not None:
             if user_input != turn_request.input:
@@ -2164,6 +2233,16 @@ class Brain:
                 rationale=rationale,
                 presentation_expectation=presentation_expectation,
             )
+            if diagnostic_trace is not None:
+                diagnostic_trace.mark_once(
+                    "intent_decision",
+                    fields={
+                        "intent": intent,
+                        "capabilities": capabilities,
+                        "routing_source": routing_source,
+                        "confidence": confidence,
+                    },
+                )
             return primary_decision
 
         # Load session-specific history from SQLite store at the start of the turn
@@ -2895,7 +2974,14 @@ class Brain:
         self.history.append({"role": "user", "content": original_user_input})
 
         payload = self._build_payload(messages, skip_tools=skip_tools)
-        accumulated, tool_calls = await self._stream_completion(payload, generation)
+        if diagnostic_trace is None:
+            accumulated, tool_calls = await self._stream_completion(payload, generation)
+        else:
+            accumulated, tool_calls = await self._stream_completion(
+                payload,
+                generation,
+                diagnostic_trace=diagnostic_trace,
+            )
 
         # Hybrid fallback: try text-based extraction if native returned nothing
         if not tool_calls and accumulated and not skip_tools:
@@ -2952,6 +3038,11 @@ class Brain:
             if not is_com and ck in _seen_tool_calls:
                 logger.info("Tool %s already executed, reusing result", call["name"])
                 return _seen_tool_calls[ck]
+            if diagnostic_trace is not None:
+                diagnostic_trace.mark(
+                    "tool_start",
+                    fields={"tool_name": tool_name, "executor_type": "com_thread" if is_com else "async"},
+                )
             timeout = _tool_timeout(tool_name, op)
             required_leases = op.required_leases if (op and op.required_leases) else ()
             lock = self._tool_locks.setdefault(tool_name, asyncio.Lock())
@@ -3131,6 +3222,16 @@ class Brain:
             )
             model_text = str(envelope.result)
 
+            if diagnostic_trace is not None:
+                diagnostic_trace.mark(
+                    "tool_complete",
+                    fields={
+                        "tool_name": tool_name,
+                        "status": getattr(envelope.status, "value", envelope.status),
+                        "result_length": len(model_text),
+                    },
+                )
+
             if _operation_failed(envelope):
                 self.world_model.record_event("tool_error", f"{tool_name}: {model_text[:200]}")
 
@@ -3301,9 +3402,24 @@ class Brain:
 
             state = FollowupStreamState()
             try:
-                async for _filtered in self._stream_followup_once(
-                    followup_client, followup_model, followup_payload, generation, state
-                ):
+                if diagnostic_trace is None:
+                    followup_stream = self._stream_followup_once(
+                        followup_client,
+                        followup_model,
+                        followup_payload,
+                        generation,
+                        state,
+                    )
+                else:
+                    followup_stream = self._stream_followup_once(
+                        followup_client,
+                        followup_model,
+                        followup_payload,
+                        generation,
+                        state,
+                        diagnostic_trace,
+                    )
+                async for _filtered in followup_stream:
                     pass
             except Exception as tool_exc:
                 error_text = str(tool_exc) or repr(tool_exc)
@@ -3358,6 +3474,7 @@ class Brain:
         turn_id: Optional[str] = None,
         turn_request: Optional[TurnRequest] = None,
         intent_decision: Optional[IntentDecision] = None,
+        diagnostic_trace: Optional[Any] = None,
     ) -> AsyncGenerator[str, None]:
         decision_turn_id = (
             turn_request.turn_id
@@ -3376,6 +3493,7 @@ class Brain:
             turn_id=turn_id,
             turn_request=turn_request,
             intent_decision=intent_decision,
+            diagnostic_trace=diagnostic_trace,
         )
         try:
             async for chunk in stream:

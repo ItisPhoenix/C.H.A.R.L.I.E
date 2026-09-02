@@ -338,6 +338,7 @@ def test_on_speech_dedupes_identical_text_within_window():
         "loop": None,
         "recent_turn_texts": {},
         "_DEDUPE_WINDOW_SEC": 20.0,
+        "voice_diagnostic_traces": {},
     }
     # on_speech declares `nonlocal current_web_session_id`, which needs a real
     # enclosing function scope (nonlocal is invalid at module level) -- wrap it

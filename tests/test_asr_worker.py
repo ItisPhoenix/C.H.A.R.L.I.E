@@ -8,7 +8,9 @@ Whisper anchored onto that prompt and echoed it back verbatim as a
 "transcription" on weak/ambiguous audio instead of transcribing real speech.
 """
 
+from argparse import Namespace
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import charlie.asr_worker as asr_worker
 from charlie.asr_worker import _build_transcribe_kwargs, _filter_hallucinated_segments
@@ -98,6 +100,233 @@ def test_worker_acknowledges_readiness_only_after_model_initializes(monkeypatch)
     )
 
     assert output_queue.messages == [{"type": "ready", "model": "distil-large-v3"}]
+
+
+def test_worker_preserves_utterance_id_and_reports_truthful_quality_metadata(monkeypatch):
+    class FakeModel:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def transcribe(self, audio, **kwargs):
+            assert len(audio) == 1600
+            return (
+                [_FakeSegment(" hello there", 0.1, 1.2, avg_logprob=-0.2)],
+                SimpleNamespace(language="en", language_probability=0.93),
+            )
+
+    class InputQueue:
+        def __init__(self):
+            self.messages = [
+                (
+                    b"\x00\x00\x00\x00" * 1600,
+                    16000,
+                    {
+                        "utterance_id": "utterance-worker",
+                        "diagnostic_enabled": True,
+                        "voice_capture_onset_monotonic": 10.0,
+                        "asr_enqueue_monotonic": 10.1,
+                        "capture": {"submitted_sample_count": 1600},
+                    },
+                )
+            ]
+
+        def get(self, timeout):
+            if self.messages:
+                return self.messages.pop(0)
+            raise KeyboardInterrupt
+
+        def qsize(self):
+            return len(self.messages)
+
+    class OutputQueue:
+        def __init__(self):
+            self.messages = []
+
+        def put(self, message):
+            self.messages.append(message)
+
+    monkeypatch.setattr(asr_worker, "WhisperModel", FakeModel)
+    monkeypatch.setattr(
+        asr_worker.VoiceDiagnostics,
+        "resource_snapshot",
+        lambda self, **kwargs: {"gpu_metrics": "unavailable"},
+    )
+    output_queue = OutputQueue()
+
+    asr_worker.asr_worker_process(
+        InputQueue(),
+        output_queue,
+        "distil-large-v3",
+        "cpu",
+        "en",
+        {"beam_size": 6, "best_of": 6},
+    )
+
+    text, compatibility_value, flags = output_queue.messages[1]
+    assert text == "hello there"
+    assert compatibility_value == 0.93
+    assert flags["utterance_id"] == "utterance-worker"
+    assert flags["confidence_semantics"] == "language_probability"
+    assert "transcript_confidence" not in flags
+    assert flags["asr_quality"] == {
+        "avg_logprob": -0.2,
+        "no_speech_prob": 0.1,
+        "compression_ratio": 1.2,
+        "segment_count": 1,
+        "decoded_text_length": 11,
+        "language": "en",
+        "language_probability": 0.93,
+        "asr_latency_ms": flags["asr_quality"]["asr_latency_ms"],
+        "audio_duration_ms": 100.0,
+    }
+    assert [event["stage"] for event in flags["diagnostic_stages"]] == [
+        "asr_worker_dequeue",
+        "asr_start",
+        "asr_complete",
+    ]
+
+
+def test_worker_keeps_legacy_two_tuple_payload_compatible(monkeypatch):
+    class FakeModel:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def transcribe(self, audio, **kwargs):
+            return ([_FakeSegment(" compatible", 0.1, 1.2)], SimpleNamespace(language="en", language_probability=0.8))
+
+    class InputQueue:
+        def __init__(self):
+            self.first = True
+
+        def get(self, timeout):
+            if self.first:
+                self.first = False
+                return (b"\x00\x00\x00\x00" * 1600, 16000)
+            raise KeyboardInterrupt
+
+    class OutputQueue:
+        def __init__(self):
+            self.messages = []
+
+        def put(self, message):
+            self.messages.append(message)
+
+    monkeypatch.setattr(asr_worker, "WhisperModel", FakeModel)
+    output_queue = OutputQueue()
+
+    asr_worker.asr_worker_process(InputQueue(), output_queue, "distil-large-v3", "cpu", "en")
+
+    assert output_queue.messages[1][0] == "compatible"
+    assert output_queue.messages[1][2]["utterance_id"] is None
+
+
+def test_replay_benchmark_exposes_current_and_controlled_variants():
+    from tools.voice_asr_benchmark import VARIANT_SETTINGS, _run_variant, _variant_kwargs
+
+    args = Namespace(
+        model="distil-large-v3",
+        device="cuda",
+        compute_type="float16",
+        language="en",
+        beam_size=1,
+        best_of=1,
+        condition_on_previous_text=True,
+        vad_filter=True,
+        repetition_penalty=1.15,
+        vad_threshold=0.05,
+        min_speech_duration_ms=120,
+        max_speech_duration_s=60,
+        min_silence_duration_ms=480,
+        speech_pad_ms=500,
+    )
+
+    assert VARIANT_SETTINGS["current"] == {}
+    assert _variant_kwargs(VARIANT_SETTINGS["current"], args)["beam_size"] == 1
+    assert VARIANT_SETTINGS["beam6_best6"] == {
+        "beam_size": 6,
+        "best_of": 6,
+        "condition_on_previous_text": True,
+        "vad_filter": True,
+    }
+    assert VARIANT_SETTINGS["beam1_best1"]["beam_size"] == 1
+    assert VARIANT_SETTINGS["beam1_best1"]["best_of"] == 1
+    assert VARIANT_SETTINGS["vad_disabled"]["vad_filter"] is False
+    assert VARIANT_SETTINGS["condition_off"]["condition_on_previous_text"] is False
+    assert VARIANT_SETTINGS["beam1_vad_disabled_condition_off"] == {
+        "beam_size": 1,
+        "best_of": 1,
+        "condition_on_previous_text": False,
+        "vad_filter": False,
+    }
+
+    class FakeModel:
+        def transcribe(self, _audio, **kwargs):
+            self.kwargs = kwargs
+            return ([_FakeSegment(" hello", 0.1, 1.2)], SimpleNamespace(language="en", language_probability=0.9))
+
+    result = _run_variant(FakeModel(), [0.0] * 1600, 16000, "current", args)
+    assert result["effective_parameters"] == {
+        "model": "distil-large-v3",
+        "device": "cuda",
+        "compute_type": "float16",
+        "language": "en",
+        "beam_size": 1,
+        "best_of": 1,
+        "condition_on_previous_text": True,
+        "vad_filter": True,
+        "repetition_penalty": 1.15,
+        "vad_parameters": {
+            "threshold": 0.05,
+            "min_speech_duration_ms": 120,
+            "max_speech_duration_s": 60,
+            "min_silence_duration_ms": 480,
+            "speech_pad_ms": 500,
+        },
+    }
+
+
+def test_replay_current_resolves_effective_config_defaults(monkeypatch):
+    import tools.voice_asr_benchmark as benchmark
+
+    monkeypatch.setattr(benchmark.runtime_config, "whisper_model", "configured-model")
+    monkeypatch.setattr(benchmark.runtime_config, "gpu_device", "cpu")
+    monkeypatch.setattr(benchmark.runtime_config, "default_language", "en")
+    monkeypatch.setattr(benchmark.runtime_config, "asr_beam_size", 1)
+    monkeypatch.setattr(benchmark.runtime_config, "asr_best_of", 1)
+    monkeypatch.setattr(benchmark.runtime_config, "asr_repetition_penalty", 1.15)
+    monkeypatch.setattr(benchmark.runtime_config, "vad_threshold", 0.05)
+    monkeypatch.setattr(benchmark.runtime_config, "vad_min_speech_duration_ms", 120)
+    monkeypatch.setattr(benchmark.runtime_config, "vad_max_speech_duration_s", 60)
+    monkeypatch.setattr(benchmark.runtime_config, "vad_min_silence_duration_ms", 480)
+    monkeypatch.setattr(benchmark.runtime_config, "vad_speech_pad_ms", 500)
+
+    args = Namespace(
+        model=None,
+        device=None,
+        compute_type=None,
+        language=None,
+        beam_size=None,
+        best_of=None,
+        condition_on_previous_text=None,
+        vad_filter=None,
+        repetition_penalty=None,
+        vad_threshold=None,
+        min_speech_duration_ms=None,
+        max_speech_duration_s=None,
+        min_silence_duration_ms=None,
+        speech_pad_ms=None,
+    )
+
+    resolved = benchmark._resolve_runtime_defaults(args)
+
+    assert resolved.model == "configured-model"
+    assert resolved.device == "cpu"
+    assert resolved.beam_size == 1
+    assert resolved.best_of == 1
+    assert resolved.condition_on_previous_text is True
+    assert resolved.vad_filter is True
+    assert resolved.vad_threshold == 0.05
+    assert resolved.speech_pad_ms == 500
 
 
 def test_filter_keeps_real_speech_segment():
