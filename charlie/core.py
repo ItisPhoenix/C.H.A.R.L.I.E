@@ -861,6 +861,7 @@ _RESULT_FAILURE_STATUSES = frozenset(
         ResultStatus.BLOCKED.value,
     }
 )
+_INTERACTIVE_VISION_TIMEOUT_S = 9.0
 
 _FRESHNESS_REQUIREMENT_RE = re.compile(
     r"\b(?:today|latest|currently|current|now|right\s+now|live|recent|breaking|trending|news|"
@@ -1111,6 +1112,9 @@ class Brain:
         self._goal_turns_remaining: int = 0
         self._reflect_turn_counter: int = 0
         self._reflect_interval: int = 5  # reflect every N turns
+        self._background_tasks: set[asyncio.Task] = set()
+        self._memory_capacity_due = False
+        self._reflection_pending = False
 
         # --- Hybrid tool calling: detect native support ---
         # Auto-detect local model servers -- they ignore the native tools payload
@@ -1242,6 +1246,44 @@ class Brain:
         if self._installed_skill_blocks.pop(name, None) is not None:
             self.reload_context()
 
+    def schedule_background_task(self, coroutine) -> asyncio.Task:
+        """Track optional housekeeping so new voice input can cancel it."""
+
+        task = asyncio.create_task(coroutine)
+        self._background_tasks.add(task)
+
+        def _finished(completed: asyncio.Task) -> None:
+            self._background_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            try:
+                error = completed.exception()
+            except asyncio.CancelledError:
+                return
+            if error is not None:
+                logger.debug("Background housekeeping failed: %s", error)
+
+        task.add_done_callback(_finished)
+        return task
+
+    def cancel_background_tasks(self) -> list[asyncio.Task]:
+        tasks = list(getattr(self, "_background_tasks", ()))
+        for task in tasks:
+            task.cancel()
+        return tasks
+
+    def schedule_deferred_background_work(self) -> None:
+        if self._memory_capacity_due:
+            self._memory_capacity_due = False
+            self.schedule_background_task(self._background_check_and_consolidate())
+        if self._reflection_pending:
+            self._reflection_pending = False
+            self.schedule_background_task(self._reflect_and_consolidate())
+
+    async def _background_save_to_memory(self, text: str, source: str) -> None:
+        await asyncio.sleep(0)
+        self._save_to_memory(text, source)
+
     async def _check_memory_capacity(self) -> None:
         """Review memory files and consolidate when near capacity."""
         self._turns_since_nudge += 1
@@ -1250,8 +1292,7 @@ class Brain:
             return
         self._turns_since_nudge = 0
 
-        # Run consolidation in background to prevent blocking the user response
-        asyncio.create_task(self._background_check_and_consolidate())
+        self._memory_capacity_due = True
 
     async def _background_check_and_consolidate(self) -> None:
         """Helper to run check and consolidation in the background."""
@@ -1358,6 +1399,7 @@ class Brain:
     def cancel_chat(self) -> None:
         """Cancel the current chat generation (barge-in support)."""
         self._chat_generation += 1
+        self.cancel_background_tasks()
 
     def _remember_intent_decision(self, decision: IntentDecision) -> IntentDecision:
         """Retain one canonical decision per turn without persisting it."""
@@ -1945,6 +1987,9 @@ class Brain:
         try:
             self._intent_decisions.clear()
             self.last_intent_decision = None
+            pending_background = self.cancel_background_tasks()
+            if pending_background:
+                await asyncio.gather(*pending_background, return_exceptions=True)
             await self.client.aclose()
             if self._vision_client:
                 await self._vision_client.aclose()
@@ -3006,10 +3051,14 @@ class Brain:
                     self.history = self.history[-max_messages:]
                 if filtered:
                     yield filtered
-                # Save to vector memory (fire-and-forget)
-                self._save_to_memory(filtered, "assistant")
-                asyncio.ensure_future(self._extract_thread_update(original_user_input, filtered, session_id))
+                if platform != "voice":
+                    self.schedule_background_task(self._background_save_to_memory(filtered, "assistant"))
+                    self.schedule_background_task(
+                        self._extract_thread_update(original_user_input, filtered, session_id)
+                    )
             await self._check_memory_capacity()
+            if platform != "voice":
+                self.schedule_deferred_background_work()
             return
 
         # --- Tool execution loop ---
@@ -3446,14 +3495,21 @@ class Brain:
                     publish_research_reports(clean_accumulated)
                     yield clean_accumulated
                 self.history.append({"role": "assistant", "content": clean_accumulated})
-                # Save to vector memory (fire-and-forget)
-                self._save_to_memory(clean_accumulated, "assistant")
-                asyncio.ensure_future(self._extract_thread_update(original_user_input, clean_accumulated, session_id))
+                if platform != "voice":
+                    self.schedule_background_task(self._background_save_to_memory(clean_accumulated, "assistant"))
+                    self.schedule_background_task(
+                        self._extract_thread_update(original_user_input, clean_accumulated, session_id)
+                    )
             await self._check_memory_capacity()
+            if platform != "voice":
+                self.schedule_deferred_background_work()
             # --- Periodic reflection and knowledge graph update ---
             self._reflect_turn_counter += 1
             if self._reflect_turn_counter % self._reflect_interval == 0:
-                asyncio.ensure_future(self._reflect_and_consolidate())
+                if platform == "voice":
+                    self._reflection_pending = True
+                else:
+                    self.schedule_background_task(self._reflect_and_consolidate())
                 self._check_outcome_feedback()
                 self._check_observed_patterns()
                 self.world_model.decay_stale_rules()
@@ -3495,9 +3551,31 @@ class Brain:
             intent_decision=intent_decision,
             diagnostic_trace=diagnostic_trace,
         )
+        effective_platform = turn_request.channel if turn_request is not None else platform
+        interactive_vision = bool(
+            effective_platform == "voice"
+            and getattr(self.config, "vision_enabled", False)
+            and (
+                router.is_direct_screen_perception_query(user_input)
+                or _VISUAL_CONTENT_QUERY_RE.search(user_input)
+            )
+        )
         try:
-            async for chunk in stream:
-                yield chunk
+            if interactive_vision:
+                async with asyncio.timeout(_INTERACTIVE_VISION_TIMEOUT_S):
+                    async for chunk in stream:
+                        yield chunk
+            else:
+                async for chunk in stream:
+                    yield chunk
+        except (asyncio.TimeoutError, httpx.TimeoutException):
+            if not interactive_vision:
+                raise
+            logger.warning(
+                "Interactive voice vision timed out after %.1fs",
+                _INTERACTIVE_VISION_TIMEOUT_S,
+            )
+            yield "I couldn't inspect the screen within the interactive voice time budget."
         finally:
             try:
                 await stream.aclose()

@@ -110,12 +110,14 @@ class VoiceEngine:
         on_speech: Callable[..., None],
         on_tts_start: Optional[Callable[[], None]] = None,
         on_tts_stop: Optional[Callable[[], None]] = None,
+        on_speech_onset: Optional[Callable[..., None]] = None,
     ):
         self.config = config
         self.on_speech = on_speech
         self._speech_callback_mode = self._resolve_speech_callback_mode(on_speech)
         self._on_tts_start = on_tts_start
         self._on_tts_stop = on_tts_stop
+        self._on_speech_onset = on_speech_onset
         self.is_speaking = threading.Event()
         self.tts_active = threading.Event()
         self.stop_event = threading.Event()
@@ -179,7 +181,7 @@ class VoiceEngine:
             os.path.join(config.kokoro_model_dir, "kokoro-v1.0.onnx"),
             os.path.join(config.kokoro_model_dir, "voices-v1.0.bin"),
         )
-        self.barge_in_enabled: bool = True
+        self.barge_in_enabled: bool = bool(getattr(config, "enable_barge_in", True))
 
         # Wake word state
         self._wake_word_detector: Optional[WakeWordDetector] = None
@@ -334,6 +336,27 @@ class VoiceEngine:
             return 0.0
         return float(np.sqrt(np.mean(np.square(arr))))
 
+    @staticmethod
+    def _speech_onset_confirmed(consecutive_loud_frames: int, required_frames: int = 2) -> bool:
+        return consecutive_loud_frames >= required_frames
+
+    @staticmethod
+    def _speech_buffer_from_pre_roll(pre_roll_buffer: deque) -> list[np.ndarray]:
+        """Start phrase with each buffered physical frame exactly once."""
+        return list(pre_roll_buffer)
+
+    @staticmethod
+    def _should_end_speech(
+        silence_duration: float,
+        speech_duration: float,
+        silence_timeout: float,
+        phrase_min_duration: float,
+        phrase_max_duration: float,
+    ) -> bool:
+        return (
+            silence_duration >= silence_timeout and speech_duration >= phrase_min_duration
+        ) or speech_duration >= phrase_max_duration
+
     def _ensure_models(self):
         os.makedirs(self.config.kokoro_model_dir, exist_ok=True)
         base_url = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
@@ -420,6 +443,7 @@ class VoiceEngine:
             if self.asr_process.is_alive():
                 self.asr_process.terminate()
                 self.asr_process.join(timeout=1.0)
+        self.voice_diagnostics.stop()
         logger.info("Voice engine stopped.")
 
     def stop_tts(self):
@@ -442,6 +466,28 @@ class VoiceEngine:
         # under rapid repeated barge-in. _playback_worker already polls
         # stop_tts_event every 10ms during playback and calls sd.stop()
         # itself from its own thread -- that's the only safe caller.
+
+    def _notify_speech_onset(self, trace: VoiceDiagnosticTrace, rms: float, sample_rate: int) -> None:
+        """Interrupt active playback after VAD confirms two loud frames."""
+
+        tts_was_active = self.is_speaking.is_set()
+        if tts_was_active and self.barge_in_enabled:
+            self.stop_tts()
+        if self._on_speech_onset is None:
+            return
+        try:
+            self._on_speech_onset(
+                {
+                    "trace": trace,
+                    "speech_onset_rms": rms,
+                    "sample_rate": sample_rate,
+                    "tts_was_active": tts_was_active,
+                }
+            )
+        except TypeError:
+            self._on_speech_onset()
+        except Exception:
+            logger.debug("speech onset callback failed", exc_info=True)
 
     def set_audio_state(self, muted: Optional[bool] = None, volume: Optional[float] = None) -> dict:
         """Apply dashboard speaker controls. Returns the resulting state.
@@ -808,6 +854,7 @@ class VoiceEngine:
     def _playback_worker(self):
         """Dedicated playback thread."""
         tts_started_fired = False
+        active_trace: Optional[VoiceDiagnosticTrace] = None
         while not self.stop_event.is_set():
             try:
                 if self.stop_tts_event.is_set():
@@ -817,6 +864,11 @@ class VoiceEngine:
                             self.playback_queue.get_nowait()
                         except queue.Empty:
                             break
+                    if active_trace is not None:
+                        active_trace.mark_once(
+                            "playback_complete",
+                            fields={"status": "stopped"},
+                        )
                     self.stop_tts_event.clear()
                     # Fire stop callback if we were speaking
                     if tts_started_fired and self._on_tts_stop:
@@ -827,6 +879,7 @@ class VoiceEngine:
                     self.is_speaking.clear()
                     self.tts_active.clear()
                     tts_started_fired = False
+                    active_trace = None
                     continue
 
                 try:
@@ -837,6 +890,11 @@ class VoiceEngine:
                 # Sentinel marking the true end of a TTS run.
                 if item is _TTS_RUN_END:
                     if tts_started_fired and self.stop_tts_event.is_set() is False:
+                        if active_trace is not None:
+                            active_trace.mark_once(
+                                "playback_complete",
+                                fields={"status": "completed"},
+                            )
                         if self._on_tts_stop:
                             try:
                                 self._on_tts_stop()
@@ -845,6 +903,7 @@ class VoiceEngine:
                         self.is_speaking.clear()
                         self.tts_active.clear()
                         tts_started_fired = False
+                        active_trace = None
                     continue
 
                 trace = item[3] if isinstance(item, tuple) and len(item) >= 4 else None
@@ -868,6 +927,7 @@ class VoiceEngine:
                 # First chunk of a new TTS run
                 if not tts_started_fired:
                     tts_started_fired = True
+                    active_trace = trace
                     self.is_speaking.set()
                     self.tts_active.set()
                     if self._on_tts_start:
@@ -908,6 +968,18 @@ class VoiceEngine:
                 self.is_speaking.clear()
                 self.tts_active.clear()
                 tts_started_fired = False
+                if active_trace is not None:
+                    active_trace.mark_once(
+                        "playback_complete",
+                        fields={"status": "error"},
+                    )
+                active_trace = None
+
+        if active_trace is not None:
+            active_trace.mark_once(
+                "playback_complete",
+                fields={"status": "stopped"},
+            )
 
     # -----------------------------------------------------------------------
     # Number and symbol -> word conversion
@@ -1431,6 +1503,7 @@ class VoiceEngine:
             daemon=True,
         )
         self.asr_process.start()
+        self.voice_diagnostics.start_resource_sampler(asr_worker_pid=self.asr_process.pid)
         self._set_asr_readiness("starting")
         logger.info("ASR worker process started.")
 
@@ -1594,7 +1667,7 @@ class VoiceEngine:
                     _consecutive_loud_frames += 1
                 else:
                     _consecutive_loud_frames = 0
-                if _consecutive_loud_frames >= _onset_debounce_frames:
+                if self._speech_onset_confirmed(_consecutive_loud_frames, _onset_debounce_frames):
                     is_speech = True
                     _consecutive_loud_frames = 0
                     speech_start_time = time.time()
@@ -1625,10 +1698,10 @@ class VoiceEngine:
                         asr_worker_pid=self.asr_process.pid if self.asr_process is not None else None,
                     )
                     speech_pre_roll_samples = len(_pre_roll_buffer) * block_size
+                    self._notify_speech_onset(speech_trace, rms, samplerate)
                     self._emit_vad_start()
                     # Prepend pre-roll buffer to prevent clipping first words
-                    speech_buffer = list(_pre_roll_buffer)
-                    speech_buffer.append(data.copy())
+                    speech_buffer = self._speech_buffer_from_pre_roll(_pre_roll_buffer)
                 continue
 
             # During speech
@@ -1642,14 +1715,13 @@ class VoiceEngine:
             duration = now - speech_start_time
             silence_duration = now - last_speech_time
 
-            should_end = False
-            if (
-                silence_duration >= _silence_timeout
-                and duration >= _phrase_min_duration
-            ):
-                should_end = True
-            if duration >= _phrase_max_duration:
-                should_end = True
+            should_end = self._should_end_speech(
+                silence_duration,
+                duration,
+                _silence_timeout,
+                _phrase_min_duration,
+                _phrase_max_duration,
+            )
 
             if should_end:
                 is_speech = False
@@ -1686,7 +1758,8 @@ class VoiceEngine:
                         ),
                         "phrase_min_duration_ms": _phrase_min_duration * 1000,
                         "phrase_max_duration_s": _phrase_max_duration,
-                        "onset_frame_duplicated_in_buffer": True,
+                        "onset_frame_duplicated_in_buffer": False,
+                        "onset_frame_counted_once": True,
                     }
                     speech_trace.mark_once(
                         "voice_capture_endpoint",

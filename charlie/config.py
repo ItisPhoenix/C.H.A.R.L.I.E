@@ -102,7 +102,7 @@ class Config:
         metadata=_meta("VAD_THRESHOLD", "VAD & ASR Tuning", restart="voice"),
     )
     vad_silence_timeout: float = field(
-        default=float(os.getenv("VAD_SILENCE_TIMEOUT", "1.5")),
+        default=float(os.getenv("VAD_SILENCE_TIMEOUT", "1.3")),
         metadata=_meta("VAD_SILENCE_TIMEOUT", "VAD & ASR Tuning", restart="voice"),
     )
     vad_min_speech_duration_ms: int = field(

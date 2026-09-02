@@ -20,6 +20,7 @@ session_id, which is the same guarantee the runtime path provides.
 
 import ast
 import os
+import textwrap
 import time
 from typing import Any, Dict, List
 
@@ -75,8 +76,21 @@ def _run_callback(name: str, captured: List[Dict[str, Any]],
         "EventMeta": EventMeta,
         "EventSource": EventSource,
     }
-    exec(compile(src, f"<main.{name}>", "exec"), namespace)
-    callback = namespace[name]
+    if name in {"on_tool_call", "on_tool_result"}:
+        wrapper_source = (
+            "def _wrapper():\n"
+            "    active_operation_name = None\n"
+            "    active_operation_task_id = None\n"
+            "    active_operation_cancellable = True\n"
+            "    active_task_id = '__test_no_active_task__'\n"
+            + textwrap.indent(src, "    ")
+            + f"\n    return {name}\n"
+        )
+        exec(compile(wrapper_source, f"<main.{name}>", "exec"), namespace)
+        callback = namespace["_wrapper"]()
+    else:
+        exec(compile(src, f"<main.{name}>", "exec"), namespace)
+        callback = namespace[name]
     callback(*args, **(identity or {}))
 
 

@@ -199,6 +199,10 @@ async def test_queue_and_dequeue_preserve_the_authoritative_request(monkeypatch:
         "    voice_diagnostic_traces = {}\n"
         "    active_turn_id = None\n"
         "    active_task_id = None\n"
+        "    active_process_task = None\n"
+        "    active_operation_name = None\n"
+        "    active_operation_task_id = None\n"
+        "    active_operation_cancellable = True\n"
         "    brain = object()\n"
         "    voice = SimpleNamespace(is_speaking=SimpleNamespace(is_set=lambda: False))\n"
         "    async def _process(request, _brain, _voice):\n"
@@ -224,6 +228,114 @@ async def test_queue_and_dequeue_preserve_the_authoritative_request(monkeypatch:
     await dispatch(dequeued)
     assert processed == [request]
     assert processed[0] is request
+
+
+@pytest.mark.asyncio
+async def test_new_voice_turn_supersedes_cancellable_foreground_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    from charlie import core
+
+    monkeypatch.setattr(core, "get_active_voice_approval", lambda: None)
+    source = _function_source("_dispatch_or_queue")
+    processed: list[TurnRequest] = []
+    cancelled = []
+
+    class Brain:
+        def cancel_chat(self):
+            cancelled.append(True)
+
+    namespace = {
+        "TurnRequest": TurnRequest,
+        "logger": _NullLogger(),
+        "processed": processed,
+        "asyncio": asyncio,
+        "time": __import__("time"),
+    }
+    wrapper_source = (
+        "def _wrapper():\n"
+        "    turn_active = True\n"
+        "    pending_turns = []\n"
+        "    pending_turn_times = {}\n"
+        "    voice_diagnostic_traces = {}\n"
+        "    active_turn_id = 'old-turn'\n"
+        "    active_task_id = 'old-task'\n"
+        "    active_operation_name = None\n"
+        "    active_operation_task_id = None\n"
+        "    active_operation_cancellable = True\n"
+        "    brain = Brain()\n"
+        "    async def _old_process():\n"
+        "        await asyncio.sleep(60)\n"
+        "    active_process_task = asyncio.create_task(_old_process())\n"
+        "    voice = SimpleNamespace(is_speaking=SimpleNamespace(is_set=lambda: False))\n"
+        "    async def _process(request, _brain, _voice):\n"
+        "        processed.append(request)\n"
+        + textwrap.indent(source, "    ")
+        + "\n    return _dispatch_or_queue, pending_turns, active_process_task\n"
+    )
+    namespace["SimpleNamespace"] = SimpleNamespace
+    namespace["Brain"] = Brain
+    exec(compile(wrapper_source, "<main._dispatch_or_queue>", "exec"), namespace)
+    dispatch, pending, old_task = namespace["_wrapper"]()
+    request = TurnRequest.allocate("new voice request", "session-queue", "voice")
+
+    await dispatch(request)
+
+    assert processed == [request]
+    assert pending == []
+    assert cancelled == [True]
+    assert old_task.done()
+
+
+@pytest.mark.asyncio
+async def test_new_voice_turn_waits_for_non_cancellable_operation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from charlie import core
+
+    monkeypatch.setattr(core, "get_active_voice_approval", lambda: None)
+    source = _function_source("_dispatch_or_queue")
+    processed: list[TurnRequest] = []
+
+    class Brain:
+        def cancel_chat(self):
+            pass
+
+    namespace = {
+        "TurnRequest": TurnRequest,
+        "logger": _NullLogger(),
+        "processed": processed,
+        "asyncio": asyncio,
+        "time": __import__("time"),
+        "SimpleNamespace": SimpleNamespace,
+        "Brain": Brain,
+    }
+    wrapper_source = (
+        "def _wrapper():\n"
+        "    turn_active = True\n"
+        "    pending_turns = [TurnRequest.allocate('old queued', 'session-queue', 'voice')]\n"
+        "    pending_turn_times = {}\n"
+        "    voice_diagnostic_traces = {}\n"
+        "    active_turn_id = 'old-turn'\n"
+        "    active_task_id = 'old-task'\n"
+        "    active_operation_name = 'file_write'\n"
+        "    active_operation_task_id = 'old-task'\n"
+        "    active_operation_cancellable = False\n"
+        "    brain = Brain()\n"
+        "    active_process_task = asyncio.create_task(asyncio.sleep(60))\n"
+        "    voice = SimpleNamespace(is_speaking=SimpleNamespace(is_set=lambda: False))\n"
+        "    async def _process(request, _brain, _voice):\n"
+        "        processed.append(request)\n"
+        + textwrap.indent(source, "    ")
+        + "\n    return _dispatch_or_queue, pending_turns, active_process_task\n"
+    )
+    exec(compile(wrapper_source, "<main._dispatch_or_queue>", "exec"), namespace)
+    dispatch, pending, old_task = namespace["_wrapper"]()
+    request = TurnRequest.allocate("latest voice request", "session-queue", "voice")
+
+    await dispatch(request)
+
+    assert processed == []
+    assert pending == [request]
+    old_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await old_task
 
 
 def test_process_accepts_only_the_existing_request_and_dequeues_it_unchanged() -> None:

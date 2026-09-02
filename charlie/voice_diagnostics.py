@@ -44,7 +44,8 @@ VOICE_DIAGNOSTIC_STAGES = (
     "tts_synthesis_start",
     "tts_synthesis_complete",
     "playback_first_sample",
-    "response_complete",
+    "response_text_complete",
+    "playback_complete",
 )
 
 _DIAGNOSTIC_FLAG = "CHARLIE_VOICE_DIAGNOSTICS"
@@ -53,6 +54,7 @@ _DIAGNOSTIC_DIR = "CHARLIE_VOICE_DIAGNOSTIC_DIR"
 _MAX_WAV_FILES = "CHARLIE_VOICE_DIAGNOSTIC_WAV_MAX_FILES"
 _DEFAULT_MAX_WAV_FILES = 32
 _DEFAULT_DIAGNOSTIC_DIR_NAME = "charlie-voice-diagnostics"
+_RESOURCE_SAMPLE_INTERVAL_S = 1.0
 _VISION_PROCESS_MARKERS = (
     "lm studio",
     "lmstudio",
@@ -148,6 +150,15 @@ class VoiceDiagnostics:
         self._gpu_lock = threading.Lock()
         self._gpu_cache_timestamp = 0.0
         self._gpu_cache: dict[str, Any] = {"gpu_metrics": "unavailable"}
+        self._resource_lock = threading.Lock()
+        self._resource_stop = threading.Event()
+        self._resource_thread: Optional[threading.Thread] = None
+        self._resource_asr_worker_pid: Optional[int] = None
+        self._resource_cache: dict[str, Any] = {
+            "resource_telemetry": "unavailable",
+            "gpu_metrics": "unavailable",
+            "asr_worker_pid": None,
+        }
 
     @classmethod
     def from_env(cls) -> "VoiceDiagnostics":
@@ -159,11 +170,39 @@ class VoiceDiagnostics:
         return VoiceDiagnosticTrace(self, utterance_id=utterance_id)
 
     def prime_gpu_async(self) -> None:
-        """Warm GPU telemetry without blocking the audio/capture thread."""
+        """Start bounded background telemetry without blocking voice threads."""
+
+        self.start_resource_sampler()
+
+    def start_resource_sampler(self, *, asr_worker_pid: Optional[int] = None) -> None:
+        """Refresh expensive telemetry in one bounded background sampler."""
 
         if not self.enabled:
             return
-        threading.Thread(target=self._gpu_snapshot, daemon=True, name="VoiceGpuDiagnostics").start()
+        with self._resource_lock:
+            if asr_worker_pid is not None:
+                self._resource_asr_worker_pid = int(asr_worker_pid)
+            if self._resource_thread is not None and self._resource_thread.is_alive():
+                return
+            self._resource_stop.clear()
+            thread = threading.Thread(
+                target=self._resource_sampler_loop,
+                daemon=True,
+                name="VoiceResourceDiagnostics",
+            )
+            self._resource_thread = thread
+        thread.start()
+
+    def stop(self) -> None:
+        """Stop the sampler cleanly; diagnostics remain non-fatal."""
+
+        self._resource_stop.set()
+        thread = self._resource_thread
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=1.0)
+        with self._resource_lock:
+            if self._resource_thread is thread:
+                self._resource_thread = None
 
     def capture_audio(self, trace: "VoiceDiagnosticTrace", audio: Any, sample_rate: int) -> Optional[str]:
         """Write exact float32 samples to a bounded-retention IEEE-float WAV."""
@@ -232,7 +271,45 @@ class VoiceDiagnostics:
             logger.debug("Could not inspect diagnostic WAV retention directory", exc_info=True)
 
     def resource_snapshot(self, *, asr_worker_pid: Optional[int] = None) -> dict[str, Any]:
-        """Return lightweight best-effort process/system/GPU telemetry."""
+        """Return cached telemetry in realtime; direct sampling is test/compat fallback."""
+
+        if asr_worker_pid is not None:
+            with self._resource_lock:
+                self._resource_asr_worker_pid = int(asr_worker_pid)
+        with self._resource_lock:
+            thread = self._resource_thread
+            cached = dict(self._resource_cache)
+            cached["asr_worker_pid"] = self._resource_asr_worker_pid
+        if thread is not None and thread.is_alive():
+            return cached
+        if self.enabled:
+            self.start_resource_sampler(asr_worker_pid=asr_worker_pid)
+            with self._resource_lock:
+                return dict(self._resource_cache)
+        return cached
+
+    def _resource_sampler_loop(self) -> None:
+        while not self._resource_stop.is_set():
+            self._refresh_resource_snapshot()
+            self._resource_stop.wait(_RESOURCE_SAMPLE_INTERVAL_S)
+
+    def _refresh_resource_snapshot(self) -> None:
+        with self._resource_lock:
+            asr_worker_pid = self._resource_asr_worker_pid
+        try:
+            snapshot = self._collect_resource_snapshot(asr_worker_pid=asr_worker_pid)
+        except Exception as exc:  # pragma: no cover - defensive sampler boundary
+            snapshot = {
+                "resource_telemetry": "unavailable",
+                "asr_worker_pid": asr_worker_pid,
+                "resource_telemetry_error": type(exc).__name__,
+                "gpu_metrics": "unavailable",
+            }
+        with self._resource_lock:
+            self._resource_cache = dict(snapshot)
+
+    def _collect_resource_snapshot(self, *, asr_worker_pid: Optional[int] = None) -> dict[str, Any]:
+        """Collect expensive telemetry from the sampler thread."""
 
         snapshot: dict[str, Any] = {
             "resource_telemetry": "available",
@@ -241,12 +318,19 @@ class VoiceDiagnostics:
         try:
             import psutil
 
+            current_pid = os.getpid()
             try:
-                process_rss = int(psutil.Process(os.getpid()).memory_info().rss)
-                snapshot["process_rss_bytes"] = process_rss
-                snapshot["charlie_process_rss_bytes"] = process_rss
+                process_rss = int(psutil.Process(current_pid).memory_info().rss)
+                if asr_worker_pid is not None and int(asr_worker_pid) == current_pid:
+                    snapshot["asr_worker_rss_bytes"] = process_rss
+                else:
+                    snapshot["process_rss_bytes"] = process_rss
+                    snapshot["charlie_process_rss_bytes"] = process_rss
             except (OSError, psutil.Error) as exc:
-                snapshot["charlie_process_rss_bytes"] = None
+                if asr_worker_pid is not None and int(asr_worker_pid) == current_pid:
+                    snapshot["asr_worker_rss_bytes"] = None
+                else:
+                    snapshot["charlie_process_rss_bytes"] = None
                 snapshot["resource_telemetry_error"] = type(exc).__name__
 
             try:
@@ -266,7 +350,7 @@ class VoiceDiagnostics:
             except (OSError, psutil.Error) as exc:
                 snapshot["resource_telemetry_error"] = type(exc).__name__
 
-            if asr_worker_pid is not None:
+            if asr_worker_pid is not None and int(asr_worker_pid) != current_pid:
                 try:
                     snapshot["asr_worker_rss_bytes"] = int(psutil.Process(asr_worker_pid).memory_info().rss)
                 except (OSError, psutil.Error, ValueError) as exc:
@@ -294,14 +378,12 @@ class VoiceDiagnostics:
             snapshot["resource_telemetry_error"] = type(exc).__name__
 
         try:
-            snapshot.update(self._gpu_snapshot())
+            snapshot.update(self._read_gpu_snapshot())
         except Exception as exc:
             snapshot["gpu_metrics"] = "unavailable"
             snapshot["resource_telemetry_error"] = type(exc).__name__
         if snapshot.get("resource_telemetry") == "available" and "resource_telemetry_error" in snapshot:
             snapshot["resource_telemetry"] = "degraded"
-        if self.enabled:
-            logger.info("voice_resource_snapshot | %s", _log_fields(snapshot))
         return snapshot
 
     def _gpu_snapshot(self) -> dict[str, Any]:

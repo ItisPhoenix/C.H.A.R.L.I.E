@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from typing import Optional, Tuple
 
@@ -21,6 +22,12 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
         return None
     apps, commands, leftover = matched
     return router.execute_open_app(apps, commands), leftover
+
+
+def test_social_freshness_phrase_does_not_trigger_core_research():
+    from charlie.core import _needs_web_search
+
+    assert _needs_web_search("How are you doing today?") is False
 
 
 @pytest.fixture
@@ -238,6 +245,7 @@ def test_detect_close_app(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", mock_run)
     monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(router, "is_process_running", lambda _: False)
 
     # 1. Test match and successful taskkill (single)
     res = _detect_close_app("close chrome")
@@ -278,6 +286,137 @@ def test_detect_close_app(monkeypatch):
     # 5. Test unknown app
     res = _detect_close_app("close unknownapp")
     assert res is None
+
+
+@pytest.mark.parametrize("utterance", ["close not bad", "close noteped", "close nod pad"])
+def test_close_app_recovers_observed_notepad_asr_variants(utterance):
+    assert router.match_close_app(utterance) == (["notepad"], ["notepad.exe"])
+
+
+@pytest.mark.parametrize("utterance", ["open noteped", "open nod pad"])
+def test_open_app_recovers_observed_notepad_asr_variants(utterance):
+    assert router.match_open_app(utterance) == (["notepad"], ["notepad"], None)
+
+
+def test_calculator_close_prefers_verified_window_identity(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(
+        "charlie.desktop.windows.find_window",
+        lambda title: {"hwnd": 42, "title": "Calculator"},
+    )
+    closed = []
+    monkeypatch.setattr(
+        "charlie.desktop.windows.close_window_and_verify",
+        lambda title: closed.append(title) or True,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("must not taskkill a resolved window"),
+    )
+
+    assert router.execute_close_app(["calculator"], ["calc.exe"]) == "Calculator has been closed for you."
+    assert closed == ["Calculator"]
+
+
+def test_calculator_close_tries_modern_candidate_after_legacy_candidate_is_absent(monkeypatch):
+    import subprocess
+
+    called_cmds = []
+
+    def mock_run(cmd, *args, **kwargs):
+        called_cmds.append(cmd)
+        return type("Result", (), {
+            "returncode": 128 if "calc.exe" in cmd else 0,
+            "stdout": "",
+            "stderr": "ERROR: The process was not found." if "calc.exe" in cmd else "",
+        })()
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(router, "is_process_running", lambda _: False)
+
+    result = router.execute_close_app(["calculator"], ["calc.exe"])
+
+    assert result == "Calculator has been closed for you."
+    assert called_cmds == ["taskkill /IM calc.exe /F", "taskkill /IM CalculatorApp.exe /F"]
+
+
+def test_calculator_close_reports_not_running_when_all_candidates_are_absent(monkeypatch):
+    import subprocess
+
+    called_cmds = []
+
+    def mock_run(cmd, *args, **kwargs):
+        called_cmds.append(cmd)
+        return type("Result", (), {"returncode": 128, "stdout": "", "stderr": "not found"})()
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    monkeypatch.setattr("sys.platform", "win32")
+
+    result = router.execute_close_app(["calculator"], ["calc.exe"])
+
+    assert result == "Calculator is not currently running."
+    assert called_cmds == ["taskkill /IM calc.exe /F", "taskkill /IM CalculatorApp.exe /F"]
+
+
+def test_calculator_close_reports_failure_when_candidate_termination_fails(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 1, "stdout": "", "stderr": "Access denied"})(),
+    )
+    monkeypatch.setattr("sys.platform", "win32")
+
+    result = router.execute_close_app(["calculator"], ["calc.exe"])
+
+    assert result == "Failed to close Calculator."
+
+
+def test_close_app_verifies_successful_taskkill_postcondition(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+    )
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(router, "is_process_running", lambda _: True)
+
+    result = router.execute_close_app(["calculator"], ["calc.exe"])
+
+    assert result == "Failed to close Calculator."
+
+
+def test_close_app_keeps_per_app_truth_for_multiple_apps(monkeypatch):
+    import subprocess
+
+    called_cmds = []
+
+    def mock_run(cmd, *args, **kwargs):
+        called_cmds.append(cmd)
+        if "notepad.exe" in cmd:
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        return type("Result", (), {"returncode": 128, "stdout": "", "stderr": "not found"})()
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(router, "is_process_running", lambda _: False)
+
+    result = router.execute_close_app(["calculator", "notepad"], ["calc.exe", "notepad.exe"])
+
+    assert "Calculator is not currently running." in result
+    assert "Notepad has been closed for you." in result
+    assert called_cmds == [
+        "taskkill /IM calc.exe /F",
+        "taskkill /IM CalculatorApp.exe /F",
+        "taskkill /IM notepad.exe /F",
+    ]
 
 
 def test_is_low_confidence_desktop_call_true_for_click_at():
@@ -916,6 +1055,47 @@ async def test_visual_screenshot_queued_after_initial_payload_not_before(monkeyp
     # proves the synthetic call bypassed the "if not tool_calls: return" early
     # exit, even though the model itself returned zero real tool calls.
     assert events.count(("build_payload",)) == 2
+
+
+@pytest.mark.asyncio
+async def test_voice_vision_has_short_budget_but_non_voice_keeps_deep_budget(monkeypatch, brain_config):
+    from charlie import core
+
+    brain_config.vision_enabled = True
+    brain = Brain(brain_config)
+    monkeypatch.setattr(core, "_INTERACTIVE_VISION_TIMEOUT_S", 0.01)
+
+    async def hanging_stream(*_args, **_kwargs):
+        await asyncio.sleep(1)
+        if False:
+            yield "unreachable"
+
+    brain._chat_stream_impl = hanging_stream
+    try:
+        voice_chunks = [
+            chunk
+            async for chunk in brain.chat_stream(
+                "What do you see on my screen?",
+                platform="voice",
+            )
+        ]
+        assert voice_chunks == ["I couldn't inspect the screen within the interactive voice time budget."]
+
+        async def deep_stream(*_args, **_kwargs):
+            await asyncio.sleep(0.02)
+            yield "deep vision result"
+
+        brain._chat_stream_impl = deep_stream
+        web_chunks = [
+            chunk
+            async for chunk in brain.chat_stream(
+                "What do you see on my screen?",
+                platform="web",
+            )
+        ]
+        assert web_chunks == ["deep vision result"]
+    finally:
+        await brain.close()
 
 
 @pytest.mark.asyncio

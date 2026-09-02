@@ -225,6 +225,7 @@ def asr_worker_process(
 
     logger.info("ASR Worker: Whisper model loaded and ready.")
     output_queue.put({"type": "ready", "model": model_size})
+    worker_diagnostics = None
 
     while True:
         try:
@@ -237,6 +238,8 @@ def asr_worker_process(
                 logger.warning(f"ASR input queue error: {e}")
                 continue
             if payload is None:  # Shutdown signal
+                if worker_diagnostics is not None:
+                    worker_diagnostics.stop()
                 break
 
             # Robust unpacking: 3-tuple, 2-tuple, or raw numpy array
@@ -261,9 +264,9 @@ def asr_worker_process(
             is_warmup = flags.get("is_warmup", False)
             utterance_id = flags.get("utterance_id")
             diagnostics_enabled = bool(flags.get("diagnostic_enabled", False))
-            worker_diagnostics = (
-                VoiceDiagnostics(enabled=True, wav_enabled=False) if diagnostics_enabled else None
-            )
+            if diagnostics_enabled and worker_diagnostics is None:
+                worker_diagnostics = VoiceDiagnostics(enabled=True, wav_enabled=False)
+                worker_diagnostics.start_resource_sampler(asr_worker_pid=os.getpid())
             diagnostic_stages: list[dict[str, Any]] = []
             onset_timestamp = None
             previous_timestamp = None

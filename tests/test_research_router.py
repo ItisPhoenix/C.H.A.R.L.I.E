@@ -2,7 +2,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from charlie.research.citations import assign_citations, strip_citation_markers, strip_invalid_citations, validate_citations
+from charlie.research.citations import (
+    assign_citations,
+    strip_citation_markers,
+    strip_invalid_citations,
+    validate_citations,
+)
 from charlie.research.engine import ResearchEngine
 from charlie.research.fetch import validate_public_url
 from charlie.research.models import ResearchMode, ResearchReport, SearchResult, SourceDocument
@@ -45,6 +50,37 @@ def test_research_router_routes_factual_and_comparison_queries():
 
 def test_current_queries_use_extraction_capable_standard_mode():
     assert route("What is the latest Python release?").mode is ResearchMode.STANDARD
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "How are you today?",
+        "How are you doing today?",
+        "How have you been lately?",
+        "Are you okay today?",
+        "What's up with you today?",
+        "How are things going lately?",
+    ],
+)
+def test_social_freshness_words_stay_conversation(query):
+    decision = route(query)
+    assert decision.should_research is False
+    assert decision.mode is None
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "What's happening in AI today?",
+        "What's the weather today?",
+        "What happened in the market today?",
+        "Latest cybersecurity news today",
+        "What changed in OpenAI recently?",
+    ],
+)
+def test_domain_freshness_words_still_research(query):
+    assert route(query).should_research is True
 
 
 def test_document_ranking_prefers_newer_evidence_when_relevance_matches():

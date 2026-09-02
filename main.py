@@ -92,6 +92,8 @@ file_handler.addFilter(redaction_filter)
 console_handler.addFilter(redaction_filter)
 root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
+for _logger_name in ("httpcore", "httpx", "asyncio", "comtypes", "trafilatura"):
+    logging.getLogger(_logger_name).setLevel(logging.WARNING)
 
 # 3. NOW IMPORT CHARLIE MODULES
 from charlie import background_task, telemetry
@@ -132,6 +134,29 @@ from charlie.watchers import (
 )
 
 logger = logging.getLogger("charlie.main")
+_NON_CANCELLABLE_FOREGROUND_TOOLS = frozenset(
+    {
+        "file_write",
+        "shell_execute",
+        "memory",
+        "vector_memory",
+        "graph_add_fact",
+        "graph_consolidate",
+        "desktop_click",
+        "desktop_click_at",
+        "desktop_type",
+        "desktop_invoke",
+        "desktop_key",
+        "desktop_move",
+        "desktop_drag",
+        "desktop_scroll",
+        "desktop_focus",
+        "desktop_window",
+        "desktop_move_window",
+        "start_background_task",
+        "propose_new_tool",
+    }
+)
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
 _state_machine = StateMachine()  # single authoritative CoreState instance for this process
 
@@ -1000,6 +1025,7 @@ def _start_voice_or_degrade(
     on_speech: Callable[[str], None],
     on_tts_start: Callable[[], None],
     on_tts_stop: Callable[[], None],
+    on_speech_onset: Optional[Callable[..., None]] = None,
 ) -> VoiceEngine | _UnavailableVoiceEngine:
     """Start voice or retain text and web operation after a voice failure."""
     try:
@@ -1008,6 +1034,7 @@ def _start_voice_or_degrade(
             on_speech=on_speech,
             on_tts_start=on_tts_start,
             on_tts_stop=on_tts_stop,
+            on_speech_onset=on_speech_onset,
         )
         voice.start()
     except Exception:
@@ -1227,6 +1254,11 @@ async def main():
     voice_diagnostic_traces: Dict[str, Any] = {}
     active_turn_id: Optional[str] = None
     active_task_id: Optional[str] = None
+    active_process_task: Optional[asyncio.Task] = None
+    active_operation_name: Optional[str] = None
+    active_operation_task_id: Optional[str] = None
+    active_operation_cancellable = True
+    background_housekeeping_tasks: set[asyncio.Task] = set()
 
     try:
         store = SessionStore(config.session_db_path)
@@ -1252,7 +1284,38 @@ async def main():
 
     loop = asyncio.get_running_loop()
 
+    def _schedule_housekeeping(coroutine) -> asyncio.Task:
+        task = asyncio.create_task(coroutine)
+        background_housekeeping_tasks.add(task)
+
+        def _finished(completed: asyncio.Task) -> None:
+            background_housekeeping_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            try:
+                error = completed.exception()
+            except asyncio.CancelledError:
+                return
+            if error is not None:
+                logger.debug("Background voice housekeeping failed: %s", error)
+
+        task.add_done_callback(_finished)
+        return task
+
+    def _cancel_housekeeping() -> None:
+        for task in tuple(background_housekeeping_tasks):
+            task.cancel()
+        try:
+            brain.cancel_background_tasks()
+        except NameError:
+            pass
+
     def on_tool_call(name, args, *, turn_id=None, task_id=None, session_id=None):
+        nonlocal active_operation_name, active_operation_task_id, active_operation_cancellable
+        if task_id == active_task_id:
+            active_operation_name = name
+            active_operation_task_id = task_id
+            active_operation_cancellable = name not in _NON_CANCELLABLE_FOREGROUND_TOOLS
         event_session_id = session_id or current_web_session_id
         try:
             active_audit_store = audit_store
@@ -1276,6 +1339,11 @@ async def main():
             )
 
     def on_tool_result(name, result, *, turn_id=None, task_id=None, session_id=None):
+        nonlocal active_operation_name, active_operation_task_id, active_operation_cancellable
+        if task_id == active_operation_task_id:
+            active_operation_name = None
+            active_operation_task_id = None
+            active_operation_cancellable = True
         event_session_id = session_id or current_web_session_id
         if event_bus:
             asyncio.run_coroutine_threadsafe(
@@ -1708,11 +1776,40 @@ async def main():
         await in between, making them atomic with respect to any other
         coroutine on this loop without needing a lock.
         """
-        nonlocal turn_active
+        nonlocal turn_active, active_process_task
         from charlie.core import get_active_voice_approval
 
         trace = voice_diagnostic_traces.get(request.turn_id)
-        blocked_by_active_turn = turn_active and not voice.is_speaking.is_set() and not get_active_voice_approval()
+        blocked_by_active_turn = turn_active and not get_active_voice_approval()
+
+        if request.channel == "voice" and blocked_by_active_turn:
+            current_task = asyncio.current_task()
+            old_task = active_process_task
+            if old_task is not None and old_task is not current_task and not old_task.done():
+                for queued in [item for item in pending_turns if item.channel == "voice"]:
+                    pending_turns.remove(queued)
+                    pending_turn_times.pop(queued.turn_id, None)
+                    voice_diagnostic_traces.pop(queued.turn_id, None)
+                brain.cancel_chat()
+                if active_operation_name is not None and not active_operation_cancellable:
+                    pending_turns.append(request)
+                    pending_turn_times[request.turn_id] = time.monotonic()
+                    logger.info(
+                        "voice_turn_schedule | turn_id=%s | scheduling=queued_safe_completion | "
+                        "active_operation=%s | queue_depth=%s",
+                        request.turn_id,
+                        active_operation_name,
+                        len(pending_turns),
+                    )
+                    return
+                old_task.cancel()
+                try:
+                    await old_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.debug("Superseded foreground turn exited with an error", exc_info=True)
+                blocked_by_active_turn = False
 
         # A gated tool call inside the still-running turn is waiting on a
         # spoken yes/no -- that answer must reach _process() immediately
@@ -1749,7 +1846,12 @@ async def main():
                 active_turn_id,
                 active_task_id,
             )
-        await _process(request, brain, voice)
+        active_process_task = asyncio.current_task()
+        try:
+            await _process(request, brain, voice)
+        finally:
+            if active_process_task is asyncio.current_task():
+                active_process_task = None
 
     def _cleanup_intent_decision(processor):
         """Release interactive route metadata after every processing outcome."""
@@ -1767,6 +1869,7 @@ async def main():
     @_cleanup_intent_decision
     async def _process(request: TurnRequest, brain, voice):
         nonlocal speech_echo_cooldown, last_emotion, turn_active, active_turn_id, active_task_id
+        nonlocal active_operation_name, active_operation_task_id, active_operation_cancellable
         text = request.input
         session_id = request.session_id
         platform = request.channel
@@ -1796,7 +1899,7 @@ async def main():
         def mark_response_complete(status: str = "completed") -> None:
             if trace is not None:
                 trace.mark_once(
-                    "response_complete",
+                    "response_text_complete",
                     fields={
                         "status": status,
                         "platform": platform,
@@ -2273,6 +2376,27 @@ async def main():
                     ),
                 )
             mark_response_complete()
+        except asyncio.CancelledError:
+            logger.info("Foreground voice turn superseded: %s", request.turn_id)
+            try:
+                turn_task = foreground_journal.cancel(task_id)
+                await _emit_foreground_task(turn_task)
+            except Exception:
+                logger.debug("Failed to mark superseded foreground turn cancelled", exc_info=True)
+            if event_bus:
+                await event_bus.emit(
+                    "response_done",
+                    {"session_id": session_id},
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=task_id,
+                        session_id=session_id,
+                        turn_id=request.turn_id,
+                        rationale="foreground voice turn superseded by newer speech",
+                    ),
+                )
+            mark_response_complete("superseded")
+            return
         except Exception as exc:
             logger.error("Turn failed", exc_info=True)
             try:
@@ -2309,6 +2433,10 @@ async def main():
             raise
         finally:
             turn_active = False
+            if active_operation_task_id == task_id:
+                active_operation_name = None
+                active_operation_task_id = None
+                active_operation_cancellable = True
             if active_turn_id == request.turn_id:
                 active_turn_id = None
                 active_task_id = None
@@ -2326,12 +2454,20 @@ async def main():
         # whatever's on screen at that moment, never a genuine user preference,
         # and storing it as one pollutes memory with stale screen snapshots that
         # resurface on later "what's on my screen" queries.
-        from charlie.router import SCREEN_QUERY_RE as _screen_query_re
+        from charlie.router import SCREEN_QUERY_RE as _screen_query_re, is_direct_screen_perception_query
+        from charlie.core import _VISUAL_CONTENT_QUERY_RE
 
-        if full_reply_buffer.strip() and text.strip() and not _screen_query_re.search(text):
+        screen_content_query = bool(
+            _screen_query_re.search(text)
+            or is_direct_screen_perception_query(text)
+            or _VISUAL_CONTENT_QUERY_RE.search(text)
+        )
+
+        if platform == "voice" and full_reply_buffer.strip() and text.strip() and not screen_content_query:
 
             async def _background_learn(user_text: str, reply_text: str):
                 try:
+                    await asyncio.sleep(0)
                     if not config.llm_url:
                         return
                     learning_prompt = (
@@ -2383,8 +2519,13 @@ async def main():
                 except Exception as e:
                     logger.debug(f"Learning loop skipped: {e}")
 
-            # Fire-and-forget: learning runs in background, doesn't block user
-            asyncio.create_task(_background_learn(text, full_reply_buffer))
+            _schedule_housekeeping(_background_learn(text, full_reply_buffer))
+
+        if platform == "voice" and full_reply_buffer.strip() and not screen_content_query:
+            _schedule_housekeeping(brain._extract_thread_update(text, full_reply_buffer, session_id))
+            _schedule_housekeeping(brain._background_save_to_memory(full_reply_buffer, "assistant"))
+        if platform == "voice":
+            brain.schedule_deferred_background_work()
 
     async def _reload_voice_engine():
         """Stop and respawn VoiceEngine so mic/VAD/ASR/TTS-model/wake-word settings take effect.
@@ -2404,6 +2545,7 @@ async def main():
                 on_speech=on_speech,
                 on_tts_start=on_tts_start,
                 on_tts_stop=on_tts_stop,
+                on_speech_onset=on_speech_onset,
             )
             voice.start()
             voice.set_wake_word_callback(on_wake_word)
@@ -2821,11 +2963,40 @@ async def main():
                     loop,
                 )
 
+        def on_speech_onset(_metadata=None):
+            """Preempt optional work as soon as VAD confirms user speech."""
+
+            if not config.enable_barge_in:
+                return
+
+            def _handle_onset() -> None:
+                _cancel_housekeeping()
+                if active_turn_id is None:
+                    return
+                brain.cancel_chat()
+                task = active_process_task
+                if task is None or task.done():
+                    return
+                if active_operation_name is not None and not active_operation_cancellable:
+                    logger.info(
+                        "Speech onset deferred foreground cancellation until safe operation completes: %s",
+                        active_operation_name,
+                    )
+                    return
+                logger.info("Speech onset superseding cancellable foreground response")
+                task.cancel()
+
+            try:
+                loop.call_soon_threadsafe(_handle_onset)
+            except RuntimeError:
+                pass
+
         voice = _start_voice_or_degrade(
             config,
             on_speech,
             on_tts_start,
             on_tts_stop,
+            on_speech_onset,
         )
 
         def on_wake_word():

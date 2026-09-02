@@ -288,6 +288,25 @@ async def test_brain_semantic_write_uses_service_and_keeps_async_executor(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_background_housekeeping_can_be_cancelled_by_new_voice_work(tmp_path):
+    brain = Brain(_config(tmp_path), register_panic_hotkey=False)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_housekeeping():
+        started.set()
+        await release.wait()
+
+    task = brain.schedule_background_task(slow_housekeeping())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    brain.cancel_background_tasks()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await brain.close()
+
+
+@pytest.mark.asyncio
 async def test_brain_reflection_uses_service_for_graph_mutations(tmp_path, monkeypatch):
     service = _MemoryServiceSpy()
     brain = Brain(

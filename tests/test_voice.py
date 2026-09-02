@@ -7,6 +7,7 @@ Focuses on the text humanization pipeline, RMS calculation, and init logic.
 import queue
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +24,7 @@ class FakeConfig:
     wake_word_enabled = False
     wake_word_model_path = ""
     wake_word_audio_chime_path = ""
+    enable_barge_in = True
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +191,29 @@ class TestRMS:
         assert VoiceEngine._rms(np.array([], dtype=np.float32)) == 0.0
 
 
+def test_vad_onset_requires_two_consecutive_loud_frames():
+    assert VoiceEngine._speech_onset_confirmed(1, 2) is False
+    assert VoiceEngine._speech_onset_confirmed(2, 2) is True
+
+
+def test_vad_pre_roll_keeps_each_onset_frame_once_and_preserves_order():
+    frames = [
+        np.array([1, 2], dtype=np.float32),
+        np.array([3, 4], dtype=np.float32),
+        np.array([5, 6], dtype=np.float32),
+    ]
+    speech = VoiceEngine._speech_buffer_from_pre_roll(deque(frames))
+
+    assert len(speech) == len(frames)
+    assert np.concatenate(speech).tolist() == [1, 2, 3, 4, 5, 6]
+
+
+def test_vad_endpoint_uses_conservative_timeout_without_shortening_minimum():
+    assert VoiceEngine._should_end_speech(1.29, 1.0, 1.3, 0.35, 45.0) is False
+    assert VoiceEngine._should_end_speech(1.3, 1.0, 1.3, 0.35, 45.0) is True
+    assert VoiceEngine._should_end_speech(0.0, 45.0, 1.3, 0.35, 45.0) is True
+
+
 # ---------------------------------------------------------------------------
 # VoiceEngine initialization with mocked hardware
 # ---------------------------------------------------------------------------
@@ -338,6 +363,35 @@ class TestVoiceEngineInit:
         samples = np.zeros(100, dtype=np.float32)
         assert VoiceEngine._rms(samples) == 0.0
 
+    def test_confirmed_speech_onset_interrupts_tts_immediately(self):
+        engine = self._make_engine()
+        engine.is_speaking.set()
+        trace = engine.voice_diagnostics.new_trace("utterance-onset")
+        onset = []
+        engine._on_speech_onset = onset.append
+
+        with patch.object(engine, "stop_tts") as stop_tts:
+            engine._notify_speech_onset(trace, 0.4, 16000)
+
+        stop_tts.assert_called_once_with()
+        assert onset[0]["tts_was_active"] is True
+
+    def test_confirmed_speech_onset_without_tts_does_not_cancel_playback(self):
+        engine = self._make_engine()
+        trace = engine.voice_diagnostics.new_trace("utterance-no-tts")
+
+        with patch.object(engine, "stop_tts") as stop_tts:
+            engine._notify_speech_onset(trace, 0.4, 16000)
+
+        stop_tts.assert_not_called()
+
+    def test_diagnostic_stage_names_separate_text_and_playback_completion(self):
+        from charlie.voice_diagnostics import VOICE_DIAGNOSTIC_STAGES
+
+        assert "response_text_complete" in VOICE_DIAGNOSTIC_STAGES
+        assert "playback_complete" in VOICE_DIAGNOSTIC_STAGES
+        assert "response_complete" not in VOICE_DIAGNOSTIC_STAGES
+
     def test_asr_poller_preserves_utterance_id_and_sidecar_trace(self):
         received = []
 
@@ -442,7 +496,10 @@ class TestVoiceEngineInit:
             mock_sd.get_stream.side_effect = lambda: (engine.stop_event.set() or None)
             engine._playback_worker()
 
-        assert trace.events()[-1]["stage"] == "playback_first_sample"
+        assert [event["stage"] for event in trace.events()[-2:]] == [
+            "playback_first_sample",
+            "playback_complete",
+        ]
         assert engine.stop_event.is_set()
 
 
@@ -518,11 +575,71 @@ def test_resource_telemetry_failure_is_nonfatal(monkeypatch):
     monkeypatch.setitem(sys.modules, "psutil", FailingPsutil())
     monkeypatch.setattr(VoiceDiagnostics, "_read_gpu_snapshot", staticmethod(lambda: {"gpu_metrics": "unavailable"}))
 
-    snapshot = VoiceDiagnostics(enabled=True, wav_enabled=False).resource_snapshot(asr_worker_pid=1234)
+    diagnostics = VoiceDiagnostics(enabled=True, wav_enabled=False)
+    snapshot = diagnostics._collect_resource_snapshot(asr_worker_pid=1234)
 
     assert snapshot["resource_telemetry"] == "degraded"
     assert snapshot["gpu_metrics"] == "unavailable"
     assert "resource_telemetry_error" in snapshot
+
+
+def test_cached_resource_snapshot_does_not_sample_on_realtime_read(monkeypatch):
+    diagnostics = VoiceDiagnostics(enabled=True, wav_enabled=False)
+    diagnostics._resource_cache = {
+        "resource_telemetry": "available",
+        "gpu_metrics": "unavailable",
+        "asr_worker_pid": 1234,
+    }
+
+    class LiveThread:
+        @staticmethod
+        def is_alive():
+            return True
+
+    diagnostics._resource_thread = LiveThread()
+    monkeypatch.setattr(
+        diagnostics,
+        "_collect_resource_snapshot",
+        lambda **_kwargs: pytest.fail("realtime stage performed synchronous telemetry collection"),
+    )
+
+    assert diagnostics.resource_snapshot(asr_worker_pid=1234)["resource_telemetry"] == "available"
+
+
+def test_asr_worker_rss_is_not_labeled_as_charlie_rss(monkeypatch):
+    from types import SimpleNamespace
+
+    class FakeProcess:
+        def memory_info(self):
+            return SimpleNamespace(rss=123)
+
+    class FakePsutil:
+        Error = RuntimeError
+
+        @staticmethod
+        def Process(_pid):
+            return FakeProcess()
+
+        @staticmethod
+        def virtual_memory():
+            return SimpleNamespace(used=1, available=2, percent=3.0)
+
+        @staticmethod
+        def cpu_percent(*_args, **_kwargs):
+            return 4.0
+
+        @staticmethod
+        def process_iter(*_args, **_kwargs):
+            return []
+
+    monkeypatch.setitem(sys.modules, "psutil", FakePsutil())
+    diagnostics = VoiceDiagnostics(enabled=True, wav_enabled=False)
+    monkeypatch.setattr(VoiceDiagnostics, "_read_gpu_snapshot", staticmethod(lambda: {"gpu_metrics": "unavailable"}))
+
+    snapshot = diagnostics._collect_resource_snapshot(asr_worker_pid=__import__("os").getpid())
+
+    assert snapshot["asr_worker_rss_bytes"] == 123
+    assert "charlie_process_rss_bytes" not in snapshot
 
 
 def test_voice_diagnostics_has_no_memory_or_session_store_writer():

@@ -9,9 +9,14 @@ from typing import Optional
 from charlie.research.models import ResearchMode
 
 _CURRENT_SIGNALS = re.compile(
-    r"\b(latest|current|currently|today|now|right now|live|recent|breaking|trending|news|"
+    r"\b(latest|current|currently|today|now|right now|live|recent|recently|lately|breaking|trending|news|"
     r"price|prices|cost|buy|shopping|recommend|recommendation|travel|release|version|"
     r"availability|schedule|score|weather|sports|on twitter|on x\b)\b",
+    re.IGNORECASE,
+)
+_SOCIAL_CONVERSATION_SIGNALS = re.compile(
+    r"\b(?:how\s+(?:are|have)\s+you\b|are\s+you\s+(?:okay|ok|well|doing)\b|"
+    r"what(?:'s|\s+is)\s+up\s+with\s+you\b|how\s+are\s+things\s+going\b)",
     re.IGNORECASE,
 )
 _RESEARCH_SIGNALS = re.compile(
@@ -74,6 +79,8 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
     if _RESEARCH_SIGNALS.search(text):
         mode = ResearchMode.DEEP if re.search(r"deep|in[- ]depth|thorough", text, re.I) else ResearchMode.STANDARD
         return ResearchDecision(True, mode, "explicit research intent")
+    if _SOCIAL_CONVERSATION_SIGNALS.search(text):
+        return ResearchDecision(False, None, "social conversation is not a live-web request")
     if _STABLE_EXPLANATION.search(text) and not _CURRENT_SIGNALS.search(text):
         return ResearchDecision(False, None, "stable general knowledge")
     if _FACTUAL_RESEARCH.search(text) or _SPECIALIZED_FACTUAL.search(text):
