@@ -295,7 +295,16 @@ class TestEmbeddingDimensionMismatch:
 
         mock_collection = MagicMock()
         mock_collection.count = MagicMock(return_value=1)
-        mock_collection.peek = MagicMock(return_value={"embeddings": [[0.0] * stored_dim]})
+
+        def query(*, query_embeddings, **kwargs):
+            if len(query_embeddings[0]) != stored_dim:
+                raise RuntimeError(
+                    f"Collection expecting embedding with dimension of {stored_dim}, "
+                    f"got {len(query_embeddings[0])}"
+                )
+            return {"distances": [[0.0]]}
+
+        mock_collection.query = MagicMock(side_effect=query)
         mock_client = MagicMock()
         mock_client.get_or_create_collection = MagicMock(return_value=mock_collection)
         monkeypatch.setattr("chromadb.PersistentClient", lambda path: mock_client)
@@ -325,6 +334,34 @@ class TestEmbeddingDimensionMismatch:
         from charlie.memory_store import MemoryStore
         store = MemoryStore(FakeConfig())
         assert store.is_available is True
+
+    def test_query_compatibility_probe_avoids_raw_vector_peek(self, monkeypatch):
+        mock_ef = MagicMock()
+        mock_ef.embed_query = MagicMock(return_value=[[0.1] * 384])
+        mock_ef.name = MagicMock(return_value="fake-ef")
+        monkeypatch.setattr(
+            "charlie.memory_store._build_embedding_function",
+            lambda _: mock_ef,
+        )
+
+        mock_collection = MagicMock()
+        mock_collection.count = MagicMock(return_value=1)
+        mock_collection.query = MagicMock(return_value={"distances": [[0.0]]})
+        mock_client = MagicMock()
+        mock_client.get_or_create_collection = MagicMock(return_value=mock_collection)
+        monkeypatch.setattr("chromadb.PersistentClient", lambda path: mock_client)
+
+        from charlie.memory_store import MemoryStore
+
+        store = MemoryStore(FakeConfig())
+
+        assert store.is_available is True
+        mock_collection.peek.assert_not_called()
+        mock_collection.query.assert_called_once_with(
+            query_embeddings=[[0.0] * 384],
+            n_results=1,
+            include=["distances"],
+        )
 
 
 class TestBuildEmbeddingFunctionRetry:
