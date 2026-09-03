@@ -194,37 +194,97 @@ def asr_worker_process(
     Worker process that handles Whisper transcription.
     """
     logger.info(f"ASR Worker started. Loading model: {model_size} on {device}")
+    startup_started = time.perf_counter()
+    model_load_ms = None
+    warmup_inference_ms = None
+    startup_stage = "model_load"
 
     try:
-        # Load WhisperModel once
-        whisper = WhisperModel(
-            model_size,
-            device=device,
-            compute_type="float16" if device == "cuda" else "int8",
-            local_files_only=True,
-        )
-    except Exception as e:
-        logger.warning(
-            f"ASR Worker: Local load failed for {model_size}, attempting download: {e}"
-        )
         try:
+            # Load WhisperModel once
             whisper = WhisperModel(
                 model_size,
                 device=device,
                 compute_type="float16" if device == "cuda" else "int8",
+                local_files_only=True,
             )
-        except Exception as e2:
+        except Exception as e:
             logger.warning(
-                f"ASR Worker: Failed to load {model_size}: {e2}. Falling back to large-v3."
+                f"ASR Worker: Local load failed for {model_size}, attempting download: {e}"
             )
-            whisper = WhisperModel(
-                "large-v3",
-                device=device,
-                compute_type="float16" if device == "cuda" else "int8",
-            )
+            try:
+                whisper = WhisperModel(
+                    model_size,
+                    device=device,
+                    compute_type="float16" if device == "cuda" else "int8",
+                )
+            except Exception as e2:
+                logger.warning(
+                    f"ASR Worker: Failed to load {model_size}: {e2}. Falling back to large-v3."
+                )
+                whisper = WhisperModel(
+                    "large-v3",
+                    device=device,
+                    compute_type="float16" if device == "cuda" else "int8",
+                )
 
-    logger.info("ASR Worker: Whisper model loaded and ready.")
-    output_queue.put({"type": "ready", "model": model_size})
+        model_load_ms = (time.perf_counter() - startup_started) * 1000
+        logger.info("ASR Worker: Whisper model loaded.")
+
+        startup_stage = "warmup"
+        warmup_started = time.perf_counter()
+        warmup_flags = {
+            "is_warmup": True,
+            "warmup_context": (
+                "This is Charlie, a voice assistant. Short conversational English with real words."
+            ),
+        }
+        warmup_audio = np.zeros(1600, dtype=np.float32)
+        warmup_segments, _ = whisper.transcribe(
+            warmup_audio,
+            **_build_transcribe_kwargs(True, warmup_flags, default_language, asr_config),
+        )
+        # faster-whisper performs inference lazily; consume iterator to force CUDA warm-up.
+        list(warmup_segments)
+        warmup_inference_ms = (time.perf_counter() - warmup_started) * 1000
+    except Exception as e:
+        metrics = {
+            "model_load_ms": round(model_load_ms, 3) if model_load_ms is not None else None,
+            "warmup_inference_ms": (
+                round(warmup_inference_ms, 3) if warmup_inference_ms is not None else None
+            ),
+            "asr_ready_ms": None,
+        }
+        logger.error(
+            "ASR startup failed | stage=%s | model_load_ms=%s | warmup_inference_ms=%s | error=%s",
+            startup_stage,
+            metrics["model_load_ms"],
+            metrics["warmup_inference_ms"],
+            type(e).__name__,
+        )
+        output_queue.put(
+            {
+                "type": "failed",
+                "stage": startup_stage,
+                "error": f"{type(e).__name__}: {e}",
+                "metrics": metrics,
+            }
+        )
+        return
+
+    asr_ready_ms = (time.perf_counter() - startup_started) * 1000
+    startup_metrics = {
+        "model_load_ms": round(model_load_ms, 3),
+        "warmup_inference_ms": round(warmup_inference_ms, 3),
+        "asr_ready_ms": round(asr_ready_ms, 3),
+    }
+    logger.info(
+        "ASR Worker ready after warm-up | model_load_ms=%.1f | warmup_inference_ms=%.1f | asr_ready_ms=%.1f",
+        startup_metrics["model_load_ms"],
+        startup_metrics["warmup_inference_ms"],
+        startup_metrics["asr_ready_ms"],
+    )
+    output_queue.put({"type": "ready", "model": model_size, "metrics": startup_metrics})
     worker_diagnostics = None
 
     while True:

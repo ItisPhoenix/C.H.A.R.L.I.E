@@ -34,6 +34,11 @@ interface ModelSnapshot {
   active_model?: string;
   models?: string[];
   has_api_key?: boolean;
+  provider_discovery?: {
+    status?: "available" | "error" | "not_configured";
+    count?: number;
+    error?: string | null;
+  };
 }
 
 interface MCPServerInfo {
@@ -195,6 +200,8 @@ export function Settings(): ReactElement {
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealth>({});
   const [modelSnapshot, setModelSnapshot] = useState<ModelSnapshot>({});
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelSearch, setModelSearch] = useState("");
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [activeCategory, setActiveCategory] = useState("All");
 
   // MCP State
@@ -276,7 +283,17 @@ export function Settings(): ReactElement {
       if (!response.ok) throw new Error("Models unavailable");
       setModelSnapshot((await response.json()) as ModelSnapshot);
     } catch {
-      setModelSnapshot({});
+      const currentField = fields.find((field) => field.key === "LLM_MODEL");
+      const currentModel = currentField ? String(fieldValue(currentField, drafts) ?? "") : "";
+      setModelSnapshot({
+        active_model: currentModel,
+        models: [],
+        provider_discovery: {
+          status: "error",
+          count: 0,
+          error: "Could not load models from configured provider.",
+        },
+      });
     } finally {
       setModelsLoading(false);
     }
@@ -464,16 +481,46 @@ export function Settings(): ReactElement {
     [fields]
   );
 
-  const availableModels = useMemo(
-    () =>
-      Array.from(
-        new Set([
-          String(fields.find((field) => field.key === "LLM_MODEL")?.value ?? ""),
-          ...(modelSnapshot.models ?? []),
-        ])
-      ).filter(Boolean),
-    [fields, modelSnapshot.models]
-  );
+  const availableModels = useMemo(() => {
+    const modelField = fields.find((field) => field.key === "LLM_MODEL");
+    const configuredModel = modelField ? String(fieldValue(modelField, drafts) ?? "") : "";
+    return Array.from(
+      new Set([
+        configuredModel,
+        String(modelSnapshot.active_model ?? ""),
+        ...(modelSnapshot.models ?? []),
+      ])
+    ).filter(Boolean);
+  }, [drafts, fields, modelSnapshot.active_model, modelSnapshot.models]);
+
+  const filteredModels = useMemo(() => {
+    const query = modelSearch.trim().toLowerCase();
+    if (!query) return availableModels;
+
+    const matchingModels = availableModels.filter((model) => model.toLowerCase().includes(query));
+    const modelField = fields.find((field) => field.key === "LLM_MODEL");
+    const currentModel = modelField ? String(fieldValue(modelField, drafts) ?? "") : "";
+    return currentModel && !matchingModels.includes(currentModel)
+      ? [currentModel, ...matchingModels]
+      : matchingModels;
+  }, [availableModels, drafts, fields, modelSearch]);
+
+  const providerDiscoveryStatus = modelSnapshot.provider_discovery?.status;
+  const modelStatusText = modelsLoading
+    ? "Loading models…"
+    : providerDiscoveryStatus === "available"
+    ? `${modelSnapshot.provider_discovery?.count ?? 0} provider models available.`
+    : providerDiscoveryStatus === "error"
+    ? "Could not load models from configured provider."
+    : providerDiscoveryStatus === "not_configured"
+    ? "No configured model provider."
+    : "";
+
+  function selectModel(model: string): void {
+    setDrafts((current) => ({ ...current, LLM_MODEL: model }));
+    setModelSearch("");
+    setModelMenuOpen(false);
+  }
 
   async function save(): Promise<void> {
     if (Object.keys(drafts).length === 0) return;
@@ -667,7 +714,7 @@ export function Settings(): ReactElement {
       data-testid="authoritative-settings"
     >
       {/* 1. Header Toolbar */}
-      <div className="settings-intro mb-3 flex items-center justify-between border-b border-cyan-500/20 pb-2.5">
+      <div className="settings-intro mb-3 flex flex-wrap items-center gap-3 border-b border-cyan-500/20 pb-2.5">
         <div>
           <h3 className="text-xs font-bold text-cyan-200 uppercase tracking-wide">
             Runtime Controls
@@ -676,14 +723,24 @@ export function Settings(): ReactElement {
             Settings are applied locally and activated on runtime reload.
           </p>
         </div>
-        <button
-          type="button"
-          className="px-3 py-1 text-xs rounded bg-cyan-950/80 border border-cyan-500/40 text-cyan-300 hover:bg-cyan-900/60 transition cursor-pointer"
-          onClick={() => void refreshModels()}
-          disabled={modelsLoading}
-        >
-          {modelsLoading ? "Discovering..." : "Refresh Models"}
-        </button>
+        <div className="ml-auto flex min-w-0 items-center gap-3">
+          <button
+            type="button"
+            className="px-3 py-1 text-xs rounded bg-cyan-950/80 border border-cyan-500/40 text-cyan-300 hover:bg-cyan-900/60 transition cursor-pointer"
+            onClick={() => void refreshModels()}
+            disabled={modelsLoading}
+          >
+            {modelsLoading ? "Loading models…" : "Refresh Models"}
+          </button>
+          <span
+            className="truncate text-[10px] text-slate-400"
+            role="status"
+            aria-live="polite"
+            data-testid="model-discovery-status"
+          >
+            {modelStatusText}
+          </span>
+        </div>
       </div>
 
       {/* 2. Main Two-Column Layout: Sidebar Categories + Content Form */}
@@ -782,26 +839,79 @@ export function Settings(): ReactElement {
                             }))
                           }
                         />
-                      ) : field.key === "LLM_MODEL" && (modelSnapshot.models?.length ?? 0) > 0 ? (
-                        <>
+                      ) : field.key === "LLM_MODEL" ? (
+                        <div className="relative w-52">
                           <input
                             aria-label={field.label}
-                            list="charlie-model-options"
-                            className="px-2.5 py-1 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono w-52 text-right"
-                            value={String(fieldValue(field, drafts) ?? "")}
-                            onChange={(event) =>
-                              setDrafts((current) => ({
-                                ...current,
-                                [field.key]: event.target.value,
-                              }))
-                            }
+                            aria-autocomplete="list"
+                            aria-controls="charlie-model-options"
+                            aria-expanded={modelMenuOpen}
+                            role="combobox"
+                            type="text"
+                            placeholder="Search or select model..."
+                            value={modelMenuOpen ? modelSearch : String(fieldValue(field, drafts) ?? "")}
+                            onFocus={() => {
+                              setModelSearch("");
+                              setModelMenuOpen(true);
+                            }}
+                            onChange={(event) => {
+                              setModelSearch(event.target.value);
+                              setModelMenuOpen(true);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "Escape") {
+                                setModelSearch("");
+                                setModelMenuOpen(false);
+                              } else if (event.key === "ArrowDown") {
+                                setModelMenuOpen(true);
+                              } else if (event.key === "Enter" && modelMenuOpen && filteredModels[0]) {
+                                event.preventDefault();
+                                selectModel(filteredModels[0]);
+                              }
+                            }}
+                            onBlur={() => window.setTimeout(() => setModelMenuOpen(false), 0)}
+                            className="w-full px-2.5 py-1 pr-8 rounded bg-slate-900 border border-cyan-500/30 text-cyan-200 text-xs font-mono text-right"
                           />
-                          <datalist id="charlie-model-options">
-                            {availableModels.map((model) => (
-                              <option key={model} value={model} />
-                            ))}
-                          </datalist>
-                        </>
+                          <button
+                            type="button"
+                            aria-label="Toggle model options"
+                            tabIndex={-1}
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => {
+                              setModelSearch("");
+                              setModelMenuOpen((open) => !open);
+                            }}
+                            className="absolute right-1 top-1/2 -translate-y-1/2 px-1 text-cyan-300 hover:text-cyan-100"
+                          >
+                            v
+                          </button>
+                          {modelMenuOpen ? (
+                            <div
+                              id="charlie-model-options"
+                              role="listbox"
+                              aria-label="Available models"
+                              className="absolute z-30 top-full left-0 right-0 mt-1 max-h-64 overflow-y-auto rounded border border-cyan-500/40 bg-slate-950 shadow-xl shadow-black/40"
+                            >
+                              {filteredModels.length > 0 ? (
+                                filteredModels.map((model) => (
+                                  <button
+                                    key={model}
+                                    type="button"
+                                    role="option"
+                                    aria-selected={model === String(fieldValue(field, drafts) ?? "")}
+                                    onMouseDown={(event) => event.preventDefault()}
+                                    onClick={() => selectModel(model)}
+                                    className="block w-full truncate px-2.5 py-1.5 text-left text-[10px] font-mono text-cyan-200 hover:bg-cyan-950/70"
+                                  >
+                                    {model}
+                                  </button>
+                                ))
+                              ) : (
+                                <div className="px-2.5 py-1.5 text-[10px] text-slate-500">No models match search.</div>
+                              )}
+                            </div>
+                          ) : null}
+                        </div>
                       ) : (
                         <input
                           aria-label={field.label}

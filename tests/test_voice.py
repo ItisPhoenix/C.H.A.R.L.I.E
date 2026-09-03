@@ -9,12 +9,13 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
 
 import charlie.voice
+from charlie.personality import parse_voice_control
 from charlie.voice import VoiceEngine
 from charlie.voice_diagnostics import VoiceDiagnostics
 
@@ -214,6 +215,24 @@ def test_vad_endpoint_uses_conservative_timeout_without_shortening_minimum():
     assert VoiceEngine._should_end_speech(0.0, 45.0, 1.3, 0.35, 45.0) is True
 
 
+@pytest.mark.parametrize(
+    ("utterance", "expected"),
+    [
+        ("Stop.", "stop"),
+        ("stop talking", "stop"),
+        ("Quiet!", "stop"),
+        ("Cancel that.", "cancel"),
+        ("Never mind.", "abandon"),
+    ],
+)
+def test_parse_voice_control_accepts_only_explicit_short_commands(utterance, expected):
+    assert parse_voice_control(utterance) == expected
+
+
+def test_parse_voice_control_does_not_match_normal_conversation():
+    assert parse_voice_control("Please stop the music") is None
+
+
 # ---------------------------------------------------------------------------
 # VoiceEngine initialization with mocked hardware
 # ---------------------------------------------------------------------------
@@ -359,6 +378,16 @@ class TestVoiceEngineInit:
         engine.asr_process = None
         engine.stop()  # must not raise AttributeError
 
+    def test_stop_cancels_queued_event_emits_and_is_idempotent(self):
+        engine = self._make_engine()
+        pending = Mock()
+        engine._event_emit_futures.add(pending)
+
+        engine.stop()
+        engine.stop()
+
+        pending.cancel.assert_called_once_with()
+
     def test_rms_static_method(self):
         samples = np.zeros(100, dtype=np.float32)
         assert VoiceEngine._rms(samples) == 0.0
@@ -427,6 +456,26 @@ class TestVoiceEngineInit:
         assert received[0][1]["utterance_id"] == "utterance-test"
         assert received[0][1]["trace"] is trace
         assert received[0][1]["confidence_semantics"] == "language_probability"
+
+    def test_asr_poller_never_forwards_warmup_result_to_user_callback(self):
+        received = []
+        engine = self._make_engine()
+        engine.on_speech = lambda *args, **kwargs: received.append((args, kwargs))
+        engine._speech_callback_mode = "keyword"
+        engine.asr_output_queue = queue.Queue()
+        engine.asr_process = None
+        engine.asr_output_queue.put(
+            (
+                "warmup text",
+                1.0,
+                {"is_warmup": True, "utterance_id": None},
+            )
+        )
+        engine.stop_event.set()
+
+        engine._asr_poller_loop()
+
+        assert received == []
 
     def test_asr_enqueue_keeps_legacy_payload_prefix_and_adds_diagnostics(self):
         engine = self._make_engine()
@@ -604,6 +653,28 @@ def test_cached_resource_snapshot_does_not_sample_on_realtime_read(monkeypatch):
     )
 
     assert diagnostics.resource_snapshot(asr_worker_pid=1234)["resource_telemetry"] == "available"
+
+
+def test_stopped_sampler_retains_reference_until_thread_exits():
+    diagnostics = VoiceDiagnostics(enabled=True, wav_enabled=False)
+
+    class SlowThread:
+        def __init__(self):
+            self.joined = False
+
+        def is_alive(self):
+            return True
+
+        def join(self, timeout):
+            self.joined = timeout == 1.0
+
+    thread = SlowThread()
+    diagnostics._resource_thread = thread
+
+    diagnostics.stop()
+
+    assert thread.joined is True
+    assert diagnostics._resource_thread is thread
 
 
 def test_asr_worker_rss_is_not_labeled_as_charlie_rss(monkeypatch):

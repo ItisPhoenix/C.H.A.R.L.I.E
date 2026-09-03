@@ -10,6 +10,7 @@ import ctypes
 import ctypes.wintypes
 import logging
 import sys
+import time
 from typing import Dict, List, Optional
 
 import psutil
@@ -115,6 +116,27 @@ def manage_window(title_substr: str, action: str) -> str:
             "may block it) -- call desktop_windows again to confirm it actually closed."
         )
     return f"Error: unknown action '{action}'. Valid: minimize, maximize, restore, close."
+
+
+def close_window_and_verify(title_substr: str, timeout_s: float = 1.5) -> bool:
+    """Close one resolved visible window and verify its exact HWND disappeared."""
+    if _user32 is None:
+        return False
+    window = find_window(title_substr)
+    if window is None:
+        return False
+    hwnd = window["hwnd"]
+    if not _user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0):
+        return False
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not any(item["hwnd"] == hwnd for item in list_windows()):
+            logger.info("Closed window '%s' (hwnd=%s, verified)", window["title"], hwnd)
+            return True
+        time.sleep(0.05)
+    logger.warning("Window '%s' (hwnd=%s) remained after close request", window["title"], hwnd)
+    return False
 
 
 def get_foreground_window() -> Optional[Dict]:

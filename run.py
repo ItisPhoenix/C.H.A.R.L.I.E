@@ -89,6 +89,16 @@ def _read_frontend_manifest(dist_dir: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _persistent_frontend_dist(root: Path) -> Path:
+    """Return the stable per-user cache used when repository dist is inaccessible."""
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        base = Path(local_app_data)
+    else:
+        base = Path.home() / "AppData" / "Local"
+    return base / "C.H.A.R.L.I.E" / "frontend-dist"
+
+
 def _git_build_identity(root: Path) -> tuple[str | None, bool | None]:
     try:
         git_sha = subprocess.check_output(
@@ -113,11 +123,6 @@ def _frontend_build_is_stale(frontend_dir: Path, dist_dir: Path) -> bool:
         return True
     manifest = _read_frontend_manifest(dist_dir)
     if not manifest or manifest.get("input_fingerprint") != _frontend_inputs_fingerprint(frontend_dir):
-        return True
-    git_sha, dirty = _git_build_identity(frontend_dir.parent)
-    if git_sha is not None and manifest.get("git_sha") != git_sha:
-        return True
-    if dirty is not None and manifest.get("dirty") != dirty:
         return True
     return False
 
@@ -170,19 +175,38 @@ def check_and_build_frontend(project_root: Path | None = None) -> None:
     if not frontend_dir.exists():
         raise RuntimeError("Frontend directory not found; refusing to start without the React HUD build.")
 
-    if not _frontend_build_is_stale(frontend_dir, dist_dir):
+    canonical_accessible = _frontend_dist_is_user_accessible(dist_dir)
+    if canonical_accessible and not _frontend_build_is_stale(frontend_dir, dist_dir):
         return
+
+    runtime_dist = _persistent_frontend_dist(root)
+    if not canonical_accessible and _frontend_dist_is_user_accessible(runtime_dist):
+        if not _frontend_build_is_stale(frontend_dir, runtime_dist):
+            os.environ[_FRONTEND_DIST_ENV] = str(runtime_dist)
+            print(f"Canonical frontend/dist is inaccessible; reusing verified user cache at {runtime_dist}.")
+            return
 
     print("Frontend build missing or stale. Compiling frontend...")
     npm_path = shutil.which("npm")
     if not npm_path:
         raise RuntimeError("npm was not found; install Node.js/npm and run 'npm run build' in frontend/.")
 
-    use_runtime_dist = not _frontend_dist_is_user_accessible(dist_dir)
+    use_runtime_dist = not canonical_accessible
+    if use_runtime_dist:
+        try:
+            runtime_dist.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                "Persistent frontend cache directory is unavailable; refusing to use a temp build."
+            ) from exc
+        if not _frontend_dist_is_user_accessible(runtime_dist.parent):
+            raise RuntimeError(
+                "Persistent frontend cache directory is not user-accessible; refusing to use a temp build."
+            )
     staging_dir = Path(
         tempfile.mkdtemp(
-            prefix="charlie-runtime-build-" if use_runtime_dist else ".charlie-build-",
-            dir=None if use_runtime_dist else frontend_dir,
+            prefix=".charlie-runtime-build-" if use_runtime_dist else ".charlie-build-",
+            dir=str(runtime_dist.parent if use_runtime_dist else frontend_dir),
         )
     )
     build_env = os.environ.copy()
@@ -213,10 +237,11 @@ def check_and_build_frontend(project_root: Path | None = None) -> None:
             _publish_frontend_build(staging_dir, dist_dir)
             os.environ[_FRONTEND_DIST_ENV] = str(dist_dir)
         else:
-            os.environ[_FRONTEND_DIST_ENV] = str(staging_dir)
+            _publish_frontend_build(staging_dir, runtime_dist)
+            os.environ[_FRONTEND_DIST_ENV] = str(runtime_dist)
             print(
                 "Canonical frontend/dist is not accessible to this user; "
-                f"serving the verified build from {staging_dir}."
+                f"serving the verified persistent build from {runtime_dist}."
             )
         print("Frontend built successfully!")
     except subprocess.CalledProcessError as e:
@@ -225,7 +250,7 @@ def check_and_build_frontend(project_root: Path | None = None) -> None:
             "See the npm output above and fix the build before restarting."
         ) from e
     finally:
-        if staging_dir.exists() and not use_runtime_dist:
+        if staging_dir.exists():
             shutil.rmtree(staging_dir)
 
 

@@ -37,6 +37,13 @@ VOICE_DIAGNOSTIC_STAGES = (
     "turn_dispatch",
     "intent_decision",
     "brain_start",
+    "vision_request_start",
+    "headers_received",
+    "first_token",
+    "client_cancel_requested",
+    "stream_closed",
+    "server_generation_stop_evidence",
+    "vision_request_end",
     "first_llm_token",
     "tool_start",
     "tool_complete",
@@ -201,8 +208,10 @@ class VoiceDiagnostics:
         if thread is not None and thread is not threading.current_thread() and thread.is_alive():
             thread.join(timeout=1.0)
         with self._resource_lock:
-            if self._resource_thread is thread:
+            if self._resource_thread is thread and (thread is None or not thread.is_alive()):
                 self._resource_thread = None
+        if thread is not None and thread.is_alive():
+            logger.warning("Voice diagnostics sampler did not stop within deadline")
 
     def capture_audio(self, trace: "VoiceDiagnosticTrace", audio: Any, sample_rate: int) -> Optional[str]:
         """Write exact float32 samples to a bounded-retention IEEE-float WAV."""

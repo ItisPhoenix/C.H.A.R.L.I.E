@@ -8,7 +8,7 @@ they could silently drift out of sync. Now it's one entry here.
 
 from dataclasses import dataclass
 from ipaddress import ip_address
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Set, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -16,8 +16,17 @@ from urllib.parse import urlsplit, urlunsplit
 class AppEntry:
     open_cmd: str
     close_process: Optional[str] = None  # None for websites -- nothing to taskkill
+    close_process_candidates: Tuple[str, ...] = ()
     is_website: bool = False
     is_productive: bool = False  # feeds charlie.context's focus-mode heuristic
+    close_window_titles: Tuple[str, ...] = ()
+
+    @property
+    def close_processes(self) -> Tuple[str, ...]:
+        """Return ordered process candidates, preserving the legacy primary name."""
+        if not self.close_process:
+            return self.close_process_candidates
+        return tuple(dict.fromkeys((self.close_process, *self.close_process_candidates)))
 
 
 APP_REGISTRY: Dict[str, AppEntry] = {
@@ -28,8 +37,18 @@ APP_REGISTRY: Dict[str, AppEntry] = {
     "edge": AppEntry("msedge", "msedge.exe"),
     "microsoft edge": AppEntry("msedge", "msedge.exe"),
     "notepad": AppEntry("notepad", "notepad.exe"),
-    "calculator": AppEntry("calc", "calc.exe"),
-    "calc": AppEntry("calc", "calc.exe"),
+    "calculator": AppEntry(
+        "calc",
+        "calc.exe",
+        ("CalculatorApp.exe",),
+        close_window_titles=("Calculator",),
+    ),
+    "calc": AppEntry(
+        "calc",
+        "calc.exe",
+        ("CalculatorApp.exe",),
+        close_window_titles=("Calculator",),
+    ),
     "spotify": AppEntry("spotify", "spotify.exe"),
     "discord": AppEntry("discord", "discord.exe"),
     "slack": AppEntry("slack", "slack.exe"),

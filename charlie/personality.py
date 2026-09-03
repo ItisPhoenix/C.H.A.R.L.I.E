@@ -35,6 +35,14 @@ _VOICE_COMMANDS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(?:calm down|speak slower|easy)\b", re.IGNORECASE), "calm"),
 ]
 
+_VOICE_CONTROL_COMMANDS = {
+    "stop": "stop",
+    "stop talking": "stop",
+    "quiet": "stop",
+    "cancel that": "cancel",
+    "never mind": "abandon",
+}
+
 
 def get_emotion_for_context(user_text: str) -> str:
     """Classify user intent into an emotion tag via keyword heuristic.
@@ -69,6 +77,14 @@ def parse_voice_command(user_text: str) -> Optional[str]:
         if pattern.search(user_text):
             return emotion
     return None
+
+
+def parse_voice_control(user_text: str) -> Optional[str]:
+    """Recognize exact short realtime interruption commands without an LLM."""
+    if not user_text or not user_text.strip():
+        return None
+    normalized = re.sub(r"[.!?,;:]+", "", user_text.casefold())
+    return _VOICE_CONTROL_COMMANDS.get(" ".join(normalized.split()))
 
 
 _YES_RE = re.compile(

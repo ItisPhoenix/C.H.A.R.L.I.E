@@ -49,6 +49,19 @@ def test_manage_window_close_posts_wm_close(monkeypatch):
     assert "asynchronous" in result
 
 
+def test_close_window_and_verify_uses_exact_hwnd(monkeypatch):
+    mock_user32 = MagicMock()
+    mock_user32.PostMessageW.return_value = True
+    monkeypatch.setattr(windows, "_user32", mock_user32)
+    monkeypatch.setattr(windows, "find_window", lambda _: {"hwnd": 42, "title": "Calculator"})
+    remaining = iter([[]])
+    monkeypatch.setattr(windows, "list_windows", lambda: next(remaining))
+    monkeypatch.setattr(windows.time, "sleep", lambda _seconds: None)
+
+    assert windows.close_window_and_verify("Calculator", timeout_s=0.1) is True
+    mock_user32.PostMessageW.assert_called_once_with(42, windows._WM_CLOSE, 0, 0)
+
+
 def test_manage_window_unknown_action_errors(monkeypatch):
     monkeypatch.setattr(windows, "find_window", lambda _: {"hwnd": 5, "title": "Test"})
     result = windows.manage_window("test", "levitate")

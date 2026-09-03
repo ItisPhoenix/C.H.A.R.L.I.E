@@ -18,6 +18,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
 from charlie.desktop.apps import launch_and_verify, resolve_local_app
@@ -74,9 +75,58 @@ def _match_time_date(query: str) -> Optional[RouteMatch]:
 
 
 _CLOSE_APP_MAP = {name: entry.close_process for name, entry in _APP_REGISTRY.items() if entry.close_process}
+_CLOSE_PROCESS_CANDIDATES = {
+    name: entry.close_processes for name, entry in _APP_REGISTRY.items() if entry.close_process
+}
+_CLOSE_WINDOW_TITLES = {
+    name: entry.close_window_titles for name, entry in _APP_REGISTRY.items() if entry.close_window_titles
+}
+_STT_APP_ALIASES = {
+    "noteped": "notepad",
+    "notepad": "notepad",
+    "notpad": "notepad",
+    "nodpad": "notepad",
+    "notbad": "notepad",
+}
 
 
-def match_close_app(query: str) -> Optional[Tuple[List[str], List[str]]]:
+def _normalize_app_target(value: str) -> str:
+    """Normalize one explicit app target for bounded command matching."""
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _recover_known_app_name(target_text: str, candidates: List[str]) -> Optional[str]:
+    """Recover a short ASR variant only inside an explicit app command."""
+    cleaned = re.sub(r"^[\s]*(?:the|my)\s+", "", target_text.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r"\.exe\s*$", "", cleaned, flags=re.IGNORECASE)
+    if not cleaned or len(cleaned.split()) > 3 or re.search(r"\b(?:and|or|then)\b", cleaned, re.IGNORECASE):
+        return None
+
+    normalized = _normalize_app_target(cleaned)
+    if not normalized:
+        return None
+    alias = _STT_APP_ALIASES.get(normalized)
+    if alias in candidates:
+        return alias
+
+    scores = sorted(
+        [
+            (SequenceMatcher(None, normalized, _normalize_app_target(candidate)).ratio(), candidate)
+            for candidate in candidates
+        ],
+        reverse=True,
+    )
+    if not scores or scores[0][0] < 0.78:
+        return None
+    if len(scores) > 1 and scores[0][0] - scores[1][0] < 0.08:
+        return None
+    return scores[0][1]
+
+
+def match_close_app(
+    query: str,
+    recent_app_context: Optional[List[str]] = None,
+) -> Optional[Tuple[List[str], List[str]]]:
     """Pure: which known apps does `query` ask to close?
 
     Returns (matched_apps, launched_processes), or None if no close-app
@@ -120,10 +170,20 @@ def match_close_app(query: str) -> Optional[Tuple[List[str], List[str]]]:
                 remaining_text = re.sub(pattern, " ", remaining_text)
 
     if not matched_apps:
+        recovered = _recover_known_app_name(target_text, sorted_keys)
+        if recovered is None and recent_app_context:
+            contextual_candidates = [app for app in recent_app_context if app in _CLOSE_APP_MAP]
+            recovered = _recover_known_app_name(target_text, contextual_candidates)
+        if recovered is not None:
+            matched_apps.append(recovered)
+            launched_processes.append(_CLOSE_APP_MAP[recovered])
+            remaining_text = " "
+
+    if not matched_apps:
         return None
 
     cleaned_remaining = re.sub(
-        r"\b(and|or|then|please|also|to|write|save|type)\b|\.exe\b|[.,;&!?]",
+        r"\b(and|or|then|please|also|to|write|save|type|the|my)\b|\.exe\b|[.,;&!?]",
         " ",
         remaining_text,
         flags=re.IGNORECASE,
@@ -136,25 +196,69 @@ def match_close_app(query: str) -> Optional[Tuple[List[str], List[str]]]:
 
 
 def execute_close_app(matched_apps: List[str], launched_processes: List[str]) -> str:
-    """Side effects: taskkill each matched app, build the status message."""
+    """Close each matched app once, then verify its process is gone."""
     logger.info("Fast-path close apps: apps=%s, processes=%s", matched_apps, launched_processes)
     if sys.platform != "win32":
         return f"App closing is only supported on Windows (detected {sys.platform})."
 
     success_apps, not_running_apps, failed_apps = [], [], []
-    for app, process in zip(matched_apps, launched_processes):
-        try:
-            cmd = f"taskkill /IM {process} /F"
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
-            if res.returncode == 0:
-                success_apps.append(app)
-            elif "not found" in res.stderr.lower() or res.returncode == 128:
-                not_running_apps.append(app)
-            else:
-                failed_apps.append(app)
-        except Exception as e:
-            logger.error("Failed to taskkill %s (%s): %s", app, process, e, exc_info=True)
+    for app, fallback_process in zip(matched_apps, launched_processes):
+        window_closed = None
+        for title in _CLOSE_WINDOW_TITLES.get(app, ()):
+            try:
+                from charlie.desktop import windows as desktop_windows
+
+                if desktop_windows._user32 is None:
+                    break
+                find_window = desktop_windows.find_window
+                close_window_and_verify = desktop_windows.close_window_and_verify
+
+                if find_window(title) is not None:
+                    logger.info("Closing %s through resolved window identity '%s'", app, title)
+                    window_closed = close_window_and_verify(title)
+                    break
+            except Exception:
+                logger.warning("Window close resolution failed for %s", app, exc_info=True)
+                window_closed = False
+                break
+        if window_closed is True:
+            success_apps.append(app)
+            continue
+        if window_closed is False:
             failed_apps.append(app)
+            continue
+
+        candidates = _CLOSE_PROCESS_CANDIDATES.get(app) or ((fallback_process,) if fallback_process else ())
+        closed = False
+        failed = False
+        for process in candidates:
+            try:
+                cmd = f"taskkill /IM {process} /F"
+                res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+                if res.returncode == 0:
+                    try:
+                        still_running = is_process_running(process)
+                    except Exception:
+                        still_running = True
+                    if still_running:
+                        failed = True
+                    else:
+                        closed = True
+                    break
+                if "not found" in res.stderr.lower() or res.returncode == 128:
+                    continue
+                failed = True
+                break
+            except Exception as e:
+                logger.error("Failed to taskkill %s (%s): %s", app, process, e, exc_info=True)
+                failed = True
+                break
+        if closed:
+            success_apps.append(app)
+        elif failed:
+            failed_apps.append(app)
+        else:
+            not_running_apps.append(app)
 
     parts = []
     if success_apps:
@@ -176,6 +280,18 @@ def _match_route_close_app(query: str) -> Optional[RouteMatch]:
 
 def close_process_for(app: str) -> Optional[str]:
     return _CLOSE_APP_MAP.get(app)
+
+
+_EXPLICIT_APP_ACTION_RE = re.compile(
+    r"^\s*(?:hey\s+charlie,?|ok\s+charlie,?|charlie,?)?\s*"
+    r"(?:open|start|launch|run|close|kill|stop|exit|quit)\s+\S",
+    re.IGNORECASE,
+)
+
+
+def is_explicit_app_action(query: str) -> bool:
+    """Return true only for command-shaped app lifecycle requests."""
+    return bool(_EXPLICIT_APP_ACTION_RE.match(query))
 
 
 _BROWSER_TASK_VERB_RE = re.compile(r"^\s*(?:play|watch|search|find|look up|browse|check)\b", re.IGNORECASE)
@@ -393,7 +509,13 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
             target_text,
             flags=re.IGNORECASE,
         ).strip()
-        if dynamic_name and len(dynamic_name.split()) <= 6:
+        recovered = _recover_known_app_name(dynamic_name, sorted_keys)
+        if recovered is not None:
+            matched_apps.append(recovered)
+            launched_commands.append(_OPEN_APP_MAP[recovered])
+            is_website_flags.append(False)
+            remaining_text = " "
+        elif dynamic_name and len(dynamic_name.split()) <= 6:
             resolution = resolve_local_app(dynamic_name)
             if resolution:
                 matched_apps.append(dynamic_name)
@@ -560,6 +682,39 @@ SCREEN_QUERY_RE = re.compile(
     r"|\b(read|look at|check) (my |the )?screen\b",
     re.IGNORECASE,
 )
+
+_SCREEN_RESEARCH_CUE_RE = re.compile(
+    r"\b(research|investigate|look\s+up|find\s+(?:out|reviews?|information)|"
+    r"how\s+to\s+fix|what\s+happened)\b",
+    re.IGNORECASE,
+)
+_DIRECT_SCREEN_PERCEPTION_RE = re.compile(
+    r"\bdescribe\s+(?:what(?:'s|\s+is)\s+)?(?:visible|on\s+(?:my|the)\s+screen)\b"
+    r"|\bwhat\s+(?:application|window)\s+do\s+you\s+see\b",
+    re.IGNORECASE,
+)
+_SCREEN_PERCEPTION_FRAGMENT_RE = re.compile(
+    r"\b(?:words?|text|writing|content)\s+on\s+(?:my|the)\s+screen\b"
+    r"|\b(?:what(?:'s|\s+is)?\s+)?visible\s+(?:on\s+(?:my|the)\s+screen|right\s+now)\b",
+    re.IGNORECASE,
+)
+_SCREEN_CONTEXT_FRAGMENT_RE = re.compile(
+    r"\b(?:it|that|this|those|words?|text|content|what)\b.*\b(?:my|the)\s+screen\b"
+    r"|\b(?:my|the)\s+screen\b",
+    re.IGNORECASE,
+)
+
+
+def is_direct_screen_perception_query(query: str, recent_screen_context: bool = False) -> bool:
+    """Return true for pure visual questions, excluding explicit research requests."""
+    if not (
+        SCREEN_QUERY_RE.search(query)
+        or _DIRECT_SCREEN_PERCEPTION_RE.search(query)
+        or _SCREEN_PERCEPTION_FRAGMENT_RE.search(query)
+        or (recent_screen_context and _SCREEN_CONTEXT_FRAGMENT_RE.search(query))
+    ):
+        return False
+    return not _SCREEN_RESEARCH_CUE_RE.search(query)
 
 
 def maybe_inject_visual_screenshot_call(

@@ -1,12 +1,202 @@
+import json
 import os
 import tempfile
 from pathlib import Path
 
+import httpx
 import pytest
 
 import charlie.web_server as web_server
 from charlie.config import config
 from charlie.memory_graph import MemoryGraph
+
+_REAL_HTTPX_ASYNC_CLIENT = httpx.AsyncClient
+
+
+def _patch_model_transport(monkeypatch, provider_url, responder):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if str(request.url) == provider_url:
+            return responder(request)
+        return httpx.Response(404, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return _REAL_HTTPX_ASYNC_CLIENT(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_factory)
+    return requests
+
+
+def _configure_model_endpoint(monkeypatch, *, url, key="no-key", model="configured-model"):
+    monkeypatch.setattr(web_server.config, "llm_url", url)
+    monkeypatch.setattr(web_server.config, "llm_key", key)
+    monkeypatch.setattr(web_server.config, "llm_model", model)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("base_url", "expected_url"),
+    [
+        ("https://api.kilo.ai/api/gateway", "https://api.kilo.ai/api/gateway/models"),
+        ("https://api.openai.com/v1", "https://api.openai.com/v1/models"),
+    ],
+)
+async def test_models_use_canonical_configured_base_without_v1_guessing(monkeypatch, base_url, expected_url):
+    import httpx
+
+    _configure_model_endpoint(monkeypatch, url=base_url)
+    requests = _patch_model_transport(
+        monkeypatch,
+        expected_url,
+        lambda request: httpx.Response(200, json={"data": [{"id": "provider/model"}]}, request=request),
+    )
+
+    result = await web_server.get_available_models()
+
+    provider_requests = [request for request in requests if str(request.url) == expected_url]
+    assert len(provider_requests) == 1
+    assert str(provider_requests[0].url) == expected_url
+    assert result["provider_discovery"] == {"status": "available", "count": 1, "error": None}
+    assert "provider/model" in result["models"]
+
+
+@pytest.mark.asyncio
+async def test_models_discover_without_api_key_and_use_auth_only_when_configured(monkeypatch):
+    expected_url = "https://api.kilo.ai/api/gateway/models"
+    _configure_model_endpoint(monkeypatch, url="https://api.kilo.ai/api/gateway", key="no-key")
+    requests = _patch_model_transport(
+        monkeypatch,
+        expected_url,
+        lambda request: httpx.Response(200, json={"data": [{"id": "anonymous/model"}]}, request=request),
+    )
+
+    result = await web_server.get_available_models()
+
+    provider_request = next(request for request in requests if str(request.url) == expected_url)
+    assert provider_request.headers.get("authorization") is None
+    assert result["has_api_key"] is False
+    assert result["provider_discovery"]["status"] == "available"
+
+    _configure_model_endpoint(monkeypatch, url="https://api.kilo.ai/api/gateway", key="secret-key")
+    requests = _patch_model_transport(
+        monkeypatch,
+        expected_url,
+        lambda request: httpx.Response(200, json={"data": [{"id": "authenticated/model"}]}, request=request),
+    )
+    result = await web_server.get_available_models()
+    provider_request = next(request for request in requests if str(request.url) == expected_url)
+    assert provider_request.headers["authorization"] == "Bearer secret-key"
+    assert "secret-key" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_models_preserve_all_unique_provider_ids_and_active_model(monkeypatch):
+    expected_url = "https://api.kilo.ai/api/gateway/models"
+    provider_ids = [f"provider/model-{index}" for index in range(300)]
+    entries = [{"id": model_id} for model_id in provider_ids]
+    entries.extend([{"id": provider_ids[0]}, {"id": ""}, {"id": 42}, {"name": "malformed"}])
+    _configure_model_endpoint(monkeypatch, url="https://api.kilo.ai/api/gateway", model="active-model")
+    _patch_model_transport(
+        monkeypatch,
+        expected_url,
+        lambda request: httpx.Response(200, json={"data": entries}, request=request),
+    )
+
+    result = await web_server.get_available_models()
+
+    assert result["active_model"] == "active-model"
+    assert set(provider_ids).issubset(result["models"])
+    assert result["models"].count("provider/model-0") == 1
+    assert result["provider_discovery"] == {"status": "available", "count": 300, "error": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403, 404])
+async def test_models_report_provider_http_failures_truthfully(monkeypatch, status_code):
+    expected_url = "https://api.kilo.ai/api/gateway/models"
+    _configure_model_endpoint(monkeypatch, url="https://api.kilo.ai/api/gateway", model="active-model")
+    _patch_model_transport(
+        monkeypatch,
+        expected_url,
+        lambda request: httpx.Response(status_code, request=request),
+    )
+
+    result = await web_server.get_available_models()
+
+    assert result["models"] == ["active-model"]
+    assert result["provider_discovery"] == {
+        "status": "error",
+        "count": 0,
+        "error": f"HTTP {status_code}",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"data": {"id": "wrong-shape"}},
+        {"unexpected": []},
+    ],
+)
+async def test_models_report_invalid_provider_data_without_leaking_details(monkeypatch, payload):
+    expected_url = "https://api.kilo.ai/api/gateway/models"
+    _configure_model_endpoint(monkeypatch, url="https://api.kilo.ai/api/gateway")
+    _patch_model_transport(
+        monkeypatch,
+        expected_url,
+        lambda request: httpx.Response(200, json=payload, request=request),
+    )
+
+    result = await web_server.get_available_models()
+
+    assert result["provider_discovery"] == {"status": "error", "count": 0, "error": "invalid response"}
+    assert result["models"] == ["configured-model"]
+
+
+@pytest.mark.asyncio
+async def test_models_report_invalid_json_and_connection_failure(monkeypatch):
+    expected_url = "https://api.kilo.ai/api/gateway/models"
+    _configure_model_endpoint(monkeypatch, url="https://api.kilo.ai/api/gateway")
+    _patch_model_transport(
+        monkeypatch,
+        expected_url,
+        lambda request: httpx.Response(200, content=b"not-json", request=request),
+    )
+    result = await web_server.get_available_models()
+    assert result["provider_discovery"]["error"] == "invalid response"
+
+    def raise_connection(request):
+        raise httpx.ConnectError("provider unavailable", request=request)
+
+    _patch_model_transport(monkeypatch, expected_url, raise_connection)
+    result = await web_server.get_available_models()
+    assert result["provider_discovery"] == {
+        "status": "error",
+        "count": 0,
+        "error": "connection unavailable",
+    }
+
+
+@pytest.mark.asyncio
+async def test_models_mark_missing_provider_not_configured(monkeypatch):
+    _configure_model_endpoint(monkeypatch, url="", model="active-model")
+    requests = _patch_model_transport(
+        monkeypatch,
+        "unused",
+        lambda request: httpx.Response(200, json={"data": []}, request=request),
+    )
+
+    result = await web_server.get_available_models()
+
+    assert all(str(request.url) not in {"unused", "https://api.kilo.ai/api/gateway/models"} for request in requests)
+    assert result["provider_discovery"] == {"status": "not_configured", "count": 0, "error": None}
+    assert result["models"] == ["active-model"]
 
 
 def _remove_db(db_path: str) -> None:

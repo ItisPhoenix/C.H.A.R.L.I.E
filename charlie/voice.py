@@ -122,12 +122,17 @@ class VoiceEngine:
         self.tts_active = threading.Event()
         self.stop_event = threading.Event()
         self.stop_tts_event = threading.Event()
+        self._stopped = False
         self.tts_queue: queue.Queue = queue.Queue()
         self.playback_queue: queue.Queue = queue.Queue()
         self.tts_lock = threading.Lock()
         # Set for real in _run(); stop() checks this before start() has run
         # (or if opening the audio device failed), so it must exist here too.
         self.audio_stream = None
+        self.input_thread = None
+        self.tts_worker = None
+        self.playback_worker = None
+        self.asr_poller_thread = None
         self._readiness_event = threading.Event()
         self._readiness_lock = threading.Lock()
         self._readiness_status = "starting"
@@ -143,6 +148,8 @@ class VoiceEngine:
         self._recent_spoken_words: set = set()
         self.speech_echo_window = _ECHO_WINDOW_SEC
         self._widget_callback = None
+        self._event_emit_lock = threading.Lock()
+        self._event_emit_futures: set = set()
 
         # Speaker output state (driven by the dashboard audio controls).
         # `muted` silences TTS playback; `volume` is a 0.0-1.0 linear gain
@@ -174,6 +181,7 @@ class VoiceEngine:
         self._asr_readiness_lock = threading.Lock()
         self._asr_readiness_status = "starting"
         self._asr_readiness_error: Optional[str] = None
+        self.asr_startup_metrics: dict = {}
 
         # Load Kokoro TTS
         self._ensure_models()
@@ -295,21 +303,40 @@ class VoiceEngine:
         Runs from audio threads; the bus lives on the async loop, so we
         schedule the emit there.
         """
-        bus = getattr(self, "_event_bus", None)
-        loop = getattr(self, "_event_loop", None)
-        if bus is None or loop is None:
-            return
         now = time.monotonic()
         last = getattr(self, "_last_level_emit", 0.0)
         if now - last < 0.05:
             return
         self._last_level_emit = now
+        self._schedule_event_emit("audio_level", {"level": level})
+
+    def _schedule_event_emit(self, event_type: str, payload: dict) -> None:
+        bus = getattr(self, "_event_bus", None)
+        loop = getattr(self, "_event_loop", None)
+        if bus is None or loop is None or self._stopped:
+            return
+        coroutine = bus.emit(event_type, payload, meta=EventMeta(source=EventSource.VOICE))
         try:
-            asyncio.run_coroutine_threadsafe(
-                bus.emit("audio_level", {"level": level}, meta=EventMeta(source=EventSource.VOICE)), loop
-            )
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
         except Exception:
-            logger.debug("audio_level emit failed", exc_info=True)
+            coroutine.close()
+            logger.debug("%s emit failed", event_type, exc_info=True)
+            return
+        with self._event_emit_lock:
+            self._event_emit_futures.add(future)
+
+        def _discard(completed) -> None:
+            with self._event_emit_lock:
+                self._event_emit_futures.discard(completed)
+
+        future.add_done_callback(_discard)
+
+    def _cancel_pending_event_emits(self) -> None:
+        with self._event_emit_lock:
+            futures = tuple(self._event_emit_futures)
+            self._event_emit_futures.clear()
+        for future in futures:
+            future.cancel()
 
     def _emit_vad_start(self) -> None:
         """Publish speech-onset so the dashboard can show a listening state.
@@ -317,16 +344,7 @@ class VoiceEngine:
         Without wake-word mode, nothing else ever emits "vad_start" -- the
         dashboard's listening animation would otherwise never trigger.
         """
-        bus = getattr(self, "_event_bus", None)
-        loop = getattr(self, "_event_loop", None)
-        if bus is None or loop is None:
-            return
-        try:
-            asyncio.run_coroutine_threadsafe(
-                bus.emit("vad_start", {}, meta=EventMeta(source=EventSource.VOICE)), loop
-            )
-        except Exception:
-            logger.debug("vad_start emit failed", exc_info=True)
+        self._schedule_event_emit("vad_start", {})
 
     @staticmethod
     def _rms(samples: "np.ndarray") -> float:
@@ -421,30 +439,76 @@ class VoiceEngine:
 
     def stop(self):
         """Shut down voice engine. Called from main.py finally block."""
-        logger.info("Voice engine stopping...")
+        if self._stopped:
+            logger.info("voice_shutdown_complete | already_stopped=true")
+            return
+        self._stopped = True
+        logger.info("voice_shutdown_begin")
         self.stop_event.set()
         self.stop_tts()
-        for thread in (
-            self.input_thread,
-            self.tts_worker,
-            self.playback_worker,
-            self.asr_poller_thread,
-        ):
-            if thread and thread.is_alive():
-                thread.join(timeout=1.0)
+        self._event_bus = None
+        self._event_loop = None
+        self._cancel_pending_event_emits()
         if self.audio_stream is not None:
             try:
                 self.audio_stream.close()
             except Exception as e:
                 logger.debug(f"audio_stream close error: {e}")
+            self.audio_stream = None
+        for name, thread in (
+            ("voice_capture_thread", self.input_thread),
+            ("tts_thread", self.tts_worker),
+            ("playback_thread", self.playback_worker),
+            ("asr_poller_thread", self.asr_poller_thread),
+        ):
+            if thread and thread.is_alive():
+                thread.join(timeout=1.0)
+            logger.info(
+                "voice_shutdown_thread | name=%s | stopped=%s",
+                name,
+                not (thread and thread.is_alive()),
+            )
+        with self._ptt_lock:
+            self._ptt_active = False
+            self._ptt_stop_requested = False
+            self._ptt_chunks.clear()
+            self._ptt_trace = None
+        pending_trace_count = len(self._utterance_traces)
+        self._utterance_traces.clear()
+        if pending_trace_count:
+            logger.info("voice_shutdown_asr_traces_cleared | count=%s", pending_trace_count)
         if self.asr_process:
-            self.asr_input_queue.put(None)
+            drained = 0
+            while True:
+                try:
+                    payload = self.asr_input_queue.get_nowait()
+                except (queue.Empty, OSError, ValueError):
+                    break
+                drained += 1
+                if isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
+                    self._utterance_traces.pop(payload[2].get("utterance_id"), None)
+            if drained:
+                logger.info("voice_shutdown_asr_queue_drained | count=%s", drained)
+            try:
+                self.asr_input_queue.put(None, timeout=1.0)
+            except Exception:
+                logger.warning("ASR worker shutdown signal could not be queued", exc_info=True)
+            logger.info("ASR worker shutdown requested | pid=%s", getattr(self.asr_process, "pid", None))
             self.asr_process.join(timeout=1.0)
             if self.asr_process.is_alive():
+                logger.warning("ASR worker did not exit gracefully; terminating owned worker")
                 self.asr_process.terminate()
                 self.asr_process.join(timeout=1.0)
+            logger.info(
+                "ASR worker exited | pid=%s | stopped=%s",
+                getattr(self.asr_process, "pid", None),
+                not self.asr_process.is_alive(),
+            )
         self.voice_diagnostics.stop()
-        logger.info("Voice engine stopped.")
+        sampler = getattr(self.voice_diagnostics, "_resource_thread", None)
+        sampler_stopped = sampler is None or not sampler.is_alive()
+        logger.info("voice_diagnostics_sampler_stopped | stopped=%s", sampler_stopped)
+        logger.info("voice_shutdown_complete")
 
     def stop_tts(self):
         self.stop_tts_event.set()
@@ -1421,6 +1485,7 @@ class VoiceEngine:
         except Exception as error:
             device_info["selected_device_index"] = selected_device_index
             self._set_readiness("failed", error=self._safe_audio_error(error), device_info=device_info)
+            self._set_asr_readiness("failed", "microphone unavailable; ASR worker was not started")
             logger.error("Failed to inspect audio input device: %s", error)
             return
 
@@ -1451,6 +1516,7 @@ class VoiceEngine:
                     pass
                 self.audio_stream = None
             self._set_readiness("failed", error=self._safe_audio_error(e), device_info=device_info)
+            self._set_asr_readiness("failed", "microphone unavailable; ASR worker was not started")
             logger.error(
                 "Audio input readiness failed: device=%s index=%s host_api=%s "
                 "max_input_channels=%s configured_rate=%s native_rate=%s "
@@ -1783,14 +1849,26 @@ class VoiceEngine:
                 receive_timestamp = time.monotonic()
                 if isinstance(result, dict):
                     if result.get("type") == "ready":
+                        metrics = result.get("metrics")
+                        self.asr_startup_metrics = dict(metrics) if isinstance(metrics, dict) else {}
                         self._set_asr_readiness("ready")
-                        logger.info("ASR readiness acknowledged by worker.")
+                        logger.info(
+                            "ASR readiness acknowledged by worker | model_load_ms=%s | "
+                            "warmup_inference_ms=%s | asr_ready_ms=%s",
+                            self.asr_startup_metrics.get("model_load_ms"),
+                            self.asr_startup_metrics.get("warmup_inference_ms"),
+                            self.asr_startup_metrics.get("asr_ready_ms"),
+                        )
                     elif result.get("type") == "failed":
+                        metrics = result.get("metrics")
+                        self.asr_startup_metrics = dict(metrics) if isinstance(metrics, dict) else {}
                         self._set_asr_readiness("failed", str(result.get("error") or "worker initialization failed"))
                     continue
                 flags = result[2] if isinstance(result, tuple) and len(result) >= 3 else {}
                 if not isinstance(flags, dict):
                     flags = {}
+                if flags.get("is_warmup"):
+                    continue
                 utterance_id = flags.get("utterance_id")
                 trace = self._utterance_traces.pop(utterance_id, None) if utterance_id else None
                 if trace is not None:

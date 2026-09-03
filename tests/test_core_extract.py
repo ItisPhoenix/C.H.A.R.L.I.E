@@ -481,6 +481,21 @@ class TestVisualContentQueryFastPath:
         assert _SCREEN_QUERY_RE.search("what is on my screen right now")
         assert _SCREEN_QUERY_RE.search("what's on my screen")
 
+    def test_direct_screen_perception_excludes_explicit_research(self):
+        from charlie.router import is_direct_screen_perception_query
+
+        assert is_direct_screen_perception_query("What do you see on my screen?")
+        assert is_direct_screen_perception_query("Describe what is visible.")
+        assert is_direct_screen_perception_query("words on my screen right now")
+        assert is_direct_screen_perception_query("what about my screen?", recent_screen_context=True)
+        assert not is_direct_screen_perception_query("Look at the error on my screen and research how to fix it.")
+
+    def test_followup_detection_does_not_hide_memory_questions(self):
+        from charlie.core import _is_followup
+
+        assert _is_followup("What is my test color?") is False
+        assert _is_followup("What did you say?") is True
+
     def test_should_queue_visual_screenshot_true_when_fully_enabled(self):
         from charlie.core import _should_queue_visual_screenshot
         cfg = MagicMock()

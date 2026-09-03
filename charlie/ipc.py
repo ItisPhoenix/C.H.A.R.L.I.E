@@ -105,6 +105,7 @@ class EventBus:
             self.ctx.term()
         except Exception:
             pass
+        logger.info("EventBus/ZMQ closed")
 
     async def emit(self, event_type: str, payload: dict, meta: Optional[EventMeta] = None):
         """Producer only. Publishes an event to all subscribers.

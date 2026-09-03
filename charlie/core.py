@@ -35,7 +35,7 @@ from charlie.streaming import (
     parse_sse_stream,
     stream_followup_content,
 )
-from charlie.tools import ToolExecutionResult, pop_pending_vision_image
+from charlie.tools import ToolExecutionResult, pop_pending_vision_image, set_pending_vision_image
 from charlie.tools import registry as tool_registry
 from charlie.turn_contracts import (
     IntentDecision,
@@ -296,7 +296,7 @@ _TIME_SENSITIVE_RE = re.compile(
 # --- Follow-up detection (skip web search for repeat/clarification requests) ---
 _FOLLOWUP_RE = re.compile(
     r"^(?:"
-    r"what|come again|repeat|say that again|pardon|sorry|excuse me|"
+    r"come again|repeat|say that again|pardon|sorry|excuse me|"
     r"what was that|what did you say|tell me again|once more|go on|"
     r"continue|and then|what else|what else did you say|anything else|"
     r"elaborate|more info|no[,.]?\s|that's\s+wrong|that's\s+not\s+right|actually|I\s+meant"
@@ -862,6 +862,7 @@ _RESULT_FAILURE_STATUSES = frozenset(
     }
 )
 _INTERACTIVE_VISION_TIMEOUT_S = 9.0
+_VISION_CLEANUP_TIMEOUT_S = 1.0
 
 _FRESHNESS_REQUIREMENT_RE = re.compile(
     r"\b(?:today|latest|currently|current|now|right\s+now|live|recent|breaking|trending|news|"
@@ -981,7 +982,28 @@ def _operation_failed(envelope: ResultEnvelope) -> bool:
     return envelope.status in _RESULT_FAILURE_STATUSES
 
 
-def _should_queue_visual_screenshot(user_input: str, config: "Config") -> bool:
+def _ground_external_action_response(
+    query: str,
+    response: str,
+    action_results: List[ResultEnvelope],
+) -> str:
+    """Prevent model-only success claims for explicit app lifecycle commands."""
+    if not router.is_explicit_app_action(query):
+        return response
+    if not action_results:
+        logger.warning("Suppressing ungrounded external action claim for: %s", query)
+        return "I couldn't verify that requested app action was executed."
+    if any(_operation_failed(result) for result in action_results):
+        logger.warning("Suppressing failed external action claim for: %s", query)
+        return "I couldn't complete that requested app action."
+    return response
+
+
+def _should_queue_visual_screenshot(
+    user_input: str,
+    config: "Config",
+    recent_screen_context: bool = False,
+) -> bool:
     """True if this turn should pre-call desktop_screenshot to queue a vision
     image for the follow-up (see _VISUAL_CONTENT_QUERY_RE). Also fires for the
     broader router.SCREEN_QUERY_RE phrasing ("what's on my screen") -- when a vision
@@ -989,7 +1011,10 @@ def _should_queue_visual_screenshot(user_input: str, config: "Config") -> bool:
     injected below, which was the only signal these queries got before. Requires
     both a configured vision model and desktop control -- otherwise a no-op."""
     return bool(
-        (_VISUAL_CONTENT_QUERY_RE.search(user_input) or router.SCREEN_QUERY_RE.search(user_input))
+        (
+            _VISUAL_CONTENT_QUERY_RE.search(user_input)
+            or router.is_direct_screen_perception_query(user_input, recent_screen_context)
+        )
         and config.vision_enabled
         and config.desktop_control_enabled
     )
@@ -1028,6 +1053,26 @@ def _with_vision_image(messages: List[Dict[str, Any]], image_url: str) -> List[D
 def _payload_is_vision(payload: Dict[str, Any]) -> bool:
     """True if _build_payload injected an image block into this payload."""
     return any(isinstance(m.get("content"), list) for m in payload.get("messages", []))
+
+
+async def _await_bounded_cleanup(awaitable, label: str) -> Optional[str]:
+    """Await owned async cleanup, cancelling and reaping it on deadline."""
+    task = asyncio.create_task(awaitable)
+    try:
+        await asyncio.wait_for(task, timeout=_VISION_CLEANUP_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        logger.warning("Async cleanup timed out | resource=%s", label)
+        return "timeout"
+    except asyncio.CancelledError:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    except Exception as exc:
+        logger.warning("Async cleanup failed | resource=%s | error=%s", label, type(exc).__name__)
+        return type(exc).__name__
+    return None
 
 
 # =====================================================================
@@ -1115,6 +1160,7 @@ class Brain:
         self._background_tasks: set[asyncio.Task] = set()
         self._memory_capacity_due = False
         self._reflection_pending = False
+        self._recent_deterministic_apps: List[str] = []
 
         # --- Hybrid tool calling: detect native support ---
         # Auto-detect local model servers -- they ignore the native tools payload
@@ -2100,44 +2146,79 @@ class Brain:
                 fields={"model": model, "route": "vision"},
                 include_resource=True,
             )
+        stream_context = client.stream("POST", "chat/completions", json=payload)
+        response = None
+        entered = False
+        request_status = "completed"
         try:
-            async with client.stream("POST", "chat/completions", json=payload) as response:
+            response = await stream_context.__aenter__()
+            entered = True
+            if is_vision_request and diagnostic_trace is not None:
+                diagnostic_trace.mark(
+                    "headers_received",
+                    fields={"status_code": getattr(response, "status_code", None)},
+                    include_resource=True,
+                )
+                diagnostic_trace.mark(
+                    "vision_first_response_or_headers",
+                    fields={"status_code": getattr(response, "status_code", None)},
+                    include_resource=True,
+                )
+            response.raise_for_status()
+            async for content in stream_followup_content(
+                response,
+                generation,
+                lambda: self._chat_generation,
+                state,
+            ):
+                if diagnostic_trace is not None:
+                    diagnostic_trace.mark_once(
+                        "first_token",
+                        fields={
+                            "route": "vision" if is_vision_request else "followup",
+                            "token_length": len(content),
+                        },
+                        include_resource=is_vision_request,
+                    )
+                    diagnostic_trace.mark_once(
+                        "first_llm_token",
+                        fields={
+                            "route": "vision" if is_vision_request else "followup",
+                            "token_length": len(content),
+                        },
+                    )
+                filtered = stream_filter.push(content)
+                if filtered:
+                    yield filtered
+            if state.cancelled:
+                request_status = "cancelled"
                 if is_vision_request and diagnostic_trace is not None:
                     diagnostic_trace.mark(
-                        "vision_first_response_or_headers",
-                        fields={"status_code": getattr(response, "status_code", None)},
+                        "client_cancel_requested",
+                        fields={"reason": "generation_changed"},
                         include_resource=True,
                     )
-                response.raise_for_status()
-                async for content in stream_followup_content(
-                    response,
-                    generation,
-                    lambda: self._chat_generation,
-                    state,
-                ):
-                    if diagnostic_trace is not None:
-                        diagnostic_trace.mark_once(
-                            "first_llm_token",
-                            fields={
-                                "route": "vision" if is_vision_request else "followup",
-                                "token_length": len(content),
-                            },
-                        )
-                    filtered = stream_filter.push(content)
-                    if filtered:
-                        yield filtered
-            if not state.cancelled:
+            else:
                 filtered = stream_filter.flush()
                 if filtered:
                     yield filtered
+        except asyncio.CancelledError:
+            request_status = "cancelled"
             if is_vision_request and diagnostic_trace is not None:
                 diagnostic_trace.mark(
-                    "vision_complete",
-                    fields={"status": "cancelled" if state.cancelled else "completed"},
+                    "client_cancel_requested",
+                    fields={"reason": "asyncio_task_cancelled"},
                     include_resource=True,
                 )
+            raise
         except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
+            request_status = "timeout"
             if is_vision_request and diagnostic_trace is not None:
+                diagnostic_trace.mark(
+                    "client_cancel_requested",
+                    fields={"reason": "http_timeout", "error": type(exc).__name__},
+                    include_resource=True,
+                )
                 diagnostic_trace.mark(
                     "vision_timeout_error",
                     fields={"error": type(exc).__name__, "kind": "timeout"},
@@ -2145,6 +2226,7 @@ class Brain:
                 )
             raise
         except Exception as exc:
+            request_status = "error"
             if is_vision_request and diagnostic_trace is not None:
                 diagnostic_trace.mark(
                     "vision_timeout_error",
@@ -2152,6 +2234,41 @@ class Brain:
                     include_resource=True,
                 )
             raise
+        finally:
+            close_error = None
+            if entered:
+                close_error = await _await_bounded_cleanup(
+                    stream_context.__aexit__(None, None, None),
+                    "vision_response_stream",
+                )
+            if is_vision_request and diagnostic_trace is not None:
+                diagnostic_trace.mark(
+                    "stream_closed",
+                    fields={"entered": entered, "close_error": close_error},
+                    include_resource=True,
+                )
+                diagnostic_trace.mark(
+                    "server_generation_stop_evidence",
+                    fields=(
+                        {"observable": True, "finish_reason": state.finish_reason}
+                        if state.finish_reason is not None
+                        else {
+                            "observable": False,
+                            "reason": "OpenAI-compatible HTTP disconnect exposes no server stop signal",
+                        }
+                    ),
+                    include_resource=True,
+                )
+                diagnostic_trace.mark(
+                    "vision_complete",
+                    fields={"status": request_status},
+                    include_resource=True,
+                )
+                diagnostic_trace.mark(
+                    "vision_request_end",
+                    fields={"status": request_status, "close_error": close_error},
+                    include_resource=True,
+                )
 
     async def _classify_router_intent(self, user_input: str) -> Optional[router.RouteMatch]:
         """One bounded LLM call for short phrasings that miss every router.py regex.
@@ -2300,6 +2417,11 @@ class Brain:
                 logger.debug("Loaded %d history messages for session: %s", len(self.history), session_id)
             except Exception as e:
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
+        recent_screen_context = any(
+            message.get("role") == "user"
+            and router.is_direct_screen_perception_query(str(message.get("content") or ""))
+            for message in self.history[-4:]
+        )
         # --- Auto-learn: detect corrections and store in opinions memory ---
         if _detect_correction(user_input) and self.history:
             last_assistant = ""
@@ -2663,7 +2785,11 @@ class Brain:
             return
 
         # --- Fast-path: close app (matcher pure, taskkill runs only after a confirmed match) ---
-        close_match = await asyncio.to_thread(router.match_close_app, user_input)
+        close_match = await asyncio.to_thread(
+            router.match_close_app,
+            user_input,
+            self._recent_deterministic_apps,
+        )
         if close_match is not None:
             record_primary_decision(
                 intent="desktop",
@@ -2675,6 +2801,10 @@ class Brain:
             close_res = await asyncio.to_thread(router.execute_close_app, close_match[0], close_match[1])
             logger.info("Fast-path close app result: %s -> %s", user_input, close_res)
             self.world_model.record_event("app_close", close_res)
+            if "Failed to close" not in close_res:
+                self._recent_deterministic_apps = [
+                    app for app in self._recent_deterministic_apps if app not in close_match[0]
+                ]
             yield close_res
             return
 
@@ -2711,6 +2841,10 @@ class Brain:
                 )
                 open_msg = await asyncio.to_thread(router.execute_open_app, open_apps, open_commands)
                 self.world_model.record_event("app_open", open_msg)
+                if "could not open" not in open_msg.lower():
+                    self._recent_deterministic_apps = list(
+                        dict.fromkeys((*self._recent_deterministic_apps, *open_apps))
+                    )[-8:]
                 if open_remaining is None:
                     logger.info("Fast-path open app result: %s -> %s", user_input, open_msg)
                     yield open_msg
@@ -2815,21 +2949,40 @@ class Brain:
                     app = classifier_match.args["app"]
                     msg = await asyncio.to_thread(router.execute_open_app, [app], [router.open_command_for(app)])
                     self.world_model.record_event("app_open", msg)
+                    if "could not open" not in msg.lower():
+                        self._recent_deterministic_apps = list(
+                            dict.fromkeys((*self._recent_deterministic_apps, app))
+                        )[-8:]
                     yield msg
                     return
                 if classifier_match.name == "close_app":
                     app = classifier_match.args["app"]
                     msg = await asyncio.to_thread(router.execute_close_app, [app], [router.close_process_for(app)])
                     self.world_model.record_event("app_close", msg)
+                    if "Failed to close" not in msg:
+                        self._recent_deterministic_apps = [
+                            existing for existing in self._recent_deterministic_apps if existing != app
+                        ]
                     yield msg
                     return
 
+        direct_screen_query = router.is_direct_screen_perception_query(user_input, recent_screen_context)
         research_route = (
             route_research(user_input, getattr(self.config, "research_default_mode", "auto"))
-            if not skip_pre_search and getattr(self.config, "research_enabled", True)
+            if not direct_screen_query
+            and not skip_pre_search
+            and getattr(self.config, "research_enabled", True)
             else None
         )
-        if research_route is not None and research_route.should_research:
+        if direct_screen_query:
+            record_primary_decision(
+                intent="desktop",
+                capabilities=("desktop",),
+                routing_source="deterministic",
+                confidence=1.0,
+                rationale="direct screen-perception query selected fresh local visual observation",
+            )
+        elif research_route is not None and research_route.should_research:
             record_primary_decision(
                 intent="research",
                 capabilities=("research",),
@@ -2856,7 +3009,7 @@ class Brain:
         research_report: Optional[ResearchReport] = None
         turn_research_reports: List[ResearchReport] = []
         search_results = ""
-        if not skip_pre_search:
+        if not skip_pre_search and not direct_screen_query:
             research_report = await self._run_research_for_turn(user_input, session_id, turn_id)
             if research_report is not None:
                 turn_research_reports.append(research_report)
@@ -2907,7 +3060,7 @@ class Brain:
         # initial completion isn't vision-routed (only follow-ups are, via
         # _select_followup_route), so queuing an image here would just send
         # it to the wrong, text-only client.
-        if self.config.desktop_control_enabled and router.SCREEN_QUERY_RE.search(user_input):
+        if self.config.desktop_control_enabled and direct_screen_query:
             try:
                 screen_observation = await asyncio.get_running_loop().run_in_executor(
                     _UIA_EXECUTOR, tool_registry.execute_tool, "desktop_observe", {}
@@ -2926,7 +3079,11 @@ class Brain:
         # initial payload is built, would have _build_payload's
         # pop_pending_vision_image() immediately consume it into the
         # non-vision-routed initial request instead of the follow-up.
-        queue_visual_screenshot = _should_queue_visual_screenshot(user_input, self.config)
+        queue_visual_screenshot = _should_queue_visual_screenshot(
+            user_input,
+            self.config,
+            recent_screen_context,
+        )
         if queue_visual_screenshot:
             logger.info("Visual-content query detected -- will queue desktop_screenshot for follow-up")
         elif _VISUAL_CONTENT_QUERY_RE.search(user_input):
@@ -2994,7 +3151,7 @@ class Brain:
             if (
                 not _is_followup(user_input)
                 and len(user_input.strip()) >= 10
-                and not router.SCREEN_QUERY_RE.search(user_input)
+                and not direct_screen_query
             ):
                 try:
                     memory_results = self.memory_service.search_semantic(user_input, n_results=3)
@@ -3035,13 +3192,18 @@ class Brain:
         if skip_tools:
             tool_calls = []
 
+        if direct_screen_query and not skip_tools:
+            tool_calls = [call for call in tool_calls if call.get("name") == "desktop_screenshot"]
+
         tool_calls = router.maybe_inject_visual_screenshot_call(tool_calls, queue_visual_screenshot and not skip_tools)
+        executed_action_results: List[ResultEnvelope] = []
 
         if not tool_calls:
             if accumulated:
                 stream_filter = TextStreamFilter()
                 filtered = stream_filter.push(accumulated) + stream_filter.flush()
                 filtered = finalize_research_answer(filtered)
+                filtered = _ground_external_action_response(user_input, filtered, executed_action_results)
                 publish_research_reports(filtered)
                 # Save assistant response to history
                 self.history.append({"role": "assistant", "content": filtered})
@@ -3074,6 +3236,7 @@ class Brain:
         _desktop_fail_counts: Dict[str, int] = {}
         _desktop_action_count = [0]  # mutable cell, closed over by _exec_one
         _turn_external_texts: List[str] = []  # tool_external results, fed to security_policy's injected-command check
+        last_vision_answer: Optional[str] = None
 
         async def _exec_one(call: Dict[str, Any]) -> ResultEnvelope | str:
             nonlocal research_report
@@ -3281,6 +3444,9 @@ class Brain:
                     },
                 )
 
+            if tool_name in _DESKTOP_CONTROL_TOOLS:
+                executed_action_results.append(envelope)
+
             if _operation_failed(envelope):
                 self.world_model.record_event("tool_error", f"{tool_name}: {model_text[:200]}")
 
@@ -3447,6 +3613,11 @@ class Brain:
             messages = await _prep_messages(messages, self.config)
 
             followup_payload = self._build_payload(messages)
+            payload_has_vision = _payload_is_vision(followup_payload)
+            if payload_has_vision and self._vision_client is None:
+                logger.warning("Local vision model is unavailable; no visual fallback will be attempted.")
+                yield "Local vision model is unavailable; I couldn't inspect the screen."
+                return
             followup_client, followup_model, is_vision = self._select_followup_route(followup_payload)
 
             state = FollowupStreamState()
@@ -3468,11 +3639,32 @@ class Brain:
                         state,
                         diagnostic_trace,
                     )
-                async for _filtered in followup_stream:
-                    pass
+                try:
+                    async for _filtered in followup_stream:
+                        pass
+                finally:
+                    await _await_bounded_cleanup(
+                        followup_stream.aclose(),
+                        "vision_followup_generator",
+                    )
             except Exception as tool_exc:
                 error_text = str(tool_exc) or repr(tool_exc)
                 logger.warning("%s follow-up LLM error: %s", "Vision" if is_vision else "Tool", error_text)
+                if payload_has_vision:
+                    partial_vision = TextStreamFilter()
+                    partial_answer = partial_vision.push(state.accumulated) + partial_vision.flush()
+                    partial_answer = strip_internal_reasoning(partial_answer).strip()
+                    if partial_answer:
+                        logger.warning("Vision stream ended after a partial valid result; preserving it.")
+                        last_vision_answer = partial_answer
+                        yield partial_answer
+                    else:
+                        yield "Local vision model is unavailable; I couldn't inspect the screen."
+                    return
+                if last_vision_answer:
+                    logger.warning("Optional follow-up failed; returning the last valid local vision result.")
+                    yield last_vision_answer
+                    return
                 if not state.accumulated:
                     yield (
                         "I ran into a problem getting a response back just now "
@@ -3485,6 +3677,14 @@ class Brain:
                 return
 
             accumulated = state.accumulated
+            if payload_has_vision:
+                vision_filter = TextStreamFilter()
+                last_vision_answer = vision_filter.push(accumulated) + vision_filter.flush()
+                last_vision_answer = strip_internal_reasoning(last_vision_answer).strip()
+                if not last_vision_answer:
+                    logger.warning("Vision model returned no usable description.")
+                    yield "Local vision model returned no usable description."
+                    return
             tool_calls = collect_tool_calls(state.tc_by_index)
             # Save final follow-up response to history (after tool loop)
             if accumulated:
@@ -3492,6 +3692,11 @@ class Brain:
                 clean_accumulated = hist_filter.push(accumulated) + hist_filter.flush()
                 if not tool_calls and clean_accumulated:
                     clean_accumulated = finalize_research_answer(clean_accumulated)
+                    clean_accumulated = _ground_external_action_response(
+                        user_input,
+                        clean_accumulated,
+                        executed_action_results,
+                    )
                     publish_research_reports(clean_accumulated)
                     yield clean_accumulated
                 self.history.append({"role": "assistant", "content": clean_accumulated})
@@ -3560,6 +3765,8 @@ class Brain:
                 or _VISUAL_CONTENT_QUERY_RE.search(user_input)
             )
         )
+        timed_out = False
+        cleanup_error = None
         try:
             if interactive_vision:
                 async with asyncio.timeout(_INTERACTIVE_VISION_TIMEOUT_S):
@@ -3571,17 +3778,30 @@ class Brain:
         except (asyncio.TimeoutError, httpx.TimeoutException):
             if not interactive_vision:
                 raise
+            timed_out = True
+            self.cancel_chat()
+            if diagnostic_trace is not None:
+                diagnostic_trace.mark(
+                    "client_cancel_requested",
+                    fields={"reason": "interactive_vision_timeout"},
+                    include_resource=True,
+                )
             logger.warning(
                 "Interactive voice vision timed out after %.1fs",
                 _INTERACTIVE_VISION_TIMEOUT_S,
             )
-            yield "I couldn't inspect the screen within the interactive voice time budget."
         finally:
             try:
-                await stream.aclose()
+                cleanup_error = await _await_bounded_cleanup(stream.aclose(), "chat_stream_generator")
             finally:
+                if interactive_vision:
+                    self._pending_vision_image_url = None
+                    set_pending_vision_image(None)
                 if decision_turn_id is not None:
                     self.finalize_intent_decision(decision_turn_id)
+        if timed_out:
+            logger.info("vision_cleanup_complete | status=timeout | error=%s", cleanup_error)
+            yield "I couldn't inspect the screen within the interactive voice time budget."
 
     async def _extract_thread_update(self, user_input: str, response: str, session_id: str) -> None:
         """Fire-and-forget: ask the LLM whether this turn touches an open thread.

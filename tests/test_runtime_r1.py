@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+import main
 from charlie.events import CONTRACT_VERSION, EventMeta, EventSource, build_event
 from charlie.subsystem_health import HealthRegistry, HealthStatus
 from charlie.task_journal import TaskJournal, TaskStatus
@@ -544,3 +545,268 @@ def test_main_runtime_introspector_receives_canonical_instances(monkeypatch):
     assert captured["health_registry"] is health
     assert captured["task_journal"] is journal
     assert captured["lease_manager"] is leases
+
+
+class _WebFakeProcess:
+    def __init__(self, pid: int = 4321, exit_code: int | None = None) -> None:
+        self.pid = pid
+        self.exit_code = exit_code
+        self.terminated = False
+        self.killed = False
+
+    def poll(self) -> int | None:
+        return self.exit_code
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.exit_code = self.exit_code if self.exit_code is not None else 0
+        return self.exit_code
+
+
+class _StartupExitSentinel(BaseException):
+    pass
+
+
+class _StartupFakeStore:
+    def close(self) -> None:
+        pass
+
+
+class _StartupFakeBrain:
+    async def close(self) -> None:
+        pass
+
+
+def _web_build_identity() -> dict[str, object]:
+    return {
+        "build_id": "build-1",
+        "input_fingerprint": "inputs-1",
+        "git_sha": "source-1",
+        "dirty": True,
+    }
+
+
+def _web_status(process: _WebFakeProcess, launch_id: str, build: dict[str, object]) -> dict[str, object]:
+    return {
+        "launch_id": launch_id,
+        "pid": process.pid,
+        "source_identity": build.get("git_sha"),
+        "frontend_build": build,
+    }
+
+
+def _patch_web_spawn(monkeypatch, process: _WebFakeProcess) -> None:
+    monkeypatch.setattr(main, "_web_port_is_listening", lambda host, port: False)
+    monkeypatch.setattr(main.subprocess, "Popen", lambda *args, **kwargs: process)
+
+
+def test_socket_probe_distinguishes_bound_and_free_ports():
+    listener = main.socket.socket(main.socket.AF_INET, main.socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    try:
+        assert main._web_port_is_listening("127.0.0.1", port) is True
+    finally:
+        listener.close()
+
+    assert main._web_port_is_listening("127.0.0.1", port) is False
+
+
+def test_free_port_requires_owned_runtime_identity_before_success(monkeypatch):
+    process = _WebFakeProcess()
+    build = _web_build_identity()
+    launch_id = "launch-current"
+    health = HealthRegistry(("web",))
+    monkeypatch.setattr(main, "_runtime_health", health)
+    _patch_web_spawn(monkeypatch, process)
+    monkeypatch.setattr(main, "_expected_frontend_build_identity", lambda: build)
+    monkeypatch.setattr(main, "_fetch_web_status", lambda host, port: _web_status(process, launch_id, build))
+
+    result = main._start_web_subprocess(
+        ("python", "web_server_entry.py"),
+        {"CHARLIE_LAUNCH_ID": launch_id},
+        host="127.0.0.1",
+        port=8000,
+        launch_id=launch_id,
+    )
+
+    assert result is process
+    assert main._runtime_health.snapshot()["web"]["status"] == "running"
+    assert process.terminated is False
+
+
+def test_web_identity_accepts_the_real_child_of_the_launcher(monkeypatch):
+    process = _WebFakeProcess(pid=4321)
+    build = _web_build_identity()
+    monkeypatch.setattr(main, "_web_process_owns_pid", lambda current, reported: reported == 8765)
+
+    status = _web_status(process, "launch-current", build) | {"pid": 8765}
+    assert main._web_identity_error(status, process, "launch-current", build) is None
+
+
+@pytest.mark.asyncio
+async def test_main_startup_failure_exits_nonzero_instead_of_succeeding(monkeypatch, caplog):
+    import charlie.audit_store as audit_store_module
+    import charlie.plugins as plugins_module
+    import charlie.tools as tools_module
+
+    health = HealthRegistry(("brain", "plugins", "mcp", "web"))
+    monkeypatch.setattr(main, "_runtime_health", health)
+    monkeypatch.setattr(main, "SessionStore", lambda path: _StartupFakeStore())
+    monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: _StartupFakeStore())
+    monkeypatch.setattr(main, "_compose_memory_dependencies", lambda runtime_config: (object(), None, object()))
+    monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: _StartupFakeBrain())
+    monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
+    monkeypatch.setattr(tools_module, "register_plugin_tools", lambda runtime_config: None)
+    monkeypatch.setattr(plugins_module, "PluginManager", lambda: object())
+    monkeypatch.setattr(main.config, "mcp_enabled", False)
+    monkeypatch.setattr(
+        main,
+        "_start_web_subprocess",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("synthetic web ownership failure")),
+    )
+
+    exit_codes = []
+
+    def fake_exit(code):
+        exit_codes.append(code)
+        raise _StartupExitSentinel
+
+    monkeypatch.setattr(main.os, "_exit", fake_exit)
+
+    with pytest.raises(_StartupExitSentinel):
+        await main.main()
+
+    assert exit_codes == [1]
+    assert "Charlie runtime startup failed before voice initialization" in caplog.text
+
+
+def test_unrelated_listener_stops_startup_without_spawning(monkeypatch):
+    health = HealthRegistry(("web",))
+    monkeypatch.setattr(main, "_runtime_health", health)
+    monkeypatch.setattr(main, "_web_port_is_listening", lambda host, port: True)
+    monkeypatch.setattr(main, "_fetch_web_status", lambda host, port: None)
+    monkeypatch.setattr(main.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("must not spawn"))
+
+    with pytest.raises(RuntimeError, match="Port 8000 is occupied by another process"):
+        main._start_web_subprocess(
+            ("python", "web_server_entry.py"),
+            {},
+            host="127.0.0.1",
+            port=8000,
+            launch_id="launch-current",
+        )
+
+
+def test_stale_charlie_listener_stops_startup_truthfully(monkeypatch):
+    process = _WebFakeProcess(pid=9999)
+    health = HealthRegistry(("web",))
+    monkeypatch.setattr(main, "_runtime_health", health)
+    monkeypatch.setattr(main, "_web_port_is_listening", lambda host, port: True)
+    monkeypatch.setattr(
+        main,
+        "_fetch_web_status",
+        lambda host, port: {"launch_id": "launch-old", "pid": process.pid},
+    )
+    monkeypatch.setattr(main.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("must not spawn"))
+
+    with pytest.raises(RuntimeError, match="another Charlie runtime"):
+        main._start_web_subprocess(
+            ("python", "web_server_entry.py"),
+            {},
+            host="127.0.0.1",
+            port=8000,
+            launch_id="launch-current",
+        )
+
+
+def test_spawned_web_exit_stops_startup_and_tears_down_child(monkeypatch):
+    process = _WebFakeProcess(exit_code=17)
+    build = _web_build_identity()
+    health = HealthRegistry(("web",))
+    monkeypatch.setattr(main, "_runtime_health", health)
+    _patch_web_spawn(monkeypatch, process)
+    monkeypatch.setattr(main, "_expected_frontend_build_identity", lambda: build)
+    monkeypatch.setattr(main, "_fetch_web_status", lambda host, port: None)
+
+    with pytest.raises(RuntimeError, match="exited before readiness"):
+        main._start_web_subprocess(
+            ("python", "web_server_entry.py"),
+            {},
+            host="127.0.0.1",
+            port=8000,
+            launch_id="launch-current",
+        )
+
+    assert process.terminated is True
+
+
+def test_web_readiness_timeout_stops_startup_and_tears_down_child(monkeypatch):
+    process = _WebFakeProcess()
+    build = _web_build_identity()
+    health = HealthRegistry(("web",))
+    monkeypatch.setattr(main, "_runtime_health", health)
+    _patch_web_spawn(monkeypatch, process)
+    monkeypatch.setattr(main, "_expected_frontend_build_identity", lambda: build)
+    monkeypatch.setattr(main, "_fetch_web_status", lambda host, port: None)
+
+    with pytest.raises(RuntimeError, match="did not become ready"):
+        main._start_web_subprocess(
+            ("python", "web_server_entry.py"),
+            {},
+            host="127.0.0.1",
+            port=8000,
+            launch_id="launch-current",
+            startup_timeout=0,
+        )
+
+    assert process.terminated is True
+
+
+def test_wrong_launch_identity_is_rejected_and_child_is_stopped(monkeypatch):
+    process = _WebFakeProcess()
+    build = _web_build_identity()
+    health = HealthRegistry(("web",))
+    monkeypatch.setattr(main, "_runtime_health", health)
+    _patch_web_spawn(monkeypatch, process)
+    monkeypatch.setattr(main, "_expected_frontend_build_identity", lambda: build)
+    monkeypatch.setattr(main, "_fetch_web_status", lambda host, port: _web_status(process, "launch-old", build))
+
+    with pytest.raises(RuntimeError, match="launch identity mismatch"):
+        main._start_web_subprocess(
+            ("python", "web_server_entry.py"),
+            {},
+            host="127.0.0.1",
+            port=8000,
+            launch_id="launch-current",
+        )
+
+    assert process.terminated is True
+
+
+def test_wrong_frontend_identity_is_rejected(monkeypatch):
+    process = _WebFakeProcess()
+    expected = _web_build_identity()
+    served = {**expected, "input_fingerprint": "stale-inputs"}
+    health = HealthRegistry(("web",))
+    monkeypatch.setattr(main, "_runtime_health", health)
+    _patch_web_spawn(monkeypatch, process)
+    monkeypatch.setattr(main, "_expected_frontend_build_identity", lambda: expected)
+    monkeypatch.setattr(main, "_fetch_web_status", lambda host, port: _web_status(process, "launch-current", served))
+
+    with pytest.raises(RuntimeError, match="frontend build identity mismatch"):
+        main._start_web_subprocess(
+            ("python", "web_server_entry.py"),
+            {},
+            host="127.0.0.1",
+            port=8000,
+            launch_id="launch-current",
+        )
+
+    assert process.terminated is True

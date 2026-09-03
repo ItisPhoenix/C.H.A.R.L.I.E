@@ -1,11 +1,15 @@
 # ruff: noqa: E402, I001
 import asyncio
 import dataclasses
+import errno
+import http.client
 import io
+import json
 import logging
 import logging.handlers
 import os
 import re
+import socket
 import sys
 import time
 import threading
@@ -107,7 +111,11 @@ from charlie.ipc import EventBus
 from charlie.memory_graph import MemoryGraph
 from charlie.memory_service import MemoryService
 from charlie.memory_store import MemoryStore
-from charlie.personality import get_emotion_for_context, parse_voice_command, parse_yes_no
+from charlie.personality import (
+    get_emotion_for_context,
+    parse_voice_command,
+    parse_yes_no,
+)
 from charlie.session_store import SessionStore
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus
@@ -965,6 +973,191 @@ def _start_subsystem_process(
     return process
 
 
+_WEB_STARTUP_TIMEOUT_SECONDS = 10.0
+_WEB_PROBE_TIMEOUT_SECONDS = 0.5
+
+
+def _web_probe_host(host: str) -> str:
+    """Use a loopback probe address for the configured local web host."""
+    normalized = host.strip()
+    return "127.0.0.1" if normalized.lower() == "localhost" else normalized
+
+
+def _web_port_is_listening(host: str, port: int) -> bool:
+    """Return whether a TCP listener currently owns the configured web port."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((_web_probe_host(host), port))
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) == 10048:
+            return True
+        raise RuntimeError(
+            f"Unable to determine whether Charlie web port {port} is available."
+        ) from exc
+    finally:
+        probe.close()
+    return False
+
+
+def _fetch_web_status(host: str, port: int) -> Optional[dict[str, Any]]:
+    """Read the local runtime identity endpoint without using proxy settings."""
+    connection: Optional[http.client.HTTPConnection] = None
+    try:
+        connection = http.client.HTTPConnection(
+            _web_probe_host(host),
+            port,
+            timeout=_WEB_PROBE_TIMEOUT_SECONDS,
+        )
+        connection.request("GET", "/api/status", headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        if response.status != 200:
+            return None
+        payload = json.loads(response.read(64 * 1024).decode("utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except (http.client.HTTPException, OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _expected_frontend_build_identity() -> Optional[dict[str, Any]]:
+    """Read the build identity that the child web process must serve."""
+    configured_dist = os.environ.get("CHARLIE_FRONTEND_DIST")
+    dist = Path(configured_dist) if configured_dist else Path(__file__).parent / "frontend" / "dist"
+    try:
+        manifest = json.loads((dist / "charlie-build.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _web_process_owns_pid(process: subprocess.Popen, reported_pid: Any) -> bool:
+    """Accept the launcher PID or the real interpreter child PID on Windows."""
+    try:
+        reported_pid = int(reported_pid)
+    except (TypeError, ValueError):
+        return False
+    if reported_pid == process.pid:
+        return True
+
+    try:
+        import psutil
+
+        return any(child.pid == reported_pid for child in psutil.Process(process.pid).children(recursive=True))
+    except (psutil.Error, OSError, ValueError):
+        return False
+
+
+def _web_identity_error(
+    status: Optional[dict[str, Any]],
+    process: subprocess.Popen,
+    launch_id: str,
+    expected_build: Optional[dict[str, Any]],
+) -> Optional[str]:
+    """Return a safe explanation when a ready response is not this launch."""
+    if not isinstance(status, dict):
+        return "Charlie web runtime returned no valid identity response."
+    if status.get("launch_id") != launch_id:
+        return "Charlie web runtime launch identity mismatch; refusing to attach to an unknown or stale HUD."
+    if not _web_process_owns_pid(process, status.get("pid")):
+        return "Charlie web runtime process identity mismatch; refusing to attach to an unexpected HUD process."
+    frontend_build = status.get("frontend_build")
+    if not isinstance(frontend_build, dict):
+        return "Charlie web runtime did not report a frontend build identity."
+    if status.get("source_identity") != frontend_build.get("git_sha"):
+        return "Charlie web runtime source identity is inconsistent with its frontend build."
+    if expected_build is not None:
+        for key in ("build_id", "input_fingerprint", "git_sha", "dirty"):
+            if key in expected_build and frontend_build.get(key) != expected_build[key]:
+                return f"Charlie web runtime frontend build identity mismatch ({key})."
+    return None
+
+
+def _terminate_subsystem_process(process: subprocess.Popen) -> None:
+    """Stop one child process without affecting any unrelated process."""
+    try:
+        process.terminate()
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+    except (OSError, AttributeError):
+        logger.debug("Unable to terminate failed subsystem child", exc_info=True)
+
+
+def _log_port_release(host: str, port: int) -> None:
+    try:
+        released = not _web_port_is_listening(host, port)
+        logger.info("port_release | port=%s | released=%s", port, released)
+    except Exception as exc:
+        logger.warning(
+            "port_release | port=%s | released=unknown | error=%s",
+            port,
+            type(exc).__name__,
+        )
+
+
+def _start_web_subprocess(
+    command: Tuple[str, ...],
+    env: Dict[str, str],
+    *,
+    host: str,
+    port: int,
+    launch_id: str,
+    startup_timeout: float = _WEB_STARTUP_TIMEOUT_SECONDS,
+) -> subprocess.Popen:
+    """Start only this launch's HUD and require its identity before continuing."""
+    if _web_port_is_listening(host, port):
+        existing_status = _fetch_web_status(host, port)
+        if isinstance(existing_status, dict) and existing_status.get("launch_id"):
+            message = (
+                f"Port {port} is occupied by another Charlie runtime. "
+                "Stop the existing runtime before starting a new one."
+            )
+        else:
+            message = f"Port {port} is occupied by another process. Stop it before starting Charlie."
+        _set_subsystem_health("web", HealthStatus.DEGRADED, message)
+        raise RuntimeError(message)
+
+    try:
+        process = subprocess.Popen(command, cwd=os.path.dirname(__file__), env=env)
+    except Exception as exc:
+        message = f"Charlie web subprocess could not start: {type(exc).__name__}."
+        _set_subsystem_health("web", HealthStatus.DEGRADED, message)
+        raise RuntimeError(message) from exc
+
+    _set_subsystem_health("web", HealthStatus.STARTING, "Waiting for owned web runtime")
+    expected_build = _expected_frontend_build_identity()
+    deadline = time.monotonic() + startup_timeout
+    try:
+        while time.monotonic() < deadline:
+            exit_code = process.poll()
+            if exit_code is not None:
+                message = f"Charlie web subprocess exited before readiness (exit code {exit_code})."
+                _set_subsystem_health("web", HealthStatus.DEGRADED, message)
+                raise RuntimeError(message)
+
+            status = _fetch_web_status(host, port)
+            if status is not None:
+                identity_error = _web_identity_error(status, process, launch_id, expected_build)
+                if identity_error is not None:
+                    _set_subsystem_health("web", HealthStatus.DEGRADED, identity_error)
+                    raise RuntimeError(identity_error)
+                _set_subsystem_health("web", HealthStatus.RUNNING, "Ready")
+                logger.info("Owned web runtime ready (PID: %s, launch_id=%s)", process.pid, launch_id)
+                return process
+            time.sleep(0.1)
+    except Exception:
+        _terminate_subsystem_process(process)
+        raise
+
+    message = f"Charlie web subprocess did not become ready within {startup_timeout:.1f}s."
+    _set_subsystem_health("web", HealthStatus.DEGRADED, message)
+    _terminate_subsystem_process(process)
+    raise RuntimeError(message)
+
+
 class _UnavailableVoiceEngine:
     """No-op voice replacement that keeps non-voice Charlie features available."""
 
@@ -1151,6 +1344,48 @@ def _schedule_process(coro, loop):
     return fut
 
 
+async def _apply_voice_control(
+    control: str,
+    *,
+    voice: Any,
+    brain: Any,
+    active_turn: bool,
+    active_operation_cancellable: bool,
+    active_process_task: Optional[asyncio.Task],
+    cancel_housekeeping: Callable[[], None],
+) -> bool:
+    """Apply one exact realtime control without entering the conversational path."""
+    tts_active = bool(getattr(voice, "is_speaking", None) and voice.is_speaking.is_set())
+    if not active_turn and not tts_active:
+        logger.info("voice_control_ignored | control=%s | reason=no_active_work", control)
+        return False
+
+    voice.stop_tts()
+    if not active_turn:
+        logger.info("voice_control_applied | control=%s | action=stop_tts", control)
+        return True
+    if not active_operation_cancellable:
+        logger.info(
+            "voice_control_applied | control=%s | action=stop_tts | "
+            "foreground_operation=non_cancellable",
+            control,
+        )
+        return True
+
+    cancel_housekeeping()
+    brain.cancel_chat()
+    if active_process_task is not None and not active_process_task.done():
+        active_process_task.cancel()
+        try:
+            await active_process_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("Voice control cancellation task exited with an error", exc_info=True)
+    logger.info("voice_control_applied | control=%s | action=cancel_foreground", control)
+    return True
+
+
 async def _restart_mcp_client(old_client, config):
     """Stop old_client and start a fresh one, both off the event loop.
 
@@ -1247,6 +1482,11 @@ async def main():
     web_proc = None
     pet_proc = None
     telegram_bot = None
+    mcp_client = None
+    mcp_start_task = None
+    companion_ready_file: Optional[Path] = None
+    companion_monitor_task: Optional[asyncio.Task] = None
+    exit_code = 0
     # True while a chat turn's LLM/tool loop runs -- see _dispatch_or_queue.
     turn_active = False
     pending_turns: list[TurnRequest] = []
@@ -1432,6 +1672,57 @@ async def main():
                 ),
                 loop,
             )
+
+    async def _handle_voice_control(request: TurnRequest, control: str) -> None:
+        nonlocal speech_echo_cooldown
+        from charlie.core import get_active_voice_approval
+
+        trace = voice_diagnostic_traces.get(request.turn_id)
+        pending_approval_id = get_active_voice_approval()
+        if pending_approval_id:
+            voice.stop_tts()
+            _resolve_tool_approval_and_notify(pending_approval_id, False)
+            handled = True
+            logger.info("voice_control_applied | control=%s | action=decline_approval", control)
+        else:
+            handled = await _apply_voice_control(
+                control,
+                voice=voice,
+                brain=brain,
+                active_turn=active_turn_id is not None,
+                active_operation_cancellable=active_operation_cancellable,
+                active_process_task=active_process_task,
+                cancel_housekeeping=_cancel_housekeeping,
+            )
+
+        if trace is not None:
+            trace.bind(turn_id=request.turn_id, session_id=request.session_id)
+            trace.mark_once(
+                "intent_decision",
+                fields={
+                    "intent": "control",
+                    "control": control,
+                    "handled": handled,
+                    "routing_source": "deterministic",
+                },
+            )
+            trace.mark_once(
+                "response_text_complete",
+                fields={"status": "control", "completion_boundary": "control_without_answer"},
+            )
+        recorder = getattr(brain, "record_intent_decision", None)
+        if callable(recorder):
+            recorder(
+                request,
+                intent="control",
+                capabilities=(),
+                routing_source="deterministic",
+                confidence=1.0,
+                rationale=("active voice interruption command" if handled else "inactive voice control ignored"),
+            )
+        voice_diagnostic_traces.pop(request.turn_id, None)
+        if handled:
+            speech_echo_cooldown = time.time() + 1.5
 
     def on_tool_approval_request(
         request_id,
@@ -1765,7 +2056,13 @@ async def main():
         if trace is not None:
             trace.bind(turn_id=request.turn_id, session_id=session_id)
             voice_diagnostic_traces[request.turn_id] = trace
-        _schedule_process(_dispatch_or_queue(request), loop)
+        from charlie.personality import parse_voice_control as _parse_voice_control
+
+        control = _parse_voice_control(text)
+        if control is not None:
+            _schedule_process(_handle_voice_control(request, control), loop)
+        else:
+            _schedule_process(_dispatch_or_queue(request), loop)
 
     async def _dispatch_or_queue(request: TurnRequest):
         """Run the turn now, or queue it if one is already running tool calls.
@@ -1790,7 +2087,6 @@ async def main():
                     pending_turns.remove(queued)
                     pending_turn_times.pop(queued.turn_id, None)
                     voice_diagnostic_traces.pop(queued.turn_id, None)
-                brain.cancel_chat()
                 if active_operation_name is not None and not active_operation_cancellable:
                     pending_turns.append(request)
                     pending_turn_times[request.turn_id] = time.monotonic()
@@ -1802,6 +2098,7 @@ async def main():
                         len(pending_turns),
                     )
                     return
+                brain.cancel_chat()
                 old_task.cancel()
                 try:
                     await old_task
@@ -2893,11 +3190,35 @@ async def main():
     web_entry = os.path.join(os.path.dirname(__file__), "charlie", "web_server_entry.py")
     _web_env = os.environ.copy()
     _web_env["CHARLIE_LAUNCH_ID"] = _LAUNCH_ID
-    web_proc = _start_subsystem_process("web", (sys.executable, web_entry), _web_env)
+    try:
+        web_proc = await asyncio.to_thread(
+            _start_web_subprocess,
+            (sys.executable, web_entry),
+            _web_env,
+            host=config.charlie_host,
+            port=config.charlie_port,
+            launch_id=_LAUNCH_ID,
+        )
+    except Exception as exc:
+        exit_code = 1
+        logger.error("Charlie runtime startup failed before voice initialization: %s", exc, exc_info=True)
+        try:
+            await brain.close()
+        except Exception:
+            logger.warning("Brain cleanup after startup failure failed", exc_info=True)
+        try:
+            if store is not None:
+                store.close()
+        except Exception:
+            logger.warning("SessionStore cleanup after startup failure failed", exc_info=True)
+        try:
+            audit_store.close()
+        except Exception:
+            logger.warning("AuditStore cleanup after startup failure failed", exc_info=True)
+        logging.shutdown()
+        os._exit(exit_code)
 
     # Start desktop companion subprocess (Windows-only, PySide6)
-    companion_ready_file: Optional[Path] = None
-    companion_monitor_task: Optional[asyncio.Task] = None
     if config.pet_enabled:
         _set_subsystem_health("companion", HealthStatus.STARTING)
         companion_ready, companion_detail = _companion_dependency_status()
@@ -2973,7 +3294,6 @@ async def main():
                 _cancel_housekeeping()
                 if active_turn_id is None:
                     return
-                brain.cancel_chat()
                 task = active_process_task
                 if task is None or task.done():
                     return
@@ -2983,6 +3303,7 @@ async def main():
                         active_operation_name,
                     )
                     return
+                brain.cancel_chat()
                 logger.info("Speech onset superseding cancellable foreground response")
                 task.cancel()
 
@@ -3401,13 +3722,26 @@ async def main():
             finally:
                 logging.getLogger().removeHandler(zmq_handler)
                 calendar_store.close()
+                logger.info("main_shutdown_begin | stage=before_event_bus_close")
+                if voice is not None:
+                    voice.stop()
     except KeyboardInterrupt:
         logger.info("Interrupt received, shutting down...")
     except asyncio.CancelledError:
         pass
     except Exception as e:
-        logger.exception(f"Fatal error: {e}")
+        exit_code = 1
+        logger.error("Charlie runtime startup/execution failed: %s", e, exc_info=True)
     finally:
+        logger.info("main_shutdown_begin | exit_code=%s", exit_code)
+        if mcp_start_task is not None and not mcp_start_task.done():
+            mcp_start_task.cancel()
+            try:
+                await mcp_start_task
+            except asyncio.CancelledError:
+                logger.info("MCP startup task stopped")
+            except Exception:
+                logger.warning("MCP startup task stopped with an error", exc_info=True)
         if "voice" in locals() and voice is not None:
             voice.stop()
         if "brain" in locals():
@@ -3423,19 +3757,21 @@ async def main():
             except Exception as e:
                 logger.warning(f"MCP subsystem stop error: {e}")
         if web_proc is not None:
-            web_proc.terminate()
-            try:
-                web_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                web_proc.kill()
+            web_pid = getattr(web_proc, "pid", None)
+            _terminate_subsystem_process(web_proc)
+            logger.info("web child exited | pid=%s | exit_code=%s", web_pid, web_proc.poll())
         if pet_proc is not None:
-            pet_proc.terminate()
-            try:
-                pet_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pet_proc.kill()
+            pet_pid = getattr(pet_proc, "pid", None)
+            _terminate_subsystem_process(pet_proc)
+            logger.info("companion child exited | pid=%s | exit_code=%s", pet_pid, pet_proc.poll())
         if companion_monitor_task is not None:
             companion_monitor_task.cancel()
+            try:
+                await companion_monitor_task
+            except asyncio.CancelledError:
+                logger.info("companion readiness monitor stopped")
+            except Exception:
+                logger.warning("Companion readiness monitor stopped with an error", exc_info=True)
         if companion_ready_file is not None:
             try:
                 companion_ready_file.unlink(missing_ok=True)
@@ -3444,12 +3780,17 @@ async def main():
         if telegram_bot is not None:
             try:
                 await telegram_bot.stop()
+                logger.info("Telegram stopped")
             except Exception as e:
                 logger.warning(f"Telegram bot stop error: {e}")
 
+        _log_port_release(config.charlie_host, config.charlie_port)
+        _log_port_release("127.0.0.1", 5555)
+        _log_port_release("127.0.0.1", 5556)
+
         logging.shutdown()
         # Force exit to ensure background threads don't hang the process on Windows
-        os._exit(0)
+        os._exit(exit_code)
 
 
 async def _voice_loop_idle(voice):

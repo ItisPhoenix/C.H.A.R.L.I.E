@@ -73,9 +73,15 @@ def test_warmup_disables_vad_filter():
 
 
 def test_worker_acknowledges_readiness_only_after_model_initializes(monkeypatch):
+    calls = []
+
     class FakeModel:
         def __init__(self, *args, **kwargs):
             pass
+
+        def transcribe(self, audio, **kwargs):
+            calls.append((audio, kwargs))
+            return ([], SimpleNamespace(language="en", language_probability=1.0))
 
     class StopInputQueue:
         def get(self, timeout):
@@ -99,7 +105,52 @@ def test_worker_acknowledges_readiness_only_after_model_initializes(monkeypatch)
         "en",
     )
 
-    assert output_queue.messages == [{"type": "ready", "model": "distil-large-v3"}]
+    assert output_queue.messages[0]["type"] == "ready"
+    assert output_queue.messages[0]["model"] == "distil-large-v3"
+    assert output_queue.messages[0]["metrics"].keys() == {
+        "model_load_ms",
+        "warmup_inference_ms",
+        "asr_ready_ms",
+    }
+    assert len(calls) == 1
+    assert len(calls[0][0]) == 1600
+    assert calls[0][1]["vad_filter"] is False
+    assert calls[0][1]["beam_size"] == 1
+
+
+def test_worker_reports_warmup_failure_without_claiming_readiness(monkeypatch):
+    class FakeModel:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def transcribe(self, *_args, **_kwargs):
+            raise RuntimeError("synthetic warm-up failure")
+
+    class StopInputQueue:
+        def get(self, timeout):
+            raise AssertionError("worker must not enter capture loop after warm-up failure")
+
+    class OutputQueue:
+        def __init__(self):
+            self.messages = []
+
+        def put(self, message):
+            self.messages.append(message)
+
+    monkeypatch.setattr(asr_worker, "WhisperModel", FakeModel)
+    output_queue = OutputQueue()
+
+    asr_worker.asr_worker_process(
+        StopInputQueue(),
+        output_queue,
+        "distil-large-v3",
+        "cpu",
+        "en",
+    )
+
+    assert output_queue.messages[0]["type"] == "failed"
+    assert output_queue.messages[0]["stage"] == "warmup"
+    assert output_queue.messages[0]["metrics"]["asr_ready_ms"] is None
 
 
 def test_worker_preserves_utterance_id_and_reports_truthful_quality_metadata(monkeypatch):

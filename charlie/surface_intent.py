@@ -8,7 +8,7 @@ from charlie.presentation_registry import PresentationRegistry, get_presentation
 
 _ACTION_RE = re.compile(
     r"^\s*(?:charlie[,:]?\s*)?(show|open|hide|close)\s+"
-    r"(?:me\s+)?(?:the\s+)?(.+?)\s*[.!?]*\s*$",
+    r"(?:me\b\s*,?\s*)?(?:the\s+)?(.+?)\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
 _CLEAR_RE = re.compile(r"^\s*(?:charlie[,:]?\s*)?clear\s+(?:the\s+)?screen\s*[.!?]*\s*$", re.IGNORECASE)

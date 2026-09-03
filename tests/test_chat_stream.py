@@ -1064,11 +1064,15 @@ async def test_voice_vision_has_short_budget_but_non_voice_keeps_deep_budget(mon
     brain_config.vision_enabled = True
     brain = Brain(brain_config)
     monkeypatch.setattr(core, "_INTERACTIVE_VISION_TIMEOUT_S", 0.01)
+    closed = []
 
     async def hanging_stream(*_args, **_kwargs):
-        await asyncio.sleep(1)
-        if False:
-            yield "unreachable"
+        try:
+            await asyncio.sleep(1)
+            if False:
+                yield "unreachable"
+        finally:
+            closed.append(True)
 
     brain._chat_stream_impl = hanging_stream
     try:
@@ -1080,6 +1084,7 @@ async def test_voice_vision_has_short_budget_but_non_voice_keeps_deep_budget(mon
             )
         ]
         assert voice_chunks == ["I couldn't inspect the screen within the interactive voice time budget."]
+        assert closed == [True]
 
         async def deep_stream(*_args, **_kwargs):
             await asyncio.sleep(0.02)
@@ -1095,6 +1100,147 @@ async def test_voice_vision_has_short_budget_but_non_voice_keeps_deep_budget(mon
         ]
         assert web_chunks == ["deep vision result"]
     finally:
+        await brain.close()
+
+
+@pytest.mark.asyncio
+async def test_bounded_vision_cleanup_reaps_hanging_cleanup(monkeypatch):
+    from charlie import core
+
+    monkeypatch.setattr(core, "_VISION_CLEANUP_TIMEOUT_S", 0.01)
+
+    async def hanging_cleanup():
+        await asyncio.Future()
+
+    tasks_before = set(asyncio.all_tasks())
+    assert await core._await_bounded_cleanup(hanging_cleanup(), "test") == "timeout"
+    assert asyncio.all_tasks() == tasks_before
+
+
+@pytest.mark.asyncio
+async def test_overlapping_research_turn_is_cancelled_before_latest_voice_turn_runs(brain_config, monkeypatch):
+    brain = Brain(brain_config)
+    research_started = asyncio.Event()
+
+    async def blocked_research(query, _session_id, turn_id=None):
+        if "research" not in query:
+            return None
+        research_started.set()
+        await asyncio.Future()
+
+    async def latest_completion(_payload, _generation):
+        return "latest voice answer", []
+
+    monkeypatch.setattr(brain, "_run_research", blocked_research)
+    monkeypatch.setattr(brain, "_stream_completion", latest_completion)
+
+    async def collect(text):
+        return [chunk async for chunk in brain.chat_stream(text, platform="voice")]
+
+    old_task = asyncio.create_task(collect("research the latest runtime behavior"))
+    try:
+        await asyncio.wait_for(research_started.wait(), timeout=1.0)
+        brain.cancel_chat()
+        old_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await old_task
+
+        latest = await collect("tell me something new")
+        assert latest == ["latest voice answer"]
+    finally:
+        if not old_task.done():
+            old_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await old_task
+        await brain.close()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_vision_turn_closes_stale_stream_before_latest_turn(monkeypatch, brain_config):
+    from charlie import core
+
+    brain_config.vision_enabled = True
+    brain = Brain(brain_config)
+    vision_started = asyncio.Event()
+    vision_closed = asyncio.Event()
+
+    async def stale_vision(*_args, **_kwargs):
+        vision_started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            vision_closed.set()
+        yield "stale vision result"
+
+    async def latest_vision(*_args, **_kwargs):
+        yield "latest vision result"
+
+    monkeypatch.setattr(core, "_INTERACTIVE_VISION_TIMEOUT_S", 1.0)
+    brain._chat_stream_impl = stale_vision
+
+    async def collect():
+        return [
+            chunk
+            async for chunk in brain.chat_stream("What do you see on my screen?", platform="voice")
+        ]
+
+    old_task = asyncio.create_task(collect())
+    try:
+        await asyncio.wait_for(vision_started.wait(), timeout=1.0)
+        brain.cancel_chat()
+        old_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await old_task
+        assert vision_closed.is_set()
+
+        brain._chat_stream_impl = latest_vision
+        assert await collect() == ["latest vision result"]
+    finally:
+        if not old_task.done():
+            old_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await old_task
+        await brain.close()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_conversation_turn_closes_stale_stream_before_latest_turn(brain_config):
+    brain = Brain(brain_config)
+    conversation_started = asyncio.Event()
+    conversation_closed = asyncio.Event()
+
+    async def stale_conversation(*_args, **_kwargs):
+        conversation_started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            conversation_closed.set()
+        yield "stale conversation result"
+
+    async def latest_conversation(*_args, **_kwargs):
+        yield "latest conversation result"
+
+    brain._chat_stream_impl = stale_conversation
+
+    async def collect():
+        return [chunk async for chunk in brain.chat_stream("tell me something", platform="voice")]
+
+    old_task = asyncio.create_task(collect())
+    try:
+        await asyncio.wait_for(conversation_started.wait(), timeout=1.0)
+        brain.cancel_chat()
+        old_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await old_task
+        assert conversation_closed.is_set()
+
+        brain._chat_stream_impl = latest_conversation
+        assert await collect() == ["latest conversation result"]
+    finally:
+        if not old_task.done():
+            old_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await old_task
         await brain.close()
 
 

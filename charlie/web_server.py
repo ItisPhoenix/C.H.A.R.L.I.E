@@ -2574,31 +2574,48 @@ async def get_workspace_file(path: str):
 
 @app.get("/api/models")
 async def get_available_models():
-    """Return live configured model plus auto-discovered local & provider API key models."""
+    """Return configured, provider-discovered, and local model identifiers."""
     import httpx
 
     current_model = config.llm_model or ""
-    # Only seed the currently configured model - no phantom defaults
     models_set: set[str] = {current_model} if current_model else set()
+    provider_models: set[str] = set()
+    provider_status = "not_configured"
+    provider_error: Optional[str] = None
 
-    # 1. Query configured LLM provider endpoint if API key is set
-    if config.llm_key and config.llm_key not in ("no-key", "no_key") and config.llm_url:
+    # The configured LLM URL is the provider API base used by Brain as well.
+    if config.llm_url:
+        provider_status = "error"
         try:
             headers = build_auth_headers(config.llm_key)
-            url = config.llm_url.rstrip("/")
-            endpoint = f"{url}/models" if url.endswith("/v1") else f"{url}/v1/models"
+            endpoint = f"{config.llm_url.rstrip('/')}/models"
             async with httpx.AsyncClient(
                 timeout=3.0,
                 trust_env=config.llm_trust_env,
             ) as client:
                 r = await client.get(endpoint, headers=headers)
-                if r.status_code == 200:
+            if r.status_code != 200:
+                provider_error = f"HTTP {r.status_code}"
+            else:
+                try:
                     data = r.json()
-                    for item in data.get("data", []):
-                        if isinstance(item, dict) and item.get("id"):
-                            models_set.add(item["id"])
-        except Exception as e:
-            logger.warning(f"Could not fetch models from provider endpoint: {e}")
+                except (TypeError, ValueError):
+                    provider_error = "invalid response"
+                else:
+                    entries = data.get("data") if isinstance(data, dict) else None
+                    if not isinstance(entries, list):
+                        provider_error = "invalid response"
+                    else:
+                        for item in entries:
+                            model_id = item.get("id") if isinstance(item, dict) else None
+                            if isinstance(model_id, str) and model_id.strip():
+                                provider_models.add(model_id)
+                        models_set.update(provider_models)
+                        provider_status = "available"
+        except httpx.HTTPError:
+            provider_error = "connection unavailable"
+        except Exception:
+            provider_error = "invalid response"
 
     # 2. Discover local Ollama models (port 11434)
     try:
@@ -2626,6 +2643,11 @@ async def get_available_models():
         "active_model": current_model,
         "has_api_key": bool(config.llm_key and config.llm_key not in ("no-key", "no_key")),
         "models": sorted(list(models_set)),
+        "provider_discovery": {
+            "status": provider_status,
+            "count": len(provider_models),
+            "error": provider_error,
+        },
     }
 
 

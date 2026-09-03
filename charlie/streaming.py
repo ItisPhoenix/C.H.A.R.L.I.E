@@ -117,6 +117,7 @@ class FollowupStreamState:
         self.accumulated: str = ""
         self.tc_by_index: Dict[int, Dict[str, str]] = {}
         self.cancelled: bool = False
+        self.finish_reason: Optional[str] = None
 
 
 async def stream_followup_content(
@@ -144,7 +145,10 @@ async def stream_followup_content(
             return
         try:
             chunk = json.loads(line[6:])
-            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            choice = chunk.get("choices", [{}])[0]
+            if choice.get("finish_reason") is not None:
+                state.finish_reason = str(choice["finish_reason"])
+            delta = choice.get("delta", {})
             content = delta.get("content", "")
             if content:
                 state.accumulated += content

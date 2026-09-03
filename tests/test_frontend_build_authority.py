@@ -98,15 +98,19 @@ def test_failed_build_keeps_old_dist_and_does_not_publish_new_identity(fixture_p
     assert not list(frontend.glob(".charlie-build-*"))
 
 
-def test_inaccessible_dist_uses_owned_runtime_build(fixture_project, monkeypatch):
+def test_inaccessible_dist_uses_persistent_user_runtime_build(fixture_project, monkeypatch, tmp_path):
     project, frontend = fixture_project
-    monkeypatch.setattr(run, "_frontend_dist_is_user_accessible", lambda _: False)
+    runtime_dist = tmp_path / "C.H.A.R.L.I.E" / "frontend-dist"
+    build_calls = []
+    monkeypatch.setattr(run, "_persistent_frontend_dist", lambda _: runtime_dist)
+    monkeypatch.setattr(run, "_frontend_dist_is_user_accessible", lambda path: path != frontend / "dist")
     monkeypatch.setattr(run.shutil, "which", lambda name: "npm.exe")
 
     def fake_build(args, *, cwd, check, env=None):
         if args[-2:] != ["run", "build"]:
             return
         assert env is not None
+        build_calls.append(args)
         staging = Path(env["CHARLIE_FRONTEND_OUT_DIR"])
         (staging / "assets").mkdir(parents=True)
         (staging / "index.html").write_text("built\n", encoding="utf-8")
@@ -118,11 +122,130 @@ def test_inaccessible_dist_uses_owned_runtime_build(fixture_project, monkeypatch
     monkeypatch.setattr(subprocess, "run", fake_build)
     run.check_and_build_frontend(project)
 
-    runtime_dist = Path(os.environ[run._FRONTEND_DIST_ENV])
-    assert runtime_dist.name.startswith("charlie-runtime-build-")
-    assert runtime_dist.parent != frontend
+    assert Path(os.environ[run._FRONTEND_DIST_ENV]) == runtime_dist
     assert (runtime_dist / "index.html").read_text(encoding="utf-8") == "built\n"
-    shutil.rmtree(runtime_dist)
+    assert len(build_calls) == 1
+
+    run.check_and_build_frontend(project)
+    assert len(build_calls) == 1
+    os.environ.pop(run._FRONTEND_DIST_ENV, None)
+
+
+def test_frontend_source_change_rebuilds_persistent_user_runtime_build(fixture_project, monkeypatch, tmp_path):
+    project, frontend = fixture_project
+    runtime_dist = tmp_path / "runtime" / "frontend-dist"
+    build_calls = []
+    monkeypatch.setattr(run, "_persistent_frontend_dist", lambda _: runtime_dist)
+    monkeypatch.setattr(run, "_frontend_dist_is_user_accessible", lambda path: path != frontend / "dist")
+    monkeypatch.setattr(run.shutil, "which", lambda name: "npm.exe")
+
+    def fake_build(args, *, cwd, check, env=None):
+        if args[-2:] == ["run", "build"]:
+            build_calls.append(args)
+            staging = Path(env["CHARLIE_FRONTEND_OUT_DIR"])
+            (staging / "assets").mkdir(parents=True)
+            (staging / "index.html").write_text("built\n", encoding="utf-8")
+            (staging / "charlie-build.json").write_text(
+                json.dumps({"build_id": str(len(build_calls))}), encoding="utf-8"
+            )
+
+    monkeypatch.setattr(subprocess, "run", fake_build)
+    run.check_and_build_frontend(project)
+    (frontend / "src" / "main.tsx").write_text("export const changed = true;\n", encoding="utf-8")
+    run.check_and_build_frontend(project)
+
+    assert len(build_calls) == 2
+    os.environ.pop(run._FRONTEND_DIST_ENV, None)
+
+
+def test_shared_contract_change_rebuilds_persistent_user_runtime_build(fixture_project, monkeypatch, tmp_path):
+    project, frontend = fixture_project
+    runtime_dist = tmp_path / "runtime" / "frontend-dist"
+    build_calls = []
+    monkeypatch.setattr(run, "_persistent_frontend_dist", lambda _: runtime_dist)
+    monkeypatch.setattr(run, "_frontend_dist_is_user_accessible", lambda path: path != frontend / "dist")
+    monkeypatch.setattr(run.shutil, "which", lambda name: "npm.exe")
+
+    def fake_build(args, *, cwd, check, env=None):
+        if args[-2:] == ["run", "build"]:
+            build_calls.append(args)
+            staging = Path(env["CHARLIE_FRONTEND_OUT_DIR"])
+            (staging / "index.html").write_text("built\n", encoding="utf-8")
+            (staging / "charlie-build.json").write_text(
+                json.dumps({"build_id": str(len(build_calls))}), encoding="utf-8"
+            )
+
+    monkeypatch.setattr(subprocess, "run", fake_build)
+    run.check_and_build_frontend(project)
+    (project / "shared" / "event_contract.json").write_text('{"changed": true}\n', encoding="utf-8")
+    run.check_and_build_frontend(project)
+
+    assert len(build_calls) == 2
+    os.environ.pop(run._FRONTEND_DIST_ENV, None)
+
+
+def test_backend_only_git_identity_does_not_invalidate_frontend_build(fixture_project, monkeypatch):
+    _, frontend = fixture_project
+    _write_current_dist(frontend)
+    monkeypatch.setattr(run, "_git_build_identity", lambda _: ("different-backend-commit", True))
+    assert not run._frontend_build_is_stale(frontend, frontend / "dist")
+
+
+def test_invalid_persistent_cache_is_rebuilt(fixture_project, monkeypatch, tmp_path):
+    project, frontend = fixture_project
+    runtime_dist = tmp_path / "runtime" / "frontend-dist"
+    runtime_dist.mkdir(parents=True)
+    (runtime_dist / "index.html").write_text("stale\n", encoding="utf-8")
+    build_calls = []
+    monkeypatch.setattr(run, "_persistent_frontend_dist", lambda _: runtime_dist)
+    monkeypatch.setattr(run, "_frontend_dist_is_user_accessible", lambda path: path != frontend / "dist")
+    monkeypatch.setattr(run.shutil, "which", lambda name: "npm.exe")
+
+    def fake_build(args, *, cwd, check, env=None):
+        if args[-2:] == ["run", "build"]:
+            build_calls.append(args)
+            staging = Path(env["CHARLIE_FRONTEND_OUT_DIR"])
+            (staging / "index.html").write_text("rebuilt\n", encoding="utf-8")
+            (staging / "charlie-build.json").write_text(json.dumps({"build_id": "rebuilt"}), encoding="utf-8")
+
+    monkeypatch.setattr(subprocess, "run", fake_build)
+    run.check_and_build_frontend(project)
+
+    assert len(build_calls) == 1
+    assert (runtime_dist / "index.html").read_text(encoding="utf-8") == "rebuilt\n"
+    os.environ.pop(run._FRONTEND_DIST_ENV, None)
+
+
+def test_failed_runtime_rebuild_preserves_last_verified_cache(fixture_project, monkeypatch, tmp_path):
+    project, frontend = fixture_project
+    runtime_dist = tmp_path / "runtime" / "frontend-dist"
+    build_calls = []
+    monkeypatch.setattr(run, "_persistent_frontend_dist", lambda _: runtime_dist)
+    monkeypatch.setattr(run, "_frontend_dist_is_user_accessible", lambda path: path != frontend / "dist")
+    monkeypatch.setattr(run.shutil, "which", lambda name: "npm.exe")
+
+    def successful_build(args, *, cwd, check, env=None):
+        if args[-2:] == ["run", "build"]:
+            build_calls.append(args)
+            staging = Path(env["CHARLIE_FRONTEND_OUT_DIR"])
+            (staging / "index.html").write_text("verified\n", encoding="utf-8")
+            (staging / "charlie-build.json").write_text(json.dumps({"build_id": "verified"}), encoding="utf-8")
+
+    monkeypatch.setattr(subprocess, "run", successful_build)
+    run.check_and_build_frontend(project)
+    old_manifest = (runtime_dist / "charlie-build.json").read_text(encoding="utf-8")
+    (frontend / "src" / "main.tsx").write_text("changed\n", encoding="utf-8")
+
+    def failed_build(args, *, cwd, check, env=None):
+        if args[-2:] == ["run", "build"]:
+            raise subprocess.CalledProcessError(1, args)
+
+    monkeypatch.setattr(subprocess, "run", failed_build)
+    with pytest.raises(RuntimeError, match="Frontend build failed"):
+        run.check_and_build_frontend(project)
+
+    assert len(build_calls) == 1
+    assert (runtime_dist / "charlie-build.json").read_text(encoding="utf-8") == old_manifest
     os.environ.pop(run._FRONTEND_DIST_ENV, None)
 
 

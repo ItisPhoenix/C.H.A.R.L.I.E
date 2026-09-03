@@ -17,6 +17,7 @@ def test_website_entries_have_no_close_process():
 def test_local_app_entries_have_close_process():
     assert APP_REGISTRY["chrome"].close_process == "chrome.exe"
     assert APP_REGISTRY["notepad"].close_process == "notepad.exe"
+    assert APP_REGISTRY["calculator"].close_processes == ("calc.exe", "CalculatorApp.exe")
     assert APP_REGISTRY["chrome"].is_website is False
 
 

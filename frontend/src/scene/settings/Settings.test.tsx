@@ -1,5 +1,5 @@
 import { describe, expect, test, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { Settings } from "./Settings";
 
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -14,6 +14,7 @@ describe("Settings Component", () => {
               Promise.resolve({
                 fields: [
                   { key: "LLM_URL", field: "llm_url", label: "LLM URL", group: "LLM", type: "str", secret: false, restart: null, value: "https://api.kilo.ai/api/gateway/v1", is_set: null },
+                  { key: "LLM_MODEL", field: "llm_model", label: "LLM Model", group: "LLM", type: "str", secret: false, restart: null, value: "gemini-2.5-pro", is_set: null },
                   { key: "LLM_API_KEY", field: "llm_key", label: "LLM Key", group: "LLM", type: "str", secret: true, restart: null, value: null, is_set: true },
                   { key: "MIC_INDEX", field: "mic_index", label: "Mic Index", group: "Voice & Speech", type: "int", secret: false, restart: "voice", value: -1, is_set: null },
                   { key: "CONTEXT_WINDOW", field: "context_window", label: "Context Window", group: "Chat Behavior", type: "int", secret: false, restart: null, value: 32000, is_set: null },
@@ -43,7 +44,12 @@ describe("Settings Component", () => {
         if (url === "/api/models") {
           return Promise.resolve({
             ok: true,
-            json: () => Promise.resolve({ models: ["gemini-2.5-pro", "gemini-2.5-flash"] }),
+            json: () =>
+              Promise.resolve({
+                active_model: "gemini-2.5-pro",
+                models: ["gemini-2.5-pro", "gemini-2.5-flash"],
+                provider_discovery: { status: "available", count: 2, error: null },
+              }),
           });
         }
         if (url === "/api/mcp/servers") {
@@ -206,6 +212,96 @@ describe("Settings Component", () => {
     fireEvent.click(audioBtn);
 
     expect(await screen.findByText("Mic Index")).toBeDefined();
+  });
+
+  test("renders every discovered model in one searchable model control", async () => {
+    render(<Settings />);
+
+    const combo = await screen.findByRole("combobox", { name: "LLM Model" });
+    expect(combo.tagName).toBe("INPUT");
+    expect(screen.queryByRole("searchbox", { name: "Search models" })).toBeNull();
+    expect(combo).toHaveValue("gemini-2.5-pro");
+
+    fireEvent.focus(combo);
+    const listbox = await screen.findByRole("listbox", { name: "Available models" });
+    const options = within(listbox).getAllByRole("option");
+    expect(options.map((option) => option.textContent)).toEqual([
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+    ]);
+  });
+
+  test("filters model options with built-in search while retaining the current model", async () => {
+    render(<Settings />);
+
+    const combo = await screen.findByRole("combobox", { name: "LLM Model" });
+    fireEvent.focus(combo);
+    fireEvent.change(combo, { target: { value: "flash" } });
+
+    const options = within(screen.getByRole("listbox", { name: "Available models" })).getAllByRole("option");
+    expect(options.map((option) => option.textContent)).toEqual([
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+    ]);
+    expect(options[0]).toHaveAttribute("aria-selected", "true");
+    expect(combo).toHaveValue("flash");
+  });
+
+  test("selecting a model updates the existing draft and save path", async () => {
+    render(<Settings />);
+
+    const combo = await screen.findByRole("combobox", { name: "LLM Model" });
+    fireEvent.focus(combo);
+    fireEvent.change(combo, { target: { value: "flash" } });
+    fireEvent.click(screen.getByRole("option", { name: "gemini-2.5-flash" }));
+    expect(combo).toHaveValue("gemini-2.5-flash");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    await screen.findByText("Saved. Reload required settings when ready.");
+    const saveCall = fetchMock.mock.calls.find(
+      ([url, init]) => url === "/api/config" && (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(JSON.parse(String((saveCall?.[1] as RequestInit).body))).toEqual({ LLM_MODEL: "gemini-2.5-flash" });
+  });
+
+  test("shows loading and provider errors while preserving current model, then refreshes", async () => {
+    let modelCalls = 0;
+    let resolveFirst: ((value: { ok: boolean }) => void) | undefined;
+    const defaultFetch = fetchMock.getMockImplementation() as
+      | ((url: string, init?: RequestInit) => Promise<unknown>)
+      | undefined;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/api/models") {
+        modelCalls += 1;
+        if (modelCalls === 1) {
+          return new Promise((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            active_model: "gemini-2.5-pro",
+            models: ["provider/new-model"],
+            provider_discovery: { status: "available", count: 1, error: null },
+          }),
+        });
+      }
+      return defaultFetch?.(url, init);
+    });
+
+    render(<Settings />);
+    expect(await screen.findByTestId("model-discovery-status")).toHaveTextContent("Loading models…");
+    expect(await screen.findByRole("combobox", { name: "LLM Model" })).toHaveValue("gemini-2.5-pro");
+
+    resolveFirst?.({ ok: false });
+    expect(await screen.findByText("Could not load models from configured provider.")).toBeDefined();
+    expect(screen.getByRole("combobox", { name: "LLM Model" })).toHaveValue("gemini-2.5-pro");
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Models" }));
+    expect(await screen.findByText("1 provider models available.")).toBeDefined();
+    expect(modelCalls).toBe(2);
+    expect(fetchMock.mock.calls.every(([url]) => !String(url).startsWith("https://"))).toBe(true);
   });
 
   test("maps voice fields into Audio and keeps configured secrets masked", async () => {

@@ -9,6 +9,14 @@ def test_matches_allowlisted_show_intent() -> None:
     assert intent.surface_id == "terminal"
 
 
+def test_matches_map_command_with_spoken_pause_comma() -> None:
+    intent = match_surface_request("Show me, map.")
+
+    assert intent is not None
+    assert intent.action == "show"
+    assert intent.surface_id == "map"
+
+
 def test_matches_allowlisted_hide_intent() -> None:
     intent = match_surface_request("hide media player")
 
