@@ -118,6 +118,7 @@ class TaskRecord:
     origin: TaskOrigin = TaskOrigin.FOREGROUND
     priority: TaskPriority = TaskPriority.NORMAL
     session_id: Optional[str] = None
+    turn_id: Optional[str] = None
     parent_task_id: Optional[str] = None
     capability_requirements: tuple[str, ...] = ()
     current_step: int = 0
@@ -142,6 +143,7 @@ class TaskRecord:
             "origin": self.origin.value,
             "priority": self.priority.value,
             "session_id": self.session_id,
+            "turn_id": self.turn_id,
             "parent_task_id": self.parent_task_id,
             "capability_requirements": list(self.capability_requirements),
             "current_step": self.current_step,
@@ -169,6 +171,7 @@ class TaskRecord:
             origin=_enum_value(payload.get("origin", TaskOrigin.FOREGROUND), TaskOrigin, TaskOrigin.FOREGROUND),
             priority=_enum_value(payload.get("priority", TaskPriority.NORMAL), TaskPriority, TaskPriority.NORMAL),
             session_id=payload.get("session_id"),
+            turn_id=payload.get("turn_id"),
             parent_task_id=payload.get("parent_task_id"),
             capability_requirements=tuple(str(value) for value in payload.get("capability_requirements", ())),
             current_step=int(payload.get("current_step", 0)),
@@ -210,6 +213,7 @@ class TaskJournal:
         priority: str | TaskPriority = TaskPriority.NORMAL,
         status: str | TaskStatus = TaskStatus.QUEUED,
         session_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
         parent_task_id: Optional[str] = None,
         capability_requirements: Iterable[str] = (),
         current_step: int = 0,
@@ -222,6 +226,7 @@ class TaskJournal:
             origin=_enum_value(origin, TaskOrigin, TaskOrigin.FOREGROUND),
             priority=_enum_value(priority, TaskPriority, TaskPriority.NORMAL),
             session_id=session_id,
+            turn_id=turn_id,
             parent_task_id=parent_task_id,
             capability_requirements=tuple(sorted({str(value) for value in capability_requirements})),
             current_step=current_step,
@@ -309,6 +314,20 @@ class TaskJournal:
                 task.total_steps = max(0, int(total_steps))
             if waiting_reason is not None:
                 task.waiting_reason = waiting_reason
+            task.updated_at = utc_now_iso()
+            self._persist()
+            self._notify(task)
+            return replace(task)
+
+    def update_capability_requirements(
+        self,
+        task_id: str,
+        capability_requirements: Iterable[str],
+    ) -> TaskRecord:
+        """Update resource classification without changing lifecycle status."""
+        with self._lock:
+            task = self._records[task_id]
+            task.capability_requirements = tuple(sorted({str(value) for value in capability_requirements}))
             task.updated_at = utc_now_iso()
             self._persist()
             self._notify(task)

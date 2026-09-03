@@ -661,6 +661,7 @@ async def test_main_startup_failure_exits_nonzero_instead_of_succeeding(monkeypa
     monkeypatch.setattr(main, "SessionStore", lambda path: _StartupFakeStore())
     monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: _StartupFakeStore())
     monkeypatch.setattr(main, "_compose_memory_dependencies", lambda runtime_config: (object(), None, object()))
+    monkeypatch.setattr(main, "_ensure_frontend_runtime", lambda: None)
     monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: _StartupFakeBrain())
     monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
     monkeypatch.setattr(tools_module, "register_plugin_tools", lambda runtime_config: None)

@@ -399,12 +399,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_FRONTEND_DIST = Path(
-    os.environ.get(
-        "CHARLIE_FRONTEND_DIST",
-        str(Path(__file__).parent.parent / "frontend" / "dist"),
-    )
-)
+_configured_frontend_dist = os.environ.get("CHARLIE_FRONTEND_DIST")
+if _configured_frontend_dist:
+    _FRONTEND_DIST = Path(_configured_frontend_dist)
+else:
+    from run import _persistent_frontend_dist
+
+    _FRONTEND_DIST = _persistent_frontend_dist(Path(__file__).resolve().parent.parent)
 
 
 def _frontend_build_identity() -> dict[str, Any] | None:
@@ -761,6 +762,8 @@ async def status():
         "pid": os.getpid(),
         "frontend_build": frontend_build,
         "source_identity": (frontend_build or {}).get("git_sha"),
+        "frontend_authority": (frontend_build or {}).get("authority"),
+        "frontend_dist": str(_FRONTEND_DIST),
         "desktop_control_enabled": config.desktop_control_enabled,
         "os_host": f"{_platform.system()} {_platform.machine()}",
     }
@@ -1511,7 +1514,7 @@ def _project_background_task_event(event: object) -> Optional[tuple[str, dict]]:
         "total_steps": total_steps,
     }
     for key in (
-        "origin", "priority", "session_id", "parent_task_id", "progress",
+        "origin", "lane", "priority", "session_id", "turn_id", "parent_task_id", "progress",
         "current_action", "waiting_reason", "result_reference", "approval_reference",
         "capability_requirements",
     ):

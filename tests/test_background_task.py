@@ -248,6 +248,7 @@ async def test_start_plans_and_runs_immediately(monkeypatch, bg_config):
 
 @pytest.mark.asyncio
 async def test_second_start_queues_behind_first_active_task(monkeypatch, bg_config):
+    bg_config.background_max_parallel_tasks = 1
     monkeypatch.setattr(Brain, "chat_stream", _fake_plan_chat_stream)
     monkeypatch.setattr(background_task, "_DESKTOP_AVAILABLE", False)
     bus = FakeEventBus()
@@ -273,6 +274,173 @@ async def test_start_returns_without_blocking_on_run_loop(monkeypatch, bg_config
     assert task.status == "running"
     background_task.cancel(task.id)
     await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_sustained_research_uses_task_lane_and_preserves_request_identity(monkeypatch, bg_config):
+    from charlie.research.models import ResearchMode, ResearchProgress, ResearchReport
+
+    class FakeBrain:
+        def __init__(self, config, **kwargs):
+            self.config = config
+            self.on_result_stored = kwargs.get("on_result_stored")
+            self.on_research_result = kwargs.get("on_research_result")
+
+        async def close(self):
+            return None
+
+        def cancel_chat(self):
+            return None
+
+        async def _research_browser_fetch(self, result):
+            return None
+
+    progress = []
+
+    class FakeEngine:
+        def __init__(self, config, *, progress=None, browser_fetch=None):
+            self.progress_callback = progress
+
+        async def run(self, query, mode, *, cancel_event=None):
+            await self.progress_callback(ResearchProgress("searching", "Searching", mode=ResearchMode.DEEP))
+            progress.append(query)
+            await self.progress_callback(ResearchProgress("done", "Done", mode=ResearchMode.DEEP))
+            return ResearchReport(query=query, mode=ResearchMode.DEEP, stop_reason="evidence-sufficient")
+
+    monkeypatch.setattr(background_task, "Brain", FakeBrain)
+    monkeypatch.setattr("charlie.research.engine.ResearchEngine", FakeEngine)
+    bus = FakeEventBus()
+    published = []
+
+    def on_research_result(report, **identity):
+        published.append((report.query, identity))
+
+    task = await background_task.start(
+        bg_config,
+        bus,
+        "Deep research Windows security",
+        session_id="session-research",
+        turn_id="turn-research",
+        origin=TaskOrigin.RESEARCH,
+        capability_requirements=("research",),
+        research_query="Deep research Windows security",
+        on_research_result=on_research_result,
+        announce=False,
+    )
+    await asyncio.sleep(0.05)
+
+    record = background_task._journal.get(task.id)
+    assert task.status == "done"
+    assert record.status is TaskStatus.COMPLETED
+    assert record.origin is TaskOrigin.RESEARCH
+    assert record.session_id == "session-research"
+    assert record.turn_id == "turn-research"
+    assert record.capability_requirements == ("research",)
+    assert progress == ["Deep research Windows security"]
+    assert published[0][1] == {
+        "session_id": "session-research",
+        "task_id": task.id,
+        "turn_id": "turn-research",
+    }
+    assert any(event_type == "research_progress" for event_type, _payload in bus.events)
+
+
+@pytest.mark.asyncio
+async def test_two_safe_research_tasks_overlap_within_configured_bound(monkeypatch, bg_config):
+    from charlie.research.models import ResearchMode, ResearchReport
+
+    started = []
+    release = asyncio.Event()
+
+    class FakeBrain:
+        def __init__(self, config, **kwargs):
+            self.config = config
+            self.on_result_stored = None
+            self.on_research_result = None
+
+        async def close(self):
+            return None
+
+        def cancel_chat(self):
+            return None
+
+        async def _research_browser_fetch(self, result):
+            return None
+
+    class FakeEngine:
+        def __init__(self, config, **kwargs):
+            pass
+
+        async def run(self, query, mode, *, cancel_event=None):
+            started.append(query)
+            await release.wait()
+            return ResearchReport(query=query, mode=ResearchMode.STANDARD, stop_reason="evidence-sufficient")
+
+    monkeypatch.setattr(background_task, "Brain", FakeBrain)
+    monkeypatch.setattr("charlie.research.engine.ResearchEngine", FakeEngine)
+    bg_config.background_max_parallel_tasks = 2
+    bus = FakeEventBus()
+    first = await background_task.start(bg_config, bus, "research one", research_query="research one", announce=False)
+    second = await background_task.start(bg_config, bus, "research two", research_query="research two", announce=False)
+    await asyncio.sleep(0.05)
+
+    assert first.status == "running"
+    assert second.status == "running"
+    assert started == ["research one", "research two"]
+    release.set()
+    await asyncio.sleep(0.05)
+    assert first.status == "done"
+    assert second.status == "done"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_sustained_research_reaches_canonical_cancelled(monkeypatch, bg_config):
+    from charlie.research.models import ResearchMode, ResearchReport
+
+    class FakeBrain:
+        def __init__(self, config, **kwargs):
+            self.config = config
+            self.on_result_stored = None
+            self.on_research_result = kwargs.get("on_research_result")
+
+        async def close(self):
+            return None
+
+        def cancel_chat(self):
+            return None
+
+        async def _research_browser_fetch(self, result):
+            return None
+
+    class FakeEngine:
+        def __init__(self, config, **kwargs):
+            pass
+
+        async def run(self, query, mode, *, cancel_event=None):
+            while cancel_event is None or not cancel_event.is_set():
+                await asyncio.sleep(0.005)
+            return ResearchReport(query=query, mode=ResearchMode.DEEP, stop_reason="cancelled")
+
+    monkeypatch.setattr(background_task, "Brain", FakeBrain)
+    monkeypatch.setattr("charlie.research.engine.ResearchEngine", FakeEngine)
+    bus = FakeEventBus()
+    task = await background_task.start(
+        bg_config,
+        bus,
+        "Deep research cancellation",
+        research_query="Deep research cancellation",
+        origin=TaskOrigin.RESEARCH,
+        capability_requirements=("research",),
+        announce=False,
+    )
+    await asyncio.sleep(0.02)
+
+    assert background_task.cancel(task.id) is True
+    await asyncio.sleep(0.05)
+
+    assert task.status == "cancelled"
+    assert background_task._journal.get(task.id).status is TaskStatus.CANCELLED
+    assert not [event for event_type, event in bus.events if event_type == "research_result"]
 
 
 class _FakeVoice:
@@ -636,17 +804,23 @@ def test_check_interrupted_task_reconciles_all_background_records_without_touchi
         for origin in (
             TaskOrigin.FOREGROUND,
             TaskOrigin.BROWSER,
-            TaskOrigin.RESEARCH,
             TaskOrigin.SYSTEM,
             TaskOrigin.MAINTENANCE,
             TaskOrigin.CHILD,
         )
     }
+    research_task = journal.create_task(
+        "research task",
+        task_id="research-active",
+        origin=TaskOrigin.RESEARCH,
+        status=TaskStatus.RUNNING,
+    )
 
     background_task.check_interrupted_task()
 
     assert all(journal.get(task_id).status is TaskStatus.FAILED for task_id in background_ids)
     assert journal.get("background-terminal").status is TaskStatus.COMPLETED
+    assert journal.get(research_task.id).status is TaskStatus.FAILED
     assert all(journal.get(task.id).status is TaskStatus.RUNNING for task in other_origins.values())
 
 

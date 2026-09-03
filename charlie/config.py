@@ -396,7 +396,7 @@ class Config:
     )
     # How many background tasks charlie.tasks.TaskManager may run at once -- rest queue.
     background_max_parallel_tasks: int = field(
-        default=int(os.getenv("BACKGROUND_MAX_PARALLEL_TASKS", "1")),
+        default=int(os.getenv("BACKGROUND_MAX_PARALLEL_TASKS", "2")),
         metadata=_meta("BACKGROUND_MAX_PARALLEL_TASKS", "Desktop Control"),
     )
     # Read once into the pet's pynput GlobalHotKeys listener; needs a full restart to re-arm.

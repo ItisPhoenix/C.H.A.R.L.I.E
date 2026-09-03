@@ -12,6 +12,10 @@ from charlie.runtime import configure as _configure_platform
 _configure_platform()
 
 
+from run import check_and_build_frontend
+
+check_and_build_frontend(Path(__file__).resolve().parent.parent)
+
 from charlie.web_server import start_server
 
 # ZMQ guard and EventBus lifecycle are handled via FastAPI lifespan

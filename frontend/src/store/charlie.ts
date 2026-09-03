@@ -23,6 +23,8 @@ export interface ChatMessage {
   role: "user" | "charlie";
   text: string;
   pending: boolean;
+  turnId?: string;
+  taskId?: string;
 }
 
 export interface ResearchResultPayload {
@@ -62,8 +64,10 @@ export interface RuntimeTask {
   currentStep: number;
   totalSteps: number;
   origin?: string;
+  lane?: string;
   priority?: string;
   sessionId?: string;
+  turnId?: string;
   parentTaskId?: string;
   progress?: number | null;
   currentAction?: string;
@@ -299,21 +303,35 @@ export const useCharlieStore = create<CharlieState>((set) => ({
       case "token":
         set((s) => {
           const text = String(payload.text ?? "");
-          const last = s.chatMessages[s.chatMessages.length - 1];
-          if (last && last.role === "charlie" && last.pending) {
-            const updated = { ...last, text: last.text + text };
-            return { chatMessages: [...s.chatMessages.slice(0, -1), updated] };
+          const turnId = event.turn_id ?? (typeof payload.turn_id === "string" ? payload.turn_id : undefined);
+          const taskId = event.task_id ?? undefined;
+          const index = lastPendingAssistantIndex(s.chatMessages, turnId, taskId);
+          if (index >= 0) {
+            const current = s.chatMessages[index];
+            const updated = { ...current, text: current.text + text };
+            return {
+              chatMessages: s.chatMessages.map((message, messageIndex) =>
+                messageIndex === index ? updated : message,
+              ),
+            };
           }
-          return {
-            chatMessages: [...s.chatMessages, { id: `${Date.now()}`, role: "charlie", text, pending: true }],
-          };
+          const message: ChatMessage = { id: `${Date.now()}`, role: "charlie", text, pending: true };
+          if (turnId) message.turnId = turnId;
+          if (taskId) message.taskId = taskId;
+          return { chatMessages: [...s.chatMessages, message] };
         });
         return;
       case "response_done":
         set((s) => {
-          const last = s.chatMessages[s.chatMessages.length - 1];
-          if (!last || last.role !== "charlie" || !last.pending) return {};
-          return { chatMessages: [...s.chatMessages.slice(0, -1), { ...last, pending: false }] };
+          const turnId = event.turn_id ?? (typeof payload.turn_id === "string" ? payload.turn_id : undefined);
+          const taskId = event.task_id ?? undefined;
+          const index = lastPendingAssistantIndex(s.chatMessages, turnId, taskId);
+          if (index < 0) return {};
+          return {
+            chatMessages: s.chatMessages.map((message, messageIndex) =>
+              messageIndex === index ? { ...message, pending: false } : message,
+            ),
+          };
         });
         return;
       case "research_result":
@@ -352,6 +370,21 @@ function taskMapFromPayload(rawTasks: unknown): Record<string, RuntimeTask> {
   }, {});
 }
 
+function lastPendingAssistantIndex(
+  messages: ChatMessage[],
+  turnId?: string | null,
+  taskId?: string | null,
+): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "charlie" || !message.pending) continue;
+    if (turnId && message.turnId !== turnId) continue;
+    if (taskId && message.taskId !== taskId) continue;
+    return index;
+  }
+  return -1;
+}
+
 function numberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -370,8 +403,10 @@ function taskFromPayload(rawTask: unknown): RuntimeTask | null {
     totalSteps: Number(task.total_steps ?? 0),
   };
   if (typeof task.origin === "string") runtimeTask.origin = task.origin;
+  if (typeof task.lane === "string") runtimeTask.lane = task.lane;
   if (typeof task.priority === "string") runtimeTask.priority = task.priority;
   if (typeof task.session_id === "string") runtimeTask.sessionId = task.session_id;
+  if (typeof task.turn_id === "string") runtimeTask.turnId = task.turn_id;
   if (typeof task.parent_task_id === "string") runtimeTask.parentTaskId = task.parent_task_id;
   if (typeof task.progress === "number" || task.progress === null) runtimeTask.progress = task.progress as number | null;
   if (typeof task.current_action === "string") runtimeTask.currentAction = task.current_action;

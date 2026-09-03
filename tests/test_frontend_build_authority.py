@@ -36,9 +36,9 @@ def fixture_project():
         shutil.rmtree(project, ignore_errors=True)
 
 
-def _write_current_dist(frontend: Path) -> None:
-    dist = frontend / "dist"
-    dist.mkdir()
+def _write_current_dist(frontend: Path, dist: Path | None = None) -> None:
+    dist = dist or frontend / "dist"
+    dist.mkdir(parents=True)
     (dist / "index.html").write_text("built\n", encoding="utf-8")
     git_sha, dirty = run._git_build_identity(frontend.parent)
     (dist / "charlie-build.json").write_text(json.dumps({
@@ -79,10 +79,51 @@ def test_unchanged_inputs_are_current(fixture_project):
     assert not run._frontend_build_is_stale(frontend, frontend / "dist")
 
 
-def test_failed_build_keeps_old_dist_and_does_not_publish_new_identity(fixture_project, monkeypatch):
+def test_runtime_cache_is_authority_even_when_canonical_dist_is_current(fixture_project, monkeypatch, tmp_path):
     project, frontend = fixture_project
+    runtime_dist = tmp_path / "runtime" / "frontend-dist"
+    _write_current_dist(frontend, runtime_dist)
+    runtime_manifest = json.loads((runtime_dist / "charlie-build.json").read_text(encoding="utf-8"))
+    runtime_manifest["authority"] = "user_runtime_cache"
+    (runtime_dist / "charlie-build.json").write_text(json.dumps(runtime_manifest), encoding="utf-8")
     _write_current_dist(frontend)
-    old_manifest = (frontend / "dist" / "charlie-build.json").read_text(encoding="utf-8")
+    monkeypatch.setattr(run, "_persistent_frontend_dist", lambda _: runtime_dist)
+
+    run.check_and_build_frontend(project)
+
+    assert Path(os.environ[run._FRONTEND_DIST_ENV]) == runtime_dist
+    os.environ.pop(run._FRONTEND_DIST_ENV, None)
+
+
+def test_acl_protected_preferred_cache_uses_stable_user_fallback(fixture_project, monkeypatch, tmp_path):
+    project, frontend = fixture_project
+    preferred = tmp_path / "preferred" / "frontend-dist"
+    fallback = tmp_path / "fallback" / "frontend-dist"
+    monkeypatch.setattr(run, "_persistent_frontend_dist", lambda _: preferred)
+    monkeypatch.setattr(run, "_temporary_frontend_dist", lambda _: fallback)
+    monkeypatch.setattr(run, "_frontend_dist_is_user_accessible", lambda path: path != preferred.parent)
+    monkeypatch.setattr(run.shutil, "which", lambda name: "npm.exe")
+
+    def fake_build(args, *, cwd, check, env=None):
+        if args[-2:] == ["run", "build"]:
+            staging = Path(env["CHARLIE_FRONTEND_OUT_DIR"])
+            (staging / "index.html").write_text("built\n", encoding="utf-8")
+            (staging / "charlie-build.json").write_text(json.dumps({"build_id": "fallback"}), encoding="utf-8")
+
+    monkeypatch.setattr(subprocess, "run", fake_build)
+    run.check_and_build_frontend(project)
+
+    assert Path(os.environ[run._FRONTEND_DIST_ENV]) == fallback
+    assert (fallback / "index.html").is_file()
+    os.environ.pop(run._FRONTEND_DIST_ENV, None)
+
+
+def test_failed_build_keeps_old_dist_and_does_not_publish_new_identity(fixture_project, monkeypatch, tmp_path):
+    project, frontend = fixture_project
+    runtime_dist = tmp_path / "runtime" / "frontend-dist"
+    monkeypatch.setattr(run, "_persistent_frontend_dist", lambda _: runtime_dist)
+    _write_current_dist(frontend, runtime_dist)
+    old_manifest = (runtime_dist / "charlie-build.json").read_text(encoding="utf-8")
     (frontend / "src" / "main.tsx").write_text("changed\n", encoding="utf-8")
 
     monkeypatch.setattr(run.shutil, "which", lambda name: "npm.exe")
@@ -94,7 +135,7 @@ def test_failed_build_keeps_old_dist_and_does_not_publish_new_identity(fixture_p
     monkeypatch.setattr(subprocess, "run", fail_build)
     with pytest.raises(RuntimeError, match="Frontend build failed"):
         run.check_and_build_frontend(project)
-    assert (frontend / "dist" / "charlie-build.json").read_text(encoding="utf-8") == old_manifest
+    assert (runtime_dist / "charlie-build.json").read_text(encoding="utf-8") == old_manifest
     assert not list(frontend.glob(".charlie-build-*"))
 
 

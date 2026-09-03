@@ -20,8 +20,13 @@ _SOCIAL_CONVERSATION_SIGNALS = re.compile(
     re.IGNORECASE,
 )
 _RESEARCH_SIGNALS = re.compile(
-    r"\b(research|investigate|deep research|in[- ]depth|compare|comparison|thoroughly|"
-    r"look into|analyze current)\b",
+    r"\b(research|investigate|deep research|in[- ]depth|compare|comparison|thorough|thoroughly|"
+    r"look into|analyze current|multi[- ]source|multi[- ]step)\b",
+    re.IGNORECASE,
+)
+_SUSTAINED_RESEARCH_SIGNALS = re.compile(
+    r"\b(?:research|investigate|deep\s+research|in[- ]depth|thorough(?:ly)?|"
+    r"multi[- ]source|multi[- ]step|look\s+into|analyze\s+current|comparison|compare)\b",
     re.IGNORECASE,
 )
 _BRIEFING_SIGNALS = re.compile(
@@ -93,3 +98,10 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
 
 def route(query: str, requested: str | ResearchMode | None = None) -> ResearchDecision:
     return choose_mode(query, requested)
+
+
+def is_sustained_research_query(query: str, decision: ResearchDecision | None = None) -> bool:
+    """Return whether explicit wording asks for an independent research task."""
+    if decision is not None and not decision.should_research:
+        return False
+    return bool(_SUSTAINED_RESEARCH_SIGNALS.search(query.strip()))

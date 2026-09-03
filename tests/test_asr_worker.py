@@ -8,6 +8,7 @@ Whisper anchored onto that prompt and echoed it back verbatim as a
 "transcription" on weak/ambiguous audio instead of transcribing real speech.
 """
 
+import time
 from argparse import Namespace
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -213,7 +214,9 @@ def test_worker_preserves_utterance_id_and_reports_truthful_quality_metadata(mon
         {"beam_size": 6, "best_of": 6},
     )
 
-    text, compatibility_value, flags = output_queue.messages[1]
+    text, compatibility_value, flags = next(
+        message for message in output_queue.messages if isinstance(message, tuple)
+    )
     assert text == "hello there"
     assert compatibility_value == 0.93
     assert flags["utterance_id"] == "utterance-worker"
@@ -231,10 +234,185 @@ def test_worker_preserves_utterance_id_and_reports_truthful_quality_metadata(mon
         "audio_duration_ms": 100.0,
     }
     assert [event["stage"] for event in flags["diagnostic_stages"]] == [
-        "asr_worker_dequeue",
-        "asr_start",
-        "asr_complete",
+        "asr_worker_dequeued",
+        "asr_worker_transcribe_enter",
+        "asr_worker_segments_iteration_begin",
+        "asr_worker_segments_iteration_complete",
+        "asr_worker_result_built",
     ]
+
+
+def test_worker_emits_lazy_iterator_boundary_stages(monkeypatch):
+    calls = []
+
+    class FakeModel:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def transcribe(self, audio, **kwargs):
+            if len(audio) == 1600:
+                return ([], SimpleNamespace(language="en", language_probability=1.0))
+            calls.append("transcribe_returned")
+
+            def lazy_segments():
+                calls.append("iterator_started")
+                yield _FakeSegment(" fixed phrase", 0.1, 1.2)
+
+            return lazy_segments(), SimpleNamespace(language="en", language_probability=0.91)
+
+    class InputQueue:
+        def __init__(self):
+            self.messages = [
+                (
+                    b"\x00\x00\x00\x00" * 3200,
+                    16000,
+                    {
+                        "utterance_id": "utterance-lazy",
+                        "diagnostic_enabled": True,
+                        "voice_capture_onset_monotonic": 10.0,
+                        "asr_enqueue_monotonic": 10.1,
+                    },
+                )
+            ]
+
+        def get(self, timeout):
+            if self.messages:
+                return self.messages.pop(0)
+            raise KeyboardInterrupt
+
+        def qsize(self):
+            return len(self.messages)
+
+    class OutputQueue:
+        def __init__(self):
+            self.messages = []
+
+        def put(self, message):
+            self.messages.append(message)
+
+        def qsize(self):
+            return len(self.messages)
+
+    monkeypatch.setattr(asr_worker, "WhisperModel", FakeModel)
+    monkeypatch.setattr(
+        asr_worker.VoiceDiagnostics,
+        "resource_snapshot",
+        lambda self, **kwargs: {"asr_worker_rss_bytes": 123},
+    )
+    output_queue = OutputQueue()
+
+    asr_worker.asr_worker_process(
+        InputQueue(),
+        output_queue,
+        "distil-large-v3",
+        "cpu",
+        "en",
+        {"beam_size": 6, "best_of": 6},
+    )
+
+    stages = [
+        message["stage"]
+        for message in output_queue.messages
+        if isinstance(message, dict) and message.get("type") == "asr_worker_stage"
+    ]
+    assert stages == [
+        "asr_worker_dequeued",
+        "asr_worker_transcribe_enter",
+        "asr_worker_segments_iteration_begin",
+        "asr_worker_segments_iteration_complete",
+        "asr_worker_result_built",
+        "asr_worker_result_enqueued",
+    ]
+    result_index = next(
+        index for index, message in enumerate(output_queue.messages) if isinstance(message, tuple)
+    )
+    result_enqueued_index = next(
+        index
+        for index, message in enumerate(output_queue.messages)
+        if isinstance(message, dict) and message.get("stage") == "asr_worker_result_enqueued"
+    )
+    assert result_index < result_enqueued_index
+    assert calls == ["transcribe_returned", "iterator_started"]
+    first_stage = next(
+        message
+        for message in output_queue.messages
+        if isinstance(message, dict) and message.get("type") == "asr_worker_stage"
+    )
+    stage_fields = first_stage["fields"]
+    assert first_stage["utterance_id"] == "utterance-lazy"
+    assert stage_fields["worker_pid"] > 0
+    assert stage_fields["audio_sample_count"] == 3200
+    assert stage_fields["audio_duration_ms"] == 200.0
+    assert stage_fields["model"] == "distil-large-v3"
+    assert stage_fields["device"] == "cpu"
+    assert stage_fields["compute_type"] == "int8"
+    assert stage_fields["beam_size"] == 6
+    assert stage_fields["best_of"] == 6
+    assert stage_fields["vad_filter"] is True
+    assert stage_fields["asr_worker_rss_bytes"] == 123
+
+
+def test_worker_emits_exception_boundary_before_empty_error_result(monkeypatch):
+    class FakeModel:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def transcribe(self, *_args, **kwargs):
+            if kwargs.get("vad_filter") is False:
+                return ([], SimpleNamespace(language="en", language_probability=1.0))
+            raise RuntimeError("synthetic iterator failure")
+
+    class InputQueue:
+        def __init__(self):
+            self.messages = [
+                (
+                    b"\x00\x00\x00\x00" * 1600,
+                    16000,
+                    {
+                        "utterance_id": "utterance-error",
+                        "diagnostic_enabled": False,
+                        "asr_enqueue_monotonic": time.monotonic(),
+                    },
+                )
+            ]
+
+        def get(self, timeout):
+            if self.messages:
+                return self.messages.pop(0)
+            raise KeyboardInterrupt
+
+        def qsize(self):
+            return len(self.messages)
+
+    class OutputQueue:
+        def __init__(self):
+            self.messages = []
+
+        def put(self, message):
+            self.messages.append(message)
+
+    monkeypatch.setattr(asr_worker, "WhisperModel", FakeModel)
+    output_queue = OutputQueue()
+
+    asr_worker.asr_worker_process(InputQueue(), output_queue, "distil-large-v3", "cpu", "en")
+
+    statuses = [
+        message
+        for message in output_queue.messages
+        if isinstance(message, dict) and message.get("type") == "asr_worker_stage"
+    ]
+    assert [message["stage"] for message in statuses] == [
+        "asr_worker_dequeued",
+        "asr_worker_transcribe_enter",
+        "asr_worker_exception",
+    ]
+    exception = statuses[-1]
+    assert exception["fields"]["last_worker_stage"] == "asr_worker_transcribe_enter"
+    assert exception["fields"]["exception_type"] == "RuntimeError"
+    assert exception["fields"]["exception_message"] == "synthetic iterator failure"
+    error_result = next(message for message in output_queue.messages if isinstance(message, tuple))
+    assert error_result[2]["asr_error"] == "RuntimeError"
+    assert error_result[2]["asr_worker_last_stage"] == "asr_worker_transcribe_enter"
 
 
 def test_worker_keeps_legacy_two_tuple_payload_compatible(monkeypatch):

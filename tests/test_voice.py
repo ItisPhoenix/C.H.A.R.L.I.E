@@ -477,6 +477,148 @@ class TestVoiceEngineInit:
 
         assert received == []
 
+    def test_asr_worker_watchdog_reports_aged_job_with_backlog(self, caplog):
+        engine = self._make_engine()
+        engine.asr_input_queue = queue.Queue(maxsize=8)
+        queued_ids = ["queued-1", "queued-2", "queued-3", "queued-4"]
+        for queued_id in queued_ids:
+            engine.asr_input_queue.put((b"", 16000, {"utterance_id": queued_id}))
+        engine.asr_output_queue = queue.Queue(maxsize=8)
+
+        class AliveWorker:
+            pid = 1234
+
+            @staticmethod
+            def is_alive():
+                return True
+
+        engine.asr_process = AliveWorker()
+        engine.asr_poller_thread = Mock()
+        engine.asr_poller_thread.is_alive.return_value = True
+        engine.voice_diagnostics = Mock()
+        engine.voice_diagnostics.resource_snapshot.return_value = {
+            "gpu_metrics": "available",
+            "gpu_used_vram_mb": 7000,
+            "asr_worker_rss_bytes": 9000,
+        }
+        now = time.monotonic()
+        for stage, timestamp in (
+            ("asr_worker_dequeued", now - 12.0),
+            ("asr_worker_transcribe_enter", now - 11.5),
+            ("asr_worker_segments_iteration_begin", now - 10.5),
+        ):
+            engine._record_asr_worker_stage(
+                {
+                    "type": "asr_worker_stage",
+                    "stage": stage,
+                    "utterance_id": "stalled-1",
+                    "worker_pid": 1234,
+                    "monotonic_timestamp": timestamp,
+                    "fields": {
+                        "worker_pid": 1234,
+                        "audio_sample_count": 64000,
+                        "audio_duration_ms": 4000.0,
+                        "queue_age_ms": 20.0,
+                        "model": "distil-large-v3",
+                        "device": "cuda",
+                        "compute_type": "float16",
+                        "beam_size": 6,
+                        "best_of": 6,
+                        "vad_filter": True,
+                    },
+                },
+                now,
+            )
+
+        caplog.set_level("WARNING", logger="charlie.voice")
+        engine._check_asr_worker_stall()
+
+        assert "asr_worker_stall_suspected" in caplog.text
+        assert "utterance_id=stalled-1" in caplog.text
+        assert "last_stage=asr_worker_segments_iteration_begin" in caplog.text
+        assert "worker_alive=True" in caplog.text
+        assert "input_queue_depth=4" in caplog.text
+        assert "gpu_used_vram_mb" in caplog.text
+        assert [item[2]["utterance_id"] for item in list(engine.asr_input_queue.queue)] == queued_ids
+
+    def test_asr_worker_watchdog_does_not_warn_for_one_long_decode_without_backlog(self, caplog):
+        engine = self._make_engine()
+        engine.asr_input_queue = queue.Queue(maxsize=8)
+
+        class AliveWorker:
+            pid = 1234
+
+            @staticmethod
+            def is_alive():
+                return True
+
+        engine.asr_process = AliveWorker()
+        engine.asr_poller_thread = Mock()
+        engine.asr_poller_thread.is_alive.return_value = True
+        engine.voice_diagnostics = Mock()
+        engine.voice_diagnostics.resource_snapshot.return_value = {"gpu_metrics": "available"}
+        now = time.monotonic()
+        for stage, timestamp in (
+            ("asr_worker_dequeued", now - 22.0),
+            ("asr_worker_transcribe_enter", now - 21.0),
+            ("asr_worker_segments_iteration_begin", now - 20.0),
+        ):
+            engine._record_asr_worker_stage(
+                {
+                    "type": "asr_worker_stage",
+                    "stage": stage,
+                    "utterance_id": "long-but-live",
+                    "worker_pid": 1234,
+                    "monotonic_timestamp": timestamp,
+                    "fields": {"worker_pid": 1234},
+                },
+                now,
+            )
+
+        caplog.set_level("WARNING", logger="charlie.voice")
+        engine._check_asr_worker_stall()
+
+        assert "asr_worker_stall_suspected" not in caplog.text
+
+    def test_asr_worker_watchdog_reports_dead_worker_without_backlog(self, caplog):
+        engine = self._make_engine()
+        engine.asr_input_queue = queue.Queue(maxsize=8)
+
+        class DeadWorker:
+            pid = 1234
+
+            @staticmethod
+            def is_alive():
+                return False
+
+        engine.asr_process = DeadWorker()
+        engine.asr_poller_thread = Mock()
+        engine.asr_poller_thread.is_alive.return_value = True
+        engine.voice_diagnostics = Mock()
+        engine.voice_diagnostics.resource_snapshot.return_value = {"gpu_metrics": "available"}
+        now = time.monotonic()
+        for stage, timestamp in (
+            ("asr_worker_dequeued", now - 22.0),
+            ("asr_worker_transcribe_enter", now - 20.0),
+        ):
+            engine._record_asr_worker_stage(
+                {
+                    "type": "asr_worker_stage",
+                    "stage": stage,
+                    "utterance_id": "dead-worker",
+                    "worker_pid": 1234,
+                    "monotonic_timestamp": timestamp,
+                    "fields": {"worker_pid": 1234},
+                },
+                now,
+            )
+
+        caplog.set_level("WARNING", logger="charlie.voice")
+        engine._check_asr_worker_stall()
+
+        assert "asr_worker_stall_suspected" in caplog.text
+        assert "worker_alive=False" in caplog.text
+
     def test_asr_enqueue_keeps_legacy_payload_prefix_and_adds_diagnostics(self):
         engine = self._make_engine()
         engine.asr_input_queue = queue.Queue(maxsize=8)

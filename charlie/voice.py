@@ -40,6 +40,9 @@ _TTS_RUN_END = object()
 _CHIME_ITEM = object()
 _LONG_SENTENCE_CHARS = 250
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?,;])\s+")
+_ASR_WORKER_STAGE_MESSAGE = "asr_worker_stage"
+_ASR_WORKER_STALL_THRESHOLD_S = 9.0
+_ASR_WORKER_WATCHDOG_INTERVAL_S = 0.5
 
 
 # Ellipsis patterns
@@ -182,6 +185,12 @@ class VoiceEngine:
         self._asr_readiness_status = "starting"
         self._asr_readiness_error: Optional[str] = None
         self.asr_startup_metrics: dict = {}
+        self._asr_worker_state_lock = threading.Lock()
+        self._asr_worker_inflight: Optional[dict] = None
+        self._asr_worker_latest_dequeued_utterance_id: Optional[str] = None
+        self._asr_worker_last_output_activity_monotonic: Optional[float] = None
+        self._asr_worker_last_watchdog_monotonic = 0.0
+        self._asr_worker_stall_warning_key = None
 
         # Load Kokoro TTS
         self._ensure_models()
@@ -1430,6 +1439,177 @@ class VoiceEngine:
         if outcome != "drop_new":
             self.voice_diagnostics.capture_audio(trace, audio, sample_rate)
 
+    def _record_asr_worker_stage(self, status: dict, receive_timestamp: float) -> None:
+        """Record child-process progress and expose it in the parent log."""
+
+        if status.get("type") != _ASR_WORKER_STAGE_MESSAGE:
+            return
+        stage = status.get("stage")
+        utterance_id = status.get("utterance_id")
+        if not isinstance(stage, str):
+            return
+        try:
+            worker_timestamp = float(status.get("monotonic_timestamp", receive_timestamp))
+        except (TypeError, ValueError):
+            worker_timestamp = receive_timestamp
+        fields = status.get("fields") if isinstance(status.get("fields"), dict) else {}
+        worker_pid = status.get("worker_pid") or fields.get("worker_pid")
+
+        with self._asr_worker_state_lock:
+            self._asr_worker_last_output_activity_monotonic = receive_timestamp
+            if stage == "asr_worker_dequeued" and utterance_id is not None:
+                self._asr_worker_latest_dequeued_utterance_id = str(utterance_id)
+                self._asr_worker_inflight = {
+                    "utterance_id": str(utterance_id),
+                    "worker_pid": worker_pid,
+                    "dequeued_monotonic": worker_timestamp,
+                    "processing_started_monotonic": None,
+                    "last_stage": stage,
+                    "last_stage_monotonic": worker_timestamp,
+                    "last_stage_fields": dict(fields),
+                }
+                self._asr_worker_stall_warning_key = None
+            elif (
+                self._asr_worker_inflight is not None
+                and str(utterance_id) == self._asr_worker_inflight.get("utterance_id")
+            ):
+                self._asr_worker_inflight.update(
+                    {
+                        "worker_pid": worker_pid or self._asr_worker_inflight.get("worker_pid"),
+                        "last_stage": stage,
+                        "last_stage_monotonic": worker_timestamp,
+                        "last_stage_fields": dict(fields),
+                    }
+                )
+                if stage == "asr_worker_transcribe_enter":
+                    self._asr_worker_inflight["processing_started_monotonic"] = worker_timestamp
+                self._asr_worker_stall_warning_key = None
+
+        resource_snapshot = None
+        if stage in {
+            "asr_worker_dequeued",
+            "asr_worker_transcribe_enter",
+            "asr_worker_segments_iteration_begin",
+            "asr_worker_exception",
+        }:
+            resource_snapshot = self.voice_diagnostics.resource_snapshot(asr_worker_pid=worker_pid)
+        logger.info(
+            "asr_worker_stage | stage=%s | utterance_id=%s | worker_pid=%s | "
+            "audio_sample_count=%s | audio_duration_ms=%s | queue_age_ms=%s | "
+            "model=%s | device=%s | compute_type=%s | beam_size=%s | best_of=%s | "
+            "vad_filter=%s | fields=%s | resource_snapshot=%s",
+            stage,
+            utterance_id,
+            worker_pid,
+            fields.get("audio_sample_count"),
+            fields.get("audio_duration_ms"),
+            fields.get("queue_age_ms"),
+            fields.get("model"),
+            fields.get("device"),
+            fields.get("compute_type"),
+            fields.get("beam_size"),
+            fields.get("best_of"),
+            fields.get("vad_filter"),
+            fields,
+            resource_snapshot,
+        )
+
+    def _record_asr_worker_output(self, result: object, receive_timestamp: float) -> None:
+        """Mark result-queue activity and retire its matching in-flight item."""
+
+        flags = result[2] if isinstance(result, tuple) and len(result) >= 3 else {}
+        if not isinstance(flags, dict):
+            flags = {}
+        utterance_id = flags.get("utterance_id")
+        text = result[0].strip() if isinstance(result, tuple) and result and isinstance(result[0], str) else ""
+        asr_error = flags.get("asr_error")
+        with self._asr_worker_state_lock:
+            self._asr_worker_last_output_activity_monotonic = receive_timestamp
+            if (
+                utterance_id is not None
+                and self._asr_worker_inflight is not None
+                and str(utterance_id) == self._asr_worker_inflight.get("utterance_id")
+            ):
+                self._asr_worker_inflight = None
+                self._asr_worker_stall_warning_key = None
+        logger.info(
+            "asr_worker_output_received | utterance_id=%s | text_length=%s | "
+            "asr_error=%s | input_queue_depth=%s | output_queue_depth=%s",
+            utterance_id,
+            len(text),
+            asr_error,
+            self._queue_depth(self.asr_input_queue),
+            self._queue_depth(self.asr_output_queue),
+        )
+
+    def _asr_worker_alive(self) -> Optional[bool]:
+        process = self.asr_process
+        if process is None:
+            return None
+        try:
+            return bool(process.is_alive())
+        except (OSError, ValueError):
+            return None
+
+    def _check_asr_worker_stall(self) -> None:
+        """Warn about an aged child job plus backlog; never restart it."""
+
+        now = time.monotonic()
+        with self._asr_worker_state_lock:
+            if now - self._asr_worker_last_watchdog_monotonic < _ASR_WORKER_WATCHDOG_INTERVAL_S:
+                return
+            self._asr_worker_last_watchdog_monotonic = now
+            state = dict(self._asr_worker_inflight) if self._asr_worker_inflight is not None else None
+            last_output = self._asr_worker_last_output_activity_monotonic
+        if state is None:
+            return
+
+        started = state.get("processing_started_monotonic") or state.get("dequeued_monotonic")
+        if started is None:
+            return
+        age_ms = max(0.0, (now - float(started)) * 1000)
+        if age_ms < _ASR_WORKER_STALL_THRESHOLD_S * 1000:
+            return
+
+        input_queue_depth = self._queue_depth(self.asr_input_queue)
+        worker_alive = self._asr_worker_alive()
+        # ponytail: require backlog or dead worker; avoids false alarms for one legitimate long decode.
+        if worker_alive is True and input_queue_depth == 0:
+            return
+        warning_key = (state.get("utterance_id"), state.get("last_stage"))
+        with self._asr_worker_state_lock:
+            if warning_key == self._asr_worker_stall_warning_key:
+                return
+            self._asr_worker_stall_warning_key = warning_key
+
+        worker_pid = state.get("worker_pid") or getattr(self.asr_process, "pid", None)
+        try:
+            poller_alive = bool(self.asr_poller_thread and self.asr_poller_thread.is_alive())
+        except (OSError, ValueError):
+            poller_alive = None
+        output_queue_depth = self._queue_depth(self.asr_output_queue)
+        output_age_ms = (
+            max(0.0, (now - last_output) * 1000) if last_output is not None else None
+        )
+        resource_snapshot = self.voice_diagnostics.resource_snapshot(asr_worker_pid=worker_pid)
+        logger.warning(
+            "asr_worker_stall_suspected | utterance_id=%s | last_stage=%s | "
+            "age_ms=%.1f | worker_alive=%s | asr_poller_alive=%s | "
+            "input_queue_depth=%s | output_queue_depth=%s | "
+            "output_queue_last_activity_age_ms=%s | latest_dequeued_utterance_id=%s | "
+            "resource_snapshot=%s",
+            state.get("utterance_id"),
+            state.get("last_stage"),
+            age_ms,
+            worker_alive,
+            poller_alive,
+            input_queue_depth,
+            output_queue_depth,
+            output_age_ms,
+            self._asr_worker_latest_dequeued_utterance_id,
+            resource_snapshot,
+        )
+
     def _run(self):
         samplerate = 16000
         block_size = 1024
@@ -1604,6 +1784,7 @@ class VoiceEngine:
         _ww_check_counter = 0
 
         while not self.stop_event.is_set():
+            self._check_asr_worker_stall()
             try:
                 data = self._audio_queue.get(timeout=0.1)
             except queue.Empty:
@@ -1848,6 +2029,11 @@ class VoiceEngine:
                 result = self.asr_output_queue.get(timeout=0.1)
                 receive_timestamp = time.monotonic()
                 if isinstance(result, dict):
+                    if result.get("type") == _ASR_WORKER_STAGE_MESSAGE:
+                        self._record_asr_worker_stage(result, receive_timestamp)
+                        continue
+                    with self._asr_worker_state_lock:
+                        self._asr_worker_last_output_activity_monotonic = receive_timestamp
                     if result.get("type") == "ready":
                         metrics = result.get("metrics")
                         self.asr_startup_metrics = dict(metrics) if isinstance(metrics, dict) else {}
@@ -1867,6 +2053,7 @@ class VoiceEngine:
                 flags = result[2] if isinstance(result, tuple) and len(result) >= 3 else {}
                 if not isinstance(flags, dict):
                     flags = {}
+                self._record_asr_worker_output(result, receive_timestamp)
                 if flags.get("is_warmup"):
                     continue
                 utterance_id = flags.get("utterance_id")
@@ -1923,6 +2110,7 @@ class VoiceEngine:
                         else:
                             self.on_speech(text)
             except queue.Empty:
+                self._check_asr_worker_stall()
                 if self.asr_process is not None and not self.asr_process.is_alive() and not self.asr_ready:
                     self._set_asr_readiness("failed", "ASR worker exited before readiness")
                 continue

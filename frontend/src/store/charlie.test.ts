@@ -156,6 +156,31 @@ test("HUD visibility follows the pet toggle event", () => {
     expect(messages[1]).toMatchObject({ text: "Second.", pending: true });
   });
 
+  test("identity keeps sustained-task acknowledgements separate from foreground output", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "token",
+      turn_id: "foreground-turn",
+      task_id: "foreground-task",
+      payload: { text: "Foreground" },
+    });
+    useCharlieStore.getState().applyEvent({
+      type: "token",
+      turn_id: "research-turn",
+      task_id: "research-task",
+      payload: { text: "Started research" },
+    });
+    useCharlieStore.getState().applyEvent({
+      type: "response_done",
+      turn_id: "research-turn",
+      task_id: "research-task",
+      payload: {},
+    });
+
+    const messages = useCharlieStore.getState().chatMessages;
+    expect(messages[0]).toMatchObject({ text: "Foreground", pending: true, taskId: "foreground-task" });
+    expect(messages[1]).toMatchObject({ text: "Started research", pending: false, taskId: "research-task" });
+  });
+
   test("alert sets activeAlert with severity and message", () => {
     useCharlieStore.getState().applyEvent({ type: "alert", payload: { severity: "warning", message: "CPU high" } });
     expect(useCharlieStore.getState().activeAlert).toMatchObject({ severity: "warning", message: "CPU high" });

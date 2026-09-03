@@ -175,6 +175,130 @@ def _allocate_turn_request(text: str, session_id: str, channel: str) -> TurnRequ
     return TurnRequest.allocate(text, session_id, channel)
 
 
+def _is_sustained_research_request(text: str, runtime_config: Any) -> bool:
+    """Classify explicit long research as a task without backgrounding every lookup."""
+    if not getattr(runtime_config, "research_enabled", True):
+        return False
+    from charlie.research.router import is_sustained_research_query, route
+
+    decision = route(text, getattr(runtime_config, "research_default_mode", "auto"))
+    return decision.should_research and is_sustained_research_query(text, decision)
+
+
+def _ensure_frontend_runtime() -> None:
+    """Use the same verified frontend authority when main.py is launched directly."""
+    from run import check_and_build_frontend
+
+    check_and_build_frontend(Path(__file__).resolve().parent)
+
+
+async def _start_sustained_research_task(
+    request: TurnRequest,
+    *,
+    runtime_config: Config,
+    event_bus: Any,
+    voice: Any,
+    store: Any,
+    memory_store: Any,
+    memory_graph: Any,
+    memory_service: Any,
+    on_result_stored: Optional[Callable] = None,
+    on_research_result: Optional[Callable] = None,
+) -> Any:
+    """Start research on the existing background manager and acknowledge immediately."""
+    try:
+        if store is not None:
+            try:
+                store.append("user", request.input, session_id=request.session_id, turn_id=request.turn_id)
+                store.touch_session(request.session_id)
+            except Exception:
+                logger.warning("sustained_research_user_message_archive_failed", exc_info=True)
+        if event_bus is not None and request.channel == "voice":
+            await event_bus.emit(
+                "transcript",
+                {"text": request.input, "source": request.channel, "session_id": request.session_id},
+                meta=EventMeta(source=EventSource.VOICE, session_id=request.session_id, turn_id=request.turn_id),
+            )
+
+        task = await background_task.start(
+            runtime_config,
+            event_bus,
+            request.input,
+            session_store=store,
+            memory_store=memory_store,
+            memory_graph=memory_graph,
+            memory_service=memory_service,
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            origin=TaskOrigin.RESEARCH,
+            capability_requirements=("research",),
+            research_query=request.input,
+            on_result_stored=on_result_stored,
+            on_research_result=on_research_result,
+            announce=False,
+        )
+    except Exception:
+        logger.error("sustained_research_start_failed | turn_id=%s", request.turn_id, exc_info=True)
+        message = "I couldn't start that research task."
+        if event_bus is not None:
+            await event_bus.emit(
+                "alert",
+                {"severity": "warning", "message": message},
+                meta=EventMeta(source=EventSource.TASK, session_id=request.session_id, turn_id=request.turn_id),
+            )
+            await event_bus.emit(
+                "token",
+                {"text": message, "session_id": request.session_id},
+                meta=EventMeta(source=EventSource.TASK, session_id=request.session_id, turn_id=request.turn_id),
+            )
+            await event_bus.emit(
+                "response_done",
+                {"session_id": request.session_id},
+                meta=EventMeta(
+                    source=EventSource.TASK,
+                    session_id=request.session_id,
+                    turn_id=request.turn_id,
+                    rationale="sustained research task failed to start",
+                ),
+            )
+        return None
+
+    message = "Started. I'll keep working on that research and let you know when it is ready."
+    logger.info(
+        "sustained_research_started | task_id=%s | turn_id=%s | session_id=%s | status=%s",
+        task.id,
+        request.turn_id,
+        request.session_id,
+        task.status,
+    )
+    if event_bus is not None:
+        await event_bus.emit(
+            "token",
+            {"text": message, "session_id": request.session_id},
+            meta=EventMeta(
+                source=EventSource.TASK,
+                task_id=task.id,
+                session_id=request.session_id,
+                turn_id=request.turn_id,
+                rationale="sustained research task acknowledged",
+            ),
+        )
+        await event_bus.emit(
+            "response_done",
+            {"session_id": request.session_id},
+            meta=EventMeta(
+                source=EventSource.TASK,
+                task_id=task.id,
+                session_id=request.session_id,
+                turn_id=request.turn_id,
+                rationale="sustained research task runs independently",
+            ),
+        )
+    if voice is not None:
+        voice.speak(message, "neutral")
+    return task
+
+
 def _watcher_surface_kind(level: AttentionLevel) -> tuple[PresentationKind, DismissPolicy, int | None, PreferredZone]:
     """Map authoritative watcher urgency to the matching non-tool HUD surface."""
     if level >= AttentionLevel.ATTENTION:
@@ -1024,7 +1148,12 @@ def _fetch_web_status(host: str, port: int) -> Optional[dict[str, Any]]:
 def _expected_frontend_build_identity() -> Optional[dict[str, Any]]:
     """Read the build identity that the child web process must serve."""
     configured_dist = os.environ.get("CHARLIE_FRONTEND_DIST")
-    dist = Path(configured_dist) if configured_dist else Path(__file__).parent / "frontend" / "dist"
+    if configured_dist:
+        dist = Path(configured_dist)
+    else:
+        from run import _persistent_frontend_dist
+
+        dist = _persistent_frontend_dist(Path(__file__).resolve().parent)
     try:
         manifest = json.loads((dist / "charlie-build.json").read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
@@ -1068,7 +1197,7 @@ def _web_identity_error(
     if status.get("source_identity") != frontend_build.get("git_sha"):
         return "Charlie web runtime source identity is inconsistent with its frontend build."
     if expected_build is not None:
-        for key in ("build_id", "input_fingerprint", "git_sha", "dirty"):
+        for key in ("build_id", "input_fingerprint", "git_sha", "dirty", "authority"):
             if key in expected_build and frontend_build.get(key) != expected_build[key]:
                 return f"Charlie web runtime frontend build identity mismatch ({key})."
     return None
@@ -1673,20 +1802,70 @@ async def main():
                 loop,
             )
 
-    async def _handle_voice_control(request: TurnRequest, control: str) -> None:
+    async def _handle_voice_control(request: TurnRequest, control: Any) -> None:
         nonlocal speech_echo_cooldown
         from charlie.core import get_active_voice_approval
 
+        action = getattr(control, "action", control)
+        target = getattr(control, "target", None)
         trace = voice_diagnostic_traces.get(request.turn_id)
         pending_approval_id = get_active_voice_approval()
-        if pending_approval_id:
+        if pending_approval_id and action != "stop_tts":
             voice.stop_tts()
             _resolve_tool_approval_and_notify(pending_approval_id, False)
             handled = True
-            logger.info("voice_control_applied | control=%s | action=decline_approval", control)
+            logger.info("voice_control_applied | control=%s | action=decline_approval", action)
+        elif action == "stop_tts":
+            tts_active = bool(getattr(voice, "is_speaking", None) and voice.is_speaking.is_set())
+            if tts_active:
+                voice.stop_tts()
+                handled = True
+                logger.info("voice_control_applied | control=%s | action=stop_tts", action)
+            else:
+                handled = False
+                logger.info("voice_control_ignored | control=%s | reason=no_active_tts", action)
+        elif action == "cancel_task":
+            task = background_task.find_task(target)
+            if task is None:
+                handled = False
+                logger.info("voice_control_ignored | control=%s | target=%s | reason=task_not_found", action, target)
+            else:
+                voice.stop_tts()
+                handled = background_task.cancel(task.id)
+                logger.info(
+                    "voice_control_applied | control=%s | target=%s | task_id=%s | action=request_cancel",
+                    action,
+                    target,
+                    task.id,
+                )
+        elif action == "cancel_all_tasks":
+            cancelled_ids = background_task.cancel_all()
+            queued_ids = [item.turn_id for item in pending_turns]
+            pending_turns.clear()
+            for queued_id in queued_ids:
+                pending_turn_times.pop(queued_id, None)
+                voice_diagnostic_traces.pop(queued_id, None)
+            foreground_handled = await _apply_voice_control(
+                "cancel",
+                voice=voice,
+                brain=brain,
+                active_turn=active_turn_id is not None,
+                active_operation_cancellable=active_operation_cancellable,
+                active_process_task=active_process_task,
+                cancel_housekeeping=_cancel_housekeeping,
+            )
+            handled = bool(cancelled_ids or queued_ids) or foreground_handled
+            logger.info(
+                "voice_control_applied | control=%s | action=cancel_all | "
+                "task_count=%s | queued_count=%s | foreground=%s",
+                action,
+                len(cancelled_ids),
+                len(queued_ids),
+                foreground_handled,
+            )
         else:
             handled = await _apply_voice_control(
-                control,
+                "cancel" if action in {"cancel_foreground", "abandon_foreground"} else action,
                 voice=voice,
                 brain=brain,
                 active_turn=active_turn_id is not None,
@@ -1701,7 +1880,7 @@ async def main():
                 "intent_decision",
                 fields={
                     "intent": "control",
-                    "control": control,
+                    "control": action,
                     "handled": handled,
                     "routing_source": "deterministic",
                 },
@@ -2056,9 +2235,9 @@ async def main():
         if trace is not None:
             trace.bind(turn_id=request.turn_id, session_id=session_id)
             voice_diagnostic_traces[request.turn_id] = trace
-        from charlie.personality import parse_voice_control as _parse_voice_control
+        from charlie.personality import parse_voice_control_intent as _parse_voice_control_intent
 
-        control = _parse_voice_control(text)
+        control = _parse_voice_control_intent(text)
         if control is not None:
             _schedule_process(_handle_voice_control(request, control), loop)
         else:
@@ -2077,6 +2256,29 @@ async def main():
         from charlie.core import get_active_voice_approval
 
         trace = voice_diagnostic_traces.get(request.turn_id)
+        sustained_checker = globals().get("_is_sustained_research_request")
+        runtime_config = globals().get("config")
+        if (
+            callable(sustained_checker)
+            and runtime_config is not None
+            and request.channel in {"voice", "web", "telegram"}
+            and not get_active_voice_approval()
+            and sustained_checker(request.input, runtime_config)
+        ):
+            await _start_sustained_research_task(
+                request,
+                runtime_config=runtime_config,
+                event_bus=event_bus,
+                voice=voice,
+                store=store,
+                memory_store=memory_store,
+                memory_graph=memory_graph,
+                memory_service=memory_service,
+                on_result_stored=on_result_stored,
+                on_research_result=on_research_result,
+            )
+            return
+
         blocked_by_active_turn = turn_active and not get_active_voice_approval()
 
         if request.channel == "voice" and blocked_by_active_turn:
@@ -2098,6 +2300,12 @@ async def main():
                         len(pending_turns),
                     )
                     return
+                old_turn_id = active_turn_id
+                logger.info(
+                    "supersession_requested | old_turn_id=%s | new_turn_id=%s | reason=new_voice_request",
+                    old_turn_id,
+                    request.turn_id,
+                )
                 brain.cancel_chat()
                 old_task.cancel()
                 try:
@@ -2106,6 +2314,11 @@ async def main():
                     pass
                 except Exception:
                     logger.debug("Superseded foreground turn exited with an error", exc_info=True)
+                logger.info(
+                    "old_generation_cancellation_completed | old_turn_id=%s | new_turn_id=%s",
+                    old_turn_id,
+                    request.turn_id,
+                )
                 blocked_by_active_turn = False
 
         # A gated tool call inside the still-running turn is waiting on a
@@ -2423,6 +2636,7 @@ async def main():
             priority=TaskPriority.HIGH,
             status=TaskStatus.RUNNING,
             session_id=session_id,
+            turn_id=request.turn_id,
             capability_requirements=capability_requirements,
         )
 
@@ -2430,7 +2644,7 @@ async def main():
             if event_bus:
                 await event_bus.emit(
                     "background_task",
-                    record.to_dict(),
+                    background_task._public_event_from_record(record),
                     meta=EventMeta(
                         source=EventSource.TASK,
                         task_id=task_id,
@@ -2674,7 +2888,10 @@ async def main():
                 )
             mark_response_complete()
         except asyncio.CancelledError:
-            logger.info("Foreground voice turn superseded: %s", request.turn_id)
+            logger.info(
+                "stale_foreground_output_suppressed | old_turn_id=%s | reason=foreground_cancelled",
+                request.turn_id,
+            )
             try:
                 turn_task = foreground_journal.cancel(task_id)
                 await _emit_foreground_task(turn_task)
@@ -2992,8 +3209,15 @@ async def main():
 
                         asyncio.create_task(_handle_terminal_command_request(request_id, terminal_session_id, command))
                 elif cmd_type == "stop":
-                    voice.stop_tts()
-                    brain.cancel_chat()
+                    await _apply_voice_control(
+                        "stop",
+                        voice=voice,
+                        brain=brain,
+                        active_turn=active_turn_id is not None,
+                        active_operation_cancellable=active_operation_cancellable,
+                        active_process_task=active_process_task,
+                        cancel_housekeeping=_cancel_housekeeping,
+                    )
                 elif cmd_type == "presentation_command":
                     payload = cmd.get("payload", {})
                     action = payload.get("action")
@@ -3187,6 +3411,7 @@ async def main():
                 logger.error(f"Error handling web command: {e}", exc_info=True)
 
     # Start web server subprocess.
+    _ensure_frontend_runtime()
     web_entry = os.path.join(os.path.dirname(__file__), "charlie", "web_server_entry.py")
     _web_env = os.environ.copy()
     _web_env["CHARLIE_LAUNCH_ID"] = _LAUNCH_ID
@@ -3285,7 +3510,7 @@ async def main():
                 )
 
         def on_speech_onset(_metadata=None):
-            """Preempt optional work as soon as VAD confirms user speech."""
+            """Preempt only the active foreground response after VAD confirms speech."""
 
             if not config.enable_barge_in:
                 return
@@ -3293,9 +3518,14 @@ async def main():
             def _handle_onset() -> None:
                 _cancel_housekeeping()
                 if active_turn_id is None:
+                    logger.info("speech_onset | foreground=idle | sustained_tasks=untouched")
                     return
                 task = active_process_task
                 if task is None or task.done():
+                    logger.info(
+                        "speech_onset | foreground_turn_id=%s | process=inactive | sustained_tasks=untouched",
+                        active_turn_id,
+                    )
                     return
                 if active_operation_name is not None and not active_operation_cancellable:
                     logger.info(
@@ -3304,7 +3534,10 @@ async def main():
                     )
                     return
                 brain.cancel_chat()
-                logger.info("Speech onset superseding cancellable foreground response")
+                logger.info(
+                    "speech_onset_supersession_requested | old_turn_id=%s | sustained_tasks=untouched",
+                    active_turn_id,
+                )
                 task.cancel()
 
             try:

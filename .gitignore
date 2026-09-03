@@ -14,6 +14,7 @@ __pycache__/
 venv/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 
 # === Logs ===
 logs/
@@ -60,10 +61,13 @@ frontend/.next/
 frontend/out/
 frontend/build/
 frontend/dist/
+frontend/.charlie-runtime-build-*/
+frontend/.charlie-build-*/
 dist/
 frontend/.env*
 playwright-report/
 test-results/
+frontend/.vite/
 
 # === Temp, Scratch & Cache ===
 tmp/
@@ -72,6 +76,11 @@ temp/
 *.temp
 .cache/
 .tempmediaStorage/
+.codex-pytest-tmp/
+.codex-uv-cache/
+.coverage
+coverage/
+htmlcov/
 
 # === Sensitive Artifacts ===
 *.key

@@ -5,6 +5,7 @@ voice command parsing. No LLM calls -- pure regex/keyword matching.
 """
 
 import re
+from dataclasses import dataclass
 from typing import Optional
 
 # -- Emotion keyword maps --------------------------------------------------
@@ -42,6 +43,14 @@ _VOICE_CONTROL_COMMANDS = {
     "cancel that": "cancel",
     "never mind": "abandon",
 }
+
+
+@dataclass(frozen=True)
+class VoiceControl:
+    """Deterministic control with an optional sustained-task selector."""
+
+    action: str
+    target: Optional[str] = None
 
 
 def get_emotion_for_context(user_text: str) -> str:
@@ -85,6 +94,35 @@ def parse_voice_control(user_text: str) -> Optional[str]:
         return None
     normalized = re.sub(r"[.!?,;:]+", "", user_text.casefold())
     return _VOICE_CONTROL_COMMANDS.get(" ".join(normalized.split()))
+
+
+def parse_voice_control_intent(user_text: str) -> Optional[VoiceControl]:
+    """Parse exact realtime controls while preserving the legacy parser API."""
+    if not user_text or not user_text.strip():
+        return None
+    normalized = re.sub(r"[.!?,;:]+", "", user_text.casefold())
+    normalized = " ".join(normalized.split())
+    if normalized == "stop talking":
+        return VoiceControl("stop_tts")
+    if normalized in {"cancel that answer", "cancel answer"}:
+        return VoiceControl("cancel_foreground")
+    if normalized in {"cancel all tasks", "stop all tasks"}:
+        return VoiceControl("cancel_all_tasks")
+    match = re.fullmatch(r"(?:stop|cancel)(?: the)? (.+)", normalized)
+    if match:
+        target = match.group(1).strip()
+        if (
+            target in {"research", "task", "background task"}
+            or target.endswith(" research")
+            or target.startswith("research ")
+            or target.endswith(" task")
+            or target.endswith(" background task")
+        ):
+            return VoiceControl("cancel_task", target)
+    legacy = _VOICE_CONTROL_COMMANDS.get(normalized)
+    if legacy is None:
+        return None
+    return VoiceControl("cancel_foreground")
 
 
 _YES_RE = re.compile(

@@ -99,6 +99,17 @@ def _persistent_frontend_dist(root: Path) -> Path:
     return base / "C.H.A.R.L.I.E" / "frontend-dist"
 
 
+def _temporary_frontend_dist(root: Path) -> Path:
+    """Return a stable user-owned fallback when the preferred cache is ACL-protected."""
+    return Path(tempfile.gettempdir()) / "C.H.A.R.L.I.E" / "frontend-dist"
+
+
+def _frontend_runtime_dist_candidates(root: Path) -> tuple[Path, ...]:
+    preferred = _persistent_frontend_dist(root)
+    fallback = _temporary_frontend_dist(root)
+    return (preferred,) if preferred == fallback else (preferred, fallback)
+
+
 def _git_build_identity(root: Path) -> tuple[str | None, bool | None]:
     try:
         git_sha = subprocess.check_output(
@@ -125,6 +136,14 @@ def _frontend_build_is_stale(frontend_dir: Path, dist_dir: Path) -> bool:
     if not manifest or manifest.get("input_fingerprint") != _frontend_inputs_fingerprint(frontend_dir):
         return True
     return False
+
+
+def _frontend_runtime_build_is_stale(frontend_dir: Path, dist_dir: Path) -> bool:
+    """Require both current inputs and the runtime authority marker."""
+    if _frontend_build_is_stale(frontend_dir, dist_dir):
+        return True
+    manifest = _read_frontend_manifest(dist_dir)
+    return not manifest or manifest.get("authority") != "user_runtime_cache"
 
 
 def _frontend_dist_is_user_accessible(dist_dir: Path) -> bool:
@@ -166,49 +185,74 @@ def _publish_frontend_build(staging_dir: Path, dist_dir: Path) -> None:
 
 
 def check_and_build_frontend(project_root: Path | None = None) -> None:
-    """Ensure a current frontend exists; refuse to serve stale output after a failed build."""
+    """Prepare the one verified user-owned frontend runtime artifact."""
     root = project_root or Path(__file__).parent
     frontend_dir = root / "frontend"
-    dist_dir = frontend_dir / "dist"
     os.environ.pop(_FRONTEND_DIST_ENV, None)
 
     if not frontend_dir.exists():
         raise RuntimeError("Frontend directory not found; refusing to start without the React HUD build.")
 
-    canonical_accessible = _frontend_dist_is_user_accessible(dist_dir)
-    if canonical_accessible and not _frontend_build_is_stale(frontend_dir, dist_dir):
-        return
+    runtime_dist = None
+    for candidate in _frontend_runtime_dist_candidates(root):
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            if not _frontend_dist_is_user_accessible(candidate.parent):
+                raise OSError("frontend runtime directory is not user-accessible")
+            if not _frontend_runtime_build_is_stale(frontend_dir, candidate):
+                os.environ[_FRONTEND_DIST_ENV] = str(candidate)
+                print(f"Frontend runtime build ready: {candidate}")
+                return
+            if runtime_dist is None:
+                runtime_dist = candidate
+        except OSError:
+            continue
 
-    runtime_dist = _persistent_frontend_dist(root)
-    if not canonical_accessible and _frontend_dist_is_user_accessible(runtime_dist):
-        if not _frontend_build_is_stale(frontend_dir, runtime_dist):
-            os.environ[_FRONTEND_DIST_ENV] = str(runtime_dist)
-            print(f"Canonical frontend/dist is inaccessible; reusing verified user cache at {runtime_dist}.")
-            return
+    if runtime_dist is None:
+        raise RuntimeError(
+            "No user-owned frontend runtime directory is available; "
+            "refusing to use a temporary build."
+        )
 
-    print("Frontend build missing or stale. Compiling frontend...")
+    print("Frontend runtime build missing or stale. Compiling frontend...")
     npm_path = shutil.which("npm")
     if not npm_path:
         raise RuntimeError("npm was not found; install Node.js/npm and run 'npm run build' in frontend/.")
 
-    use_runtime_dist = not canonical_accessible
-    if use_runtime_dist:
-        try:
-            runtime_dist.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise RuntimeError(
-                "Persistent frontend cache directory is unavailable; refusing to use a temp build."
-            ) from exc
-        if not _frontend_dist_is_user_accessible(runtime_dist.parent):
-            raise RuntimeError(
-                "Persistent frontend cache directory is not user-accessible; refusing to use a temp build."
+    try:
+        staging_dir = Path(
+            tempfile.mkdtemp(
+                prefix=".charlie-runtime-build-",
+                dir=str(runtime_dist.parent),
             )
-    staging_dir = Path(
-        tempfile.mkdtemp(
-            prefix=".charlie-runtime-build-" if use_runtime_dist else ".charlie-build-",
-            dir=str(runtime_dist.parent if use_runtime_dist else frontend_dir),
         )
-    )
+    except OSError as exc:
+        fallback = _temporary_frontend_dist(root)
+        if runtime_dist == fallback:
+            raise RuntimeError(
+                "No user-owned frontend runtime staging directory is writable; "
+                "refusing to use a temporary build."
+            ) from exc
+        try:
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            if not _frontend_dist_is_user_accessible(fallback.parent):
+                raise OSError("frontend runtime fallback directory is not user-accessible")
+            if not _frontend_runtime_build_is_stale(frontend_dir, fallback):
+                os.environ[_FRONTEND_DIST_ENV] = str(fallback)
+                print(f"Frontend runtime build ready: {fallback}")
+                return
+            staging_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=".charlie-runtime-build-",
+                    dir=str(fallback.parent),
+                )
+            )
+            runtime_dist = fallback
+        except OSError as fallback_exc:
+            raise RuntimeError(
+                "No user-owned frontend runtime staging directory is writable; "
+                "refusing to use a temporary build."
+            ) from fallback_exc
     build_env = os.environ.copy()
     build_env["CHARLIE_FRONTEND_OUT_DIR"] = str(staging_dir)
     try:
@@ -227,26 +271,19 @@ def check_and_build_frontend(project_root: Path | None = None) -> None:
             check=True,
         )
         manifest = _read_frontend_manifest(staging_dir)
-        if not (staging_dir / "index.html").is_file() or not manifest:
+        if not (staging_dir / "index.html").is_file() or not manifest or not manifest.get("build_id"):
             raise RuntimeError("Frontend build completed without a valid charlie-build.json identity.")
         manifest["input_fingerprint"] = _frontend_inputs_fingerprint(frontend_dir)
+        manifest["authority"] = "user_runtime_cache"
         (staging_dir / "charlie-build.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-        if not use_runtime_dist:
-            _publish_frontend_build(staging_dir, dist_dir)
-            os.environ[_FRONTEND_DIST_ENV] = str(dist_dir)
-        else:
-            _publish_frontend_build(staging_dir, runtime_dist)
-            os.environ[_FRONTEND_DIST_ENV] = str(runtime_dist)
-            print(
-                "Canonical frontend/dist is not accessible to this user; "
-                f"serving the verified persistent build from {runtime_dist}."
-            )
-        print("Frontend built successfully!")
+        _publish_frontend_build(staging_dir, runtime_dist)
+        os.environ[_FRONTEND_DIST_ENV] = str(runtime_dist)
+        print(f"Frontend runtime build published: {runtime_dist}")
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
-            "Frontend build failed; refusing to start with stale React HUD assets. "
+            "Frontend build failed; the previously verified runtime build was preserved but not selected. "
             "See the npm output above and fix the build before restarting."
         ) from e
     finally:

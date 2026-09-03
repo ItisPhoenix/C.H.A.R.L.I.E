@@ -11,7 +11,7 @@ from charlie.research.citations import (
 from charlie.research.engine import ResearchEngine
 from charlie.research.fetch import validate_public_url
 from charlie.research.models import ResearchMode, ResearchReport, SearchResult, SourceDocument
-from charlie.research.router import is_briefing_query, route
+from charlie.research.router import is_briefing_query, is_sustained_research_query, route
 from charlie.research.search import build_plan, clean_query
 
 
@@ -21,6 +21,28 @@ def test_research_router_distinguishes_stable_and_fresh_requests():
     assert current.should_research is True
     assert current.mode is ResearchMode.STANDARD
     assert route("deep research open source browser agents").mode is ResearchMode.DEEP
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Deep research the latest Windows security changes",
+        "Investigate current browser agent security",
+        "Compare Playwright and Selenium thoroughly",
+        "Do a multi-source analysis of local LLM runtimes",
+    ],
+)
+def test_explicit_sustained_research_is_task_routed(query):
+    decision = route(query)
+    assert decision.should_research is True
+    assert is_sustained_research_query(query, decision) is True
+
+
+def test_current_lookup_is_not_automatically_backgrounded():
+    query = "What's the latest Python release?"
+    decision = route(query)
+    assert decision.should_research is True
+    assert is_sustained_research_query(query, decision) is False
 
 
 def test_current_request_asking_for_sources_fetches_documents():

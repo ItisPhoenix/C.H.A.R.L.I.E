@@ -257,17 +257,31 @@ async def test_owned_vision_stream_closes_on_cancellation_and_records_lifecycle(
 
     assert response_closed is True
     assert context_exited is True
+    from charlie.resource_locks import current_owner
+
+    assert current_owner("vision_gpu") is None
     stages = [event["stage"] for event in trace.events()]
     assert stages[:4] == [
         "vision_request_start",
+        "vision_resource_before_lease",
         "headers_received",
         "vision_first_response_or_headers",
-        "first_token",
     ]
+    assert "first_token" in stages
     assert "client_cancel_requested" in stages
+    assert "vision_http_cancel_requested" in stages
+    assert "vision_task_cancelled" in stages
+    assert "vision_stream_aclose_begin" in stages
+    assert "vision_stream_aclose_complete" in stages
     assert "stream_closed" in stages
     evidence = next(event for event in trace.events() if event["stage"] == "server_generation_stop_evidence")
     assert evidence["fields"]["observable"] is False
+    finish_reason = next(
+        event for event in trace.events() if event["stage"] == "vision_server_finish_reason_if_observable"
+    )
+    assert finish_reason["fields"]["observable"] is False
+    assert "vision_cleanup_complete" in stages
+    assert "vision_task_done" in stages
     assert stages[-1] == "vision_request_end"
 
 

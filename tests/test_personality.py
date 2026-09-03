@@ -1,6 +1,11 @@
 """Tests for charlie.personality — emotion detection and voice commands."""
 
-from charlie.personality import get_emotion_for_context, parse_voice_command, parse_yes_no
+from charlie.personality import (
+    get_emotion_for_context,
+    parse_voice_command,
+    parse_voice_control_intent,
+    parse_yes_no,
+)
 
 # ── get_emotion_for_context ────────────────────────────────────────────────
 
@@ -139,3 +144,23 @@ class TestParseYesNo:
     def test_empty_returns_none(self):
         assert parse_yes_no("") is None
         assert parse_yes_no("   ") is None
+
+
+class TestVoiceControlIntent:
+    def test_stop_talking_only_stops_tts(self):
+        assert parse_voice_control_intent("Stop talking").action == "stop_tts"
+
+    def test_cancel_answer_targets_foreground(self):
+        assert parse_voice_control_intent("Cancel that answer").action == "cancel_foreground"
+
+    def test_cancel_research_extracts_task_selector(self):
+        control = parse_voice_control_intent("Stop the Windows research")
+        assert control is not None
+        assert control.action == "cancel_task"
+        assert control.target == "windows research"
+
+    def test_cancel_all_tasks_is_explicit(self):
+        assert parse_voice_control_intent("Cancel all tasks").action == "cancel_all_tasks"
+
+    def test_normal_stop_phrase_is_not_task_control(self):
+        assert parse_voice_control_intent("Please stop the music") is None

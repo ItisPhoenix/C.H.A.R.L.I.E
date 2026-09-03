@@ -296,7 +296,7 @@ _TIME_SENSITIVE_RE = re.compile(
 # --- Follow-up detection (skip web search for repeat/clarification requests) ---
 _FOLLOWUP_RE = re.compile(
     r"^(?:"
-    r"come again|repeat|say that again|pardon|sorry|excuse me|"
+    r"what(?=\s*[?.!]?$)|come again|repeat|say that again|pardon|sorry|excuse me|"
     r"what was that|what did you say|tell me again|once more|go on|"
     r"continue|and then|what else|what else did you say|anything else|"
     r"elaborate|more info|no[,.]?\s|that's\s+wrong|that's\s+not\s+right|actually|I\s+meant"
@@ -863,6 +863,7 @@ _RESULT_FAILURE_STATUSES = frozenset(
 )
 _INTERACTIVE_VISION_TIMEOUT_S = 9.0
 _VISION_CLEANUP_TIMEOUT_S = 1.0
+_VISION_LEASE_TIMEOUT_S = 0.5
 
 _FRESHNESS_REQUIREMENT_RE = re.compile(
     r"\b(?:today|latest|currently|current|now|right\s+now|live|recent|breaking|trending|news|"
@@ -1444,6 +1445,7 @@ class Brain:
 
     def cancel_chat(self) -> None:
         """Cancel the current chat generation (barge-in support)."""
+        logger.info("chat_generation_cancel_requested | generation=%s", self._chat_generation + 1)
         self._chat_generation += 1
         self.cancel_background_tasks()
 
@@ -1515,7 +1517,13 @@ class Brain:
         """True if the physical panic hotkey or this instance's own turn-halt tripped."""
         return (desktop_actions is not None and desktop_actions.is_halted()) or self._turn_halted
 
-    async def _handle_start_background_task(self, arguments: Dict[str, Any]) -> str:
+    async def _handle_start_background_task(
+        self,
+        arguments: Dict[str, Any],
+        *,
+        session_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
+    ) -> str:
         """Kicks a task into charlie.tasks.TaskManager's queue via background_task.start() --
         needs Brain/event-bus access the plain registry stub doesn't have, same interception
         pattern as propose_new_tool."""
@@ -1527,17 +1535,27 @@ class Brain:
         if recovery._event_bus is None:
             return "Error: background tasks require the event bus to be running."
 
+        start_kwargs: Dict[str, Any] = {
+            "session_store": self.session_store,
+            "memory_store": self.memory_store,
+            "memory_graph": self.memory_graph,
+            "memory_service": self.memory_service,
+            "priority": arguments.get("priority", 0),
+            "depends_on": arguments.get("depends_on") or [],
+            "on_result_stored": self.on_result_stored,
+        }
+        if session_id is not None:
+            start_kwargs["session_id"] = session_id
+        if turn_id is not None:
+            start_kwargs["turn_id"] = turn_id
+        if self.on_research_result is not None:
+            start_kwargs["on_research_result"] = self.on_research_result
+
         task = await background_task.start(
             self.config,
             recovery._event_bus,
             text,
-            session_store=self.session_store,
-            memory_store=self.memory_store,
-            memory_graph=self.memory_graph,
-            memory_service=self.memory_service,
-            priority=arguments.get("priority", 0),
-            depends_on=arguments.get("depends_on") or [],
-            on_result_stored=self.on_result_stored,
+            **start_kwargs,
         )
         return f"Background task started (id={task.id}, status={task.status}): {text}"
 
@@ -1565,9 +1583,22 @@ class Brain:
             "max_tokens": 300,
         }
         try:
-            resp = await self._vision_client.post("chat/completions", json=payload)
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
+            from charlie.resource_locks import default_lease_manager
+
+            lease = await default_lease_manager.acquire(
+                "vision_gpu",
+                f"vision:{id(self)}:browser:{id(data_url)}",
+                timeout=_VISION_LEASE_TIMEOUT_S,
+            )
+            try:
+                resp = await self._vision_client.post("chat/completions", json=payload)
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"].strip()
+            finally:
+                await lease.release()
+        except asyncio.TimeoutError:
+            logger.warning("Vision GPU lease unavailable for browser image description")
+            return ""
         except Exception as exc:
             logger.warning("browser_task vision fallback failed: %s", exc, exc_info=True)
             return ""
@@ -2074,7 +2105,7 @@ class Brain:
             telemetry.record_llm_call(success=False)
             raise
         if cancelled:
-            logger.info("Chat generation cancelled (barge-in)")
+            logger.info("stale_chat_generation_output_suppressed | generation=%s", generation)
             return ("", [])
         tool_calls = collect_tool_calls(tc_by_index)
         return (accumulated, tool_calls)
@@ -2146,11 +2177,30 @@ class Brain:
                 fields={"model": model, "route": "vision"},
                 include_resource=True,
             )
-        stream_context = client.stream("POST", "chat/completions", json=payload)
+        stream_context = None
         response = None
         entered = False
+        vision_lease = None
+        vision_lease_acquired = False
         request_status = "completed"
         try:
+            if is_vision_request:
+                from charlie.resource_locks import default_lease_manager
+
+                if diagnostic_trace is not None:
+                    diagnostic_trace.mark(
+                        "vision_resource_before_lease",
+                        fields={"lease": "vision_gpu", "phase": "before_acquire"},
+                        include_resource=True,
+                    )
+                vision_owner = f"vision:{id(self)}:{generation}:{id(payload)}"
+                vision_lease = await default_lease_manager.acquire(
+                    "vision_gpu",
+                    vision_owner,
+                    timeout=_VISION_LEASE_TIMEOUT_S,
+                )
+                vision_lease_acquired = True
+            stream_context = client.stream("POST", "chat/completions", json=payload)
             response = await stream_context.__aenter__()
             entered = True
             if is_vision_request and diagnostic_trace is not None:
@@ -2194,6 +2244,16 @@ class Brain:
                 request_status = "cancelled"
                 if is_vision_request and diagnostic_trace is not None:
                     diagnostic_trace.mark(
+                        "vision_http_cancel_requested",
+                        fields={"reason": "generation_changed"},
+                        include_resource=True,
+                    )
+                    diagnostic_trace.mark(
+                        "vision_task_cancelled",
+                        fields={"reason": "generation_changed", "kind": "generation_stale"},
+                        include_resource=True,
+                    )
+                    diagnostic_trace.mark(
                         "client_cancel_requested",
                         fields={"reason": "generation_changed"},
                         include_resource=True,
@@ -2206,6 +2266,16 @@ class Brain:
             request_status = "cancelled"
             if is_vision_request and diagnostic_trace is not None:
                 diagnostic_trace.mark(
+                    "vision_http_cancel_requested",
+                    fields={"reason": "asyncio_task_cancelled"},
+                    include_resource=True,
+                )
+                diagnostic_trace.mark(
+                    "vision_task_cancelled",
+                    fields={"reason": "asyncio_task_cancelled", "kind": "task_cancelled"},
+                    include_resource=True,
+                )
+                diagnostic_trace.mark(
                     "client_cancel_requested",
                     fields={"reason": "asyncio_task_cancelled"},
                     include_resource=True,
@@ -2214,6 +2284,11 @@ class Brain:
         except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
             request_status = "timeout"
             if is_vision_request and diagnostic_trace is not None:
+                diagnostic_trace.mark(
+                    "vision_http_cancel_requested",
+                    fields={"reason": "http_timeout", "error": type(exc).__name__},
+                    include_resource=True,
+                )
                 diagnostic_trace.mark(
                     "client_cancel_requested",
                     fields={"reason": "http_timeout", "error": type(exc).__name__},
@@ -2236,32 +2311,80 @@ class Brain:
             raise
         finally:
             close_error = None
-            if entered:
-                close_error = await _await_bounded_cleanup(
-                    stream_context.__aexit__(None, None, None),
-                    "vision_response_stream",
-                )
+            close_completed = not entered
+            if entered and stream_context is not None:
+                if is_vision_request and diagnostic_trace is not None:
+                    diagnostic_trace.mark(
+                        "vision_stream_aclose_begin",
+                        fields={"status": request_status},
+                        include_resource=True,
+                    )
+                try:
+                    close_error = await _await_bounded_cleanup(
+                        stream_context.__aexit__(None, None, None),
+                        "vision_response_stream",
+                    )
+                    close_completed = True
+                finally:
+                    if is_vision_request and diagnostic_trace is not None:
+                        diagnostic_trace.mark(
+                            "vision_stream_aclose_complete",
+                            fields={
+                                "status": request_status,
+                                "completed": close_completed,
+                                "close_error": close_error,
+                            },
+                            include_resource=True,
+                        )
             if is_vision_request and diagnostic_trace is not None:
                 diagnostic_trace.mark(
                     "stream_closed",
                     fields={"entered": entered, "close_error": close_error},
                     include_resource=True,
                 )
+                finish_reason_fields = (
+                    {"observable": True, "finish_reason": state.finish_reason}
+                    if state.finish_reason is not None
+                    else {
+                        "observable": False,
+                        "reason": "OpenAI-compatible HTTP disconnect exposes no server stop signal",
+                    }
+                )
                 diagnostic_trace.mark(
                     "server_generation_stop_evidence",
-                    fields=(
-                        {"observable": True, "finish_reason": state.finish_reason}
-                        if state.finish_reason is not None
-                        else {
-                            "observable": False,
-                            "reason": "OpenAI-compatible HTTP disconnect exposes no server stop signal",
-                        }
-                    ),
+                    fields=finish_reason_fields,
+                    include_resource=True,
+                )
+                diagnostic_trace.mark(
+                    "vision_server_finish_reason_if_observable",
+                    fields=finish_reason_fields,
                     include_resource=True,
                 )
                 diagnostic_trace.mark(
                     "vision_complete",
                     fields={"status": request_status},
+                    include_resource=True,
+                )
+            lease_released = vision_lease is None
+            if vision_lease is not None:
+                await vision_lease.release()
+                lease_released = True
+            if is_vision_request and diagnostic_trace is not None:
+                cleanup_fields = {
+                    "status": request_status,
+                    "close_error": close_error,
+                    "stream_close_completed": close_completed,
+                    "lease_acquired": vision_lease_acquired,
+                    "lease_released": lease_released,
+                }
+                diagnostic_trace.mark(
+                    "vision_cleanup_complete",
+                    fields=cleanup_fields,
+                    include_resource=True,
+                )
+                diagnostic_trace.mark(
+                    "vision_task_done",
+                    fields=cleanup_fields,
                     include_resource=True,
                 )
                 diagnostic_trace.mark(
@@ -3327,7 +3450,11 @@ class Brain:
             elif tool_name == "propose_new_tool":
                 raw_result = await self._handle_propose_new_tool(call["arguments"])
             elif tool_name == "start_background_task":
-                raw_result = await self._handle_start_background_task(call["arguments"])
+                raw_result = await self._handle_start_background_task(
+                    call["arguments"],
+                    session_id=session_id,
+                    turn_id=turn_id,
+                )
             elif tool_name == "browser_task":
                 raw_result = await self.browser_task(
                     call["arguments"].get("task", ""),
@@ -3779,6 +3906,12 @@ class Brain:
             if not interactive_vision:
                 raise
             timed_out = True
+            if diagnostic_trace is not None:
+                diagnostic_trace.mark(
+                    "vision_http_cancel_requested",
+                    fields={"reason": "interactive_vision_timeout"},
+                    include_resource=True,
+                )
             self.cancel_chat()
             if diagnostic_trace is not None:
                 diagnostic_trace.mark(

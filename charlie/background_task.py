@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 from charlie.attention import decide as _attention_decide
 from charlie.config import Config
-from charlie.core import Brain
+from charlie.core import Brain, _invoke_callback_with_identity
 from charlie.events import EventMeta, EventSource, EventType
 from charlie.resource_locks import CapabilityLease, CapabilityLeaseManager
 from charlie.results import ResultsStore
@@ -85,6 +85,11 @@ _RESTART_ERROR = "Charlie restarted while this task was still running."
 _DESKTOP_KEYWORD_RE = re.compile(
     r"\b(click|type|open|close|desktop|screen|window)\b", re.IGNORECASE
 )
+_BROWSER_RESOURCE_RE = re.compile(r"\b(browser|website|web\s+page|youtube|amazon)\b", re.IGNORECASE)
+_TERMINAL_RESOURCE_RE = re.compile(r"\b(shell|terminal|powershell|command|script)\b", re.IGNORECASE)
+_FILE_RESOURCE_RE = re.compile(r"\b(file|folder|directory|download|write|delete|rename)\b", re.IGNORECASE)
+_RESEARCH_RESOURCE_RE = re.compile(r"\b(research|web\s+search|search\s+sources|investigate)\b", re.IGNORECASE)
+_VISION_RESOURCE_RE = re.compile(r"\b(vision|screenshot|image|photo|picture|visual)\b", re.IGNORECASE)
 
 TaskStatus = Literal[
     "planning", "queued", "awaiting_approval", "running", "paused", "done", "failed", "cancelled"
@@ -104,7 +109,13 @@ class BackgroundTask:
     error: Optional[str] = None
     brain: Optional[Brain] = None
     session_id: str = ""
+    turn_id: Optional[str] = None
+    origin: TaskOrigin = TaskOrigin.BACKGROUND
+    capability_requirements: tuple[str, ...] = ("desktop",)
+    research_query: Optional[str] = None
+    progress_override: Optional[float] = field(default=None, repr=False, compare=False)
     cancel_requested: bool = field(default=False, repr=False)
+    cancel_event: Optional[asyncio.Event] = field(default=None, repr=False, compare=False)
     priority: int = 0
     depends_on: List[str] = field(default_factory=list)
     # Read by charlie.surfaces._categorize to route "workspace" hints to a sustained-interaction surface.
@@ -133,18 +144,26 @@ class BackgroundTask:
         }
         if include_metadata:
             public.update({
-                "origin": TaskOrigin.BACKGROUND.value,
+                "origin": self.origin.value,
+                "lane": "foreground" if self.origin is TaskOrigin.FOREGROUND else "sustained",
                 "priority": _priority_name(self.priority).value,
                 "session_id": self.session_id or None,
+                "turn_id": self.turn_id,
                 "progress": (self.current_step / len(self.steps)) if self.steps else None,
                 "current_action": self.steps[self.current_step] if self.current_step < len(self.steps) else None,
-                "capability_requirements": ["desktop"],
+                "capability_requirements": list(self.capability_requirements),
             })
         return public
 
     def to_state_dict(self) -> Dict[str, Any]:
         """to_event() plus session_id, for on-disk persistence."""
-        return {**self.to_event(), "session_id": self.session_id}
+        return {
+            **self.to_event(),
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "origin": self.origin.value,
+            "capability_requirements": list(self.capability_requirements),
+        }
 
 
 _current_task: Optional[BackgroundTask] = None
@@ -189,15 +208,18 @@ def _record_task_lifecycle(
         current = _journal.create_task(
             task.text,
             task_id=task.id,
-            origin=TaskOrigin.BACKGROUND,
+            origin=task.origin,
             priority=_priority_name(task.priority),
             status=requested_status,
             session_id=task.session_id or None,
-            capability_requirements=("desktop",),
+            turn_id=task.turn_id,
+            capability_requirements=task.capability_requirements,
             current_step=task.current_step,
             total_steps=len(task.steps),
         )
     else:
+        if current.capability_requirements != task.capability_requirements:
+            current = _journal.update_capability_requirements(task.id, task.capability_requirements)
         if current.status is not requested_status:
             try:
                 if requested_status is CanonicalTaskStatus.COMPLETED and current.status not in (
@@ -229,7 +251,11 @@ def _record_task_lifecycle(
             task.status = _legacy_status_for(current.status)
             return current
 
-    progress = (task.current_step / len(task.steps)) if task.steps else None
+    progress = (
+        task.progress_override
+        if task.progress_override is not None
+        else (task.current_step / len(task.steps)) if task.steps else None
+    )
     current_action = task.steps[task.current_step] if task.current_step < len(task.steps) else None
     current = _journal.update_progress(
         task.id,
@@ -251,6 +277,8 @@ def _request_task_cancellation(task: BackgroundTask) -> None:
         _record_task_lifecycle(task, status=task.status)
     _journal.request_cancel(task.id)
     task.cancel_requested = True
+    if task.cancel_event is not None:
+        task.cancel_event.set()
 
 
 def _public_event_from_record(record: TaskRecord) -> Dict[str, Any]:
@@ -263,8 +291,10 @@ def _public_event_from_record(record: TaskRecord) -> Dict[str, Any]:
         "current_step": record.current_step,
         "total_steps": record.total_steps,
         "origin": record.origin.value,
+        "lane": "foreground" if record.origin is TaskOrigin.FOREGROUND else "sustained",
         "priority": record.priority.value,
         "session_id": record.session_id,
+        "turn_id": record.turn_id,
         "progress": record.progress,
         "current_action": current_action,
         "capability_requirements": list(record.capability_requirements),
@@ -317,7 +347,12 @@ async def _emit_task_event(
     """Emit a captured canonical task snapshot and preserve legacy state on disk."""
     await event_bus.emit(
         "background_task", _public_event_from_record(record),
-        meta=EventMeta(source=EventSource.TASK, task_id=record.id),
+        meta=EventMeta(
+            source=EventSource.TASK,
+            task_id=record.id,
+            session_id=record.session_id,
+            turn_id=record.turn_id,
+        ),
     )
     if task is not None:
         _save_state(task)
@@ -336,7 +371,10 @@ def _reconcile_persisted_background_tasks() -> tuple[set[str], set[str]]:
     reconciled_ids: set[str] = set()
     failed_transition_ids: set[str] = set()
     for record in _journal.list():
-        if record.origin is not TaskOrigin.BACKGROUND or record.status in _CANONICAL_TERMINAL_STATUSES:
+        if (
+            record.origin not in {TaskOrigin.BACKGROUND, TaskOrigin.RESEARCH}
+            or record.status in _CANONICAL_TERMINAL_STATUSES
+        ):
             continue
         try:
             _journal.transition(
@@ -530,6 +568,25 @@ def _scan_gated_steps(steps: List[str]) -> List[int]:
     return flagged
 
 
+def _infer_capability_requirements(text: str, steps: List[str]) -> tuple[str, ...]:
+    """Classify scarce task resources before allowing bounded overlap."""
+    combined = " ".join((text, *steps))
+    requirements: set[str] = set()
+    if _DESKTOP_KEYWORD_RE.search(combined):
+        requirements.add("desktop")
+    if _BROWSER_RESOURCE_RE.search(combined):
+        requirements.add("browser")
+    if _TERMINAL_RESOURCE_RE.search(combined):
+        requirements.add("terminal")
+    if _FILE_RESOURCE_RE.search(combined):
+        requirements.add("file")
+    if _RESEARCH_RESOURCE_RE.search(combined):
+        requirements.add("research")
+    if _VISION_RESOURCE_RE.search(combined):
+        requirements.add("vision_gpu")
+    return tuple(sorted(requirements))
+
+
 async def _store_result(task: BackgroundTask, event_bus, full_result: str) -> None:
     """Persist one row per terminal task (charlie/results.py) -- attention_level
     reuses charlie.attention's own BACKGROUND_TASK status table, same source of truth
@@ -547,7 +604,12 @@ async def _store_result(task: BackgroundTask, event_bus, full_result: str) -> No
     try:
         await event_bus.emit(
             EventType.RESULT_STORED, {"task_id": task.id, "summary": summary, "attention_level": int(level)},
-            meta=EventMeta(source=EventSource.TASK, task_id=task.id),
+            meta=EventMeta(
+                source=EventSource.TASK,
+                task_id=task.id,
+                session_id=task.session_id,
+                turn_id=task.turn_id,
+            ),
         )
     except Exception:
         logger.warning("Failed to emit result_stored event", exc_info=True)
@@ -579,10 +641,15 @@ async def start(
     priority: int = 0, depends_on: Optional[List[str]] = None, visibility_hint: str = "",
     on_result_stored: Optional[Callable] = None,
     memory_graph=None, memory_service=None,
+    *, task_id: Optional[str] = None, session_id: Optional[str] = None,
+    turn_id: Optional[str] = None, origin: TaskOrigin | str = TaskOrigin.BACKGROUND,
+    capability_requirements: Optional[tuple[str, ...] | List[str]] = None,
+    research_query: Optional[str] = None, on_research_result: Optional[Callable] = None,
+    announce: bool = True,
 ) -> BackgroundTask:
     """Plan a background task and hand it to the TaskManager queue -- no
     upfront approval gate. Runs immediately if a slot is free (the common
-    case at the default max_parallel=1), otherwise queues behind whatever is
+    case at the default max_parallel=2), otherwise queues behind whatever is
     already running/queued, per priority then submission order. Returns once
     the plan is generated and the task is submitted to the queue; does not
     await task completion. _run_loop reports progress asynchronously via
@@ -591,9 +658,24 @@ async def start(
     _active_event_bus = event_bus
     _manager.max_parallel = config.background_max_parallel_tasks
 
+    effective_origin = origin if isinstance(origin, TaskOrigin) else TaskOrigin(origin)
+    requirements = (
+        tuple(capability_requirements)
+        if capability_requirements is not None
+        else (("research",) if research_query is not None else ("desktop",))
+    )
     task = BackgroundTask(
-        id=make_id(8), text=text, session_id=f"bg:{make_id(6)}",
-        priority=priority, depends_on=list(depends_on or []), visibility_hint=visibility_hint,
+        id=task_id or make_id(8),
+        text=text,
+        session_id=session_id or f"bg:{make_id(6)}",
+        turn_id=turn_id,
+        origin=effective_origin,
+        capability_requirements=requirements,
+        research_query=research_query,
+        cancel_event=asyncio.Event(),
+        priority=priority,
+        depends_on=list(depends_on or []),
+        visibility_hint=visibility_hint,
     )
     _current_task = task
 
@@ -612,24 +694,36 @@ async def start(
         approval_timeout=None,
         is_background=True,
         on_result_stored=on_result_stored,
+        on_research_result=on_research_result,
     )
+
+    if research_query is not None:
+        task.steps = [f"Research: {research_query}"]
+        task.flagged_steps = []
 
     record = _record_task_lifecycle(task, status=CanonicalTaskStatus.PLANNING)
     await _emit_task_event(event_bus, record, task=task)
 
-    plan_prompt = (
-        "Break the following task into a short numbered list of concrete steps. "
-        "Reply with ONLY the numbered list, one step per line, no preamble.\n\n"
-        f"Task: {text}"
-    )
-    plan_text = ""
-    async for chunk in task.brain.chat_stream(plan_prompt, session_id=task.session_id, skip_tools=True):
-        plan_text += chunk
-    task.steps = _parse_steps(plan_text) or [text]
-    task.flagged_steps = _scan_gated_steps(task.steps)
+    if research_query is None:
+        plan_prompt = (
+            "Break the following task into a short numbered list of concrete steps. "
+            "Reply with ONLY the numbered list, one step per line, no preamble.\n\n"
+            f"Task: {text}"
+        )
+        plan_text = ""
+        async for chunk in task.brain.chat_stream(plan_prompt, session_id=task.session_id, skip_tools=True):
+            plan_text += chunk
+        task.steps = _parse_steps(plan_text) or [text]
+        task.flagged_steps = _scan_gated_steps(task.steps)
+        inferred_requirements = _infer_capability_requirements(text, task.steps)
+        if inferred_requirements:
+            task.capability_requirements = inferred_requirements
+        else:
+            task.capability_requirements = ()
 
     _manager.submit(task, lambda: _run_loop(task, event_bus, voice))
-    await _announce(event_bus, voice, "info", f"Starting background task: {text}")
+    if announce:
+        await _announce(event_bus, voice, "info", f"Starting background task: {text}")
     return task
 
 
@@ -644,12 +738,36 @@ def cancel(task_id: str) -> bool:
     return cancelled
 
 
+def cancel_all() -> List[str]:
+    """Request cancellation for every non-terminal sustained task."""
+    cancelled: List[str] = []
+    for task in list(_manager.list()):
+        if task.status in _TERMINAL_STATUSES:
+            continue
+        if cancel(task.id):
+            cancelled.append(task.id)
+    return cancelled
+
+
+def find_task(query: Optional[str] = None) -> Optional[BackgroundTask]:
+    """Find the newest active task whose id or title contains every query token."""
+    normalized = " ".join((query or "").casefold().split())
+    candidates = [task for task in _manager.list() if task.status not in _TERMINAL_STATUSES]
+    for task in reversed(candidates):
+        if not normalized:
+            return task
+        haystack = f"{task.id} {task.text}".casefold()
+        if all(token in haystack for token in normalized.split()):
+            return task
+    return None
+
+
 async def _wait_until_clear(task: BackgroundTask, config: Config, event_bus) -> bool:
     """Block until no real external input has landed since the task's own
     last action (or, before any action, until the user has been idle for
     config.desktop_idle_threshold_s). Returns False if cancelled or
     panic-halted while waiting."""
-    if not _DESKTOP_AVAILABLE:
+    if "desktop" not in task.capability_requirements or not _DESKTOP_AVAILABLE:
         return not task.cancel_requested
 
     paused = False
@@ -676,7 +794,7 @@ async def _wait_until_clear(task: BackgroundTask, config: Config, event_bus) -> 
 
 async def _wait_for_desktop(task: BackgroundTask) -> bool:
     """Acquire the canonical desktop lease, retaining the old fake-session seam for tests."""
-    if not _DESKTOP_AVAILABLE:
+    if "desktop" not in task.capability_requirements or not _DESKTOP_AVAILABLE:
         return True
     if desktop_session is not _REAL_DESKTOP_SESSION:
         while not desktop_session.acquire_desktop(task.id):
@@ -695,11 +813,87 @@ async def _wait_for_desktop(task: BackgroundTask) -> bool:
     return False
 
 
+async def _run_research_task(task: BackgroundTask, event_bus, voice=None) -> None:
+    """Run an explicit sustained research request on the background lane."""
+    from charlie.research.engine import ResearchEngine
+
+    async def on_progress(progress) -> None:
+        if task.cancel_requested:
+            return
+        task.progress_override = 1.0 if progress.stage == "done" else 0.0
+        task.current_step = 1 if progress.stage == "done" else 0
+        record = _record_task_lifecycle(task, status=CanonicalTaskStatus.RUNNING)
+        await _emit_task_event(event_bus, record, task=task)
+        await event_bus.emit(
+            EventType.RESEARCH_PROGRESS.value,
+            {
+                "task_id": task.id,
+                "turn_id": task.turn_id,
+                "session_id": task.session_id,
+                "stage": progress.stage,
+                "message": progress.message,
+                "current": progress.current,
+                "total": progress.total,
+                "mode": progress.mode.value if progress.mode else None,
+            },
+            meta=EventMeta(
+                source=EventSource.TASK,
+                task_id=task.id,
+                session_id=task.session_id,
+                turn_id=task.turn_id,
+            ),
+        )
+
+    engine = ResearchEngine(
+        task.brain.config,
+        progress=on_progress,
+        browser_fetch=task.brain._research_browser_fetch,
+    )
+    report = await engine.run(
+        task.research_query or task.text,
+        getattr(task.brain.config, "research_default_mode", "auto"),
+        cancel_event=task.cancel_event,
+    )
+    if task.cancel_requested or report.stop_reason == "cancelled":
+        task.progress_override = None
+        record = _record_task_lifecycle(task, status=CanonicalTaskStatus.CANCELLED)
+        await _emit_task_event(event_bus, record, task=task)
+        await _store_result(task, event_bus, report.legacy_text())
+        return
+
+    callback = getattr(task.brain, "on_research_result", None)
+    if callback is not None:
+        try:
+            _invoke_callback_with_identity(
+                callback,
+                report,
+                session_id=task.session_id,
+                task_id=task.id,
+                turn_id=task.turn_id,
+            )
+        except Exception:
+            logger.warning("Sustained research presentation callback failed", exc_info=True)
+    task.current_step = len(task.steps)
+    task.progress_override = None
+    record = _record_task_lifecycle(task, status=CanonicalTaskStatus.COMPLETED)
+    await _emit_task_event(event_bus, record, task=task)
+    await _announce(event_bus, voice, "success", f"Background task complete: {task.text}")
+    await _store_result(task, event_bus, report.legacy_text())
+
+
 async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
     config = task.brain.config
     step_outputs: List[str] = []
     try:
+        if task.research_query is not None:
+            await _run_research_task(task, event_bus, voice)
+            return
         while task.current_step < len(task.steps):
+            if task.cancel_requested:
+                record = _record_task_lifecycle(task, status=CanonicalTaskStatus.CANCELLED)
+                await _emit_task_event(event_bus, record, task=task)
+                await _store_result(task, event_bus, "\n".join(step_outputs))
+                return
             if task.current_step in task.flagged_steps:
                 await _announce(
                     event_bus, voice, "warning",
@@ -735,6 +929,12 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
                 elif _DESKTOP_AVAILABLE and desktop_session is not _REAL_DESKTOP_SESSION:
                     desktop_session.release_desktop(task.id)
 
+            if task.cancel_requested:
+                record = _record_task_lifecycle(task, status=CanonicalTaskStatus.CANCELLED)
+                await _emit_task_event(event_bus, record, task=task)
+                await _store_result(task, event_bus, "\n".join(step_outputs))
+                return
+
             task.current_step += 1
             record = _record_task_lifecycle(task)
             await _emit_task_event(event_bus, record, task=task)
@@ -745,10 +945,16 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
         await _store_result(task, event_bus, "\n".join(step_outputs))
     except Exception as e:
         logger.error("Background task %s failed at step %d: %s", task.id, task.current_step, e, exc_info=True)
+        if task.cancel_requested:
+            record = _record_task_lifecycle(task, status=CanonicalTaskStatus.CANCELLED)
+            await _emit_task_event(event_bus, record, task=task)
+            await _store_result(task, event_bus, "\n".join(step_outputs))
+            return
         task.error = str(e)
         record = _record_task_lifecycle(task, status=CanonicalTaskStatus.FAILED)
         await _emit_task_event(event_bus, record, task=task)
         await _announce(event_bus, voice, "error", "Background task failed. Check task details.")
         await _store_result(task, event_bus, "\n".join(step_outputs) or task.error or "")
     finally:
-        await task.brain.close()
+        if task.brain is not None:
+            await task.brain.close()

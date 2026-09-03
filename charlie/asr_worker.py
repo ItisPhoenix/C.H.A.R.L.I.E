@@ -133,6 +133,91 @@ def _worker_stage(
     return timestamp
 
 
+_ASR_WORKER_STAGE_MESSAGE = "asr_worker_stage"
+
+
+def _safe_queue_depth(queue_obj: Any) -> Optional[int]:
+    try:
+        return int(queue_obj.qsize())
+    except (AttributeError, NotImplementedError, OSError, ValueError):
+        return None
+
+
+def _worker_resource_fields(worker_diagnostics: Optional[VoiceDiagnostics]) -> dict[str, Any]:
+    """Return cached worker resource fields without sampling inference inline."""
+
+    if worker_diagnostics is None:
+        return {}
+    try:
+        snapshot = worker_diagnostics.resource_snapshot(asr_worker_pid=os.getpid())
+    except Exception:
+        return {}
+    return {
+        "asr_worker_rss_bytes": snapshot.get("asr_worker_rss_bytes"),
+    }
+
+
+def _emit_worker_stage(
+    output_queue: mp.Queue,
+    *,
+    stage: str,
+    utterance_id: Optional[str],
+    timestamp: float,
+    model_size: str,
+    device: str,
+    compute_type: str,
+    fields: dict[str, Any],
+    diagnostic_stages: list[dict[str, Any]],
+    diagnostics_enabled: bool,
+    worker_diagnostics: Optional[VoiceDiagnostics],
+    previous_timestamp: Optional[float],
+    onset_timestamp: Optional[float],
+    include_resource: bool = False,
+) -> Optional[float]:
+    """Send one worker boundary event while preserving legacy result tuples."""
+
+    if utterance_id is None:
+        return previous_timestamp
+
+    stage_fields = {
+        "worker_pid": os.getpid(),
+        "model": model_size,
+        "device": device,
+        "compute_type": compute_type,
+        "diagnostic_enabled": diagnostics_enabled,
+        **fields,
+    }
+    if include_resource:
+        stage_fields.update(_worker_resource_fields(worker_diagnostics))
+
+    if diagnostics_enabled:
+        previous_timestamp = _worker_stage(
+            diagnostic_stages,
+            stage,
+            timestamp,
+            previous_timestamp=previous_timestamp,
+            onset_timestamp=onset_timestamp,
+            utterance_id=utterance_id,
+            fields=stage_fields,
+        )
+
+    try:
+        output_queue.put(
+            {
+                "type": _ASR_WORKER_STAGE_MESSAGE,
+                "stage": stage,
+                "utterance_id": utterance_id,
+                "worker_pid": os.getpid(),
+                "monotonic_timestamp": timestamp,
+                "fields": stage_fields,
+            }
+        )
+    except Exception:
+        # Diagnostics must never turn a successful transcription into a failed one.
+        logger.warning("ASR worker stage delivery failed | stage=%s | utterance_id=%s", stage, utterance_id)
+    return previous_timestamp
+
+
 def _build_transcribe_kwargs(
     is_warmup: bool, flags: dict, default_language: str, asr_config: dict | None
 ) -> dict:
@@ -193,6 +278,7 @@ def asr_worker_process(
     """
     Worker process that handles Whisper transcription.
     """
+    compute_type = "float16" if device == "cuda" else "int8"
     logger.info(f"ASR Worker started. Loading model: {model_size} on {device}")
     startup_started = time.perf_counter()
     model_load_ms = None
@@ -205,7 +291,7 @@ def asr_worker_process(
             whisper = WhisperModel(
                 model_size,
                 device=device,
-                compute_type="float16" if device == "cuda" else "int8",
+                compute_type=compute_type,
                 local_files_only=True,
             )
         except Exception as e:
@@ -216,7 +302,7 @@ def asr_worker_process(
                 whisper = WhisperModel(
                     model_size,
                     device=device,
-                    compute_type="float16" if device == "cuda" else "int8",
+                    compute_type=compute_type,
                 )
             except Exception as e2:
                 logger.warning(
@@ -225,7 +311,7 @@ def asr_worker_process(
                 whisper = WhisperModel(
                     "large-v3",
                     device=device,
-                    compute_type="float16" if device == "cuda" else "int8",
+                    compute_type=compute_type,
                 )
 
         model_load_ms = (time.perf_counter() - startup_started) * 1000
@@ -288,6 +374,14 @@ def asr_worker_process(
     worker_diagnostics = None
 
     while True:
+        last_worker_stage = None
+        diagnostic_stages: list[dict[str, Any]] = []
+        onset_timestamp = None
+        previous_timestamp = None
+        diagnostics_enabled = False
+        utterance_id = None
+        transcribe_kwargs: dict[str, Any] = {}
+        worker_fields: dict[str, Any] = {}
         try:
             # Poll with timeout so KeyboardInterrupt can fire cleanly
             try:
@@ -327,9 +421,6 @@ def asr_worker_process(
             if diagnostics_enabled and worker_diagnostics is None:
                 worker_diagnostics = VoiceDiagnostics(enabled=True, wav_enabled=False)
                 worker_diagnostics.start_resource_sampler(asr_worker_pid=os.getpid())
-            diagnostic_stages: list[dict[str, Any]] = []
-            onset_timestamp = None
-            previous_timestamp = None
             if diagnostics_enabled:
                 try:
                     onset_timestamp = float(flags.get("voice_capture_onset_monotonic"))
@@ -339,72 +430,113 @@ def asr_worker_process(
                     previous_timestamp = float(flags.get("asr_enqueue_monotonic"))
                 except (TypeError, ValueError):
                     previous_timestamp = onset_timestamp
-                dequeue_timestamp = time.monotonic()
-                queue_depth = None
-                try:
-                    queue_depth = input_queue.qsize()
-                except (AttributeError, NotImplementedError, OSError):
-                    pass
-                previous_timestamp = _worker_stage(
-                    diagnostic_stages,
-                    "asr_worker_dequeue",
-                    dequeue_timestamp,
-                    previous_timestamp=previous_timestamp,
-                    onset_timestamp=onset_timestamp,
-                    utterance_id=utterance_id,
-                    fields={
-                        "worker_pid": os.getpid(),
-                        "queue_depth_after_dequeue": queue_depth,
-                        "dequeue_age_ms": (
-                            (dequeue_timestamp - float(flags["asr_enqueue_monotonic"])) * 1000
-                            if flags.get("asr_enqueue_monotonic") is not None
-                            else None
-                        ),
-                        "resource_snapshot": (
-                            worker_diagnostics.resource_snapshot(asr_worker_pid=os.getpid())
-                            if worker_diagnostics is not None
-                            else None
-                        ),
-                    },
-                )
 
+            dequeue_timestamp = time.monotonic()
             audio_data = np.frombuffer(audio_data_bytes, dtype=np.float32)
-
-            start_time = time.monotonic()
 
             transcribe_kwargs = _build_transcribe_kwargs(
                 is_warmup, flags, default_language, asr_config
             )
+            worker_fields = {
+                "audio_sample_count": int(audio_data.size),
+                "audio_duration_ms": audio_data.size / sample_rate * 1000 if sample_rate else None,
+                "queue_age_ms": (
+                    (dequeue_timestamp - float(flags["asr_enqueue_monotonic"])) * 1000
+                    if flags.get("asr_enqueue_monotonic") is not None
+                    else None
+                ),
+                "queue_depth_after_dequeue": _safe_queue_depth(input_queue),
+                "beam_size": transcribe_kwargs.get("beam_size"),
+                "best_of": transcribe_kwargs.get("best_of"),
+                "vad_filter": transcribe_kwargs.get("vad_filter"),
+            }
+            previous_timestamp = _emit_worker_stage(
+                output_queue,
+                stage="asr_worker_dequeued",
+                utterance_id=utterance_id,
+                timestamp=dequeue_timestamp,
+                model_size=model_size,
+                device=device,
+                compute_type=compute_type,
+                fields=worker_fields,
+                diagnostic_stages=diagnostic_stages,
+                diagnostics_enabled=diagnostics_enabled,
+                worker_diagnostics=worker_diagnostics,
+                previous_timestamp=previous_timestamp,
+                onset_timestamp=onset_timestamp,
+                include_resource=True,
+            )
+            last_worker_stage = "asr_worker_dequeued"
 
-            if diagnostics_enabled:
-                previous_timestamp = _worker_stage(
-                    diagnostic_stages,
-                    "asr_start",
-                    start_time,
-                    previous_timestamp=previous_timestamp,
-                    onset_timestamp=onset_timestamp,
-                    utterance_id=utterance_id,
-                    fields={
-                        "worker_pid": os.getpid(),
-                        "model": model_size,
-                        "sample_rate": sample_rate,
-                        "sample_count": int(audio_data.size),
-                        "audio_duration_ms": audio_data.size / sample_rate * 1000 if sample_rate else None,
-                        "beam_size": transcribe_kwargs.get("beam_size"),
-                        "best_of": transcribe_kwargs.get("best_of"),
-                        "condition_on_previous_text": transcribe_kwargs.get("condition_on_previous_text"),
-                        "vad_filter": transcribe_kwargs.get("vad_filter"),
-                        "vad_parameters": transcribe_kwargs.get("vad_parameters"),
-                        "resource_snapshot": (
-                            worker_diagnostics.resource_snapshot(asr_worker_pid=os.getpid())
-                            if worker_diagnostics is not None
-                            else None
-                        ),
-                    },
-                )
+            start_time = time.monotonic()
 
+            worker_fields.update(
+                {
+                    "sample_rate": sample_rate,
+                    "condition_on_previous_text": transcribe_kwargs.get("condition_on_previous_text"),
+                    "vad_parameters": transcribe_kwargs.get("vad_parameters"),
+                }
+            )
+
+            transcribe_enter_timestamp = time.monotonic()
+            previous_timestamp = _emit_worker_stage(
+                output_queue,
+                stage="asr_worker_transcribe_enter",
+                utterance_id=utterance_id,
+                timestamp=transcribe_enter_timestamp,
+                model_size=model_size,
+                device=device,
+                compute_type=compute_type,
+                fields=worker_fields,
+                diagnostic_stages=diagnostic_stages,
+                diagnostics_enabled=diagnostics_enabled,
+                worker_diagnostics=worker_diagnostics,
+                previous_timestamp=previous_timestamp,
+                onset_timestamp=onset_timestamp,
+                include_resource=True,
+            )
+            last_worker_stage = "asr_worker_transcribe_enter"
+
+            # Faster-Whisper returns a lazy segments iterator. This boundary
+            # proves transcribe() returned before iteration begins.
             segments, info = whisper.transcribe(audio_data, **transcribe_kwargs)
-            segments = _filter_hallucinated_segments(list(segments))
+            segments_iteration_begin_timestamp = time.monotonic()
+            previous_timestamp = _emit_worker_stage(
+                output_queue,
+                stage="asr_worker_segments_iteration_begin",
+                utterance_id=utterance_id,
+                timestamp=segments_iteration_begin_timestamp,
+                model_size=model_size,
+                device=device,
+                compute_type=compute_type,
+                fields=worker_fields,
+                diagnostic_stages=diagnostic_stages,
+                diagnostics_enabled=diagnostics_enabled,
+                worker_diagnostics=worker_diagnostics,
+                previous_timestamp=previous_timestamp,
+                onset_timestamp=onset_timestamp,
+                include_resource=True,
+            )
+            last_worker_stage = "asr_worker_segments_iteration_begin"
+
+            segments = list(segments)
+            previous_timestamp = _emit_worker_stage(
+                output_queue,
+                stage="asr_worker_segments_iteration_complete",
+                utterance_id=utterance_id,
+                timestamp=time.monotonic(),
+                model_size=model_size,
+                device=device,
+                compute_type=compute_type,
+                fields={**worker_fields, "raw_segment_count": len(segments)},
+                diagnostic_stages=diagnostic_stages,
+                diagnostics_enabled=diagnostics_enabled,
+                worker_diagnostics=worker_diagnostics,
+                previous_timestamp=previous_timestamp,
+                onset_timestamp=onset_timestamp,
+            )
+            last_worker_stage = "asr_worker_segments_iteration_complete"
+            segments = _filter_hallucinated_segments(segments)
 
             text = "".join([s.text for s in segments]).strip()
             latency_ms = (time.monotonic() - start_time) * 1000
@@ -419,25 +551,6 @@ def asr_worker_process(
             # Compatibility value retained for existing callers. This is the
             # model's language probability, not transcript confidence.
             legacy_confidence = info.language_probability
-            if diagnostics_enabled:
-                previous_timestamp = _worker_stage(
-                    diagnostic_stages,
-                    "asr_complete",
-                    time.monotonic(),
-                    previous_timestamp=previous_timestamp,
-                    onset_timestamp=onset_timestamp,
-                    utterance_id=utterance_id,
-                    fields={
-                        "worker_pid": os.getpid(),
-                        "quality": quality,
-                        "confidence_semantics": "language_probability",
-                        "resource_snapshot": (
-                            worker_diagnostics.resource_snapshot(asr_worker_pid=os.getpid())
-                            if worker_diagnostics is not None
-                            else None
-                        ),
-                    },
-                )
             logger.info(
                 f"pipeline_stage | stage=asr | latency_ms={latency_ms:.1f} | warmup={is_warmup}"
             )
@@ -450,16 +563,81 @@ def asr_worker_process(
                 "asr_quality": quality,
                 "capture": flags.get("capture", {}),
             }
+            previous_timestamp = _emit_worker_stage(
+                output_queue,
+                stage="asr_worker_result_built",
+                utterance_id=utterance_id,
+                timestamp=time.monotonic(),
+                model_size=model_size,
+                device=device,
+                compute_type=compute_type,
+                fields={
+                    **worker_fields,
+                    "accepted_segment_count": len(segments),
+                    "text_length": len(text),
+                    "asr_latency_ms": round(latency_ms, 3),
+                },
+                diagnostic_stages=diagnostic_stages,
+                diagnostics_enabled=diagnostics_enabled,
+                worker_diagnostics=worker_diagnostics,
+                previous_timestamp=previous_timestamp,
+                onset_timestamp=onset_timestamp,
+            )
+            last_worker_stage = "asr_worker_result_built"
             if diagnostics_enabled:
-                output_flags["diagnostic_stages"] = diagnostic_stages
+                output_flags["diagnostic_stages"] = list(diagnostic_stages)
                 output_flags["asr_complete_monotonic"] = previous_timestamp
             output_queue.put((text, legacy_confidence, output_flags))
+            _emit_worker_stage(
+                output_queue,
+                stage="asr_worker_result_enqueued",
+                utterance_id=utterance_id,
+                timestamp=time.monotonic(),
+                model_size=model_size,
+                device=device,
+                compute_type=compute_type,
+                fields={
+                    **worker_fields,
+                    "accepted_segment_count": len(segments),
+                    "text_length": len(text),
+                    "output_queue_depth_after_put": _safe_queue_depth(output_queue),
+                },
+                diagnostic_stages=diagnostic_stages,
+                diagnostics_enabled=diagnostics_enabled,
+                worker_diagnostics=worker_diagnostics,
+                previous_timestamp=previous_timestamp,
+                onset_timestamp=onset_timestamp,
+            )
 
         except KeyboardInterrupt:
             break
         except Exception as e:
+            if utterance_id is not None:
+                error_fields = {
+                    **worker_fields,
+                    "last_worker_stage": last_worker_stage,
+                    "exception_type": type(e).__name__,
+                    "exception_message": str(e)[:1000],
+                }
+                _emit_worker_stage(
+                    output_queue,
+                    stage="asr_worker_exception",
+                    utterance_id=utterance_id,
+                    timestamp=time.monotonic(),
+                    model_size=model_size,
+                    device=device,
+                    compute_type=compute_type,
+                    fields=error_fields,
+                    diagnostic_stages=diagnostic_stages,
+                    diagnostics_enabled=diagnostics_enabled,
+                    worker_diagnostics=worker_diagnostics,
+                    previous_timestamp=previous_timestamp,
+                    onset_timestamp=onset_timestamp,
+                    include_resource=True,
+                )
             logger.error(f"ASR Worker: Error during transcription: {e}")
             error_flags = {"is_warmup": False, "utterance_id": locals().get("utterance_id")}
+            error_flags["asr_worker_last_stage"] = last_worker_stage
             if locals().get("diagnostics_enabled"):
                 error_timestamp = time.monotonic()
                 _worker_stage(
