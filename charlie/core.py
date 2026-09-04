@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import time
 from functools import wraps
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -861,9 +862,15 @@ _RESULT_FAILURE_STATUSES = frozenset(
         ResultStatus.BLOCKED.value,
     }
 )
-_INTERACTIVE_VISION_TIMEOUT_S = 9.0
+FIRST_CONTENT_TIMEOUT_SECONDS = 12.0
+STREAM_IDLE_TIMEOUT_SECONDS = 3.0
+ABSOLUTE_VISION_TIMEOUT_SECONDS = 20.0
 _VISION_CLEANUP_TIMEOUT_S = 1.0
 _VISION_LEASE_TIMEOUT_S = 0.5
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 _FRESHNESS_REQUIREMENT_RE = re.compile(
     r"\b(?:today|latest|currently|current|now|right\s+now|live|recent|breaking|trending|news|"
@@ -1023,7 +1030,9 @@ def _should_queue_visual_screenshot(
 
 _VISION_SYSTEM_PROMPT = (
     "You are a vision assistant. Describe exactly what is visible in the image, "
-    "answering the user's question. Be concise and factual -- report only what you can see."
+    "answering the user's question. Be concise and factual -- report only what you can see. "
+    "Answer in 1-3 concise sentences. Prioritize the user's specific question. "
+    "Do not enumerate every visible detail unless the user asks for detail."
 )
 
 
@@ -1074,6 +1083,69 @@ async def _await_bounded_cleanup(awaitable, label: str) -> Optional[str]:
         logger.warning("Async cleanup failed | resource=%s | error=%s", label, type(exc).__name__)
         return type(exc).__name__
     return None
+
+
+def _vision_next_deadline(started_at: float, last_content_at: Optional[float]) -> Tuple[float, str]:
+    """Return next useful-content deadline and its internal classification."""
+    absolute_deadline = started_at + ABSOLUTE_VISION_TIMEOUT_SECONDS
+    if last_content_at is None:
+        candidate_deadline = started_at + FIRST_CONTENT_TIMEOUT_SECONDS
+        candidate_reason = "first_content_timeout"
+    else:
+        candidate_deadline = last_content_at + STREAM_IDLE_TIMEOUT_SECONDS
+        candidate_reason = "stream_idle_timeout"
+    if absolute_deadline <= candidate_deadline:
+        return absolute_deadline, "absolute_vision_timeout"
+    return candidate_deadline, candidate_reason
+
+
+def _mark_vision_timeout(state: FollowupStreamState, reason: str) -> None:
+    """Record truthful internal timeout state without changing user-facing text."""
+    state.timeout_reason = reason
+    state.completion_status = (
+        ResultStatus.PARTIALLY_COMPLETED.value if state.accumulated.strip() else "timeout"
+    )
+
+
+async def _stream_vision_content(
+    response: Any,
+    generation: int,
+    current_generation_getter: Callable[[], int],
+    state: FollowupStreamState,
+    started_at: float,
+) -> AsyncGenerator[str, None]:
+    """Read vision SSE content with first-content, idle, and absolute deadlines."""
+    parser = stream_followup_content(
+        response,
+        generation,
+        current_generation_getter,
+        state,
+        stop_on_finish_reason=True,
+    )
+    last_content_at: Optional[float] = None
+    try:
+        while True:
+            deadline, reason = _vision_next_deadline(started_at, last_content_at)
+            remaining = deadline - _monotonic()
+            if remaining <= 0:
+                _mark_vision_timeout(state, reason)
+                raise asyncio.TimeoutError(reason)
+            try:
+                content = await asyncio.wait_for(parser.__anext__(), timeout=remaining)
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError:
+                _mark_vision_timeout(state, reason)
+                raise asyncio.TimeoutError(reason)
+
+            now = _monotonic()
+            if now >= deadline:
+                _mark_vision_timeout(state, reason)
+                raise asyncio.TimeoutError(reason)
+            last_content_at = now
+            yield content
+    finally:
+        await _await_bounded_cleanup(parser.aclose(), "vision_sse_parser")
 
 
 # =====================================================================
@@ -2137,6 +2209,7 @@ class Brain:
             image_url, self._pending_vision_image_url = self._pending_vision_image_url, None
             if image_url:
                 payload["messages"] = _with_vision_image(messages, image_url)
+                payload["max_tokens"] = 160
                 # Vision is a one-shot describer -- strip tools so it can't emit a broken tool call.
                 payload.pop("tools", None)
                 payload.pop("tool_choice", None)
@@ -2171,6 +2244,7 @@ class Brain:
         payload = dict(payload, model=model)
         stream_filter = TextStreamFilter()
         is_vision_request = _payload_is_vision(payload)
+        vision_deadlines_enabled = is_vision_request and state.interactive_vision is not False
         if is_vision_request and diagnostic_trace is not None:
             diagnostic_trace.mark(
                 "vision_request_start",
@@ -2183,6 +2257,7 @@ class Brain:
         vision_lease = None
         vision_lease_acquired = False
         request_status = "completed"
+        vision_request_started_at: Optional[float] = None
         try:
             if is_vision_request:
                 from charlie.resource_locks import default_lease_manager
@@ -2201,7 +2276,20 @@ class Brain:
                 )
                 vision_lease_acquired = True
             stream_context = client.stream("POST", "chat/completions", json=payload)
-            response = await stream_context.__aenter__()
+            if vision_deadlines_enabled:
+                vision_request_started_at = _monotonic()
+                deadline, timeout_reason = _vision_next_deadline(vision_request_started_at, None)
+                remaining = deadline - _monotonic()
+                if remaining <= 0:
+                    _mark_vision_timeout(state, timeout_reason)
+                    raise asyncio.TimeoutError(timeout_reason)
+                try:
+                    response = await asyncio.wait_for(stream_context.__aenter__(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    _mark_vision_timeout(state, timeout_reason)
+                    raise asyncio.TimeoutError(timeout_reason)
+            else:
+                response = await stream_context.__aenter__()
             entered = True
             if is_vision_request and diagnostic_trace is not None:
                 diagnostic_trace.mark(
@@ -2215,12 +2303,25 @@ class Brain:
                     include_resource=True,
                 )
             response.raise_for_status()
-            async for content in stream_followup_content(
-                response,
-                generation,
-                lambda: self._chat_generation,
-                state,
-            ):
+            if vision_deadlines_enabled:
+                assert vision_request_started_at is not None
+            content_stream = (
+                _stream_vision_content(
+                    response,
+                    generation,
+                    lambda: self._chat_generation,
+                    state,
+                    vision_request_started_at,
+                )
+                if vision_deadlines_enabled
+                else stream_followup_content(
+                    response,
+                    generation,
+                    lambda: self._chat_generation,
+                    state,
+                )
+            )
+            async for content in content_stream:
                 if diagnostic_trace is not None:
                     diagnostic_trace.mark_once(
                         "first_token",
@@ -2264,6 +2365,8 @@ class Brain:
                     yield filtered
         except asyncio.CancelledError:
             request_status = "cancelled"
+            if is_vision_request and state.accumulated.strip():
+                state.completion_status = ResultStatus.PARTIALLY_COMPLETED.value
             if is_vision_request and diagnostic_trace is not None:
                 diagnostic_trace.mark(
                     "vision_http_cancel_requested",
@@ -2282,21 +2385,28 @@ class Brain:
                 )
             raise
         except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
-            request_status = "timeout"
+            if is_vision_request and state.accumulated.strip():
+                state.completion_status = ResultStatus.PARTIALLY_COMPLETED.value
+            request_status = (
+                state.completion_status
+                if is_vision_request and state.accumulated.strip()
+                else "timeout"
+            )
+            timeout_reason = state.timeout_reason or "http_timeout"
             if is_vision_request and diagnostic_trace is not None:
                 diagnostic_trace.mark(
                     "vision_http_cancel_requested",
-                    fields={"reason": "http_timeout", "error": type(exc).__name__},
+                    fields={"reason": timeout_reason, "error": type(exc).__name__},
                     include_resource=True,
                 )
                 diagnostic_trace.mark(
                     "client_cancel_requested",
-                    fields={"reason": "http_timeout", "error": type(exc).__name__},
+                    fields={"reason": timeout_reason, "error": type(exc).__name__},
                     include_resource=True,
                 )
                 diagnostic_trace.mark(
                     "vision_timeout_error",
-                    fields={"error": type(exc).__name__, "kind": "timeout"},
+                    fields={"error": type(exc).__name__, "kind": timeout_reason},
                     include_resource=True,
                 )
             raise
@@ -3747,7 +3857,7 @@ class Brain:
                 return
             followup_client, followup_model, is_vision = self._select_followup_route(followup_payload)
 
-            state = FollowupStreamState()
+            state = FollowupStreamState(interactive_vision=platform == "voice")
             try:
                 if diagnostic_trace is None:
                     followup_stream = self._stream_followup_once(
@@ -3778,13 +3888,25 @@ class Brain:
                 error_text = str(tool_exc) or repr(tool_exc)
                 logger.warning("%s follow-up LLM error: %s", "Vision" if is_vision else "Tool", error_text)
                 if payload_has_vision:
+                    if state.timeout_reason:
+                        self.cancel_chat()
                     partial_vision = TextStreamFilter()
                     partial_answer = partial_vision.push(state.accumulated) + partial_vision.flush()
                     partial_answer = strip_internal_reasoning(partial_answer).strip()
                     if partial_answer:
-                        logger.warning("Vision stream ended after a partial valid result; preserving it.")
+                        logger.warning(
+                            "Vision stream ended after partial output; preserving it | status=%s | reason=%s",
+                            state.completion_status,
+                            state.timeout_reason or "stream_error",
+                        )
                         last_vision_answer = partial_answer
+                        self.history.append({"role": "assistant", "content": partial_answer})
+                        max_messages = self._history_max_turns * 2
+                        if len(self.history) > max_messages:
+                            self.history = self.history[-max_messages:]
                         yield partial_answer
+                    elif state.timeout_reason:
+                        yield "I couldn't inspect the screen within the interactive voice time budget."
                     else:
                         yield "Local vision model is unavailable; I couldn't inspect the screen."
                     return
@@ -3892,49 +4014,16 @@ class Brain:
                 or _VISUAL_CONTENT_QUERY_RE.search(user_input)
             )
         )
-        timed_out = False
-        cleanup_error = None
         try:
-            if interactive_vision:
-                async with asyncio.timeout(_INTERACTIVE_VISION_TIMEOUT_S):
-                    async for chunk in stream:
-                        yield chunk
-            else:
-                async for chunk in stream:
-                    yield chunk
-        except (asyncio.TimeoutError, httpx.TimeoutException):
-            if not interactive_vision:
-                raise
-            timed_out = True
-            if diagnostic_trace is not None:
-                diagnostic_trace.mark(
-                    "vision_http_cancel_requested",
-                    fields={"reason": "interactive_vision_timeout"},
-                    include_resource=True,
-                )
-            self.cancel_chat()
-            if diagnostic_trace is not None:
-                diagnostic_trace.mark(
-                    "client_cancel_requested",
-                    fields={"reason": "interactive_vision_timeout"},
-                    include_resource=True,
-                )
-            logger.warning(
-                "Interactive voice vision timed out after %.1fs",
-                _INTERACTIVE_VISION_TIMEOUT_S,
-            )
+            async for chunk in stream:
+                yield chunk
         finally:
-            try:
-                cleanup_error = await _await_bounded_cleanup(stream.aclose(), "chat_stream_generator")
-            finally:
-                if interactive_vision:
-                    self._pending_vision_image_url = None
-                    set_pending_vision_image(None)
-                if decision_turn_id is not None:
-                    self.finalize_intent_decision(decision_turn_id)
-        if timed_out:
-            logger.info("vision_cleanup_complete | status=timeout | error=%s", cleanup_error)
-            yield "I couldn't inspect the screen within the interactive voice time budget."
+            await _await_bounded_cleanup(stream.aclose(), "chat_stream_generator")
+            if interactive_vision:
+                self._pending_vision_image_url = None
+                set_pending_vision_image(None)
+            if decision_turn_id is not None:
+                self.finalize_intent_decision(decision_turn_id)
 
     async def _extract_thread_update(self, user_input: str, response: str, session_id: str) -> None:
         """Fire-and-forget: ask the LLM whether this turn touches an open thread.

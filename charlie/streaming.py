@@ -113,11 +113,14 @@ class FollowupStreamState:
     / `.cancelled` once the generator has been fully consumed.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, interactive_vision: Optional[bool] = None) -> None:
         self.accumulated: str = ""
         self.tc_by_index: Dict[int, Dict[str, str]] = {}
         self.cancelled: bool = False
         self.finish_reason: Optional[str] = None
+        self.interactive_vision = interactive_vision
+        self.completion_status: str = "completed"
+        self.timeout_reason: Optional[str] = None
 
 
 async def stream_followup_content(
@@ -125,6 +128,7 @@ async def stream_followup_content(
     generation: int,
     current_generation_getter: Callable[[], int],
     state: FollowupStreamState,
+    stop_on_finish_reason: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Async-generator SSE parser for tool-followup completions.
 
@@ -133,7 +137,8 @@ async def stream_followup_content(
     TextStreamFilter and yield immediately -- required to keep the streamed
     reply's Time-To-First-Audio low. Tool-call deltas and the accumulated
     text land on `state`; `state.cancelled` is set if the chat generation
-    changes mid-stream (barge-in) instead of raising.
+    changes mid-stream (barge-in) instead of raising. Vision callers can
+    stop on an observable server finish reason without waiting for `[DONE]`.
     """
     async for line in response.aiter_lines():
         if current_generation_getter() != generation:
@@ -146,8 +151,9 @@ async def stream_followup_content(
         try:
             chunk = json.loads(line[6:])
             choice = chunk.get("choices", [{}])[0]
-            if choice.get("finish_reason") is not None:
-                state.finish_reason = str(choice["finish_reason"])
+            finish_reason = choice.get("finish_reason")
+            if finish_reason is not None:
+                state.finish_reason = str(finish_reason)
             delta = choice.get("delta", {})
             content = delta.get("content", "")
             if content:
@@ -155,6 +161,8 @@ async def stream_followup_content(
                 yield content
             for tc in delta.get("tool_calls", []):
                 _merge_tool_call_delta(tc, state.tc_by_index)
+            if stop_on_finish_reason and finish_reason is not None:
+                return
         except Exception:
             continue
 

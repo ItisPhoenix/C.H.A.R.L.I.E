@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 from typing import Optional, Tuple
 
@@ -7,6 +8,7 @@ import pytest
 from charlie import router
 from charlie.config import Config
 from charlie.core import Brain
+from charlie.streaming import FollowupStreamState
 
 
 def _detect_close_app(query: str) -> Optional[str]:
@@ -416,6 +418,93 @@ def test_close_app_keeps_per_app_truth_for_multiple_apps(monkeypatch):
         "taskkill /IM calc.exe /F",
         "taskkill /IM CalculatorApp.exe /F",
         "taskkill /IM notepad.exe /F",
+    ]
+
+
+def _vision_content_line(text):
+    return "data: " + json.dumps({"choices": [{"delta": {"content": text}}]})
+
+
+def _vision_payload():
+    return {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is visible?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,screen"}},
+                ],
+            }
+        ],
+        "stream": True,
+    }
+
+
+class _VisionClock:
+    def __init__(self):
+        self.value = 0.0
+
+    def __call__(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
+
+
+class _VisionResponse:
+    status_code = 200
+
+    def __init__(self, entries, clock=None):
+        self.entries = entries
+        self.clock = clock
+
+    def raise_for_status(self):
+        pass
+
+    async def aiter_lines(self):
+        for advance, line in self.entries:
+            if self.clock is not None:
+                self.clock.advance(advance)
+            if line is None:
+                await asyncio.Future()
+            else:
+                yield line
+
+
+class _VisionStreamContext:
+    def __init__(self, response):
+        self.response = response
+        self.close_count = 0
+
+    async def __aenter__(self):
+        return self.response
+
+    async def __aexit__(self, *_args):
+        self.close_count += 1
+        return False
+
+
+class _VisionClient:
+    def __init__(self, response):
+        self.context = _VisionStreamContext(response)
+
+    def stream(self, *_args, **_kwargs):
+        return self.context
+
+    async def aclose(self):
+        pass
+
+
+async def _collect_vision_followup(brain, client, state):
+    return [
+        chunk
+        async for chunk in brain._stream_followup_once(
+            client,
+            "vision-model",
+            _vision_payload(),
+            brain._chat_generation,
+            state,
+        )
     ]
 
 
@@ -1058,34 +1147,360 @@ async def test_visual_screenshot_queued_after_initial_payload_not_before(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_voice_vision_has_short_budget_but_non_voice_keeps_deep_budget(monkeypatch, brain_config):
+async def test_interactive_vision_completes_before_deadlines(monkeypatch, brain_config):
     from charlie import core
 
-    brain_config.vision_enabled = True
+    clock = _VisionClock()
+    monkeypatch.setattr(core, "_monotonic", clock)
+    response = _VisionResponse(
+        [
+            (0.0, _vision_content_line("vision answer")),
+            (0.0, 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+        ],
+        clock,
+    )
+    client = _VisionClient(response)
     brain = Brain(brain_config)
-    monkeypatch.setattr(core, "_INTERACTIVE_VISION_TIMEOUT_S", 0.01)
-    closed = []
-
-    async def hanging_stream(*_args, **_kwargs):
-        try:
-            await asyncio.sleep(1)
-            if False:
-                yield "unreachable"
-        finally:
-            closed.append(True)
-
-    brain._chat_stream_impl = hanging_stream
+    state = FollowupStreamState()
     try:
-        voice_chunks = [
+        chunks = await _collect_vision_followup(brain, client, state)
+    finally:
+        await brain.close()
+
+    assert chunks == ["vision answer"]
+    assert state.finish_reason == "stop"
+    assert state.completion_status == "completed"
+    assert state.timeout_reason is None
+    assert client.context.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_interactive_vision_server_eof_wins_over_elapsed_idle_deadline(monkeypatch, brain_config):
+    from charlie import core
+
+    clock = _VisionClock()
+    monkeypatch.setattr(core, "_monotonic", clock)
+    monkeypatch.setattr(core, "FIRST_CONTENT_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(core, "STREAM_IDLE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(core, "ABSOLUTE_VISION_TIMEOUT_SECONDS", 2.0)
+    client = _VisionClient(
+        _VisionResponse(
+            [
+                (0.0, _vision_content_line("vision answer")),
+                (0.2, "data: [DONE]"),
+            ],
+            clock,
+        )
+    )
+    brain = Brain(brain_config)
+    state = FollowupStreamState()
+    try:
+        chunks = await _collect_vision_followup(brain, client, state)
+    finally:
+        await brain.close()
+
+    assert chunks == ["vision answer"]
+    assert state.completion_status == "completed"
+    assert state.timeout_reason is None
+    assert client.context.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_interactive_vision_headers_without_content_hit_first_content_timeout(monkeypatch, brain_config):
+    from charlie import core
+
+    clock = _VisionClock()
+    monkeypatch.setattr(core, "_monotonic", clock)
+    monkeypatch.setattr(core, "FIRST_CONTENT_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(core, "STREAM_IDLE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(core, "ABSOLUTE_VISION_TIMEOUT_SECONDS", 0.02)
+    response = _VisionResponse(
+        [
+            (1.1, 'data: {"choices":[{"delta":{}}]}'),
+            (0.0, None),
+        ],
+        clock,
+    )
+    client = _VisionClient(response)
+    brain = Brain(brain_config)
+    state = FollowupStreamState()
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await _collect_vision_followup(brain, client, state)
+    finally:
+        await brain.close()
+
+    assert state.timeout_reason == "first_content_timeout"
+    assert state.completion_status == "timeout"
+    assert client.context.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_interactive_vision_active_stream_survives_old_nine_second_boundary(monkeypatch, brain_config):
+    from charlie import core
+
+    clock = _VisionClock()
+    monkeypatch.setattr(core, "_monotonic", clock)
+    monkeypatch.setattr(core, "FIRST_CONTENT_TIMEOUT_SECONDS", 12.0)
+    monkeypatch.setattr(core, "STREAM_IDLE_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(core, "ABSOLUTE_VISION_TIMEOUT_SECONDS", 20.0)
+    entries = [(0.0, _vision_content_line("chunk-0"))]
+    entries.extend((0.5, _vision_content_line(f"chunk-{index}")) for index in range(1, 21))
+    entries.extend(
+        [
+            (0.0, 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+            (0.0, "data: [DONE]"),
+        ]
+    )
+    client = _VisionClient(_VisionResponse(entries, clock))
+    brain = Brain(brain_config)
+    state = FollowupStreamState()
+    try:
+        chunks = await _collect_vision_followup(brain, client, state)
+    finally:
+        await brain.close()
+
+    assert len(chunks) == 21
+    assert "chunk-20" in chunks[-1]
+    assert state.completion_status == "completed"
+    assert client.context.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_interactive_vision_stream_idle_timeout_preserves_accumulated_state(monkeypatch, brain_config):
+    from charlie import core
+
+    clock = _VisionClock()
+    monkeypatch.setattr(core, "_monotonic", clock)
+    monkeypatch.setattr(core, "FIRST_CONTENT_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(core, "STREAM_IDLE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(core, "ABSOLUTE_VISION_TIMEOUT_SECONDS", 2.0)
+    client = _VisionClient(
+        _VisionResponse(
+            [
+                (0.0, _vision_content_line("partial")),
+                (0.0, None),
+            ],
+            clock,
+        )
+    )
+    brain = Brain(brain_config)
+    state = FollowupStreamState()
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await _collect_vision_followup(brain, client, state)
+    finally:
+        await brain.close()
+
+    assert state.accumulated == "partial"
+    assert state.timeout_reason == "stream_idle_timeout"
+    assert state.completion_status == "partially_completed"
+    assert client.context.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_interactive_vision_absolute_timeout_bounds_continuously_active_stream(monkeypatch, brain_config):
+    from charlie import core
+
+    clock = _VisionClock()
+    monkeypatch.setattr(core, "_monotonic", clock)
+    monkeypatch.setattr(core, "FIRST_CONTENT_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(core, "STREAM_IDLE_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(core, "ABSOLUTE_VISION_TIMEOUT_SECONDS", 1.0)
+    client = _VisionClient(
+        _VisionResponse(
+            [
+                (0.0, _vision_content_line("a")),
+                (0.4, _vision_content_line("b")),
+                (0.4, _vision_content_line("c")),
+                (0.4, _vision_content_line("d")),
+            ],
+            clock,
+        )
+    )
+    brain = Brain(brain_config)
+    state = FollowupStreamState()
+    chunks = []
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            async for chunk in brain._stream_followup_once(
+                client,
+                "vision-model",
+                _vision_payload(),
+                brain._chat_generation,
+                state,
+            ):
+                chunks.append(chunk)
+    finally:
+        await brain.close()
+
+    assert chunks == ["a", "b", "c"]
+    assert state.timeout_reason == "absolute_vision_timeout"
+    assert state.completion_status == "partially_completed"
+    assert client.context.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_interactive_vision_empty_metadata_does_not_reset_idle_timeout(monkeypatch, brain_config):
+    from charlie import core
+
+    clock = _VisionClock()
+    monkeypatch.setattr(core, "_monotonic", clock)
+    monkeypatch.setattr(core, "FIRST_CONTENT_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(core, "STREAM_IDLE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(core, "ABSOLUTE_VISION_TIMEOUT_SECONDS", 2.0)
+    client = _VisionClient(
+        _VisionResponse(
+            [
+                (0.0, _vision_content_line("first")),
+                (0.0, 'data: {"choices":[{"delta":{}}]}'),
+                (0.0, None),
+            ],
+            clock,
+        )
+    )
+    brain = Brain(brain_config)
+    state = FollowupStreamState()
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await _collect_vision_followup(brain, client, state)
+    finally:
+        await brain.close()
+
+    assert state.accumulated == "first"
+    assert state.timeout_reason == "stream_idle_timeout"
+    assert client.context.close_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial", [True, False])
+async def test_interactive_vision_timeout_surfaces_partial_or_existing_fallback(monkeypatch, partial):
+    from charlie import core
+    from charlie.tools import set_pending_vision_image
+
+    config = Config(
+        llm_url="http://cloud.example/v1",
+        llm_key="test-key",
+        llm_model="chat-model",
+        vision_enabled=True,
+        vision_llm_url="http://local-vision/v1",
+        vision_llm_key="vision-key",
+        vision_llm_model="vision-model",
+        desktop_control_enabled=True,
+        memory_graph_db=":memory:",
+        world_model_db_path=":memory:",
+    )
+    monkeypatch.setattr(core, "FIRST_CONTENT_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(core, "STREAM_IDLE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(core, "ABSOLUTE_VISION_TIMEOUT_SECONDS", 0.5)
+    response = _VisionResponse(
+        (
+            [(0.0, _vision_content_line("partial vision answer")), (0.0, None)]
+            if partial
+            else [(0.0, None)]
+        )
+    )
+    client = _VisionClient(response)
+    brain = Brain(config, register_panic_hotkey=False)
+    brain._vision_client = client
+    brain._vision_model = "vision-model"
+
+    async def empty_initial_completion(*_args, **_kwargs):
+        return "", []
+
+    def execute_tool(name, _arguments):
+        if name == "desktop_screenshot":
+            set_pending_vision_image("data:image/png;base64,screen")
+        return "Screen observation marks."
+
+    monkeypatch.setattr(brain, "_stream_completion", empty_initial_completion)
+    monkeypatch.setattr("charlie.tools.registry.execute_tool", execute_tool)
+    try:
+        result = [
             chunk
             async for chunk in brain.chat_stream(
                 "What do you see on my screen?",
                 platform="voice",
+                skip_pre_search=True,
             )
         ]
-        assert voice_chunks == ["I couldn't inspect the screen within the interactive voice time budget."]
-        assert closed == [True]
+    finally:
+        set_pending_vision_image(None)
+        await brain.close()
 
+    if partial:
+        assert result == ["partial vision answer"]
+        assert brain.history[-1] == {"role": "assistant", "content": "partial vision answer"}
+    else:
+        assert result == ["I couldn't inspect the screen within the interactive voice time budget."]
+        assert not any(message.get("role") == "assistant" for message in brain.history)
+    assert client.context.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_interactive_vision_payload_uses_160_tokens(monkeypatch):
+    from charlie import core
+
+    config = Config(
+        llm_url="https://cloud.example/v1",
+        llm_key="test-key",
+        llm_model="chat-model",
+        native_tool_calling=True,
+        vision_enabled=True,
+        vision_llm_url="",
+        vision_llm_key="",
+    )
+    brain = Brain(config, register_panic_hotkey=False)
+    brain._pending_vision_image_url = "data:image/png;base64,screen"
+    try:
+        payload = brain._build_payload([{"role": "user", "content": "What is visible?"}])
+    finally:
+        await brain.close()
+
+    assert payload["max_tokens"] == 160
+    assert payload["stream"] is True
+    assert payload["temperature"] == core._LLM_TEMPERATURE
+    assert "Answer in 1-3 concise sentences." in payload["messages"][0]["content"]
+    assert "Prioritize the user's specific question." in payload["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_browser_image_description_keeps_300_token_budget(brain_config):
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "browser description"}}]}
+
+    class BrowserVisionClient:
+        async def post(self, _path, **kwargs):
+            captured.update(kwargs)
+            return Response()
+
+        async def aclose(self):
+            pass
+
+    brain = Brain(brain_config, register_panic_hotkey=False)
+    brain._vision_client = BrowserVisionClient()
+    brain._vision_model = "vision-model"
+    try:
+        result = await brain._describe_image("data:image/png;base64,screen")
+    finally:
+        await brain.close()
+
+    assert result == "browser description"
+    assert captured["json"]["max_tokens"] == 300
+
+
+@pytest.mark.asyncio
+async def test_non_voice_vision_keeps_deep_budget(monkeypatch, brain_config):
+    brain_config.vision_enabled = True
+    brain = Brain(brain_config)
+
+    try:
         async def deep_stream(*_args, **_kwargs):
             await asyncio.sleep(0.02)
             yield "deep vision result"
@@ -1157,8 +1572,6 @@ async def test_overlapping_research_turn_is_cancelled_before_latest_voice_turn_r
 
 @pytest.mark.asyncio
 async def test_overlapping_vision_turn_closes_stale_stream_before_latest_turn(monkeypatch, brain_config):
-    from charlie import core
-
     brain_config.vision_enabled = True
     brain = Brain(brain_config)
     vision_started = asyncio.Event()
@@ -1175,7 +1588,6 @@ async def test_overlapping_vision_turn_closes_stale_stream_before_latest_turn(mo
     async def latest_vision(*_args, **_kwargs):
         yield "latest vision result"
 
-    monkeypatch.setattr(core, "_INTERACTIVE_VISION_TIMEOUT_S", 1.0)
     brain._chat_stream_impl = stale_vision
 
     async def collect():
