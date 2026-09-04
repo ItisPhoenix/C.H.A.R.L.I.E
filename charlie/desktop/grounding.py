@@ -18,9 +18,10 @@ from typing import Any, List, Tuple
 
 import httpx
 
+from charlie import resource_locks
 from charlie.desktop.uia import Element
 from charlie.desktop.vision import to_data_url
-from charlie.utils import build_auth_headers
+from charlie.utils import build_auth_headers, make_id
 
 logger = logging.getLogger("charlie.desktop.grounding")
 
@@ -36,7 +37,7 @@ _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 _TIMEOUT_SEC = 30.0
 
 
-def detect(png_bytes: bytes, config: Any) -> List[Element]:
+def detect(png_bytes: bytes, config: Any, *, owner_id: str | None = None) -> List[Element]:
     """Ask the configured vision LLM to find clickable regions in `png_bytes`.
 
     Returns provisional Elements (mark_id starting at 0) -- merge_ocr_elements
@@ -57,20 +58,30 @@ def detect(png_bytes: bytes, config: Any) -> List[Element]:
             ],
         }],
     }
-    try:
-        response = httpx.post(
-            f"{config.vision_llm_url.rstrip('/')}/chat/completions",
-            json=payload,
-            headers=build_auth_headers(config.vision_llm_key),
-            timeout=_TIMEOUT_SEC,
+    grounding_owner = owner_id or f"grounding:{make_id(8)}"
+    if not resource_locks.acquire("vision_gpu", grounding_owner):
+        logger.info(
+            "Grounding vision skipped: vision_gpu is held by %s",
+            resource_locks.current_owner("vision_gpu"),
         )
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-    except Exception:
-        logger.warning("Grounding vision call failed", exc_info=True)
         return []
-    width, height = _image_size(png_bytes)
-    return _parse_elements(content, width, height)
+    try:
+        try:
+            response = httpx.post(
+                f"{config.vision_llm_url.rstrip('/')}/chat/completions",
+                json=payload,
+                headers=build_auth_headers(config.vision_llm_key),
+                timeout=_TIMEOUT_SEC,
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+        except Exception:
+            logger.warning("Grounding vision call failed", exc_info=True)
+            return []
+        width, height = _image_size(png_bytes)
+        return _parse_elements(content, width, height)
+    finally:
+        resource_locks.release("vision_gpu", grounding_owner)
 
 
 def _clamp01000(value: float) -> float:

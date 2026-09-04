@@ -4,8 +4,14 @@ Reuses the existing VISION_LLM_URL/KEY/MODEL config -- no new dependency,
 no torch. Runs on any platform; the network call is always mocked.
 """
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock
 
+import httpx
+import pytest
+
+from charlie import resource_locks
 from charlie.config import Config
 from charlie.desktop import grounding
 from charlie.desktop.uia import Element
@@ -80,6 +86,68 @@ def test_detect_returns_empty_when_no_vision_url():
     assert grounding.detect(b"fake-png-bytes", config) == []
 
 
+def test_detect_requires_vision_gpu(monkeypatch):
+    config = _vision_config()
+    acquired = []
+
+    def deny(capability, owner_id):
+        acquired.append((capability, owner_id))
+        return False
+
+    mock_post = MagicMock()
+    mock_release = MagicMock()
+    monkeypatch.setattr(grounding.resource_locks, "acquire", deny)
+    monkeypatch.setattr(grounding.resource_locks, "release", mock_release)
+    monkeypatch.setattr(grounding.httpx, "post", mock_post)
+
+    assert grounding.detect(b"fake-png-bytes", config, owner_id="grounding-owner") == []
+    assert acquired == [("vision_gpu", "grounding-owner")]
+    mock_post.assert_not_called()
+    mock_release.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_detect_cannot_bypass_existing_vision_lease(monkeypatch):
+    config = _vision_config()
+    mock_post = MagicMock()
+    owner = "existing-vision-owner"
+    lease = await resource_locks.default_lease_manager.acquire("vision_gpu", owner)
+    monkeypatch.setattr(grounding.httpx, "post", mock_post)
+    try:
+        assert grounding.detect(b"fake-png-bytes", config, owner_id="grounding-owner") == []
+        assert resource_locks.current_owner("vision_gpu") == owner
+    finally:
+        await lease.release()
+    mock_post.assert_not_called()
+
+
+def test_different_grounding_owners_cannot_run_concurrently(monkeypatch):
+    config = _vision_config()
+    entered = threading.Event()
+    release_request = threading.Event()
+    calls = []
+    response = MagicMock()
+    response.json.return_value = {"choices": [{"message": {"content": "[]"}}]}
+    monkeypatch.setattr(grounding, "_image_size", lambda _png: (100, 100))
+
+    def post(*args, **kwargs):
+        calls.append((args, kwargs))
+        entered.set()
+        assert release_request.wait(timeout=2)
+        return response
+
+    monkeypatch.setattr(grounding.httpx, "post", post)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(grounding.detect, b"first", config, owner_id="owner-a")
+        assert entered.wait(timeout=1)
+        second = executor.submit(grounding.detect, b"second", config, owner_id="owner-b")
+        assert second.result(timeout=1) == []
+        release_request.set()
+        assert first.result(timeout=2) == []
+
+    assert len(calls) == 1
+
+
 def test_detect_calls_vision_endpoint_and_parses_response(monkeypatch):
     config = _vision_config()
 
@@ -91,7 +159,7 @@ def test_detect_calls_vision_endpoint_and_parses_response(monkeypatch):
     monkeypatch.setattr(grounding.httpx, "post", mock_post)
     monkeypatch.setattr(grounding, "_image_size", lambda png_bytes: (100, 100))
 
-    elements = grounding.detect(b"fake-png-bytes", config)
+    elements = grounding.detect(b"fake-png-bytes", config, owner_id="grounding-owner")
 
     assert len(elements) == 1
     assert elements[0].bounds == (0, 0, 100, 100)
@@ -99,14 +167,32 @@ def test_detect_calls_vision_endpoint_and_parses_response(monkeypatch):
     assert called_url == "http://localhost:1234/v1/chat/completions"
 
 
-def test_detect_returns_empty_on_request_failure(monkeypatch):
+def test_detect_releases_vision_gpu_after_normal_completion(monkeypatch):
+    config = _vision_config()
+    response = MagicMock()
+    response.json.return_value = {"choices": [{"message": {"content": "[]"}}]}
+    monkeypatch.setattr(grounding.httpx, "post", MagicMock(return_value=response))
+    monkeypatch.setattr(grounding, "_image_size", lambda _png: (100, 100))
+
+    assert grounding.detect(b"fake-png-bytes", config, owner_id="grounding-owner") == []
+    assert resource_locks.current_owner("vision_gpu") is None
+
+
+@pytest.mark.parametrize("failure", ["timeout", "error"])
+def test_detect_releases_vision_gpu_after_timeout_or_error(monkeypatch, failure):
     config = _vision_config()
 
-    def _raise(*a, **k):
+    def raise_failure(*args, **kwargs):
+        if failure == "timeout":
+            raise httpx.ReadTimeout(
+                "timed out",
+                request=httpx.Request("POST", "http://localhost:1234/v1/chat/completions"),
+            )
         raise OSError("connection refused")
 
-    monkeypatch.setattr(grounding.httpx, "post", _raise)
-    assert grounding.detect(b"fake-png-bytes", config) == []
+    monkeypatch.setattr(grounding.httpx, "post", raise_failure)
+    assert grounding.detect(b"fake-png-bytes", config, owner_id="grounding-owner") == []
+    assert resource_locks.current_owner("vision_gpu") is None
 
 
 def test_grounding_marks_skips_call_when_elements_plentiful(monkeypatch):
@@ -117,12 +203,41 @@ def test_grounding_marks_skips_call_when_elements_plentiful(monkeypatch):
         raise AssertionError("grounding.detect should not be called when elements are plentiful")
 
     monkeypatch.setattr("charlie.desktop.grounding.detect", _fail_if_called)
+
+    def fail_if_acquired(*args, **kwargs):
+        raise AssertionError("vision_gpu should not be acquired")
+
+    monkeypatch.setattr(
+        grounding.resource_locks,
+        "acquire",
+        fail_if_acquired,
+    )
     elements = [
         Element(mark_id=i, name="x", control_type="Button", bounds=(0, 0, 1, 1),
                 is_password=False, is_offscreen=False)
         for i in range(5)
     ]
     assert _grounding_marks(elements) == elements
+
+
+def test_grounding_marks_preserves_elements_when_grounding_unavailable(monkeypatch):
+    elements = [
+        Element(mark_id=1, name="OCR label", control_type="ocr_text", bounds=(0, 0, 1, 1),
+                is_password=False, is_offscreen=False)
+    ]
+    calls = []
+    monkeypatch.setattr(tools_config, "vision_enabled", True)
+    monkeypatch.setattr("charlie.desktop.ocr.OCR_AVAILABLE", True)
+    monkeypatch.setattr("charlie.desktop.ocr.capture", lambda: b"fake-png-bytes")
+
+    def return_unavailable(*args, **kwargs):
+        calls.append((args, kwargs))
+        return []
+
+    monkeypatch.setattr("charlie.desktop.grounding.detect", return_unavailable)
+
+    assert _grounding_marks(elements) == elements
+    assert len(calls) == 1
 
 
 def test_grounding_marks_skips_call_when_vision_disabled(monkeypatch):
