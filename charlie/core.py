@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from functools import wraps
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
@@ -36,6 +37,7 @@ from charlie.streaming import (
     parse_sse_stream,
     stream_followup_content,
 )
+from charlie.subsystem_health import HealthStatus
 from charlie.tools import ToolExecutionResult, pop_pending_vision_image, set_pending_vision_image
 from charlie.tools import registry as tool_registry
 from charlie.turn_contracts import (
@@ -1192,6 +1194,7 @@ class Brain:
         is_background: bool = False,
         memory_graph=None,
         memory_service=None,
+        on_llm_health: Optional[Callable[[HealthStatus, Optional[str]], None]] = None,
     ):
         if memory_service is not None and memory_graph is None:
             raise ValueError("memory_graph is required when memory_service is provided")
@@ -1210,6 +1213,7 @@ class Brain:
         self.on_tool_approval_request = on_tool_approval_request
         self.on_result_stored = on_result_stored
         self.on_research_result = on_research_result
+        self._on_llm_health = on_llm_health
         self._approval_timeout = approval_timeout
         llm_headers: Dict[str, str] = build_auth_headers(config.llm_key)
         self.client = httpx.AsyncClient(
@@ -1217,8 +1221,11 @@ class Brain:
             headers=llm_headers,
             timeout=60.0,
             trust_env=config.llm_trust_env,
-            event_hooks={"response": [_record_llm_response]},
+            event_hooks={"response": [self._record_llm_response]},
         )
+        self._primary_llm_lock = threading.Lock()
+        self._primary_llm_dispatch_generation: int = 0
+        self._primary_llm_applied_generation: int = 0
         self._chat_generation = 0
         # Per-turn halt; module-global _HALT is reserved for the physical panic hotkey.
         self._turn_halted: bool = False
@@ -2235,6 +2242,87 @@ class Brain:
                 self.memory_graph.close()
                 self._owns_memory_graph = False
 
+    def _allocate_primary_llm_generation(self) -> int:
+        """Allocate monotonically increasing attempt generation for health tracking."""
+        with self._primary_llm_lock:
+            self._primary_llm_dispatch_generation += 1
+            return self._primary_llm_dispatch_generation
+
+    def _notify_primary_llm_health(
+        self,
+        generation: int,
+        status: HealthStatus,
+        detail: Optional[str] = None,
+    ) -> bool:
+        """Apply health transition only if generation matches the newest dispatched primary attempt."""
+        with self._primary_llm_lock:
+            if generation < self._primary_llm_dispatch_generation:
+                logger.debug(
+                    "Suppressing stale primary LLM health update: gen=%s < dispatched=%s (status=%s)",
+                    generation,
+                    self._primary_llm_dispatch_generation,
+                    status.value,
+                )
+                return False
+            self._primary_llm_applied_generation = generation
+
+        if self._on_llm_health is not None:
+            try:
+                self._on_llm_health(status, detail)
+            except Exception:
+                logger.warning("Error in on_llm_health callback", exc_info=True)
+        return True
+
+    async def _record_llm_response(self, response: httpx.Response) -> None:
+        """httpx response event hook: records primary LLM call outcome and live health."""
+        success = response.status_code < 400
+        telemetry.record_llm_call(success=success)
+        generation = response.request.extensions.get("primary_llm_generation")
+        if generation is not None:
+            if success:
+                self._notify_primary_llm_health(generation, HealthStatus.RUNNING, "Ready")
+            else:
+                self._notify_primary_llm_health(generation, HealthStatus.DEGRADED, f"HTTP {response.status_code}")
+
+    async def probe_primary_llm(self, timeout: float = 5.0) -> bool:
+        """Validate the primary conversational LLM route using configured client, model, and auth."""
+        if not self.config.llm_url:
+            logger.warning("Primary LLM probe failed: LLM_URL not configured")
+            gen = self._allocate_primary_llm_generation()
+            self._notify_primary_llm_health(gen, HealthStatus.DEGRADED, "LLM URL not configured")
+            return False
+
+        payload = {
+            "model": self.config.llm_model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "temperature": 0.0,
+        }
+        gen = self._allocate_primary_llm_generation()
+        try:
+            response = await self.client.post(
+                "chat/completions",
+                json=payload,
+                timeout=timeout,
+                extensions={"primary_llm_generation": gen},
+            )
+            if response.status_code < 400:
+                logger.info("Primary LLM probe succeeded (model=%s)", self.config.llm_model)
+                return True
+            else:
+                logger.warning("Primary LLM probe failed with HTTP %s", response.status_code)
+                return False
+        except (httpx.TransportError, httpx.TimeoutException, asyncio.TimeoutError) as exc:
+            logger.warning("Primary LLM probe failed with network error: %s", type(exc).__name__)
+            telemetry.record_llm_call(success=False)
+            self._notify_primary_llm_health(gen, HealthStatus.DEGRADED, "Unreachable")
+            return False
+        except Exception as exc:
+            logger.warning("Primary LLM probe failed: %s", exc)
+            telemetry.record_llm_call(success=False)
+            self._notify_primary_llm_health(gen, HealthStatus.DEGRADED, "Probe failed")
+            return False
+
     async def _stream_completion(
         self,
         payload: Dict[str, Any],
@@ -2242,8 +2330,14 @@ class Brain:
         diagnostic_trace: Optional[Any] = None,
     ) -> tuple:
         """Stream a chat completion. Returns (accumulated_text, tool_calls_list)."""
+        llm_gen = self._allocate_primary_llm_generation()
         try:
-            async with self.client.stream("POST", "chat/completions", json=payload) as response:
+            async with self.client.stream(
+                "POST",
+                "chat/completions",
+                json=payload,
+                extensions={"primary_llm_generation": llm_gen},
+            ) as response:
                 response.raise_for_status()
                 accumulated, tc_by_index, cancelled = await parse_sse_stream(
                     response,
@@ -2261,6 +2355,7 @@ class Brain:
         except httpx.TransportError:
             # No response ever arrived, so the client's "response" event hook never fires -- record it here.
             telemetry.record_llm_call(success=False)
+            self._notify_primary_llm_health(llm_gen, HealthStatus.DEGRADED, "Transport error")
             raise
         if cancelled:
             logger.info("stale_chat_generation_output_suppressed | generation=%s", generation)
@@ -2344,6 +2439,12 @@ class Brain:
         vision_lease_acquired = False
         request_status = "completed"
         vision_request_started_at: Optional[float] = None
+        llm_gen: Optional[int] = None
+        extensions: Optional[dict] = None
+        if not is_vision_request and client is self.client:
+            llm_gen = self._allocate_primary_llm_generation()
+            extensions = {"primary_llm_generation": llm_gen}
+
         try:
             if is_vision_request:
                 from charlie.resource_locks import default_lease_manager
@@ -2361,7 +2462,7 @@ class Brain:
                     timeout=_VISION_LEASE_TIMEOUT_S,
                 )
                 vision_lease_acquired = True
-            stream_context = client.stream("POST", "chat/completions", json=payload)
+            stream_context = client.stream("POST", "chat/completions", json=payload, extensions=extensions)
             if vision_deadlines_enabled:
                 vision_request_started_at = _monotonic()
                 deadline, timeout_reason = _vision_next_deadline(vision_request_started_at, None)
@@ -2495,6 +2596,11 @@ class Brain:
                     fields={"error": type(exc).__name__, "kind": timeout_reason},
                     include_resource=True,
                 )
+            raise
+        except httpx.TransportError:
+            if not is_vision_request and client is self.client and llm_gen is not None:
+                telemetry.record_llm_call(success=False)
+                self._notify_primary_llm_health(llm_gen, HealthStatus.DEGRADED, "Transport error")
             raise
         except Exception as exc:
             request_status = "error"

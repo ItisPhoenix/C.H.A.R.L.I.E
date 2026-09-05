@@ -38,6 +38,7 @@
     "extension_operation_result": {"category": "result", "replay": false, "required": ["request_id", "operation", "kind", "name", "success", "tool_names"]},
     "background_task": {"category": "progress", "replay": true, "required": []},
     "task_snapshot": {"category": "snapshot", "replay": true, "required": []},
+    "runtime_telemetry": {"category": "snapshot", "replay": true, "required": []},
     "tool_snapshot": {"category": "snapshot", "replay": true, "required": ["tools"]},
     "mcp_snapshot": {"category": "snapshot", "replay": true, "required": ["servers"]},
     "mcp_operation_result": {"category": "result", "replay": false, "required": ["request_id", "operation", "success", "server_name"]},

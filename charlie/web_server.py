@@ -322,12 +322,15 @@ async def lifespan(app: FastAPI):
     # --- startup ---
     global event_bus, plugin_manager, _calendar_store, _audit_store
     global _tool_snapshot, _tool_snapshot_event, _mcp_snapshot, _mcp_snapshot_event
+    global _projected_telemetry, _projected_telemetry_event
     # This process never owns executable tool activation. Start each web
     # lifecycle without a stale projection and wait for main's replay.
     _tool_snapshot = None
     _tool_snapshot_event = None
     _mcp_snapshot = None
     _mcp_snapshot_event = None
+    _projected_telemetry = None
+    _projected_telemetry_event = None
 
     # EventBus resolves test-mode ports from the central pytest isolation setup;
     # production keeps its documented defaults.
@@ -529,6 +532,9 @@ async def _event_bridge():
         elif etype == "mcp_snapshot":
             if not _apply_mcp_snapshot_event(event):
                 logger.warning("Ignoring malformed main MCP snapshot")
+        elif etype == "runtime_telemetry":
+            if not _apply_runtime_telemetry_event(event):
+                logger.warning("Ignoring malformed main runtime telemetry snapshot")
         elif etype == "background_task":
             _apply_background_task_event(_background_tasks, event)
         elif etype == "system_status":
@@ -938,14 +944,21 @@ async def backup_export(data: dict | None = None):
 
 @app.get("/api/health")
 async def health():
-    from charlie import telemetry
-    last_success = telemetry.last_llm_success_timestamp()
     log_path = "logs/charlie.log"
     log_stat = os.stat(log_path) if os.path.exists(log_path) else None
+    if _projected_telemetry is not None:
+        last_success = _projected_telemetry.get("llm_last_success_timestamp")
+        last_success_ago = (time.time() - last_success) if last_success else None
+        llm_err_rate = _projected_telemetry.get("llm_error_rate")
+        tool_err_rate = _projected_telemetry.get("tool_error_rate")
+    else:
+        last_success_ago = None
+        llm_err_rate = None
+        tool_err_rate = None
     return {
-        "llm_last_success_seconds_ago": (time.time() - last_success) if last_success else None,
-        "llm_error_rate": telemetry.llm_error_rate(),
-        "tool_error_rate": telemetry.tool_error_rate(),
+        "llm_last_success_seconds_ago": last_success_ago,
+        "llm_error_rate": llm_err_rate,
+        "tool_error_rate": tool_err_rate,
         "approval_channel_connected": len(active_connections) > 0,
         "log_file_size_bytes": log_stat.st_size if log_stat else 0,
         "log_file_age_seconds": (time.time() - log_stat.st_mtime) if log_stat else None,
@@ -956,11 +969,18 @@ async def health():
 
 @app.get("/api/metrics")
 async def metrics():
-    from charlie import telemetry
+    if _projected_telemetry is not None:
+        return {
+            "status": "available",
+            "llm_error_rate": _projected_telemetry.get("llm_error_rate"),
+            "tool_error_rate": _projected_telemetry.get("tool_error_rate"),
+            "tool_error_rate_by_tool": _projected_telemetry.get("tool_error_rate_by_tool", {}),
+        }
     return {
-        "llm_error_rate": telemetry.llm_error_rate(),
-        "tool_error_rate": telemetry.tool_error_rate(),
-        "tool_error_rate_by_tool": telemetry.tool_error_rate_by_name(),
+        "status": "unavailable",
+        "llm_error_rate": None,
+        "tool_error_rate": None,
+        "tool_error_rate_by_tool": {},
     }
 
 
@@ -1097,6 +1117,8 @@ _tool_snapshot: dict[str, Any] | None = None
 _tool_snapshot_event: dict[str, Any] | None = None
 _mcp_snapshot: dict[str, Any] | None = None
 _mcp_snapshot_event: dict[str, Any] | None = None
+_projected_telemetry: dict[str, Any] | None = None
+_projected_telemetry_event: dict[str, Any] | None = None
 _active_frontend_session: str | None = None
 _audio_state: dict = {
     "muted": False,
@@ -1137,6 +1159,8 @@ def _initial_state_events() -> List[dict]:
         events.append(replay_event(_tool_snapshot_event, allow_unknown=True))
     if _mcp_snapshot_event is not None:
         events.append(replay_event(_mcp_snapshot_event, allow_unknown=True))
+    if _projected_telemetry_event is not None:
+        events.append(replay_event(_projected_telemetry_event, allow_unknown=True))
     events.extend(_pending_approvals.values())
     events.extend(_active_presentation_intents.values())
     return [replay_event(event, allow_unknown=True) for event in events]
@@ -1798,6 +1822,78 @@ def _apply_mcp_snapshot_event(event: dict) -> bool:
     return True
 
 
+def _project_runtime_telemetry_payload(payload: Any) -> dict[str, Any] | None:
+    """Validate and reduce main runtime telemetry snapshot to safe projection."""
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("authority") != "main_runtime":
+        return None
+
+    llm_rate = payload.get("llm_error_rate")
+    if llm_rate is not None and not isinstance(llm_rate, (int, float)):
+        return None
+    if isinstance(llm_rate, (int, float)) and not (0.0 <= float(llm_rate) <= 1.0):
+        return None
+
+    tool_rate = payload.get("tool_error_rate")
+    if tool_rate is not None and not isinstance(tool_rate, (int, float)):
+        return None
+    if isinstance(tool_rate, (int, float)) and not (0.0 <= float(tool_rate) <= 1.0):
+        return None
+
+    last_success = payload.get("llm_last_success_timestamp")
+    if last_success is not None and not isinstance(last_success, (int, float)):
+        return None
+
+    by_tool = payload.get("tool_error_rate_by_tool")
+    if by_tool is not None and not isinstance(by_tool, dict):
+        return None
+
+    unreliable = payload.get("unreliable_tools")
+    if unreliable is not None and not isinstance(unreliable, list):
+        return None
+
+    return {
+        "authority": "main_runtime",
+        "status": "available",
+        "llm_error_rate": float(llm_rate) if llm_rate is not None else None,
+        "tool_error_rate": float(tool_rate) if tool_rate is not None else None,
+        "llm_last_success_timestamp": float(last_success) if last_success is not None else None,
+        "last_llm_attempt_timestamp": (
+            payload.get("last_llm_attempt_timestamp") or payload.get("llm_last_attempt_timestamp")
+        ),
+        "last_llm_attempt_status": (
+            payload.get("last_llm_attempt_status") or payload.get("llm_last_attempt_status")
+        ),
+        "tool_stats": dict(by_tool) if by_tool else {},
+        "tool_error_rate_by_tool": dict(by_tool) if by_tool else {},
+        "unreliable_tools": list(unreliable) if unreliable else [],
+        "llm": dict(payload["llm"]) if isinstance(payload.get("llm"), dict) else {},
+        "tools": dict(payload["tools"]) if isinstance(payload.get("tools"), dict) else {},
+    }
+
+
+def _apply_runtime_telemetry_event(event: dict) -> bool:
+    """Atomically replace the web's IPC-derived runtime telemetry projection."""
+    if (
+        not isinstance(event, dict)
+        or event.get("type") != "runtime_telemetry"
+        or type(event.get("version")) is not int
+        or event.get("version") != CONTRACT_VERSION
+    ):
+        return False
+    projection = _project_runtime_telemetry_payload(event.get("payload"))
+    if projection is None:
+        return False
+
+    global _projected_telemetry, _projected_telemetry_event
+    _projected_telemetry = projection
+    stored_event = dict(event)
+    stored_event["payload"] = projection
+    _projected_telemetry_event = stored_event
+    return True
+
+
 @app.get("/api/audio")
 async def get_audio_state():
     """Return current speaker mute/volume state."""
@@ -1952,17 +2048,17 @@ async def get_developer_diagnostics():
         "detail": "Main-process lease state is unavailable over IPC.",
     }
 
-    telemetry_data = {}
-    try:
-        from charlie.telemetry import llm_error_rate, tool_error_rate, tool_error_rate_by_name, unreliable_tools
+    if _projected_telemetry is not None:
+        telemetry_data = dict(_projected_telemetry)
+    else:
         telemetry_data = {
-            "llm_error_rate": llm_error_rate(),
-            "tool_error_rate": tool_error_rate(),
-            "tool_stats": tool_error_rate_by_name(),
-            "unreliable_tools": unreliable_tools(),
+            "status": "unavailable",
+            "detail": "Main-process telemetry state is unavailable over IPC.",
+            "llm_error_rate": None,
+            "tool_error_rate": None,
+            "tool_stats": {},
+            "unreliable_tools": [],
         }
-    except Exception:
-        pass
 
     import threading
     system_metrics = {

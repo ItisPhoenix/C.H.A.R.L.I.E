@@ -53,6 +53,7 @@ class EventType(StrEnum):
     EXTENSION_OPERATION_RESULT = "extension_operation_result"
     BACKGROUND_TASK = "background_task"
     TASK_SNAPSHOT = "task_snapshot"
+    RUNTIME_TELEMETRY = "runtime_telemetry"
     TOOL_SNAPSHOT = "tool_snapshot"
     MCP_SNAPSHOT = "mcp_snapshot"
     MCP_OPERATION_RESULT = "mcp_operation_result"

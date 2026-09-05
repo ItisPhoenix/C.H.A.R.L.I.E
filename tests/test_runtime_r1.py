@@ -80,6 +80,7 @@ async def test_runtime_state_replay_publishes_health_and_canonical_task_snapshot
         "task_snapshot",
         "tool_snapshot",
         "mcp_snapshot",
+        "runtime_telemetry",
     ]
     assert bus.events[0][1] == health.snapshot()
     assert bus.events[1][1]["tasks"][0]["id"] == "task-r1"
@@ -109,6 +110,7 @@ async def test_runtime_state_request_dispatch_publishes_health_and_task_snapshot
         "task_snapshot",
         "tool_snapshot",
         "mcp_snapshot",
+        "runtime_telemetry",
     ]
     assert bus.events[1][1]["tasks"][0]["id"] == "task-dispatch"
 
@@ -135,6 +137,7 @@ async def test_runtime_state_request_uses_actual_command_consumer_dispatch_seam(
         "task_snapshot",
         "tool_snapshot",
         "mcp_snapshot",
+        "runtime_telemetry",
     ]
     assert bus.events[1][1]["tasks"][0]["id"] == "task-command-seam"
 
@@ -656,7 +659,7 @@ async def test_main_startup_failure_exits_nonzero_instead_of_succeeding(monkeypa
     import charlie.plugins as plugins_module
     import charlie.tools as tools_module
 
-    health = HealthRegistry(("brain", "plugins", "mcp", "web"))
+    health = HealthRegistry(("brain", "llm", "plugins", "mcp", "web"))
     monkeypatch.setattr(main, "_runtime_health", health)
     monkeypatch.setattr(main, "SessionStore", lambda path: _StartupFakeStore())
     monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: _StartupFakeStore())
@@ -694,7 +697,7 @@ async def test_brain_initialization_failure_exits_nonzero_and_marks_health(monke
     import charlie.plugins as plugins_module
     import charlie.tools as tools_module
 
-    health = HealthRegistry(("brain", "plugins", "mcp", "web"))
+    health = HealthRegistry(("brain", "llm", "plugins", "mcp", "web"))
     closed = []
 
     class Store:

@@ -351,6 +351,7 @@ def _task_workspace_admitted(task: Any) -> bool:
 _runtime_health = HealthRegistry(
     (
         "brain",
+        "llm",
         "memory",
         "plugins",
         "mcp",
@@ -655,12 +656,47 @@ async def _publish_mcp_snapshot(
     )
 
 
+async def _publish_runtime_telemetry(bus: Optional[EventBus] = None) -> None:
+    """Publish current main-owned runtime telemetry snapshot over IPC."""
+    target_bus = bus or _main_event_bus
+    if target_bus is None:
+        return
+    from charlie import telemetry
+
+    await target_bus.emit(
+        EventType.RUNTIME_TELEMETRY.value,
+        telemetry.snapshot(),
+        meta=EventMeta(
+            source=EventSource.RUNTIME,
+            rationale="authoritative main-runtime telemetry snapshot",
+        ),
+    )
+
+
+def _on_telemetry_updated() -> None:
+    """Invoked when LLM or tool metrics change in main process."""
+    bus = _main_event_bus
+    if bus is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_publish_runtime_telemetry(bus))
+    except RuntimeError:
+        pass
+
+
+from charlie import telemetry as _main_telemetry
+
+_main_telemetry.set_telemetry_listener(_on_telemetry_updated)
+
+
 async def _publish_runtime_state(bus: Optional[EventBus] = None, mcp_client: Any = None) -> None:
     """Replay public operational state owned by this main process."""
     await _publish_subsystem_health(bus)
     await _publish_task_snapshot(bus)
     await _publish_tool_snapshot(bus)
     await _publish_mcp_snapshot(bus, mcp_client)
+    await _publish_runtime_telemetry(bus)
 
 
 async def _dispatch_web_command(
@@ -1183,6 +1219,25 @@ async def _dispatch_mcp_operation(
 def _set_subsystem_health(name: str, status: HealthStatus, public_detail: Optional[str] = None) -> None:
     """Record one safe public subsystem transition."""
     _runtime_health.set(name, status, public_detail=public_detail)
+
+
+def _on_brain_llm_health(status: HealthStatus, detail: Optional[str] = None) -> None:
+    """Callback when Brain's primary conversational LLM health transitions."""
+    _set_subsystem_health("llm", status, public_detail=detail)
+    if status == HealthStatus.RUNNING:
+        _set_subsystem_health("brain", HealthStatus.RUNNING, "Ready")
+    elif status == HealthStatus.DEGRADED:
+        _set_subsystem_health("brain", HealthStatus.DEGRADED, "Primary LLM unavailable")
+    elif status == HealthStatus.STARTING:
+        _set_subsystem_health("brain", HealthStatus.STARTING, "Starting")
+
+    bus = _main_event_bus
+    if bus is not None:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_publish_subsystem_health(bus))
+        except RuntimeError:
+            pass
 
 
 def _companion_dependency_status() -> tuple[bool, Optional[str]]:
@@ -2256,9 +2311,10 @@ async def main():
                     ),
                     loop,
                 )
-
         _emit_events()
 
+    _set_subsystem_health("llm", HealthStatus.STARTING, "Starting")
+    _set_subsystem_health("brain", HealthStatus.STARTING, "Starting")
     try:
         brain = Brain(
             config,
@@ -2275,10 +2331,11 @@ async def main():
             on_tool_approval_request=on_tool_approval_request,
             on_result_stored=on_result_stored,
             on_research_result=on_research_result,
+            on_llm_health=_on_brain_llm_health,
         )
-        _set_subsystem_health("brain", HealthStatus.RUNNING)
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")
+        _set_subsystem_health("llm", HealthStatus.DEGRADED, "Brain initialization failed")
         _set_subsystem_health("brain", HealthStatus.DEGRADED, "Brain initialization failed")
         for resource in (memory_graph, audit_store, store):
             try:
@@ -2287,10 +2344,19 @@ async def main():
                 logger.warning("Failed to clean up Brain startup resource", exc_info=True)
         raise RuntimeError("Charlie Brain initialization failed") from e
 
+    # Bounded startup probe for primary conversational LLM.
+    # Construction alone does NOT cause brain = RUNNING.
+    try:
+        llm_ok = await brain.probe_primary_llm(timeout=5.0)
+        if not llm_ok:
+            logger.warning("Primary LLM unavailable at startup; runtime entering degraded mode")
+    except Exception as probe_err:
+        logger.warning("Primary LLM startup probe encountered error: %s", probe_err)
+        _set_subsystem_health("llm", HealthStatus.DEGRADED, "Probe error")
+        _set_subsystem_health("brain", HealthStatus.DEGRADED, "Primary LLM unavailable")
+
     # Canonical memory facade wiring stays owned by main's composition root.
     _wire_memory_service(memory_service)
-
-    # Wire the plugin system into the tool registry (no-op unless enabled).
     # The SAME registry the LLM calls, so when PLUGINS_ENABLED=true the
     # plugin_* tools appear alongside the built-in tools and are gated by
     # the flag off by default.
