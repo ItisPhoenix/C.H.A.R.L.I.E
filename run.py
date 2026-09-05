@@ -291,7 +291,7 @@ def check_and_build_frontend(project_root: Path | None = None) -> None:
             shutil.rmtree(staging_dir)
 
 
-def run_full():
+def run_full() -> int:
     """Run voice pipeline + React HUD bridge (the default)."""
     check_and_build_frontend()
 
@@ -304,12 +304,12 @@ def run_full():
     from main import main
 
     try:
-        asyncio.run(main())
+        return asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        return 0
 
 
-def run_web_only():
+def run_web_only() -> int:
     """Run just the web server -- no voice hardware needed."""
     check_and_build_frontend()
 
@@ -369,9 +369,14 @@ def run_web_only():
         server = uvicorn.Server(server_config)
         _server_ref.append(server)
         server.run()
+        return 0
+    except KeyboardInterrupt:
+        return 0
+    except Exception as exc:
+        print(f"Web server failed: {exc}", file=sys.stderr)
+        return 1
     finally:
         _cancel_force_exit()
-        os._exit(0)
 
 
 if __name__ == "__main__":
@@ -383,7 +388,5 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.web_only:
-        run_web_only()
-    else:
-        run_full()
+    exit_code = run_web_only() if args.web_only else run_full()
+    sys.exit(exit_code)

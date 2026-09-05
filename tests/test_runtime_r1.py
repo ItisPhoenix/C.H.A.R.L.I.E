@@ -676,18 +676,8 @@ async def test_main_startup_failure_exits_nonzero_instead_of_succeeding(monkeypa
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("synthetic web ownership failure")),
     )
 
-    exit_codes = []
-
-    def fake_exit(code):
-        exit_codes.append(code)
-        raise _StartupExitSentinel
-
-    monkeypatch.setattr(main.os, "_exit", fake_exit)
-
-    with pytest.raises(_StartupExitSentinel):
-        await main.main()
-
-    assert exit_codes == [1]
+    exit_code = await main.main()
+    assert exit_code == 1
     assert "Charlie runtime startup failed before voice initialization" in caplog.text
 
 
@@ -719,9 +709,8 @@ async def test_brain_initialization_failure_exits_nonzero_and_marks_health(monke
     monkeypatch.setattr(plugins_module, "PluginManager", lambda: object())
     monkeypatch.setattr(main.config, "mcp_enabled", False)
 
-    with pytest.raises(RuntimeError, match="Charlie Brain initialization failed"):
-        await main.main()
-
+    exit_code = await main.main()
+    assert exit_code == 1
     assert set(closed) == {"session", "audit", "graph"}
     assert health.snapshot()["brain"] == {"status": "degraded", "detail": "Brain initialization failed"}
     assert "Failed to initialize Brain" in caplog.text
@@ -749,8 +738,8 @@ async def test_required_storage_failure_propagates_and_closes_open_stores(monkey
     monkeypatch.setattr(main, "SessionStore", lambda path: create("session"))
     monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: create("audit"))
     monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: create("memory"))
-    with pytest.raises(RuntimeError):
-        await main.main()
+    exit_code = await main.main()
+    assert exit_code == 1
     assert closed == {"session": [], "audit": ["session"], "memory": ["audit", "session"]}[backend]
 
 
