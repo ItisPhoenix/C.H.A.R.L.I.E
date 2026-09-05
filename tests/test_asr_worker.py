@@ -8,10 +8,16 @@ Whisper anchored onto that prompt and echoed it back verbatim as a
 "transcription" on weak/ambiguous audio instead of transcribing real speech.
 """
 
+import json
+import queue
+import sys
 import time
 from argparse import Namespace
 from dataclasses import dataclass
 from types import SimpleNamespace
+
+import numpy as np
+import pytest
 
 import charlie.asr_worker as asr_worker
 from charlie.asr_worker import _build_transcribe_kwargs, _filter_hallucinated_segments
@@ -413,6 +419,196 @@ def test_worker_emits_exception_boundary_before_empty_error_result(monkeypatch):
     error_result = next(message for message in output_queue.messages if isinstance(message, tuple))
     assert error_result[2]["asr_error"] == "RuntimeError"
     assert error_result[2]["asr_worker_last_stage"] == "asr_worker_transcribe_enter"
+
+
+def test_native_probe_wait_ready_uses_startup_deadline(monkeypatch):
+    from tools import voice_asr_native_probe as probe_module
+
+    class EmptyOutputQueue:
+        def __init__(self):
+            self.timeouts = []
+
+        def get(self, timeout):
+            self.timeouts.append(timeout)
+            raise queue.Empty
+
+    probe = probe_module.NativeAsrWorkerProbe.__new__(probe_module.NativeAsrWorkerProbe)
+    probe.output_queue = EmptyOutputQueue()
+    probe.process = SimpleNamespace(pid=4242)
+    monkeypatch.setattr(probe_module.time, "monotonic", lambda: 100.0)
+
+    with pytest.raises(probe_module._AsrWorkerStartupTimeout) as caught:
+        probe.wait_ready()
+
+    assert probe.output_queue.timeouts == [probe_module._ASR_STARTUP_TIMEOUT_S]
+    assert caught.value.worker_pid == 4242
+    assert caught.value.last_stage is None
+
+
+def test_native_probe_replay_deadline_starts_after_submission(monkeypatch):
+    from tools import voice_asr_native_probe as probe_module
+
+    class InputQueue:
+        def __init__(self):
+            self.submitted = []
+
+        def put(self, payload):
+            self.submitted.append(payload)
+
+    class EmptyOutputQueue:
+        def __init__(self):
+            self.timeouts = []
+
+        def get(self, timeout):
+            self.timeouts.append(timeout)
+            raise queue.Empty
+
+    probe = probe_module.NativeAsrWorkerProbe.__new__(probe_module.NativeAsrWorkerProbe)
+    probe.input_queue = InputQueue()
+    probe.output_queue = EmptyOutputQueue()
+    probe.process = SimpleNamespace(pid=4343)
+    clock = iter((10.0, 11.0, 100.0, 100.0))
+    monkeypatch.setattr(probe_module.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(probe_module._AsrReplayTimeout) as caught:
+        probe.transcribe(np.zeros(1600, dtype=np.float32), 16000, "pre-vision", 1)
+
+    assert len(probe.input_queue.submitted) == 1
+    assert probe.output_queue.timeouts == [probe_module._ASR_REPLAY_TIMEOUT_S]
+    assert caught.value.worker_pid == 4343
+    assert caught.value.last_stage is None
+
+
+def test_native_probe_main_prints_replay_timeout_json(monkeypatch, capsys, tmp_path):
+    from tools import voice_asr_native_probe as probe_module
+
+    wav = tmp_path / "probe.wav"
+    wav.touch()
+
+    class FakeDiagnostics:
+        def __init__(self, **_kwargs):
+            pass
+
+        def stop(self):
+            pass
+
+    class FakeWorker:
+        def __init__(self, _diagnostics):
+            self.process = SimpleNamespace(pid=4545)
+
+        def wait_ready(self):
+            pass
+
+        def transcribe(self, _audio, _sample_rate, phase, ordinal):
+            raise probe_module._AsrReplayTimeout(
+                phase=phase,
+                ordinal=ordinal,
+                utterance_id="pre-vision-1-test",
+                worker_pid=4545,
+                last_stage="asr_worker_segments_iteration_begin",
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(probe_module, "VoiceDiagnostics", FakeDiagnostics)
+    monkeypatch.setattr(probe_module, "NativeAsrWorkerProbe", FakeWorker)
+    monkeypatch.setattr(
+        probe_module,
+        "_read_wav",
+        lambda _path: (np.zeros(1600, dtype=np.float32), 16000),
+    )
+    monkeypatch.setattr(sys, "argv", ["voice_asr_native_probe.py", "--wav", str(wav)])
+
+    assert probe_module.main() == 1
+    output = json.loads(capsys.readouterr().out.strip())
+    assert output == {
+        "event": "asr_replay_timeout",
+        "last_stage": "asr_worker_segments_iteration_begin",
+        "ordinal": 1,
+        "phase": "pre-vision",
+        "timeout_s": 15.0,
+        "utterance_id": "pre-vision-1-test",
+        "worker_pid": 4545,
+    }
+
+
+def test_native_probe_main_prints_startup_timeout_json(monkeypatch, capsys, tmp_path):
+    from tools import voice_asr_native_probe as probe_module
+
+    wav = tmp_path / "probe.wav"
+    wav.touch()
+
+    class FakeDiagnostics:
+        def __init__(self, **_kwargs):
+            pass
+
+        def stop(self):
+            pass
+
+    class FakeWorker:
+        def __init__(self, _diagnostics):
+            self.process = SimpleNamespace(pid=4646)
+
+        def wait_ready(self):
+            raise probe_module._AsrWorkerStartupTimeout(
+                worker_pid=4646,
+                last_stage="asr_worker_model_load",
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(probe_module, "VoiceDiagnostics", FakeDiagnostics)
+    monkeypatch.setattr(probe_module, "NativeAsrWorkerProbe", FakeWorker)
+    monkeypatch.setattr(
+        probe_module,
+        "_read_wav",
+        lambda _path: (np.zeros(1600, dtype=np.float32), 16000),
+    )
+    monkeypatch.setattr(sys, "argv", ["voice_asr_native_probe.py", "--wav", str(wav)])
+
+    assert probe_module.main() == 1
+    output = json.loads(capsys.readouterr().out.strip())
+    assert output == {
+        "event": "asr_worker_startup_timeout",
+        "last_stage": "asr_worker_model_load",
+        "timeout_s": 60.0,
+        "worker_pid": 4646,
+    }
+
+
+def test_native_probe_post_vision_delay_parser_and_snapshots(monkeypatch):
+    from tools import voice_asr_native_probe as probe_module
+
+    events = []
+    sleeps = []
+
+    class FakeDiagnostics:
+        def resource_snapshot(self, **kwargs):
+            return {"asr_worker_pid": kwargs["asr_worker_pid"], "gpu_used_vram_mb": 270}
+
+    monkeypatch.setattr(
+        probe_module,
+        "_emit",
+        lambda event, **fields: events.append({"event": event, **fields}),
+    )
+    monkeypatch.setattr(probe_module.time, "sleep", sleeps.append)
+    args = probe_module.build_parser().parse_args(
+        ["--wav", "existing.wav", "--post-vision-delay", "2.5"]
+    )
+
+    probe_module._run_post_vision_delay(FakeDiagnostics(), 4747, args.post_vision_delay)
+
+    assert args.post_vision_delay == 2.5
+    assert sleeps == [2.5]
+    assert [event["phase"] for event in events] == [
+        "post_vision_delay_start",
+        "post_vision_asr_before_replay",
+    ]
+    assert all(event["event"] == "resource_snapshot" for event in events)
+    assert all(event["worker_pid"] == 4747 for event in events)
+    assert all(event["snapshot"]["asr_worker_pid"] == 4747 for event in events)
 
 
 def test_worker_keeps_legacy_two_tuple_payload_compatible(monkeypatch):

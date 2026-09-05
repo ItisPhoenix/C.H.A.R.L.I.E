@@ -1,6 +1,7 @@
 """Tests for Charlie Doctor & Self-Healing."""
 
 import tempfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,53 @@ from charlie.resource_locks import CapabilityLeaseManager
 from charlie.runtime_introspector import RuntimeIntrospector
 from charlie.subsystem_health import HealthRegistry, HealthStatus
 from charlie.task_journal import TaskJournal
+
+
+@pytest.mark.parametrize("check", ["event_bus", "vision_ocr", "terminal_subsystem", "subsystem_health"])
+def test_doctor_never_reports_missing_runtime_evidence_as_ok(check):
+    inspector = SimpleNamespace(get_health_info=lambda: {}, get_subsystem_info=lambda: {})
+    result = getattr(CharlieDoctor(introspector=inspector), f"_check_{check}")()
+    assert result.status != CheckStatus.OK
+
+
+@pytest.mark.parametrize("state", ["starting", "stopped", "degraded"])
+def test_doctor_reports_nonrunning_subsystem_health(state):
+    inspector = SimpleNamespace(get_health_info=lambda: {"voice": {"status": state}})
+    result = CharlieDoctor(introspector=inspector)._check_subsystem_health()
+    assert result.status == CheckStatus.WARNING
+
+
+def test_doctor_reports_its_tripped_repair_circuit():
+    doctor = CharlieDoctor()
+    for _ in range(3):
+        doctor.record_repair_attempt("repair_mcp_reconnect", success=False)
+    result = doctor._check_recovery_state()
+    assert result.status == CheckStatus.WARNING
+    assert "repair_mcp_reconnect" in result.evidence
+
+
+def test_stale_lease_repair_preserves_live_and_non_task_owners(mock_doctor_env):
+    from charlie.resource_locks import acquire, current_owner, release
+
+    doctor, _, _, _, journal = mock_doctor_env
+    live = journal.create_task("Active work")
+    journal.transition(live.id, "running")
+    owners = {"desktop": "orphan", "browser": live.id, "terminal": "session_live", "keyboard": "user"}
+    try:
+        for capability, owner in owners.items():
+            assert acquire(capability, owner)
+        assert doctor.execute_repair("repair_stale_leases")["success"]
+        assert current_owner("desktop") is None
+        for capability in ("browser", "terminal", "keyboard"):
+            assert current_owner(capability) == owners[capability]
+    finally:
+        for capability, owner in owners.items():
+            release(capability, owner)
+
+
+def test_mcp_repair_without_runtime_client_cannot_succeed():
+    inspector = SimpleNamespace(_get_mcp_client=lambda: None)
+    assert not CharlieDoctor(introspector=inspector).execute_repair("repair_mcp_reconnect")["success"]
 
 
 @pytest.fixture

@@ -54,6 +54,10 @@ from charlie.doctor import CharlieDoctor
 logger = logging.getLogger("charlie.web_server")
 logger.addFilter(SensitiveDataFilter())
 
+from run import _git_build_identity
+
+_SOURCE_IDENTITY, _SOURCE_DIRTY = _git_build_identity(Path(__file__).resolve().parent.parent)
+
 _memory_service = MemoryService()
 _privacy_service = PrivacyService()
 _code_index = CodeIndex()
@@ -761,7 +765,8 @@ async def status():
         "uptime_seconds": int(time.time() - _START_TIME),
         "pid": os.getpid(),
         "frontend_build": frontend_build,
-        "source_identity": (frontend_build or {}).get("git_sha"),
+        "source_identity": _SOURCE_IDENTITY,
+        "source_dirty": _SOURCE_DIRTY,
         "frontend_authority": (frontend_build or {}).get("authority"),
         "frontend_dist": str(_FRONTEND_DIST),
         "desktop_control_enabled": config.desktop_control_enabled,

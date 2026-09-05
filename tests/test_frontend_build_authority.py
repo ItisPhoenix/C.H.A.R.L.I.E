@@ -299,3 +299,17 @@ def test_status_exposes_safe_frontend_identity(fixture_project, monkeypatch):
     assert result["pid"] > 0
     assert result["frontend_build"]["build_id"] == "test"
     assert result["source_identity"] == run._git_build_identity(frontend.parent)[0]
+
+
+def test_status_does_not_use_cached_frontend_commit_as_runtime_identity(fixture_project, monkeypatch):
+    _, frontend = fixture_project
+    _write_current_dist(frontend)
+    manifest_path = frontend / "dist" / "charlie-build.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["git_sha"] = "older-frontend-commit"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(web_server, "_FRONTEND_DIST", frontend / "dist")
+
+    result = asyncio.run(web_server.status())
+    assert result["frontend_build"]["git_sha"] == "older-frontend-commit"
+    assert result["source_identity"] == run._git_build_identity(Path(run.__file__).parent)[0]

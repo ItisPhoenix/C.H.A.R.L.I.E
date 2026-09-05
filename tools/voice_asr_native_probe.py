@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import multiprocessing as mp
 import queue
 import sys
@@ -33,12 +34,38 @@ from tools.voice_asr_benchmark import _read_wav
 
 logger = logging.getLogger("charlie.voice.native_probe")
 
-_ASR_RESULT_TIMEOUT_S = 30.0
+_ASR_STARTUP_TIMEOUT_S = 60.0
+_ASR_REPLAY_TIMEOUT_S = 15.0
 _VISION_TIMEOUT_S = 9.0
 
 
 def _emit(event: str, **fields: Any) -> None:
     print(json.dumps({"event": event, **fields}, ensure_ascii=False, sort_keys=True, default=str), flush=True)
+
+
+def _run_post_vision_delay(
+    diagnostics: VoiceDiagnostics,
+    worker_pid: Optional[int],
+    delay_s: float,
+) -> None:
+    """Capture cooldown snapshots, then leave the post-vision replay untouched."""
+
+    _emit(
+        "resource_snapshot",
+        phase="post_vision_delay_start",
+        delay_s=delay_s,
+        worker_pid=worker_pid,
+        snapshot=diagnostics.resource_snapshot(asr_worker_pid=worker_pid),
+    )
+    if delay_s > 0:
+        time.sleep(delay_s)
+    _emit(
+        "resource_snapshot",
+        phase="post_vision_asr_before_replay",
+        delay_s=delay_s,
+        worker_pid=worker_pid,
+        snapshot=diagnostics.resource_snapshot(asr_worker_pid=worker_pid),
+    )
 
 
 def _asr_config() -> dict[str, Any]:
@@ -54,6 +81,31 @@ def _asr_config() -> dict[str, Any]:
         "min_silence_duration_ms": runtime_config.vad_min_silence_duration_ms,
         "speech_pad_ms": runtime_config.vad_speech_pad_ms,
     }
+
+
+class _AsrWorkerStartupTimeout(TimeoutError):
+    def __init__(self, *, worker_pid: Optional[int], last_stage: Optional[str]) -> None:
+        super().__init__("ASR worker did not report ready before startup deadline")
+        self.worker_pid = worker_pid
+        self.last_stage = last_stage
+
+
+class _AsrReplayTimeout(TimeoutError):
+    def __init__(
+        self,
+        *,
+        phase: str,
+        ordinal: int,
+        utterance_id: str,
+        worker_pid: Optional[int],
+        last_stage: Optional[str],
+    ) -> None:
+        super().__init__(f"ASR replay timed out for {utterance_id}")
+        self.phase = phase
+        self.ordinal = ordinal
+        self.utterance_id = utterance_id
+        self.worker_pid = worker_pid
+        self.last_stage = last_stage
 
 
 class NativeAsrWorkerProbe:
@@ -88,14 +140,23 @@ class NativeAsrWorkerProbe:
             raise TimeoutError("ASR worker probe deadline exceeded") from exc
 
     def wait_ready(self) -> None:
-        deadline = time.monotonic() + _ASR_RESULT_TIMEOUT_S
-        while True:
-            message = self._get(deadline)
-            if isinstance(message, dict) and message.get("type") == "ready":
-                _emit("asr_ready", metrics=message.get("metrics"), worker_pid=self.process.pid)
-                return
-            if isinstance(message, dict) and message.get("type") == "failed":
-                raise RuntimeError(message.get("error") or "ASR worker failed during startup")
+        deadline = time.monotonic() + _ASR_STARTUP_TIMEOUT_S
+        last_stage = None
+        worker_pid = getattr(self.process, "pid", None)
+        try:
+            while True:
+                message = self._get(deadline)
+                if isinstance(message, dict) and message.get("type") == "asr_worker_stage":
+                    last_stage = message.get("stage")
+                    worker_pid = message.get("worker_pid") or worker_pid
+                    continue
+                if isinstance(message, dict) and message.get("type") == "ready":
+                    _emit("asr_ready", metrics=message.get("metrics"), worker_pid=worker_pid)
+                    return
+                if isinstance(message, dict) and message.get("type") == "failed":
+                    raise RuntimeError(message.get("error") or "ASR worker failed during startup")
+        except TimeoutError as exc:
+            raise _AsrWorkerStartupTimeout(worker_pid=worker_pid, last_stage=last_stage) from exc
 
     def transcribe(self, audio: Any, sample_rate: int, phase: str, ordinal: int) -> dict[str, Any]:
         utterance_id = f"{phase}-{ordinal}-{uuid4().hex[:8]}"
@@ -116,37 +177,51 @@ class NativeAsrWorkerProbe:
                 },
             )
         )
-        deadline = time.monotonic() + _ASR_RESULT_TIMEOUT_S
+        submitted_at = time.monotonic()
+        deadline = submitted_at + _ASR_REPLAY_TIMEOUT_S
         stages: list[dict[str, Any]] = []
         result: Optional[tuple[Any, ...]] = None
         terminal_stage = False
-        while result is None or not terminal_stage:
-            message = self._get(deadline)
-            if isinstance(message, dict) and message.get("type") == "asr_worker_stage":
-                if message.get("utterance_id") != utterance_id:
-                    _emit("asr_unexpected_stage", expected=utterance_id, message=message)
+        last_stage = None
+        worker_pid = getattr(self.process, "pid", None)
+        try:
+            while result is None or not terminal_stage:
+                message = self._get(deadline)
+                if isinstance(message, dict) and message.get("type") == "asr_worker_stage":
+                    if message.get("utterance_id") != utterance_id:
+                        _emit("asr_unexpected_stage", expected=utterance_id, message=message)
+                        continue
+                    stages.append(message)
+                    last_stage = message.get("stage")
+                    worker_pid = message.get("worker_pid") or worker_pid
+                    _emit("asr_worker_stage", phase=phase, ordinal=ordinal, **message)
+                    terminal_stage = last_stage in {
+                        "asr_worker_result_enqueued",
+                        "asr_worker_exception",
+                    }
                     continue
-                stages.append(message)
-                _emit("asr_worker_stage", phase=phase, ordinal=ordinal, **message)
-                terminal_stage = message.get("stage") in {
-                    "asr_worker_result_enqueued",
-                    "asr_worker_exception",
-                }
-                continue
-            if isinstance(message, tuple) and len(message) >= 3:
-                flags = message[2] if isinstance(message[2], dict) else {}
-                if flags.get("utterance_id") != utterance_id:
-                    _emit("asr_unexpected_result", expected=utterance_id, message=message)
-                    continue
-                result = message
-                _emit(
-                    "asr_result",
-                    phase=phase,
-                    ordinal=ordinal,
-                    utterance_id=utterance_id,
-                    text=message[0],
-                    flags=flags,
-                )
+                if isinstance(message, tuple) and len(message) >= 3:
+                    flags = message[2] if isinstance(message[2], dict) else {}
+                    if flags.get("utterance_id") != utterance_id:
+                        _emit("asr_unexpected_result", expected=utterance_id, message=message)
+                        continue
+                    result = message
+                    _emit(
+                        "asr_result",
+                        phase=phase,
+                        ordinal=ordinal,
+                        utterance_id=utterance_id,
+                        text=message[0],
+                        flags=flags,
+                    )
+        except TimeoutError as exc:
+            raise _AsrReplayTimeout(
+                phase=phase,
+                ordinal=ordinal,
+                utterance_id=utterance_id,
+                worker_pid=worker_pid,
+                last_stage=last_stage,
+            ) from exc
 
         return {
             "phase": phase,
@@ -250,6 +325,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wav", required=True, type=Path, help="Existing mono 16 kHz WAV to replay")
     parser.add_argument(
+        "--post-vision-delay",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="Wait before post-vision replay while printing two resource snapshots",
+    )
+    parser.add_argument(
         "--skip-vision",
         action="store_true",
         help="Control variant: replay the same WAV without making a vision request",
@@ -259,7 +341,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] [%(levelname)s] %(message)s")
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    if not math.isfinite(args.post_vision_delay) or args.post_vision_delay < 0:
+        parser.error("--post-vision-delay must be a finite, non-negative number")
     if not args.wav.is_file():
         raise SystemExit(f"WAV does not exist: {args.wav}")
 
@@ -283,8 +368,28 @@ def main() -> int:
             _emit("vision_probe_begin", worker_pid=worker.process.pid)
             vision_result = asyncio.run(_run_real_vision_request(diagnostics))
             _emit("vision_probe_end", **vision_result)
+            _run_post_vision_delay(diagnostics, worker.process.pid, args.post_vision_delay)
             worker.transcribe(audio, sample_rate, "post-vision", 1)
         return 0
+    except _AsrWorkerStartupTimeout as exc:
+        _emit(
+            "asr_worker_startup_timeout",
+            timeout_s=_ASR_STARTUP_TIMEOUT_S,
+            worker_pid=exc.worker_pid,
+            last_stage=exc.last_stage,
+        )
+        return 1
+    except _AsrReplayTimeout as exc:
+        _emit(
+            "asr_replay_timeout",
+            timeout_s=_ASR_REPLAY_TIMEOUT_S,
+            phase=exc.phase,
+            ordinal=exc.ordinal,
+            utterance_id=exc.utterance_id,
+            worker_pid=exc.worker_pid,
+            last_stage=exc.last_stage,
+        )
+        return 1
     except Exception as exc:
         _emit("native_probe_failed", error_type=type(exc).__name__, error=str(exc))
         return 1

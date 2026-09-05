@@ -307,8 +307,6 @@ def run_full():
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-    finally:
-        os._exit(0)
 
 
 def run_web_only():

@@ -830,6 +830,14 @@ def test_match_open_app_bare_website_defers_to_verified_browser():
     assert leftover == "open youtube"
 
 
+@pytest.mark.parametrize("browser", ["your browser", "Chrome", "Firefox", "Microsoft Edge"])
+def test_open_site_in_browser_preserves_url_and_instruction(browser):
+    from charlie import router
+
+    query = f"Open https://example.com/CaseSensitive in {browser} and tell me the page title."
+    assert router.match_open_app(query) == ([], [], query)
+
+
 # --- router.py: deterministic "<verb> ... on <site>" browser-task fast-path -----
 
 

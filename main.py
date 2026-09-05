@@ -166,6 +166,9 @@ _NON_CANCELLABLE_FOREGROUND_TOOLS = frozenset(
     }
 )
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
+from run import _git_build_identity
+
+_SOURCE_IDENTITY, _SOURCE_DIRTY = _git_build_identity(Path(__file__).resolve().parent)
 _state_machine = StateMachine()  # single authoritative CoreState instance for this process
 
 
@@ -1194,8 +1197,8 @@ def _web_identity_error(
     frontend_build = status.get("frontend_build")
     if not isinstance(frontend_build, dict):
         return "Charlie web runtime did not report a frontend build identity."
-    if status.get("source_identity") != frontend_build.get("git_sha"):
-        return "Charlie web runtime source identity is inconsistent with its frontend build."
+    if status.get("source_identity") != _SOURCE_IDENTITY:
+        return "Charlie web runtime source identity differs from its parent runtime."
     if expected_build is not None:
         for key in ("build_id", "input_fingerprint", "git_sha", "dirty", "authority"):
             if key in expected_build and frontend_build.get(key) != expected_build[key]:
@@ -1204,7 +1207,13 @@ def _web_identity_error(
 
 
 def _terminate_subsystem_process(process: subprocess.Popen) -> None:
-    """Stop one child process without affecting any unrelated process."""
+    """Stop an owned launcher and its interpreter descendants."""
+    import psutil
+
+    try:
+        descendants = psutil.Process(process.pid).children(recursive=True)
+    except (psutil.Error, OSError, AttributeError):
+        descendants = []
     try:
         process.terminate()
         process.wait(timeout=5)
@@ -1213,6 +1222,23 @@ def _terminate_subsystem_process(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
     except (OSError, AttributeError):
         logger.debug("Unable to terminate failed subsystem child", exc_info=True)
+    finally:
+        for child in reversed(descendants):
+            try:
+                child.terminate()
+            except psutil.NoSuchProcess:
+                pass
+            except psutil.Error:
+                logger.warning("Unable to stop owned descendant %s", child.pid, exc_info=True)
+        _, alive = psutil.wait_procs(descendants, timeout=5)
+        for child in alive:
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+        _, alive = psutil.wait_procs(alive, timeout=5)
+        if alive:
+            logger.error("Owned subsystem descendants remain alive: %s", [child.pid for child in alive])
 
 
 def _log_port_release(host: str, port: int) -> None:
@@ -1633,19 +1659,21 @@ async def main():
         store = SessionStore(config.session_db_path)
     except Exception as e:
         logger.error(f"Failed to initialize SessionStore: {e}")
-        return
+        raise
     from charlie.audit_store import AuditStore
 
-    audit_store = AuditStore(config.session_db_path)
+    audit_store = None
     try:
+        audit_store = AuditStore(config.session_db_path)
         memory_graph, memory_store, memory_service = _compose_memory_dependencies(config)
     except Exception:
         # MemoryGraph was previously required by Brain construction. Stop
         # startup explicitly rather than substituting a fabricated graph.
-        audit_store.close()
+        if audit_store is not None:
+            audit_store.close()
         if store:
             store.close()
-        return
+        raise
 
     def speaking_callback(text):
         if voice:
@@ -2104,10 +2132,13 @@ async def main():
         _set_subsystem_health("brain", HealthStatus.RUNNING)
     except Exception as e:
         logger.error(f"Failed to initialize Brain: {e}")
-        _set_subsystem_health("brain", HealthStatus.DEGRADED)
-        if store:
-            store.close()
-        return
+        _set_subsystem_health("brain", HealthStatus.DEGRADED, "Brain initialization failed")
+        for resource in (memory_graph, audit_store, store):
+            try:
+                resource.close()
+            except Exception:
+                logger.warning("Failed to clean up Brain startup resource", exc_info=True)
+        raise RuntimeError("Charlie Brain initialization failed") from e
 
     # Canonical memory facade wiring stays owned by main's composition root.
     _wire_memory_service(memory_service)
@@ -2154,7 +2185,7 @@ async def main():
                 mcp_client = await asyncio.to_thread(start_mcp, config)
                 if mcp_client is None:
                     logger.info("MCP subsystem not started (no servers configured)")
-                    _set_subsystem_health("mcp", HealthStatus.DEGRADED)
+                    _set_subsystem_health("mcp", HealthStatus.DISABLED)
                 else:
                     _set_subsystem_health("mcp", HealthStatus.RUNNING)
             else:

@@ -244,7 +244,7 @@ class RuntimeIntrospector:
         for t in task_list:
             st = str(t.get("status", "unknown")).lower()
             counts[st] = counts.get(st, 0) + 1
-            if st in ("running", "queued", "planning", "verifying", "waiting", "approval_required"):
+            if st in ("running", "queued", "planning", "verifying", "waiting", "paused", "approval_required"):
                 active.append({
                     "task_id": t.get("id", t.get("task_id", "")),
                     "title": t.get("title", ""),

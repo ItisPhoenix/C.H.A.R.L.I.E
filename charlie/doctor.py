@@ -278,10 +278,10 @@ class CharlieDoctor:
         return DiagnosticCheck(
             check_id="event_bus",
             category="health",
-            status=CheckStatus.OK,
+            status=CheckStatus.WARNING,
             severity=CheckSeverity.LOW,
-            summary="EventBus operational",
-            evidence="In-process and IPC event delivery channels are active.",
+            summary="EventBus delivery unverified",
+            evidence="No end-to-end delivery probe is available to this diagnostic instance.",
         )
 
     def _check_task_journal(self) -> DiagnosticCheck:
@@ -338,14 +338,14 @@ class CharlieDoctor:
         cfg_srv = mcp.get("configured_servers", 0)
         conn_srv = mcp.get("connected_servers", 0)
 
-        if cfg_srv > 0 and conn_srv == 0:
+        if cfg_srv > conn_srv:
             return DiagnosticCheck(
                 check_id="mcp_subsystem",
                 category="mcp",
                 status=CheckStatus.WARNING,
                 severity=CheckSeverity.MEDIUM,
-                summary=f"MCP servers configured ({cfg_srv}) but none connected",
-                evidence=f"{cfg_srv} MCP server(s) configured; 0 currently connected.",
+                summary=f"MCP connections incomplete ({conn_srv}/{cfg_srv})",
+                evidence=f"{cfg_srv} MCP server(s) configured; {conn_srv} currently connected.",
                 fix_hint="Check MCP server logs or trigger reconnect.",
                 repair_available=True,
                 repair_id="repair_mcp_reconnect",
@@ -355,9 +355,9 @@ class CharlieDoctor:
         return DiagnosticCheck(
             check_id="mcp_subsystem",
             category="mcp",
-            status=CheckStatus.OK,
+            status=CheckStatus.OK if conn_srv else CheckStatus.INFO,
             severity=CheckSeverity.LOW,
-            summary=f"MCP subsystem operational ({conn_srv}/{cfg_srv} connected)",
+            summary=f"MCP servers connected ({conn_srv}/{cfg_srv})" if conn_srv else "No MCP connections reported",
             evidence=f"{cfg_srv} configured server(s), {conn_srv} active connection(s).",
         )
 
@@ -491,14 +491,15 @@ class CharlieDoctor:
         subsys = self._introspector.get_subsystem_info()
         t_info = subsys.get("terminal", {})
         conpty = t_info.get("has_conpty", False)
+        available = t_info.get("available") is True
 
         return DiagnosticCheck(
             check_id="terminal_subsystem",
             category="terminal",
-            status=CheckStatus.OK,
+            status=CheckStatus.INFO if available else CheckStatus.WARNING,
             severity=CheckSeverity.LOW,
-            summary="Terminal service available",
-            evidence=f"Terminal subsystem loaded. Windows ConPTY bridge supported: {conpty}.",
+            summary="Terminal dependencies available" if available else "Terminal dependencies unavailable",
+            evidence=f"Module loaded: {available}; ConPTY support: {conpty}. Shell execution unverified.",
         )
 
     def _check_browser_subsystem(self) -> DiagnosticCheck:
@@ -507,8 +508,8 @@ class CharlieDoctor:
         avail = b_info.get("available", False)
 
         status = CheckStatus.OK if avail else CheckStatus.INFO
-        summary = "Browser automation available (Playwright)" if avail else "Browser automation not installed/disabled"
-        evidence = f"Browser capability status: available={avail}."
+        summary = "Browser dependencies available (Playwright)" if avail else "Browser dependencies unavailable"
+        evidence = f"Module available={avail}. Browser launch and actions not verified by this check."
 
         return DiagnosticCheck(
             check_id="browser_subsystem",
@@ -531,18 +532,18 @@ class CharlieDoctor:
             category="desktop",
             status=status,
             severity=CheckSeverity.LOW,
-            summary="Desktop automation available" if avail else "Desktop automation unavailable",
-            evidence=f"Desktop capability status: available={avail}, platform={d_info.get('platform')}.",
+            summary="Desktop dependencies available" if avail else "Desktop dependencies unavailable",
+            evidence=f"Module available={avail}, platform={d_info.get('platform')}. Desktop actions not verified.",
         )
 
     def _check_vision_ocr(self) -> DiagnosticCheck:
         return DiagnosticCheck(
             check_id="vision_ocr",
             category="vision",
-            status=CheckStatus.OK,
+            status=CheckStatus.WARNING,
             severity=CheckSeverity.LOW,
-            summary="Vision/OCR dependencies verified",
-            evidence="Screen capture and local OCR grounding modules accessible.",
+            summary="Vision/OCR execution unverified",
+            evidence="No model inference or OCR execution evidence is available to this diagnostic instance.",
         )
 
     def _check_voice_subsystem(self) -> DiagnosticCheck:
@@ -550,30 +551,41 @@ class CharlieDoctor:
         v_info = subsys.get("voice", {})
         model_present = v_info.get("wake_word_model_present", False)
 
-        status = CheckStatus.OK if model_present else CheckStatus.INFO
+        voice_health = self._introspector.get_health_info().get("voice", {})
+        voice_state = voice_health.get("status", "unknown")
+        status = CheckStatus.OK if voice_state == "running" else CheckStatus.WARNING
+        if voice_state == "disabled":
+            status = CheckStatus.INFO
         return DiagnosticCheck(
             check_id="voice_subsystem",
             category="voice",
             status=status,
             severity=CheckSeverity.LOW,
-            summary="Voice wake word model ready" if model_present else "Wake word model not found",
-            evidence=f"Model 'charlie.onnx' present: {model_present}.",
+            summary=f"Voice runtime: {voice_state}",
+            evidence=f"Runtime state: {voice_state}; wake model present: {model_present}. Live speech unverified.",
         )
 
     def _check_data_directories(self) -> DiagnosticCheck:
         cwd = Path(os.getcwd())
+        writable = os.access(cwd, os.W_OK)
         return DiagnosticCheck(
             check_id="data_directories",
             category="storage",
-            status=CheckStatus.OK,
+            status=CheckStatus.INFO if writable else CheckStatus.WARNING,
             severity=CheckSeverity.LOW,
-            summary="Data directories verified",
-            evidence=f"Working repository root '{cwd}' has write permissions.",
+            summary="Repository write access reported" if writable else "Repository write access unavailable",
+            evidence=f"OS write-access check for '{cwd}': {writable}. Individual data stores unverified.",
         )
 
     def _check_subsystem_health(self) -> DiagnosticCheck:
         health = self._introspector.get_health_info()
-        degraded = [k for k, v in health.items() if v.get("status") == "degraded"]
+        if not health:
+            return DiagnosticCheck(
+                check_id="subsystem_health", category="health", status=CheckStatus.WARNING,
+                severity=CheckSeverity.MEDIUM, summary="Runtime health unavailable",
+                evidence="No subsystem health observations are available in this process.",
+            )
+        degraded = [k for k, v in health.items() if v.get("status") not in {"running", "disabled"}]
 
         if degraded:
             return DiagnosticCheck(
@@ -581,8 +593,8 @@ class CharlieDoctor:
                 category="health",
                 status=CheckStatus.WARNING,
                 severity=CheckSeverity.MEDIUM,
-                summary=f"Degraded subsystems: {degraded}",
-                evidence=f"Subsystems currently in degraded state: {degraded}.",
+                summary=f"Subsystems not ready: {degraded}",
+                evidence=f"Non-running subsystem states: { {k: health[k].get('status') for k in degraded} }.",
                 probable_cause="One or more service background loops reported failure.",
                 fix_hint="Check developer logs for underlying stack traces.",
             )
@@ -597,13 +609,14 @@ class CharlieDoctor:
         )
 
     def _check_recovery_state(self) -> DiagnosticCheck:
+        blocked = [repair for repair in self._repair_failures if self.is_repair_circuit_broken(repair)]
         return DiagnosticCheck(
             check_id="recovery_state",
             category="recovery",
-            status=CheckStatus.OK,
+            status=CheckStatus.WARNING if blocked else CheckStatus.INFO,
             severity=CheckSeverity.LOW,
-            summary="Failure recovery circuit breakers clear",
-            evidence="No active circuit breakers or blocked recovery paths.",
+            summary="Doctor repair circuit breakers blocked" if blocked else "Doctor repair circuit breakers clear",
+            evidence=f"Blocked repairs in this diagnostic instance: {blocked}. Other recovery owners not verified.",
         )
 
     def _check_extensions_registry(self) -> DiagnosticCheck:
@@ -683,20 +696,35 @@ class CharlieDoctor:
         try:
             # 1. Stale leases cleanup
             if repair_id == "repair_stale_leases":
-                from charlie.resource_locks import _lock, _owners
-                with _lock:
-                    _owners.clear()
+                from charlie.resource_locks import CapabilityLeaseManager, release
+                from charlie.task_journal import TaskJournal
+
+                journal = self._introspector._get_task_journal()
+                manager = self._introspector._get_lease_manager()
+                if not isinstance(journal, TaskJournal) or not isinstance(manager, CapabilityLeaseManager):
+                    raise RuntimeError("Lease repair requires the owning runtime's journal and lease manager")
+                active_ids = {task.id for task in journal.list(include_terminal=False)}
+                stale = {
+                    cap: owner for cap, owner in manager.snapshot().items()
+                    if owner not in active_ids and owner != "user" and not owner.startswith("session_")
+                }
+                for capability, owner in stale.items():
+                    release(capability, owner)
                 self.record_repair_attempt(repair_id, success=True)
-                return {"success": True, "repair_id": repair_id, "message": "Cleared stale capability leases."}
+                return {"success": True, "repair_id": repair_id, "message": f"Released {len(stale)} stale leases."}
 
             # 2. MCP servers reconnect
             elif repair_id == "repair_mcp_reconnect":
                 mcp = self._introspector._get_mcp_client()
-                if mcp:
-                    from charlie.tools import registry
-                    for s in mcp.list_servers_detailed():
-                        if s.get("status") != "connected":
-                            mcp.enable_server(registry, s["name"])
+                if mcp is None or not callable(getattr(mcp, "enable_server", None)):
+                    raise RuntimeError("MCP reconnect requires the owning runtime client")
+                from charlie.tools import registry
+
+                for s in mcp.list_servers_detailed():
+                    if s.get("status") != "connected":
+                        mcp.enable_server(registry, s["name"])
+                if any(s.get("status") != "connected" for s in mcp.list_servers_detailed()):
+                    raise RuntimeError("One or more MCP servers remain disconnected")
                 self.record_repair_attempt(repair_id, success=True)
                 return {"success": True, "repair_id": repair_id, "message": "Triggered MCP server reconnection."}
 

@@ -497,7 +497,10 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
 
     # Website navigation belongs to Charlie's verified browser runtime, not
     # desktop app launching. Preserve the original utterance for browser_task.
-    if matched_apps and all(is_website_flags):
+    if any(is_website_flags) and all(
+        website or command in {"chrome", "firefox", "msedge"}
+        for command, website in zip(launched_commands, is_website_flags)
+    ):
         return [], [], query.strip()
 
     # Registry miss: perform bounded read-only runtime discovery for one app-like

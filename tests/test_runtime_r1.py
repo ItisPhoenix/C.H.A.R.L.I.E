@@ -595,7 +595,7 @@ def _web_status(process: _WebFakeProcess, launch_id: str, build: dict[str, objec
     return {
         "launch_id": launch_id,
         "pid": process.pid,
-        "source_identity": build.get("git_sha"),
+        "source_identity": main._SOURCE_IDENTITY,
         "frontend_build": build,
     }
 
@@ -686,6 +686,113 @@ async def test_main_startup_failure_exits_nonzero_instead_of_succeeding(monkeypa
 
     assert exit_codes == [1]
     assert "Charlie runtime startup failed before voice initialization" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_brain_initialization_failure_exits_nonzero_and_marks_health(monkeypatch, caplog):
+    import charlie.audit_store as audit_store_module
+    import charlie.plugins as plugins_module
+    import charlie.tools as tools_module
+
+    health = HealthRegistry(("brain", "plugins", "mcp", "web"))
+    closed = []
+
+    class Store:
+        def __init__(self, name):
+            self.name = name
+
+        def close(self):
+            closed.append(self.name)
+
+    class Graph(Store):
+        pass
+
+    monkeypatch.setattr(main, "_runtime_health", health)
+    monkeypatch.setattr(main, "SessionStore", lambda path: Store("session"))
+    monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: Store("audit"))
+    monkeypatch.setattr(main, "_compose_memory_dependencies", lambda runtime_config: (Graph("graph"), None, object()))
+    monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("brain failed")))
+    monkeypatch.setattr(tools_module, "register_plugin_tools", lambda runtime_config: None)
+    monkeypatch.setattr(plugins_module, "PluginManager", lambda: object())
+    monkeypatch.setattr(main.config, "mcp_enabled", False)
+
+    with pytest.raises(RuntimeError, match="Charlie Brain initialization failed"):
+        await main.main()
+
+    assert set(closed) == {"session", "audit", "graph"}
+    assert health.snapshot()["brain"] == {"status": "degraded", "detail": "Brain initialization failed"}
+    assert "Failed to initialize Brain" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["session", "audit", "memory"])
+async def test_required_storage_failure_propagates_and_closes_open_stores(monkeypatch, backend):
+    import charlie.audit_store as audit_store_module
+
+    closed = []
+
+    class Store:
+        def __init__(self, name):
+            self.name = name
+
+        def close(self):
+            closed.append(self.name)
+
+    def create(name):
+        if name == backend:
+            raise RuntimeError("storage unavailable")
+        return Store(name)
+
+    monkeypatch.setattr(main, "SessionStore", lambda path: create("session"))
+    monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: create("audit"))
+    monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: create("memory"))
+    with pytest.raises(RuntimeError):
+        await main.main()
+    assert closed == {"session": [], "audit": ["session"], "memory": ["audit", "session"]}[backend]
+
+
+def test_full_launcher_does_not_mask_runtime_failure(monkeypatch):
+    import run
+
+    monkeypatch.setattr(run, "check_and_build_frontend", lambda: None)
+    monkeypatch.setattr(main, "main", lambda: None)
+
+    def fail(_coroutine):
+        raise RuntimeError("startup failed")
+
+    monkeypatch.setattr(run.asyncio, "run", fail)
+    monkeypatch.setattr(run.os, "_exit", lambda code: pytest.fail(f"masked failure with exit {code}"))
+    with pytest.raises(RuntimeError, match="startup failed"):
+        run.run_full()
+
+
+def test_full_launcher_propagates_main_startup_failure(monkeypatch):
+    import run
+
+    monkeypatch.setattr(run, "check_and_build_frontend", lambda: None)
+
+    async def failing_main():
+        raise RuntimeError("brain startup failed")
+
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "main", failing_main)
+    with pytest.raises(RuntimeError, match="brain startup failed"):
+        run.run_full()
+
+
+def test_subsystem_cleanup_stops_launcher_descendants(monkeypatch):
+    from types import SimpleNamespace
+
+    import psutil
+
+    child = _WebFakeProcess(pid=8765)
+    process = _WebFakeProcess()
+    monkeypatch.setattr(psutil, "Process", lambda pid: SimpleNamespace(children=lambda recursive: [child]))
+    monkeypatch.setattr(psutil, "wait_procs", lambda children, timeout: (children, []))
+    main._terminate_subsystem_process(process)
+    assert process.terminated
+    assert child.terminated
 
 
 def test_unrelated_listener_stops_startup_without_spawning(monkeypatch):
