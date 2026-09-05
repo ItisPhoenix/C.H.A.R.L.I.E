@@ -3,10 +3,11 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Callable, List, Optional, Tuple, TypeVar
+from typing import Any, Callable, List, Optional, Tuple, TypeVar
 
 T = TypeVar("T")
 
+from charlie.turn_contracts import ResultEnvelope
 from charlie.utils import utc_now_iso
 
 logger = logging.getLogger("charlie.session_store")
@@ -232,11 +233,13 @@ class SessionStore:
         turn_id: Optional[str],
         tool_name: str,
         args: dict,
-        result: str,
+        result: Any,
         session_id: str = "default",
     ) -> None:
         """Append a tool execution result as a role='tool' row.
 
+        Production callers pass the canonical ``ResultEnvelope``. Legacy text
+        callers remain supported at this history-rendering boundary.
         Truncated save to prevent DB bloat: tool name + args + first
         _TOOL_PERSIST_MAX_CHARS chars of result.
         """
@@ -247,7 +250,8 @@ class SessionStore:
             args_str = _json.dumps(args, ensure_ascii=False)
         except (TypeError, ValueError):
             args_str = str(args)
-        truncated_result = (result or "")[:max_chars]
+        result_text = result.result if isinstance(result, ResultEnvelope) else result
+        truncated_result = str(result_text or "")[:max_chars]
         content = f"[{tool_name} args={args_str}] result: {truncated_result}"
         self.append("tool", content, session_id=session_id, turn_id=turn_id)
 

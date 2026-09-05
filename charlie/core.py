@@ -926,8 +926,19 @@ def _normalize_tool_result(
     evidence: Optional[List[Any]] = None,
     artifacts: Optional[List[Any]] = None,
     errors: Optional[List[str]] = None,
+    capability_override: Optional[str] = None,
+    operation_override: Optional[str] = None,
 ) -> ResultEnvelope:
     """Normalize one adapter result into the canonical operation envelope."""
+
+    if isinstance(raw_result, ResultEnvelope):
+        if turn_id is not None and raw_result.turn_id not in (None, turn_id):
+            raise TurnContractError("ResultEnvelope turn_id does not match operation turn")
+        if task_id is not None and raw_result.task_id not in (None, task_id):
+            raise TurnContractError("ResultEnvelope task_id does not match operation task")
+        if session_id is not None and raw_result.session_id not in (None, session_id):
+            raise TurnContractError("ResultEnvelope session_id does not match operation session")
+        return raw_result
 
     result_text = _tool_result_text(raw_result)
     status_value = status.value if isinstance(status, ResultStatus) else status
@@ -962,8 +973,8 @@ def _normalize_tool_result(
         turn_id=turn_id,
         task_id=task_id,
         session_id=session_id,
-        capability=capability_index.get_operation_domain(tool_name),
-        operation=operation.id if operation is not None else None,
+        capability=capability_override or capability_index.get_operation_domain(tool_name),
+        operation=operation_override or (operation.id if operation is not None else None),
         status=status_value,
         result=result_text,
         verification=verification,
@@ -976,6 +987,12 @@ def _normalize_tool_result(
         artifacts=envelope_artifacts,
         errors=envelope_errors,
     )
+
+
+def _result_envelope_to_model_text(envelope: ResultEnvelope) -> str:
+    """Project one canonical operation result into model-facing tool text."""
+
+    return str(envelope.result) if envelope.result is not None else ""
 
 
 def _operation_succeeded(envelope: ResultEnvelope) -> bool:
@@ -1773,7 +1790,7 @@ class Brain:
         task_id: Optional[str] = None,
         session_id: Optional[str] = None,
         turn_id: Optional[str] = None,
-    ) -> str:
+    ) -> ResultEnvelope:
         """Fast-path callers' safety net -- same timeout bound _exec_one already gives the LLM-dispatched path."""
         try:
             return await asyncio.wait_for(
@@ -1783,12 +1800,26 @@ class Brain:
                     task_id=task_id,
                     session_id=session_id,
                     turn_id=turn_id,
+                    return_envelope=True,
                 ),
                 timeout=_tool_timeout("browser_task"),
             )
         except asyncio.TimeoutError:
             logger.warning("Fast-path browser_task timed out after %.0fs: %s", _tool_timeout("browser_task"), task)
-            return "That's taking too long -- I gave up on it."
+            return ResultEnvelope(
+                request=task,
+                turn_id=turn_id,
+                task_id=task_id,
+                session_id=session_id,
+                capability="browser",
+                operation="browser.task",
+                status=ResultStatus.FAILED.value,
+                result="That's taking too long -- I gave up on it.",
+                reason="Browser operation timed out.",
+                source="browser_runtime",
+                data={"failure_kind": "timeout", "timeout_seconds": _tool_timeout("browser_task")},
+                errors=["Browser task timed out."],
+            )
 
     async def browser_task(
         self,
@@ -1798,9 +1829,12 @@ class Brain:
         task_id: Optional[str] = None,
         session_id: Optional[str] = None,
         turn_id: Optional[str] = None,
-    ) -> str:
+        return_envelope: bool = False,
+    ) -> Any:
         """Resolve `task` through charlie.browser's tier cascade and report back.
 
+        Legacy callers receive rendered text; canonical callers set
+        ``return_envelope`` and receive the structured operation outcome.
         Tiers 0-2 need no LLM; tier 3 uses this Brain's own client/model via
         _stream_completion; tier 4 is a last-resort stealth retry after a
         detected block. Opens the user's real browser only when the task
@@ -1808,7 +1842,23 @@ class Brain:
         a vision LLM is configured -- None otherwise, same as no fallback.
         """
         if not self.config.browser_enabled or not _BROWSER_AVAILABLE:
-            return "Browser control is disabled (set BROWSER_ENABLED=true and install the browser extra)."
+            text = "Browser control is disabled (set BROWSER_ENABLED=true and install the browser extra)."
+            if return_envelope:
+                return ResultEnvelope(
+                    request=task,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    capability="browser",
+                    operation="browser.task",
+                    status=ResultStatus.BLOCKED.value,
+                    result=text,
+                    reason="Browser capability is unavailable.",
+                    source="browser_runtime",
+                    data={"failure_kind": "unavailable"},
+                    errors=[text],
+                )
+            return text
 
         from charlie.browser import controller as browser_controller
         from charlie.browser import intent as browser_intent
@@ -1852,6 +1902,27 @@ class Brain:
             text, _ = await self._stream_completion(payload, generation)
             return text
 
+        def _browser_outcome(
+            text: str,
+            *,
+            status: str = ResultStatus.UNVERIFIED.value,
+            reason: str = "",
+            data: Optional[dict[str, Any]] = None,
+        ) -> ResultEnvelope:
+            return ResultEnvelope(
+                request=task,
+                turn_id=turn_id,
+                task_id=task_id,
+                session_id=session_id,
+                capability="browser",
+                operation=parsed_browser_intent.operation.casefold() or "browser.task",
+                status=status,
+                result=text,
+                reason=reason,
+                source="browser_runtime",
+                data=data or {},
+            )
+
         if current_page_read:
             try:
                 page_text = await loop.run_in_executor(
@@ -1861,9 +1932,13 @@ class Brain:
                     ),
                 )
             except Exception:
-                return "I couldn't read the current browser page."
+                text = "I couldn't read the current browser page."
+                return _browser_outcome(text, reason="Current browser page read failed.") if return_envelope else text
             if not page_text.strip():
-                return "The current browser page has no readable content."
+                text = "The current browser page has no readable content."
+                if return_envelope:
+                    return _browser_outcome(text, reason="Current browser page had no readable content.")
+                return text
             answer_prompt = (
                 "Answer the user's question using only the current browser page evidence below. "
                 "Do not navigate, use memory, or suggest another source. Be concise and state uncertainty "
@@ -1876,9 +1951,13 @@ class Brain:
                     self._build_payload([{"role": "user", "content": answer_prompt}], skip_tools=True),
                     generation,
                 )
-                return answer.strip() or "The current page did not provide an answer."
+                text = answer.strip() or "The current page did not provide an answer."
+                return _browser_outcome(text, status=ResultStatus.COMPLETED.value) if return_envelope else text
             except Exception:
-                return "I couldn't answer from the current browser page."
+                text = "I couldn't answer from the current browser page."
+                if return_envelope:
+                    return _browser_outcome(text, reason="Current browser page synthesis failed.")
+                return text
 
         async def _approve_click(name: str, url: str) -> bool:
             return await self.request_tool_approval(
@@ -1931,6 +2010,30 @@ class Brain:
             ),
         )
 
+        verification_status = ResultStatus.COMPLETED.value if result.success else ResultStatus.UNVERIFIED.value
+        outcome = ResultEnvelope(
+            request=task,
+            turn_id=turn_id,
+            task_id=task_id,
+            session_id=session_id,
+            capability="browser",
+            operation=parsed_browser_intent.operation.casefold() or "browser.task",
+            status=verification_status,
+            result=result.answer or result.url or "",
+            verification={
+                "verified": result.success,
+                "status": verification_status,
+                "message": result.verification,
+            },
+            source="browser_runtime",
+            data={
+                "url": result.url,
+                "site": result.site,
+                "query": result.query,
+                "verification": result.verification,
+            },
+        )
+
         if recovery._event_bus:
             await recovery._event_bus.emit(
                 "browser_task_done",
@@ -1952,29 +2055,6 @@ class Brain:
 
             from charlie.presentation import PresentationContext, default_presentation_resolver
 
-            verification_status = "completed" if result.success else "unverified"
-            outcome = ResultEnvelope(
-                request=task,
-                turn_id=turn_id,
-                task_id=task_id,
-                session_id=session_id,
-                capability="browser",
-                operation=parsed_browser_intent.operation.casefold(),
-                status=verification_status,
-                result=result.answer or result.url or "",
-                verification={
-                    "verified": result.success,
-                    "status": verification_status,
-                    "message": result.verification,
-                },
-                source="browser_runtime",
-                data={
-                    "url": result.url,
-                    "site": result.site,
-                    "query": result.query,
-                    "verification": result.verification,
-                },
-            )
             presentation = default_presentation_resolver.resolve(
                 outcome,
                 PresentationContext(platform=platform),
@@ -1995,12 +2075,18 @@ class Brain:
             parts = ([result.answer] if result.answer else []) + [
                 f"Opened {result.url}." if opened else f"Found {result.url} but couldn't open your browser."
             ]
-            return " ".join(parts)
+            response_text = " ".join(parts)
+            outcome.result = response_text
+            return outcome if return_envelope else response_text
         if result.answer:
-            return result.answer
+            outcome.result = result.answer
+            return outcome if return_envelope else result.answer
         if result.success and result.url:
-            return f"Found it: {result.url}"
-        return "I couldn't verify the browser result."
+            response_text = f"Found it: {result.url}"
+            outcome.result = response_text
+            return outcome if return_envelope else response_text
+        outcome.result = "I couldn't verify the browser result."
+        return outcome if return_envelope else outcome.result
 
     async def _handle_propose_new_tool(self, arguments: Dict[str, Any]) -> str:
         """Tier-3 self-extension: validate the authored code, then queue it on
@@ -2681,6 +2767,81 @@ class Brain:
         # Preserved for history/memory even if a fast-path below rebinds user_input
         # to a compound instruction's leftover text (see the open-app fast-path).
         original_user_input = user_input
+
+        def _publish_direct_operation_result(
+            tool_name: str,
+            args: Dict[str, Any],
+            envelope: ResultEnvelope,
+        ) -> None:
+            """Send deterministic outcomes through canonical callback/persistence boundaries."""
+
+            operation_callback = getattr(self, "on_operation_result", None)
+            if operation_callback is not None:
+                try:
+                    operation_callback(tool_name, envelope)
+                except Exception:
+                    logger.warning("Operation result callback failed for %s", tool_name, exc_info=True)
+            if self.session_store:
+                try:
+                    self.session_store.append_tool(
+                        turn_id=envelope.turn_id,
+                        tool_name=tool_name,
+                        args=args,
+                        result=envelope,
+                        session_id=envelope.session_id or session_id,
+                    )
+                except Exception as persist_exc:
+                    logger.debug("Tool result persist skipped: %s", persist_exc)
+            telemetry.record_tool_call(tool_name, success=_operation_succeeded(envelope))
+
+        def _direct_operation_result(
+            *,
+            tool_name: str,
+            capability: str,
+            operation: str,
+            raw_result: Any,
+            args: Optional[Dict[str, Any]] = None,
+            status: Optional[str | ResultStatus] = None,
+            reason: str = "",
+            data: Optional[dict[str, Any]] = None,
+            source: str = "brain.deterministic",
+            risk_class: Optional[str] = None,
+        ) -> ResultEnvelope:
+            envelope = _normalize_tool_result(
+                tool_name,
+                raw_result,
+                request=original_user_input,
+                turn_id=turn_id,
+                task_id=task_id,
+                session_id=session_id,
+                status=status,
+                reason=reason,
+                source=source,
+                risk_class=risk_class,
+                data=data,
+                capability_override=capability,
+                operation_override=operation,
+            )
+            _publish_direct_operation_result(tool_name, args or {}, envelope)
+            return envelope
+
+        async def _run_direct_browser(task_text: str) -> str:
+            outcome = await self._browser_task_bounded(
+                task_text,
+                platform,
+                task_id=task_id,
+                session_id=session_id,
+                turn_id=turn_id,
+            )
+            if isinstance(outcome, ResultEnvelope):
+                _publish_direct_operation_result(
+                    "browser_task",
+                    {"task": task_text},
+                    outcome,
+                )
+                return _result_envelope_to_model_text(outcome)
+            return str(outcome)
+
         explicit_memory = _detect_explicit_memory(user_input)
         if explicit_memory is not None:
             record_primary_decision(
@@ -2696,7 +2857,14 @@ class Brain:
                 {"action": "remember", "content": explicit_memory},
             )
             logger.info("Explicit memory request handled deterministically: %s", result)
-            yield result
+            outcome = _direct_operation_result(
+                tool_name="vector_memory",
+                capability="memory",
+                operation="memory.remember",
+                raw_result=result,
+                args={"action": "remember", "content": explicit_memory},
+            )
+            yield _result_envelope_to_model_text(outcome)
             return
         explicit_recall = _detect_explicit_recall(user_input)
         if explicit_recall is not None:
@@ -2713,7 +2881,14 @@ class Brain:
                 {"action": "recall", "content": explicit_recall},
             )
             logger.info("Explicit memory recall handled deterministically: %s", result)
-            yield result
+            outcome = _direct_operation_result(
+                tool_name="vector_memory",
+                capability="memory",
+                operation="memory.recall",
+                raw_result=result,
+                args={"action": "recall", "content": explicit_recall},
+            )
+            yield _result_envelope_to_model_text(outcome)
             return
         fast = router.answer_time_date(user_input)
         if fast is not None:
@@ -2725,7 +2900,14 @@ class Brain:
                 rationale="time/date matcher selected the system clock",
             )
             logger.info("Fast-path time/date: %s -> %s", user_input, fast)
-            yield fast
+            outcome = _direct_operation_result(
+                tool_name="system_diagnostics",
+                capability="system",
+                operation="system.time.read",
+                raw_result=fast,
+                args={"query": user_input},
+            )
+            yield _result_envelope_to_model_text(outcome)
             return
         # --- Fast-path: opinion teaching (deterministic, no LLM needed) ---
         opinion = _detect_opinion_teaching(user_input)
@@ -2750,10 +2932,26 @@ class Brain:
                 )
                 self.reload_context()
                 logger.info("Opinion stored: %s", result)
-                yield "Got it, I'll remember that."
+                outcome = _direct_operation_result(
+                    tool_name="memory",
+                    capability="memory",
+                    operation="memory.add",
+                    raw_result=result,
+                    args={"action": "add", "target": "opinions", "content": opinion},
+                )
+                yield _result_envelope_to_model_text(outcome)
             except Exception as e:
                 logger.error("Failed to store opinion: %s", e, exc_info=True)
-                yield "I tried to remember that, but something went wrong."
+                outcome = _direct_operation_result(
+                    tool_name="memory",
+                    capability="memory",
+                    operation="memory.add",
+                    raw_result=f"Error: Failed to store opinion: {e}",
+                    status=ResultStatus.FAILED,
+                    reason="Opinion memory update failed.",
+                    args={"action": "add", "target": "opinions", "content": opinion},
+                )
+                yield _result_envelope_to_model_text(outcome)
             return
         # --- Fast-path: standing instruction (behavior rule, no LLM needed) ---
         instruction = _detect_standing_instruction(user_input)
@@ -2770,7 +2968,15 @@ class Brain:
 
             emit_memory_updated("world_model", instruction)
             logger.info("Standing instruction learned: %s", instruction)
-            yield "Got it, I'll remember that."
+            outcome = _direct_operation_result(
+                tool_name="memory",
+                capability="memory",
+                operation="memory.rule.add",
+                raw_result="Got it, I'll remember that.",
+                args={"action": "rule_add", "content": instruction},
+                data={"instruction": instruction},
+            )
+            yield _result_envelope_to_model_text(outcome)
             return
         # --- Fast-path: review learned rules (deterministic, no LLM needed) ---
         if _detect_review_rules(user_input):
@@ -2803,9 +3009,18 @@ class Brain:
                 self.world_model.delete_rule(rule_id)
             if matches:
                 logger.info("Forgot %d rule(s) matching '%s'", len(matches), forget_text)
-                yield f"Forgot {len(matches)} thing{'s' if len(matches) != 1 else ''} about that."
+                result_text = f"Forgot {len(matches)} thing{'s' if len(matches) != 1 else ''} about that."
             else:
-                yield "I couldn't find anything matching that to forget."
+                result_text = "I couldn't find anything matching that to forget."
+            outcome = _direct_operation_result(
+                tool_name="memory",
+                capability="memory",
+                operation="memory.rule.delete",
+                raw_result=result_text,
+                args={"action": "rule_delete", "query": forget_text},
+                data={"matched_count": len(matches)},
+            )
+            yield _result_envelope_to_model_text(outcome)
             return
         # --- Fast-path: set goal (deterministic, no LLM needed) ---
         goal_text = _detect_set_goal(user_input)
@@ -2819,7 +3034,15 @@ class Brain:
             self._active_goal = goal_text
             self._goal_turns_remaining = 5
             logger.info("Goal set: %s", goal_text)
-            yield f"Got it, I'll focus on: {goal_text}."
+            outcome = _direct_operation_result(
+                tool_name="start_background_task",
+                capability="task",
+                operation="task.goal.set",
+                raw_result=f"Got it, I'll focus on: {goal_text}.",
+                args={"action": "set_goal", "content": goal_text},
+                data={"goal": goal_text, "turns_remaining": self._goal_turns_remaining},
+            )
+            yield _result_envelope_to_model_text(outcome)
             return
 
         # --- Verbosity preference update ---
@@ -2844,8 +3067,24 @@ class Brain:
                 up.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
                 self.reload_context()
                 logger.info("Verbosity preference set to: %s", verbosity)
+                _direct_operation_result(
+                    tool_name="system_control",
+                    capability="settings",
+                    operation="settings.verbosity.set",
+                    raw_result=f"Verbosity preference set to {verbosity}.",
+                    args={"verbosity": verbosity},
+                )
             except Exception as ve:
                 logger.warning("Failed to update verbosity: %s", ve)
+                _direct_operation_result(
+                    tool_name="system_control",
+                    capability="settings",
+                    operation="settings.verbosity.set",
+                    raw_result=f"Error: Failed to update verbosity: {ve}",
+                    args={"verbosity": verbosity},
+                    status=ResultStatus.FAILED,
+                    reason="Verbosity preference update failed.",
+                )
 
         # --- Fast-path: resume desktop control after the panic hotkey (deterministic, no LLM needed) ---
         if desktop_actions is not None and desktop_actions.is_halted() and _detect_desktop_resume(user_input):
@@ -2858,7 +3097,15 @@ class Brain:
             )
             desktop_actions.clear_halt()
             logger.info("Desktop control resumed by user command: %s", user_input)
-            yield "Desktop control resumed."
+            outcome = _direct_operation_result(
+                tool_name="desktop_focus",
+                capability="desktop",
+                operation="desktop.control.resume",
+                raw_result="Desktop control resumed.",
+                args={"action": "resume"},
+                source="desktop.panic_recovery",
+            )
+            yield _result_envelope_to_model_text(outcome)
             return
 
         # Active verified browser media owns contextual controls before global
@@ -2876,13 +3123,7 @@ class Brain:
                     rationale="verified active browser media context selected browser control",
                 )
                 logger.info("Fast-path browser media continuation: %s", browser_media)
-                yield await self._browser_task_bounded(
-                    browser_media,
-                    platform,
-                    task_id=task_id,
-                    session_id=session_id,
-                    turn_id=turn_id,
-                )
+                yield await _run_direct_browser(browser_media)
                 return
 
         # --- Authoritative Deterministic Fast-Paths (Telemetry, Volume, Settings, Focus, Filesystem, Browser) ---
@@ -2914,7 +3155,21 @@ class Brain:
             requirement, risk_class, requirement_reason = autonomy_evaluate(fp_match.tool_name, fp_match.arguments)
             if requirement == Requirement.BLOCK:
                 msg = f"Operation '{fp_match.intent}' is blocked by security policy: {requirement_reason}"
-                yield msg
+                outcome = _normalize_tool_result(
+                    fp_match.tool_name,
+                    msg,
+                    request=user_input,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    status=ResultStatus.BLOCKED,
+                    reason=requirement_reason,
+                    source="deterministic_fastpath",
+                    risk_class=getattr(risk_class, "value", risk_class),
+                    data={"failure_kind": "policy_block"},
+                )
+                _publish_direct_operation_result(fp_match.tool_name, fp_match.arguments, outcome)
+                yield _result_envelope_to_model_text(outcome)
                 return
             if requirement == Requirement.APPROVE:
                 approved = await self.request_tool_approval(
@@ -2929,12 +3184,30 @@ class Brain:
                 )
                 if not approved:
                     msg = f"Operation '{fp_match.intent}' was declined."
-                    yield msg
+                    outcome = _normalize_tool_result(
+                        fp_match.tool_name,
+                        msg,
+                        request=user_input,
+                        turn_id=turn_id,
+                        task_id=task_id,
+                        session_id=session_id,
+                        status=ResultStatus.CANCELLED,
+                        reason=requirement_reason,
+                        source="deterministic_fastpath",
+                        risk_class=getattr(risk_class, "value", risk_class),
+                        requires_approval=True,
+                        data={"failure_kind": "approval_denied"},
+                    )
+                    _publish_direct_operation_result(fp_match.tool_name, fp_match.arguments, outcome)
+                    yield _result_envelope_to_model_text(outcome)
                     return
 
             op = capability_index.get_operation(fp_match.tool_name)
             leases = op.required_leases if op else ()
             v_res = None
+            fastpath_status: Optional[str | ResultStatus] = None
+            fastpath_reason = ""
+            fastpath_data: Optional[dict[str, Any]] = None
 
             async def _run_fast_path() -> tuple[str, Any]:
                 nonlocal v_res
@@ -2961,13 +3234,25 @@ class Brain:
                         logger.debug("Fast-path verifier %s exception: %s", fp_match.verifier_name, ve)
                 return res, v_res
 
-            if leases:
-                from charlie.resource_locks import default_lease_manager
+            try:
+                timeout = _tool_timeout(fp_match.tool_name, op)
+                if leases:
+                    from charlie.resource_locks import default_lease_manager
 
-                async with await default_lease_manager.acquire_many(leases, f"fastpath.{fp_match.intent}"):
-                    fp_res, v_res = await _run_fast_path()
-            else:
-                fp_res, v_res = await _run_fast_path()
+                    async with await default_lease_manager.acquire_many(leases, f"fastpath.{fp_match.intent}"):
+                        fp_res, v_res = await asyncio.wait_for(_run_fast_path(), timeout=timeout)
+                else:
+                    fp_res, v_res = await asyncio.wait_for(_run_fast_path(), timeout=timeout)
+            except asyncio.TimeoutError:
+                fp_res = f"Error: Tool '{fp_match.tool_name}' timed out after {timeout}s"
+                fastpath_status = ResultStatus.FAILED
+                fastpath_reason = f"Tool '{fp_match.tool_name}' timed out."
+                fastpath_data = {"failure_kind": "timeout", "timeout_seconds": timeout}
+            except Exception as exc:
+                fp_res = f"Error executing tool '{fp_match.tool_name}': {exc}"
+                fastpath_status = ResultStatus.FAILED
+                fastpath_reason = f"Tool '{fp_match.tool_name}' raised an exception."
+                fastpath_data = {"failure_kind": "exception", "exception_type": type(exc).__name__}
 
             from charlie.presentation import (
                 PresentationContext,
@@ -2983,18 +3268,38 @@ class Brain:
                 if v_res is not None
                 else None
             )
-            outcome = ResultEnvelope(
+            if fastpath_status is None and v_res is not None and not v_res.verified:
+                fastpath_status = v_res.status
+                fastpath_reason = v_res.message
+            fastpath_result_data = {**dict(getattr(fp_res, "data", {}) or {}), **(fastpath_data or {})}
+            if fastpath_status is None and (
+                fastpath_result_data.get("available") is False
+                or (
+                    fastpath_result_data.get("vitals") is None
+                    and fastpath_result_data.get("processes") is None
+                    and "vitals" in fastpath_result_data
+                    and "processes" in fastpath_result_data
+                )
+            ):
+                fastpath_status = ResultStatus.UNVERIFIED
+                fastpath_reason = str(
+                    fastpath_result_data.get("reason") or "Deterministic fast-path result was unavailable."
+                )
+            outcome = _normalize_tool_result(
+                fp_match.tool_name,
+                fp_res,
                 request=user_input,
                 turn_id=turn_id,
                 task_id=task_id,
                 session_id=session_id,
-                capability=fp_match.target_domain,
-                operation=fp_match.semantic_op_id,
-                result=str(fp_res),
+                status=fastpath_status,
                 verification=v_dict,
+                reason=fastpath_reason,
                 source="deterministic_fastpath",
-                data=getattr(fp_res, "data", {}),
+                risk_class=getattr(risk_class, "value", risk_class),
+                data=fastpath_result_data,
             )
+            _publish_direct_operation_result(fp_match.tool_name, fp_match.arguments, outcome)
             p_ctx = PresentationContext(platform=platform)
             intent = default_presentation_resolver.resolve(outcome, p_ctx)
             logger.info("Resolved presentation intent: %s (kind=%s)", intent.id, intent.kind)
@@ -3014,7 +3319,7 @@ class Brain:
                     ),
                 )
 
-            yield intent.spoken_text or fp_res
+            yield intent.spoken_text or _result_envelope_to_model_text(outcome)
             return
 
         # --- Fast-path: close app (matcher pure, taskkill runs only after a confirmed match) ---
@@ -3034,11 +3339,19 @@ class Brain:
             close_res = await asyncio.to_thread(router.execute_close_app, close_match[0], close_match[1])
             logger.info("Fast-path close app result: %s -> %s", user_input, close_res)
             self.world_model.record_event("app_close", close_res)
+            close_outcome = _direct_operation_result(
+                tool_name="desktop_focus",
+                capability="desktop",
+                operation="desktop.app.close",
+                raw_result=close_res,
+                args={"apps": close_match[0], "processes": close_match[1]},
+                status=ResultStatus.FAILED if "Failed to close" in close_res else ResultStatus.COMPLETED,
+            )
             if "Failed to close" not in close_res:
                 self._recent_deterministic_apps = [
                     app for app in self._recent_deterministic_apps if app not in close_match[0]
                 ]
-            yield close_res
+            yield _result_envelope_to_model_text(close_outcome)
             return
 
         # --- Fast-path: open app (matcher pure, launch/focus runs only after a confirmed match) ---
@@ -3055,13 +3368,7 @@ class Brain:
                         rationale="open-site matcher deferred execution to browser task",
                     )
                     logger.info("Fast-path browser task (deferred open): %s", open_remaining)
-                    yield await self._browser_task_bounded(
-                        open_remaining,
-                        platform,
-                        task_id=task_id,
-                        session_id=session_id,
-                        turn_id=turn_id,
-                    )
+                    yield await _run_direct_browser(open_remaining)
                     return
                 user_input = open_remaining
             else:
@@ -3074,13 +3381,21 @@ class Brain:
                 )
                 open_msg = await asyncio.to_thread(router.execute_open_app, open_apps, open_commands)
                 self.world_model.record_event("app_open", open_msg)
+                open_outcome = _direct_operation_result(
+                    tool_name="system_control",
+                    capability="desktop",
+                    operation="desktop.app.open",
+                    raw_result=open_msg,
+                    args={"apps": open_apps, "commands": open_commands},
+                    status=ResultStatus.FAILED if "could not open" in open_msg.lower() else ResultStatus.COMPLETED,
+                )
                 if "could not open" not in open_msg.lower():
                     self._recent_deterministic_apps = list(
                         dict.fromkeys((*self._recent_deterministic_apps, *open_apps))
                     )[-8:]
                 if open_remaining is None:
                     logger.info("Fast-path open app result: %s -> %s", user_input, open_msg)
-                    yield open_msg
+                    yield _result_envelope_to_model_text(open_outcome)
                     return
                 # Compound instruction: apps already open, confirm and continue with the leftover text.
                 logger.info(
@@ -3089,7 +3404,7 @@ class Brain:
                     open_msg,
                     open_remaining,
                 )
-                yield open_msg + " "
+                yield _result_envelope_to_model_text(open_outcome) + " "
                 user_input = open_remaining
 
         # --- Fast-path: browser task ("play/watch/search X on <site>") bypasses the LLM's tool-call decision ---
@@ -3103,13 +3418,7 @@ class Brain:
                 rationale="site-scoped browser matcher selected browser task",
             )
             logger.info("Fast-path browser task: %s", browser_task_query)
-            yield await self._browser_task_bounded(
-                browser_task_query,
-                platform,
-                task_id=task_id,
-                session_id=session_id,
-                turn_id=turn_id,
-            )
+            yield await _run_direct_browser(browser_task_query)
             return
 
         # --- Fast-path: continue an explicit request against the active browser page ---
@@ -3126,13 +3435,7 @@ class Brain:
                     rationale="active browser page context selected browser continuation",
                 )
                 logger.info("Fast-path browser continuation: %s", browser_continuation)
-                yield await self._browser_task_bounded(
-                    browser_continuation,
-                    platform,
-                    task_id=task_id,
-                    session_id=session_id,
-                    turn_id=turn_id,
-                )
+                yield await _run_direct_browser(browser_continuation)
                 return
 
         # --- Fast-path: live background-task progress query (deterministic, no LLM needed) ---
@@ -3175,28 +3478,54 @@ class Brain:
                     rationale=f"router classifier selected {classifier_match.name}",
                 )
                 logger.info("Fast-path (classifier): %s -> %s", user_input, classifier_match.name)
-                if classifier_match.name in ("time_date", "background_task_status"):
+                if classifier_match.name == "time_date":
+                    outcome = _direct_operation_result(
+                        tool_name="system_diagnostics",
+                        capability="system",
+                        operation="system.time.read",
+                        raw_result=classifier_match.args["answer"],
+                        args={"query": user_input},
+                    )
+                    yield _result_envelope_to_model_text(outcome)
+                    return
+                if classifier_match.name == "background_task_status":
                     yield classifier_match.args["answer"]
                     return
                 if classifier_match.name == "open_app":
                     app = classifier_match.args["app"]
                     msg = await asyncio.to_thread(router.execute_open_app, [app], [router.open_command_for(app)])
                     self.world_model.record_event("app_open", msg)
+                    outcome = _direct_operation_result(
+                        tool_name="system_control",
+                        capability="desktop",
+                        operation="desktop.app.open",
+                        raw_result=msg,
+                        args={"apps": [app], "commands": [router.open_command_for(app)]},
+                        status=ResultStatus.FAILED if "could not open" in msg.lower() else ResultStatus.COMPLETED,
+                    )
                     if "could not open" not in msg.lower():
                         self._recent_deterministic_apps = list(
                             dict.fromkeys((*self._recent_deterministic_apps, app))
                         )[-8:]
-                    yield msg
+                    yield _result_envelope_to_model_text(outcome)
                     return
                 if classifier_match.name == "close_app":
                     app = classifier_match.args["app"]
                     msg = await asyncio.to_thread(router.execute_close_app, [app], [router.close_process_for(app)])
                     self.world_model.record_event("app_close", msg)
+                    outcome = _direct_operation_result(
+                        tool_name="desktop_focus",
+                        capability="desktop",
+                        operation="desktop.app.close",
+                        raw_result=msg,
+                        args={"apps": [app], "processes": [router.close_process_for(app)]},
+                        status=ResultStatus.FAILED if "Failed to close" in msg else ResultStatus.COMPLETED,
+                    )
                     if "Failed to close" not in msg:
                         self._recent_deterministic_apps = [
                             existing for existing in self._recent_deterministic_apps if existing != app
                         ]
-                    yield msg
+                    yield _result_envelope_to_model_text(outcome)
                     return
 
         direct_screen_query = router.is_direct_screen_perception_query(user_input, recent_screen_context)
@@ -3471,15 +3800,136 @@ class Brain:
         _turn_external_texts: List[str] = []  # tool_external results, fed to security_policy's injected-command check
         last_vision_answer: Optional[str] = None
 
-        async def _exec_one(call: Dict[str, Any]) -> ResultEnvelope | str:
+        def _finalize_operation_result(
+            call: Dict[str, Any],
+            envelope: ResultEnvelope,
+            *,
+            ck: str,
+            is_com: bool,
+            cache_result: bool = True,
+            update_desktop_failure: bool = True,
+            record_failure_event: bool = True,
+        ) -> ResultEnvelope:
+            """Apply one canonical operation result to every downstream boundary."""
+
+            tool_name = call["name"]
+            model_text = _result_envelope_to_model_text(envelope)
+
+            if diagnostic_trace is not None:
+                diagnostic_trace.mark(
+                    "tool_complete",
+                    fields={
+                        "tool_name": tool_name,
+                        "status": getattr(envelope.status, "value", envelope.status),
+                        "result_length": len(model_text),
+                    },
+                )
+
+            if tool_name in _DESKTOP_CONTROL_TOOLS:
+                executed_action_results.append(envelope)
+
+            if record_failure_event and _operation_failed(envelope):
+                self.world_model.record_event("tool_error", f"{tool_name}: {model_text[:200]}")
+
+            if tool_name == "memory" and _operation_succeeded(envelope):
+                self.reload_context()
+
+            _repeat_guard.record_result(
+                ck,
+                envelope,
+                state_changed=(
+                    _operation_succeeded(envelope)
+                    and tool_name
+                    not in {"desktop_observe", "desktop_read_screen", "desktop_screenshot", "desktop_windows"}
+                ),
+            )
+
+            # Anomaly auto-halt: repeated failure of the same call means looping, not progress.
+            if tool_name in _DESKTOP_CONTROL_TOOLS and update_desktop_failure:
+                if _operation_failed(envelope):
+                    _desktop_fail_counts[ck] = _desktop_fail_counts.get(ck, 0) + 1
+                    threshold = 1 if _is_low_confidence_desktop_call(tool_name, call["arguments"]) else 2
+                    if _desktop_fail_counts[ck] >= threshold:
+                        self._turn_halted = True
+                        logger.warning(
+                            "Desktop action %s failed %d time(s) (threshold %d) -- auto-halting.",
+                            tool_name,
+                            _desktop_fail_counts[ck],
+                            threshold,
+                        )
+                else:
+                    _desktop_fail_counts[ck] = 0
+
+            # Pop immediately (no await above) so a concurrent Brain can't overwrite it first.
+            if tool_name == "desktop_screenshot":
+                self._pending_vision_image_url = pop_pending_vision_image()
+
+            _invoke_callback_with_identity(
+                self.on_tool_result,
+                tool_name,
+                model_text,
+                turn_id=envelope.turn_id,
+                task_id=envelope.task_id,
+                session_id=envelope.session_id,
+            )
+            operation_callback = getattr(self, "on_operation_result", None)
+            if operation_callback is not None:
+                try:
+                    operation_callback(tool_name, envelope)
+                except Exception:
+                    logger.warning("Operation result callback failed for %s", tool_name, exc_info=True)
+
+            # Persist the canonical envelope; SessionStore projects it to the history text boundary.
+            if self.session_store:
+                try:
+                    self.session_store.append_tool(
+                        turn_id=envelope.turn_id,
+                        tool_name=tool_name,
+                        args=call["arguments"],
+                        result=envelope,
+                        session_id=envelope.session_id or session_id,
+                    )
+                except Exception as persist_exc:
+                    logger.debug("Tool result persist skipped: %s", persist_exc)
+
+            if cache_result and not is_com:
+                _seen_tool_calls[ck] = envelope
+            telemetry.record_tool_call(tool_name, success=_operation_succeeded(envelope))
+            return envelope
+
+        async def _exec_one(call: Dict[str, Any]) -> ResultEnvelope:
             nonlocal research_report
             tool_name = call["name"]
             ck = f"{call['name']}({json.dumps(call['arguments'], sort_keys=True)})"
-            if _repeat_guard.before(ck):
-                logger.warning("Suppressing repeated failed tool call: %s", ck)
-                return _REPEATED_TOOL_RESULT
             op = capability_index.get_operation(tool_name)
             is_com = bool(op and op.executor_type == "com_thread")
+            if _repeat_guard.before(ck):
+                logger.warning("Suppressing repeated failed tool call: %s", ck)
+                suppression_message = _REPEATED_TOOL_RESULT
+                envelope = ResultEnvelope(
+                    request=original_user_input,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    capability=capability_index.get_operation_domain(tool_name),
+                    operation=op.id if op is not None else None,
+                    status=ResultStatus.BLOCKED.value,
+                    result=suppression_message,
+                    risk_class=op.risk_class if op is not None else "safe",
+                    reason="Repeated identical tool call suppressed.",
+                    source="brain.repeat_guard",
+                    data={"suppressed": True, "repeat_guard": "identical_call"},
+                    errors=[suppression_message],
+                )
+                return _finalize_operation_result(
+                    call,
+                    envelope,
+                    ck=ck,
+                    is_com=is_com,
+                    cache_result=False,
+                    update_desktop_failure=False,
+                    record_failure_event=False,
+                )
             if not is_com and ck in _seen_tool_calls:
                 logger.info("Tool %s already executed, reusing result", call["name"])
                 return _seen_tool_calls[ck]
@@ -3553,10 +4003,12 @@ class Brain:
             raw_result: Any
             result_errors: List[str] = []
             result_reason = policy_reason
+            result_data: Optional[dict[str, Any]] = None
             if gate_reason and not approved:
                 raw_result = f"Error: Command declined by user (required approval: {gate_reason})."
                 policy_status = ResultStatus.CANCELLED.value
                 result_reason = gate_reason
+                result_data = {"failure_kind": "approval_denied"}
             elif tool_name == "propose_new_tool":
                 raw_result = await self._handle_propose_new_tool(call["arguments"])
             elif tool_name == "start_background_task":
@@ -3572,6 +4024,7 @@ class Brain:
                     task_id=task_id,
                     session_id=session_id,
                     turn_id=turn_id,
+                    return_envelope=True,
                 )
             elif tool_name in _DESKTOP_CONTROL_TOOLS and self._is_desktop_halted():
                 raw_result = "Error: Desktop control is halted (panic or repeated failure). Say 'continue' to resume."
@@ -3633,10 +4086,14 @@ class Brain:
                             raw_result = f"Error: Tool '{tool_name}' timed out after {timeout}s"
                             result_errors.append(_tool_result_text(raw_result))
                             policy_status = ResultStatus.FAILED.value
+                            result_reason = f"Tool '{tool_name}' timed out."
+                            result_data = {"failure_kind": "timeout", "timeout_seconds": timeout}
                     else:
                         raw_result = f"Error: Tool '{tool_name}' timed out after {timeout}s"
                         result_errors.append(_tool_result_text(raw_result))
                         policy_status = ResultStatus.FAILED.value
+                        result_reason = f"Tool '{tool_name}' timed out."
+                        result_data = {"failure_kind": "timeout", "timeout_seconds": timeout}
                     logger.warning("Tool %s timed out", tool_name)
                 except Exception as e:
                     if tool_name in ("shell_execute", "file_write"):
@@ -3650,10 +4107,14 @@ class Brain:
                             raw_result = f"Error executing tool '{tool_name}': {e}"
                             result_errors.append(_tool_result_text(raw_result))
                             policy_status = ResultStatus.FAILED.value
+                            result_reason = f"Tool '{tool_name}' raised an exception."
+                            result_data = {"failure_kind": "exception", "exception_type": type(e).__name__}
                     else:
                         raw_result = f"Error executing tool '{tool_name}': {e}"
                         result_errors.append(_tool_result_text(raw_result))
                         policy_status = ResultStatus.FAILED.value
+                        result_reason = f"Tool '{tool_name}' raised an exception."
+                        result_data = {"failure_kind": "exception", "exception_type": type(e).__name__}
                     logger.warning("Tool %s raised an exception: %s", tool_name, e)
 
             envelope = _normalize_tool_result(
@@ -3667,91 +4128,10 @@ class Brain:
                 reason=result_reason,
                 risk_class=getattr(risk_class, "value", risk_class),
                 requires_approval=bool(gate_reason),
+                data=result_data,
                 errors=result_errors or None,
             )
-            model_text = str(envelope.result)
-
-            if diagnostic_trace is not None:
-                diagnostic_trace.mark(
-                    "tool_complete",
-                    fields={
-                        "tool_name": tool_name,
-                        "status": getattr(envelope.status, "value", envelope.status),
-                        "result_length": len(model_text),
-                    },
-                )
-
-            if tool_name in _DESKTOP_CONTROL_TOOLS:
-                executed_action_results.append(envelope)
-
-            if _operation_failed(envelope):
-                self.world_model.record_event("tool_error", f"{tool_name}: {model_text[:200]}")
-
-            if tool_name == "memory" and _operation_succeeded(envelope):
-                self.reload_context()
-
-            _repeat_guard.record_result(
-                ck,
-                envelope,
-                state_changed=(
-                    _operation_succeeded(envelope)
-                    and tool_name
-                    not in {"desktop_observe", "desktop_read_screen", "desktop_screenshot", "desktop_windows"}
-                ),
-            )
-
-            # Anomaly auto-halt: repeated failure of the same call means looping, not progress.
-            if tool_name in _DESKTOP_CONTROL_TOOLS:
-                if _operation_failed(envelope):
-                    _desktop_fail_counts[ck] = _desktop_fail_counts.get(ck, 0) + 1
-                    threshold = 1 if _is_low_confidence_desktop_call(tool_name, call["arguments"]) else 2
-                    if _desktop_fail_counts[ck] >= threshold:
-                        self._turn_halted = True
-                        logger.warning(
-                            "Desktop action %s failed %d time(s) (threshold %d) -- auto-halting.",
-                            tool_name,
-                            _desktop_fail_counts[ck],
-                            threshold,
-                        )
-                else:
-                    _desktop_fail_counts[ck] = 0
-
-            # Pop immediately (no await above) so a concurrent Brain can't overwrite it first.
-            if tool_name == "desktop_screenshot":
-                self._pending_vision_image_url = pop_pending_vision_image()
-
-            _invoke_callback_with_identity(
-                self.on_tool_result,
-                call["name"],
-                model_text,
-                turn_id=turn_id,
-                task_id=task_id,
-                session_id=session_id,
-            )
-            operation_callback = getattr(self, "on_operation_result", None)
-            if operation_callback is not None:
-                try:
-                    operation_callback(tool_name, envelope)
-                except Exception:
-                    logger.warning("Operation result callback failed for %s", tool_name, exc_info=True)
-
-            # Persist tool result to session store (truncated)
-            if self.session_store:
-                try:
-                    self.session_store.append_tool(
-                        turn_id=turn_id,
-                        tool_name=call["name"],
-                        args=call["arguments"],
-                        result=model_text,
-                        session_id=session_id,
-                    )
-                except Exception as persist_exc:
-                    logger.debug("Tool result persist skipped: %s", persist_exc)
-
-            if not is_com:
-                _seen_tool_calls[ck] = envelope
-            telemetry.record_tool_call(tool_name, success=_operation_succeeded(envelope))
-            return envelope
+            return _finalize_operation_result(call, envelope, ck=ck, is_com=is_com)
 
         while True:
             # Re-check cancellation at the top of every tool cycle so a turn
@@ -3780,7 +4160,7 @@ class Brain:
                 return
 
             tool_calls = allowed_calls
-            results_map: Dict[int, ResultEnvelope | str] = {}
+            results_map: Dict[int, ResultEnvelope] = {}
             read_only_idxs = [i for i, call in enumerate(tool_calls) if not tool_registry.is_interactive(call["name"])]
             if read_only_idxs:
                 gathered = await asyncio.gather(*(_exec_one(tool_calls[i]) for i in read_only_idxs))
@@ -3792,7 +4172,7 @@ class Brain:
                 if tool_registry.is_interactive(call["name"]):
                     results_map[idx] = await _exec_one(call)
 
-            operation_results = [results_map[i] for i in range(len(tool_calls))]
+            operation_results: List[ResultEnvelope] = [results_map[i] for i in range(len(tool_calls))]
             if _repeat_guard.should_escape:
                 if any(c["name"] in _DESKTOP_CONTROL_TOOLS for c in tool_calls):
                     self._turn_halted = True
@@ -3802,10 +4182,7 @@ class Brain:
                 return
             # Keep the model-facing tool text stable; structured operation outcomes stay in
             # the typed callback/persistence boundary above.
-            exec_results = [
-                str(result.result) if isinstance(result, ResultEnvelope) else str(result)
-                for result in operation_results
-            ]
+            exec_results = [_result_envelope_to_model_text(result) for result in operation_results]
 
             # Step 3: Post-tool confidence gate - replace low-quality results
             exec_results = [
