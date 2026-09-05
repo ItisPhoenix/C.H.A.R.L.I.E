@@ -52,9 +52,10 @@ from charlie.doctor import CharlieDoctor
 logger = logging.getLogger("charlie.web_server")
 logger.addFilter(SensitiveDataFilter())
 
-from run import _git_build_identity
+from charlie.runtime_identity import git_build_identity
 
-_SOURCE_IDENTITY, _SOURCE_DIRTY = _git_build_identity(Path(__file__).resolve().parent.parent)
+_SOURCE_IDENTITY, _SOURCE_DIRTY = git_build_identity(Path(__file__).resolve().parent.parent)
+
 
 _privacy_service = PrivacyService()
 _code_index = CodeIndex()
@@ -396,7 +397,7 @@ _configured_frontend_dist = os.environ.get("CHARLIE_FRONTEND_DIST")
 if _configured_frontend_dist:
     _FRONTEND_DIST = Path(_configured_frontend_dist)
 else:
-    from run import _persistent_frontend_dist
+    from charlie.runtime_identity import persistent_frontend_dist as _persistent_frontend_dist
 
     _FRONTEND_DIST = _persistent_frontend_dist(Path(__file__).resolve().parent.parent)
 

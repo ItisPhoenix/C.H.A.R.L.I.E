@@ -57,6 +57,10 @@ class _FakeEventBus:
     async def emit(self, *args, **kwargs):
         pass
 
+    async def next_command(self):
+        await asyncio.sleep(3600)
+        return {}
+
 
 class _FakeVoice:
     def __init__(self):
@@ -151,7 +155,6 @@ async def test_main_does_not_call_os_exit_on_clean_shutdown(monkeypatch):
     import charlie.audit_store as audit_store_module
     monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: _FakeStore("audit"))
     monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: (_FakeStore("graph"), None, object()))
-    monkeypatch.setattr(main, "_ensure_frontend_runtime", lambda: None)
     monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: _FakeBrain())
     monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
 
@@ -165,12 +168,18 @@ async def test_main_does_not_call_os_exit_on_clean_shutdown(monkeypatch):
     monkeypatch.setattr(main, "_start_voice_or_degrade", lambda *a, **kw: _FakeVoice())
     monkeypatch.setattr(main, "EventBus", lambda *a, **kw: _FakeEventBus())
 
+    orig_gather = main.asyncio.gather
+
     # Fast-exit gather
     async def fast_gather(*args, **kwargs):
+        if kwargs.get("return_exceptions"):
+            return await orig_gather(*args, **kwargs)
         for a in args:
             if asyncio.iscoroutine(a):
                 a.close()
-        return None
+            elif isinstance(a, asyncio.Task) and not a.done():
+                a.cancel()
+        return []
 
     monkeypatch.setattr(main.asyncio, "gather", fast_gather)
     monkeypatch.setattr(main, "_voice_loop_idle", lambda *a, **kw: asyncio.sleep(0))
@@ -270,7 +279,6 @@ async def test_web_startup_failure_uses_canonical_cleanup_path(monkeypatch, capl
     import charlie.audit_store as audit_store_module
     monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: audit_store)
     monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: (_FakeStore("graph"), None, object()))
-    monkeypatch.setattr(main, "_ensure_frontend_runtime", lambda: None)
     monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: brain)
     monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
 
@@ -312,7 +320,6 @@ async def test_brain_closes_exactly_once(monkeypatch):
     import charlie.audit_store as audit_store_module
     monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: _FakeStore())
     monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: (_FakeStore("graph"), None, object()))
-    monkeypatch.setattr(main, "_ensure_frontend_runtime", lambda: None)
     monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: brain)
     monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
 
@@ -478,7 +485,6 @@ async def test_runtime_cancellation_enters_cleanup(monkeypatch, caplog):
     import charlie.audit_store as audit_store_module
     monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: _FakeStore())
     monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: (_FakeStore("graph"), None, object()))
-    monkeypatch.setattr(main, "_ensure_frontend_runtime", lambda: None)
     monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: _FakeBrain())
     monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
 
@@ -521,7 +527,6 @@ async def test_ctrl_c_does_not_bypass_cleanup(monkeypatch, caplog):
     import charlie.audit_store as audit_store_module
     monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: _FakeStore())
     monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: (_FakeStore("graph"), None, object()))
-    monkeypatch.setattr(main, "_ensure_frontend_runtime", lambda: None)
     monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: _FakeBrain())
     monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
 
@@ -569,7 +574,6 @@ async def test_cleanup_failure_in_one_resource_does_not_skip_remaining(monkeypat
     import charlie.audit_store as audit_store_module
     monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: audit_store)
     monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: (_FakeStore("graph"), None, object()))
-    monkeypatch.setattr(main, "_ensure_frontend_runtime", lambda: None)
     monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: BrokenBrain())
     monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
 
@@ -756,3 +760,624 @@ def test_run_full_imports_and_calls_main_main(monkeypatch):
     res = run_module.run_full()
     assert called is True
     assert res == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 26: Housekeeping cancellation is awaited before EventBus close
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_housekeeping_cancellation_awaited_before_event_bus_close(monkeypatch):
+    order: list[str] = []
+
+    class TrackedEventBus(_FakeEventBus):
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            order.append("event_bus_close")
+
+    monkeypatch.setattr(main, "_runtime_health", HealthRegistry(_all_subsystems()))
+    monkeypatch.setattr(main, "SessionStore", lambda path: _FakeStore("session"))
+    import charlie.audit_store as audit_store_module
+    monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: _FakeStore("audit"))
+    monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: (_FakeStore("graph"), None, object()))
+    monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: _FakeBrain())
+    monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
+    import charlie.plugins as plugins_module
+    import charlie.tools as tools_module
+    monkeypatch.setattr(tools_module, "register_plugin_tools", lambda cfg: None)
+    monkeypatch.setattr(plugins_module, "PluginManager", lambda: object())
+    monkeypatch.setattr(main.config, "mcp_enabled", False)
+    monkeypatch.setattr(main.config, "pet_enabled", False)
+    monkeypatch.setattr(main, "_start_web_subprocess", lambda *a, **kw: _FakeProcess(8000))
+    monkeypatch.setattr(main, "_start_voice_or_degrade", lambda *a, **kw: _FakeVoice())
+    monkeypatch.setattr(main, "EventBus", lambda *a, **kw: TrackedEventBus())
+    monkeypatch.setattr(main, "_log_port_release", lambda *a: None)
+
+    async def fake_housekeeping():
+        try:
+            await asyncio.sleep(100)
+        finally:
+            order.append("housekeeping_finalizer")
+
+    hk_task = None
+    orig_gather = main.asyncio.gather
+
+    async def fast_gather(*args, **kwargs):
+        nonlocal hk_task
+        if kwargs.get("return_exceptions"):
+            return await orig_gather(*args, **kwargs)
+        hk_task = asyncio.create_task(fake_housekeeping(), name="test_hk_task")
+        main.background_housekeeping_tasks.add(hk_task)
+        await asyncio.sleep(0.01)
+        for a in args:
+            if asyncio.iscoroutine(a):
+                a.close()
+            elif isinstance(a, asyncio.Task) and not a.done():
+                a.cancel()
+        return []
+
+    monkeypatch.setattr(main.asyncio, "gather", fast_gather)
+    exit_code = await main.main()
+    assert exit_code == 0
+    assert "housekeeping_finalizer" in order
+    assert "event_bus_close" in order
+    assert order.index("housekeeping_finalizer") < order.index("event_bus_close")
+
+
+# ---------------------------------------------------------------------------
+# Test 27: Active foreground task is awaited before EventBus close and before Brain/store close
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_active_foreground_task_awaited_before_eventbus_and_stores_close(monkeypatch):
+    order: list[str] = []
+
+    class TrackedEventBus(_FakeEventBus):
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            order.append("event_bus_close")
+
+    class TrackedStore(_FakeStore):
+        def close(self):
+            order.append(f"{self.name}_close")
+            super().close()
+
+    class TrackedBrain(_FakeBrain):
+        async def close(self):
+            order.append("brain_close")
+            await super().close()
+
+    monkeypatch.setattr(main, "_runtime_health", HealthRegistry(_all_subsystems()))
+    monkeypatch.setattr(main, "SessionStore", lambda path: TrackedStore("session"))
+    import charlie.audit_store as audit_store_module
+    monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: TrackedStore("audit"))
+    monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: (TrackedStore("graph"), None, object()))
+    monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: TrackedBrain())
+    monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
+    import charlie.plugins as plugins_module
+    import charlie.tools as tools_module
+    monkeypatch.setattr(tools_module, "register_plugin_tools", lambda cfg: None)
+    monkeypatch.setattr(plugins_module, "PluginManager", lambda: object())
+    monkeypatch.setattr(main.config, "mcp_enabled", False)
+    monkeypatch.setattr(main.config, "pet_enabled", False)
+    monkeypatch.setattr(main, "_start_web_subprocess", lambda *a, **kw: _FakeProcess(8000))
+    monkeypatch.setattr(main, "_start_voice_or_degrade", lambda *a, **kw: _FakeVoice())
+    monkeypatch.setattr(main, "EventBus", lambda *a, **kw: TrackedEventBus())
+    monkeypatch.setattr(main, "_log_port_release", lambda *a: None)
+
+    async def foreground_turn():
+        try:
+            await asyncio.sleep(100)
+        finally:
+            order.append("foreground_finalizer")
+
+    fg_task = None
+    orig_gather = main.asyncio.gather
+
+    async def fast_gather(*args, **kwargs):
+        nonlocal fg_task
+        if kwargs.get("return_exceptions"):
+            return await orig_gather(*args, **kwargs)
+        fg_task = asyncio.create_task(foreground_turn(), name="foreground_turn_task")
+        main.active_process_task = fg_task
+        await asyncio.sleep(0.01)
+        for a in args:
+            if asyncio.iscoroutine(a):
+                a.close()
+            elif isinstance(a, asyncio.Task) and not a.done():
+                a.cancel()
+        return []
+
+    monkeypatch.setattr(main.asyncio, "gather", fast_gather)
+    exit_code = await main.main()
+    assert exit_code == 0
+    assert "foreground_finalizer" in order
+    assert "event_bus_close" in order
+    assert "brain_close" in order
+    assert "session_close" in order
+    assert "audit_close" in order
+
+    fg_idx = order.index("foreground_finalizer")
+    assert fg_idx < order.index("event_bus_close")
+    assert fg_idx < order.index("brain_close")
+    assert fg_idx < order.index("session_close")
+    assert fg_idx < order.index("audit_close")
+
+
+# ---------------------------------------------------------------------------
+# Test 28: Steady-state task failure cancels and drains pending siblings before EventBus close
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_steady_state_task_failure_cancels_siblings_before_event_bus_exit(monkeypatch):
+    order: list[str] = []
+
+    class TrackedEventBus(_FakeEventBus):
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            order.append("event_bus_close")
+
+    monkeypatch.setattr(main, "_runtime_health", HealthRegistry(_all_subsystems()))
+    monkeypatch.setattr(main, "SessionStore", lambda path: _FakeStore("session"))
+    import charlie.audit_store as audit_store_module
+    monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: _FakeStore("audit"))
+    monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: (_FakeStore("graph"), None, object()))
+    monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: _FakeBrain())
+    monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
+    import charlie.plugins as plugins_module
+    import charlie.tools as tools_module
+    monkeypatch.setattr(tools_module, "register_plugin_tools", lambda cfg: None)
+    monkeypatch.setattr(plugins_module, "PluginManager", lambda: object())
+    monkeypatch.setattr(main.config, "mcp_enabled", False)
+    monkeypatch.setattr(main.config, "pet_enabled", False)
+    monkeypatch.setattr(main, "_start_web_subprocess", lambda *a, **kw: _FakeProcess(8000))
+    monkeypatch.setattr(main, "_start_voice_or_degrade", lambda *a, **kw: _FakeVoice())
+    monkeypatch.setattr(main, "EventBus", lambda *a, **kw: TrackedEventBus())
+    monkeypatch.setattr(main, "_log_port_release", lambda *a: None)
+
+    async def failing_deliver(store, now, callback):
+        await asyncio.sleep(0.01)
+        raise RuntimeError("calendar loop crashed")
+
+    async def sibling_idle(voice):
+        try:
+            await asyncio.sleep(100)
+        finally:
+            order.append("sibling_finalizer")
+
+    import charlie.calendar_scheduler as calendar_scheduler
+    monkeypatch.setattr(calendar_scheduler, "deliver_due_reminders", failing_deliver)
+    monkeypatch.setattr(main, "_voice_loop_idle", sibling_idle)
+
+    exit_code = await main.main()
+    assert exit_code == 1
+    assert "sibling_finalizer" in order
+    assert "event_bus_close" in order
+    assert order.index("sibling_finalizer") < order.index("event_bus_close")
+
+
+# ---------------------------------------------------------------------------
+# Test 29: Companion monitor task is drained before EventBus close
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_companion_monitor_drained_before_event_bus_close(monkeypatch, tmp_path):
+    order: list[str] = []
+
+    class TrackedEventBus(_FakeEventBus):
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            order.append("event_bus_close")
+
+    ready_file = tmp_path / "companion.ready"
+    ready_file.write_text("ready")
+
+    monkeypatch.setattr(main, "_runtime_health", HealthRegistry(_all_subsystems()))
+    monkeypatch.setattr(main, "SessionStore", lambda path: _FakeStore("session"))
+    import charlie.audit_store as audit_store_module
+    monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: _FakeStore("audit"))
+    monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: (_FakeStore("graph"), None, object()))
+    monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: _FakeBrain())
+    monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
+    import charlie.plugins as plugins_module
+    import charlie.tools as tools_module
+    monkeypatch.setattr(tools_module, "register_plugin_tools", lambda cfg: None)
+    monkeypatch.setattr(plugins_module, "PluginManager", lambda: object())
+    monkeypatch.setattr(main.config, "mcp_enabled", False)
+    monkeypatch.setattr(main.config, "pet_enabled", True)
+    pet_proc = _FakeProcess(8001)
+    monkeypatch.setattr(main, "_companion_dependency_status", lambda: (True, None))
+    monkeypatch.setattr(main, "_start_web_subprocess", lambda *a, **kw: _FakeProcess(8000))
+    monkeypatch.setattr(main, "_start_subsystem_process", lambda *a, **kw: pet_proc)
+    monkeypatch.setattr(main, "_start_voice_or_degrade", lambda *a, **kw: _FakeVoice())
+    monkeypatch.setattr(main, "EventBus", lambda *a, **kw: TrackedEventBus())
+    monkeypatch.setattr(main, "_log_port_release", lambda *a: None)
+
+    async def mock_monitor(proc, file, bus):
+        try:
+            await asyncio.sleep(100)
+        finally:
+            order.append("companion_monitor_finalizer")
+
+    monkeypatch.setattr(main, "_monitor_companion_readiness", mock_monitor)
+
+    orig_gather = main.asyncio.gather
+    async def fast_gather(*args, **kwargs):
+        if kwargs.get("return_exceptions"):
+            return await orig_gather(*args, **kwargs)
+        await asyncio.sleep(0.01)
+        for a in args:
+            if asyncio.iscoroutine(a):
+                a.close()
+            elif isinstance(a, asyncio.Task) and not a.done():
+                a.cancel()
+        return []
+
+    monkeypatch.setattr(main.asyncio, "gather", fast_gather)
+    exit_code = await main.main()
+    assert exit_code == 0
+    assert "companion_monitor_finalizer" in order
+    assert "event_bus_close" in order
+    assert order.index("companion_monitor_finalizer") < order.index("event_bus_close")
+
+
+# ---------------------------------------------------------------------------
+# Test 30: No main-owned EventBus-dependent steady-state task remains pending
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_no_eventbus_dependent_steady_state_task_pending_after_main_returns(monkeypatch):
+    created_tasks: list[asyncio.Task] = []
+    orig_create_task = asyncio.create_task
+
+    def tracked_create_task(*args, **kwargs):
+        task = orig_create_task(*args, **kwargs)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", tracked_create_task)
+    monkeypatch.setattr(main.asyncio, "create_task", tracked_create_task)
+
+    monkeypatch.setattr(main, "_runtime_health", HealthRegistry(_all_subsystems()))
+    monkeypatch.setattr(main, "SessionStore", lambda path: _FakeStore("session"))
+    import charlie.audit_store as audit_store_module
+    monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: _FakeStore("audit"))
+    monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: (_FakeStore("graph"), None, object()))
+    monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: _FakeBrain())
+    monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
+    import charlie.plugins as plugins_module
+    import charlie.tools as tools_module
+    monkeypatch.setattr(tools_module, "register_plugin_tools", lambda cfg: None)
+    monkeypatch.setattr(plugins_module, "PluginManager", lambda: object())
+    monkeypatch.setattr(main.config, "mcp_enabled", False)
+    monkeypatch.setattr(main.config, "pet_enabled", False)
+    monkeypatch.setattr(main, "_start_web_subprocess", lambda *a, **kw: _FakeProcess(8000))
+    monkeypatch.setattr(main, "_start_voice_or_degrade", lambda *a, **kw: _FakeVoice())
+    monkeypatch.setattr(main, "EventBus", lambda *a, **kw: _FakeEventBus())
+    monkeypatch.setattr(main, "_log_port_release", lambda *a: None)
+
+    orig_gather = main.asyncio.gather
+    async def fast_gather(*args, **kwargs):
+        if kwargs.get("return_exceptions"):
+            return await orig_gather(*args, **kwargs)
+        for a in args:
+            if asyncio.iscoroutine(a):
+                a.close()
+            elif isinstance(a, asyncio.Task) and not a.done():
+                a.cancel()
+        return []
+
+    monkeypatch.setattr(main.asyncio, "gather", fast_gather)
+    exit_code = await main.main()
+    assert exit_code == 0
+    pending_tasks = [t for t in created_tasks if not t.done()]
+    assert pending_tasks == [], f"Tasks remained pending: {[t.get_name() for t in pending_tasks]}"
+    registry = main._main_event_bus_registry
+    assert registry is not None
+    tracked_tasks, tracked_futures = registry.snapshot()
+    assert tracked_tasks == ()
+    assert tracked_futures == ()
+
+
+# ---------------------------------------------------------------------------
+# Test 31: Pending local EventBus submission drains before EventBus exit
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_pending_local_eventbus_submission_drains_before_eventbus_exit():
+    order: list[str] = []
+    started = asyncio.Event()
+    registry = main._EventBusSubmissionRegistry()
+
+    class Bus:
+        async def emit(self, *_args, **_kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                order.append("local_finalizer")
+
+        async def __aexit__(self, *_args):
+            order.append("event_bus_close")
+
+    loop = asyncio.get_running_loop()
+    task = registry.submit_task(Bus().emit("pending"), loop)
+    await started.wait()
+    registry.close()
+    await main._drain_event_bus_submissions(registry, loop=loop)
+    await Bus().__aexit__(None, None, None)
+
+    assert task is not None and task.done()
+    assert order == ["local_finalizer", "event_bus_close"]
+
+
+# ---------------------------------------------------------------------------
+# Test 32: Pending thread-safe EventBus future resolves before EventBus exit
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_pending_threadsafe_eventbus_future_resolves_before_eventbus_exit():
+    order: list[str] = []
+    started = asyncio.Event()
+    registry = main._EventBusSubmissionRegistry()
+
+    class Bus:
+        async def emit(self, *_args, **_kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                order.append("future_finalizer")
+
+        async def __aexit__(self, *_args):
+            order.append("event_bus_close")
+
+    loop = asyncio.get_running_loop()
+    future = registry.submit_threadsafe(Bus().emit("pending"), loop)
+    await started.wait()
+    registry.close()
+    await main._drain_event_bus_submissions(registry, loop=loop)
+    await Bus().__aexit__(None, None, None)
+
+    assert future is not None and future.done()
+    assert order == ["future_finalizer", "event_bus_close"]
+
+
+# ---------------------------------------------------------------------------
+# Test 33: Late Voice-style callback is rejected by the closed submission gate
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_late_voice_callback_creates_no_eventbus_submission(monkeypatch):
+    registry = main._EventBusSubmissionRegistry()
+    monkeypatch.setattr(main, "_main_event_bus_registry", registry)
+    loop = asyncio.get_running_loop()
+    calls: list[str] = []
+
+    class Bus:
+        async def emit(self, event, *_args, **_kwargs):
+            calls.append(event)
+            raise AssertionError("closed EventBus must not receive late Voice callback")
+
+    registry.close()
+    future = main._submit_event_threadsafe(Bus().emit("speaking_start"), loop)
+
+    assert future is None
+    assert calls == []
+    await main._drain_event_bus_submissions(registry, loop=loop)
+
+
+# ---------------------------------------------------------------------------
+# Test 34: Producer race drains admitted work and rejects late work
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_eventbus_producer_race_closes_gate_before_eventbus_exit():
+    order: list[str] = []
+    started = asyncio.Event()
+    registry = main._EventBusSubmissionRegistry()
+
+    class Bus:
+        async def emit(self, event, *_args, **_kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                order.append(f"{event}_finalizer")
+
+        async def __aexit__(self, *_args):
+            order.append("event_bus_close")
+
+    loop = asyncio.get_running_loop()
+    admitted = registry.submit_task(Bus().emit("admitted"), loop)
+    await started.wait()
+    registry.close()
+    late = registry.submit_threadsafe(Bus().emit("late"), loop)
+    await main._drain_event_bus_submissions(registry, loop=loop)
+    after_drain = registry.submit_task(Bus().emit("after_drain"), loop)
+    await Bus().__aexit__(None, None, None)
+
+    assert admitted is not None and admitted.done()
+    assert late is None
+    assert after_drain is None
+    assert order == ["admitted_finalizer", "event_bus_close"]
+    assert registry.is_empty()
+
+
+# ---------------------------------------------------------------------------
+# Test 35: Timeout path cancels cooperative local and thread-safe submissions
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_eventbus_timeout_cancels_submissions_to_zero_live_entries():
+    local_started = asyncio.Event()
+    future_started = asyncio.Event()
+    registry = main._EventBusSubmissionRegistry()
+
+    class Bus:
+        async def emit(self, kind, *_args, **_kwargs):
+            (local_started if kind == "local" else future_started).set()
+            await asyncio.Event().wait()
+
+    loop = asyncio.get_running_loop()
+    local_task = registry.submit_task(Bus().emit("local"), loop)
+    future = registry.submit_threadsafe(Bus().emit("future"), loop)
+    await asyncio.gather(local_started.wait(), future_started.wait())
+    registry.close()
+    await main._drain_event_bus_submissions(registry, loop=loop, timeout=0)
+
+    assert local_task is not None and local_task.done()
+    assert future is not None and future.done()
+    tracked_tasks, tracked_futures = registry.snapshot()
+    assert tracked_tasks == ()
+    assert tracked_futures == ()
+
+
+# ---------------------------------------------------------------------------
+# Test 31: Full-mode frontend build failure returns canonical code 1
+# ---------------------------------------------------------------------------
+def test_full_mode_frontend_failure_returns_canonical_code_1(monkeypatch):
+    def failing_build(*args):
+        raise RuntimeError("Vite compilation exploded")
+
+    monkeypatch.setattr(run, "check_and_build_frontend", failing_build)
+    exit_code = run.cli_main([])
+    assert exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 32: Web-only frontend build failure returns canonical code 1
+# ---------------------------------------------------------------------------
+def test_web_only_frontend_failure_returns_canonical_code_1(monkeypatch):
+    def failing_build(*args):
+        raise RuntimeError("Vite compilation exploded")
+
+    monkeypatch.setattr(run, "check_and_build_frontend", failing_build)
+    exit_code = run.cli_main(["--web-only"])
+    assert exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 33: KeyboardInterrupt during launcher preflight returns graceful 0
+# ---------------------------------------------------------------------------
+def test_keyboard_interrupt_during_launcher_preflight_returns_graceful_zero(monkeypatch):
+    def interrupted_build(*args):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(run, "check_and_build_frontend", interrupted_build)
+    assert run.cli_main([]) == 0
+    assert run.cli_main(["--web-only"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 34: main.py does not call or import frontend build authority
+# ---------------------------------------------------------------------------
+def test_main_does_not_call_or_import_frontend_build_authority():
+    main_path = Path("main.py")
+    content = main_path.read_text(encoding="utf-8")
+    assert "check_and_build_frontend" not in content
+    assert "_ensure_frontend_runtime" not in content
+    assert not hasattr(main, "_ensure_frontend_runtime")
+
+
+# ---------------------------------------------------------------------------
+# Test 35: main.py and web_server.py have no reverse import of run.py
+# ---------------------------------------------------------------------------
+def test_main_and_web_server_have_no_reverse_import_of_run():
+    import ast
+
+    for rel_path in ("main.py", "charlie/web_server.py"):
+        tree = ast.parse(Path(rel_path).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert alias.name != "run", f"{rel_path} has 'import run'"
+            elif isinstance(node, ast.ImportFrom):
+                assert node.module != "run", f"{rel_path} has 'from run import ...'"
+
+
+# ---------------------------------------------------------------------------
+# Test 36: run.py -> main.py remains the supported dependency direction
+# ---------------------------------------------------------------------------
+def test_run_to_main_supported_direction():
+    import ast
+
+    run_tree = ast.parse(Path("run.py").read_text(encoding="utf-8"))
+    imports_main = any(
+        (isinstance(node, ast.Import) and any(a.name == "main" for a in node.names))
+        or (isinstance(node, ast.ImportFrom) and node.module == "main")
+        for node in ast.walk(run_tree)
+    )
+    assert imports_main, "run.py must import main"
+
+
+# ---------------------------------------------------------------------------
+# Test 37: Loop exception handler is restored across multiple invocations
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_loop_exception_handler_restored_without_stacking(monkeypatch):
+    loop = asyncio.get_running_loop()
+    sentinel_called = 0
+
+    def sentinel_handler(lp, ctx):
+        nonlocal sentinel_called
+        sentinel_called += 1
+
+    loop.set_exception_handler(sentinel_handler)
+    initial_handler = loop.get_exception_handler()
+    assert initial_handler is sentinel_handler
+
+    monkeypatch.setattr(main, "_runtime_health", HealthRegistry(_all_subsystems()))
+    monkeypatch.setattr(main, "SessionStore", lambda path: _FakeStore("session"))
+    import charlie.audit_store as audit_store_module
+    monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: _FakeStore("audit"))
+    monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: (_FakeStore("graph"), None, object()))
+    monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: _FakeBrain())
+    monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
+    import charlie.plugins as plugins_module
+    import charlie.tools as tools_module
+    monkeypatch.setattr(tools_module, "register_plugin_tools", lambda cfg: None)
+    monkeypatch.setattr(plugins_module, "PluginManager", lambda: object())
+    monkeypatch.setattr(main.config, "mcp_enabled", False)
+    monkeypatch.setattr(main.config, "pet_enabled", False)
+    monkeypatch.setattr(main, "_start_web_subprocess", lambda *a, **kw: _FakeProcess(8000))
+    monkeypatch.setattr(main, "_start_voice_or_degrade", lambda *a, **kw: _FakeVoice())
+    monkeypatch.setattr(main, "EventBus", lambda *a, **kw: _FakeEventBus())
+    monkeypatch.setattr(main, "_log_port_release", lambda *a: None)
+
+    orig_gather = main.asyncio.gather
+    async def fast_gather(*args, **kwargs):
+        if kwargs.get("return_exceptions"):
+            return await orig_gather(*args, **kwargs)
+        for a in args:
+            if asyncio.iscoroutine(a):
+                a.close()
+            elif isinstance(a, asyncio.Task) and not a.done():
+                a.cancel()
+        return []
+
+    monkeypatch.setattr(main.asyncio, "gather", fast_gather)
+
+    # First run
+    await main.main()
+    assert loop.get_exception_handler() is initial_handler
+
+    # Second run
+    await main.main()
+    assert loop.get_exception_handler() is initial_handler
+
+    loop.set_exception_handler(None)
+
+
+# ---------------------------------------------------------------------------
+# Test 38: H2 health causal guard authority remains intact
+# ---------------------------------------------------------------------------
+def test_h2_health_causal_guard_authority_remains_intact():
+    import threading
+
+    from charlie.core import Brain
+    from charlie.subsystem_health import HealthStatus
+    brain = Brain.__new__(Brain)
+    brain._primary_llm_lock = threading.Lock()
+    brain._primary_llm_dispatch_generation = 2
+    brain._primary_llm_applied_generation = 0
+    notified_statuses = []
+    brain._on_llm_health = lambda st, det: notified_statuses.append((st, det))
+
+    # Older generation 1 outcome must be suppressed
+    applied = brain._notify_primary_llm_health(1, HealthStatus.DEGRADED, "error")
+    assert applied is False
+    assert brain._primary_llm_applied_generation == 0
+    assert notified_statuses == []
+
+    # Current generation 2 outcome must apply
+    applied = brain._notify_primary_llm_health(2, HealthStatus.RUNNING, "Ready")
+    assert applied is True
+    assert brain._primary_llm_applied_generation == 2
+    assert notified_statuses == [(HealthStatus.RUNNING, "Ready")]

@@ -56,9 +56,8 @@ def _run_callback(name: str, captured: List[Dict[str, Any]],
 
     bus = _CapturingBus()
 
-    # run_coroutine_threadsafe / create_task appear in the callback source as
-    # asyncio.<method>(event_bus.emit(...), loop). Since emit already recorded
-    # synchronously, these scheduling calls are no-ops in the test namespace.
+    # EventBus submission helpers are no-ops here because emit records
+    # synchronously in this source-extraction harness.
     class _FakeAsyncio:
         @staticmethod
         def run_coroutine_threadsafe(coro, loop):
@@ -73,6 +72,8 @@ def _run_callback(name: str, captured: List[Dict[str, Any]],
         "loop": None,
         "current_web_session_id": session_id,
         "asyncio": _FakeAsyncio,
+        "_submit_event_task": lambda coro, loop=None: None,
+        "_submit_event_threadsafe": lambda coro, loop: None,
         "EventMeta": EventMeta,
         "EventSource": EventSource,
     }

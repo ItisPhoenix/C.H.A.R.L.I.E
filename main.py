@@ -1,5 +1,6 @@
 # ruff: noqa: E402, I001
 import asyncio
+import concurrent.futures
 import dataclasses
 import errno
 import http.client
@@ -13,7 +14,7 @@ import socket
 import sys
 import time
 import threading
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 # Windows event-loop policy (must precede zmq/asyncio imports)
 from charlie.runtime import configure as _configure_platform
@@ -166,10 +167,47 @@ _NON_CANCELLABLE_FOREGROUND_TOOLS = frozenset(
     }
 )
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
-from run import _git_build_identity
+from charlie.runtime_identity import git_build_identity, persistent_frontend_dist
 
-_SOURCE_IDENTITY, _SOURCE_DIRTY = _git_build_identity(Path(__file__).resolve().parent)
+_SOURCE_IDENTITY, _SOURCE_DIRTY = git_build_identity(Path(__file__).resolve().parent)
 _state_machine = StateMachine()  # single authoritative CoreState instance for this process
+
+# Authoritative main runtime task tracking
+active_process_task: Optional[asyncio.Task] = None
+background_housekeeping_tasks: set[asyncio.Task] = set()
+
+
+async def _cancel_and_drain(
+    tasks: Iterable[Optional[asyncio.Task | asyncio.Future]], *, label: str = "tasks"
+) -> None:
+    current = asyncio.current_task()
+    pending: list[asyncio.Task] = []
+    seen: set[asyncio.Task | asyncio.Future] = set()
+
+    for item in tasks:
+        if item is None or not isinstance(item, (asyncio.Task, asyncio.Future)):
+            continue
+        if item is current or item in seen:
+            continue
+        seen.add(item)
+        if not item.done():
+            item.cancel()
+            pending.append(item)
+        elif not item.cancelled():
+            try:
+                item.exception()
+            except (asyncio.CancelledError, asyncio.InvalidStateError):
+                pass
+
+    if not pending:
+        return
+
+    results = await asyncio.gather(*pending, return_exceptions=True)
+    if results is not None:
+        for task, res in zip(pending, results, strict=False):
+            if isinstance(res, Exception) and not isinstance(res, asyncio.CancelledError):
+                name = getattr(task, "get_name", lambda: str(task))()
+                logger.warning("Error during %s task drain (%s): %s", label, name, res)
 
 
 def _allocate_turn_request(text: str, session_id: str, channel: str) -> TurnRequest:
@@ -186,13 +224,6 @@ def _is_sustained_research_request(text: str, runtime_config: Any) -> bool:
 
     decision = route(text, getattr(runtime_config, "research_default_mode", "auto"))
     return decision.should_research and is_sustained_research_query(text, decision)
-
-
-def _ensure_frontend_runtime() -> None:
-    """Use the same verified frontend authority when main.py is launched directly."""
-    from run import check_and_build_frontend
-
-    check_and_build_frontend(Path(__file__).resolve().parent)
 
 
 async def _start_sustained_research_task(
@@ -391,6 +422,206 @@ def _build_runtime_introspector(
 hud_visible: bool = True
 hud_client_count: int = 0
 _main_event_bus: Optional[Any] = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _TrackedThreadsafeSubmission:
+    future: concurrent.futures.Future
+    started: concurrent.futures.Future
+    completion: concurrent.futures.Future
+
+
+class _EventBusSubmissionRegistry:
+    """Gate and drain main-owned fire-and-forget EventBus submissions."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._accepting = True
+        self._tasks: set[asyncio.Task] = set()
+        self._futures: set[_TrackedThreadsafeSubmission] = set()
+
+    def close(self) -> None:
+        with self._lock:
+            self._accepting = False
+
+    def submit_task(self, coroutine: Any, loop: asyncio.AbstractEventLoop) -> Optional[asyncio.Task]:
+        with self._lock:
+            if not self._accepting:
+                coroutine.close()
+                return None
+            try:
+                task = loop.create_task(coroutine)
+            except Exception:
+                coroutine.close()
+                raise
+            self._tasks.add(task)
+        task.add_done_callback(self._task_done)
+        return task
+
+    def submit_threadsafe(
+        self, coroutine: Any, loop: asyncio.AbstractEventLoop
+    ) -> Optional[concurrent.futures.Future]:
+        started = concurrent.futures.Future()
+        completion = concurrent.futures.Future()
+
+        async def _tracked_submission() -> Any:
+            if not started.done():
+                started.set_result(None)
+            try:
+                return await coroutine
+            finally:
+                if not completion.done():
+                    completion.set_result(None)
+
+        wrapped_coroutine = _tracked_submission()
+        with self._lock:
+            if not self._accepting:
+                wrapped_coroutine.close()
+                coroutine.close()
+                return None
+            try:
+                future = asyncio.run_coroutine_threadsafe(wrapped_coroutine, loop)
+            except Exception:
+                wrapped_coroutine.close()
+                coroutine.close()
+                raise
+            tracked = _TrackedThreadsafeSubmission(future=future, started=started, completion=completion)
+            self._futures.add(tracked)
+        future.add_done_callback(lambda _future: self._future_done(tracked))
+        completion.add_done_callback(lambda _future: self._future_done(tracked))
+        return future
+
+    def snapshot(self) -> tuple[tuple[asyncio.Task, ...], tuple[_TrackedThreadsafeSubmission, ...]]:
+        with self._lock:
+            return tuple(self._tasks), tuple(self._futures)
+
+    def prune_done(self) -> None:
+        with self._lock:
+            done_tasks = [task for task in self._tasks if task.done()]
+            done_futures = [entry for entry in self._futures if entry.future.done() and entry.completion.done()]
+            self._tasks.difference_update(done_tasks)
+            self._futures.difference_update(done_futures)
+        for task in done_tasks:
+            self._log_task_error(task)
+        for entry in done_futures:
+            self._log_future_error(entry.future)
+
+    def is_empty(self) -> bool:
+        with self._lock:
+            return not self._tasks and not self._futures
+
+    def _task_done(self, task: asyncio.Task) -> None:
+        with self._lock:
+            self._tasks.discard(task)
+        self._log_task_error(task)
+
+    @staticmethod
+    def _log_task_error(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except (asyncio.CancelledError, asyncio.InvalidStateError):
+            return
+        if error is not None:
+            logger.warning("EventBus submission task failed: %s", error)
+
+    def _future_done(self, entry: _TrackedThreadsafeSubmission) -> None:
+        if entry.future.cancelled() and not entry.started.done():
+            entry.started.set_result(None)
+            if not entry.completion.done():
+                entry.completion.set_result(None)
+        with self._lock:
+            if not entry.future.done() or not entry.completion.done() or entry not in self._futures:
+                return
+            self._futures.discard(entry)
+        self._log_future_error(entry.future)
+
+    @staticmethod
+    def _log_future_error(future: concurrent.futures.Future) -> None:
+        if future.cancelled():
+            return
+        try:
+            error = future.exception()
+        except (concurrent.futures.CancelledError, concurrent.futures.InvalidStateError):
+            return
+        if error is not None:
+            logger.warning("Thread-safe EventBus submission failed: %s", error)
+
+
+_main_event_bus_registry: Optional[_EventBusSubmissionRegistry] = None
+
+
+def _submit_event_task(coroutine: Any, loop: Optional[asyncio.AbstractEventLoop] = None) -> Optional[asyncio.Task]:
+    registry = _main_event_bus_registry
+    if registry is None:
+        coroutine.close()
+        return None
+    try:
+        target_loop = loop or asyncio.get_running_loop()
+        return registry.submit_task(coroutine, target_loop)
+    except RuntimeError:
+        coroutine.close()
+        return None
+
+
+def _submit_event_threadsafe(
+    coroutine: Any, loop: asyncio.AbstractEventLoop
+) -> Optional[concurrent.futures.Future]:
+    registry = _main_event_bus_registry
+    if registry is None:
+        coroutine.close()
+        return None
+    try:
+        return registry.submit_threadsafe(coroutine, loop)
+    except RuntimeError:
+        coroutine.close()
+        return None
+
+
+async def _drain_event_bus_submissions(
+    registry: _EventBusSubmissionRegistry,
+    *,
+    loop: Optional[asyncio.AbstractEventLoop] = None,
+    timeout: float = 2.0,
+) -> None:
+    """Cancel and resolve registered EventBus work within a bounded window."""
+    target_loop = loop or asyncio.get_running_loop()
+
+    async def _wait_until(deadline: float) -> bool:
+        while True:
+            registry.prune_done()
+            if registry.is_empty():
+                return True
+            tasks, futures = registry.snapshot()
+            waitables = [task for task in tasks if not task.done()]
+            waitables.extend(
+                asyncio.wrap_future(entry.completion, loop=target_loop)
+                for entry in futures
+                if not entry.completion.done()
+            )
+            remaining = deadline - target_loop.time()
+            if not waitables or remaining <= 0:
+                return registry.is_empty()
+            await asyncio.wait(waitables, timeout=remaining)
+
+    if await _wait_until(target_loop.time() + timeout):
+        return
+
+    tasks, futures = registry.snapshot()
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    for entry in futures:
+        if not entry.future.done():
+            entry.future.cancel()
+
+    cancellation_deadline = target_loop.time() + min(0.5, max(timeout, 0.05))
+    if await _wait_until(cancellation_deadline):
+        return
+    message = "EventBus submission cancellation did not reach quiescence before shutdown timeout"
+    logger.error(message)
+    raise RuntimeError(message)
 
 
 async def _summon_hud(toggle: bool = False, event_bus: Optional[Any] = None) -> None:
@@ -680,7 +911,7 @@ def _on_telemetry_updated() -> None:
         return
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(_publish_runtime_telemetry(bus))
+        _submit_event_task(_publish_runtime_telemetry(bus), loop)
     except RuntimeError:
         pass
 
@@ -1235,7 +1466,7 @@ def _on_brain_llm_health(status: HealthStatus, detail: Optional[str] = None) -> 
     if bus is not None:
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(_publish_subsystem_health(bus))
+            _submit_event_task(_publish_subsystem_health(bus), loop)
         except RuntimeError:
             pass
 
@@ -1356,9 +1587,7 @@ def _expected_frontend_build_identity() -> Optional[dict[str, Any]]:
     if configured_dist:
         dist = Path(configured_dist)
     else:
-        from run import _persistent_frontend_dist
-
-        dist = _persistent_frontend_dist(Path(__file__).resolve().parent)
+        dist = persistent_frontend_dist(Path(__file__).resolve().parent)
     try:
         manifest = json.loads((dist / "charlie-build.json").read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
@@ -1691,7 +1920,9 @@ def _safe_speak(voice, text: str, emotion: str, label: str = "") -> None:
 
 
 def _schedule_process(coro, loop):
-    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    fut = _submit_event_threadsafe(coro, loop)
+    if fut is None:
+        return None
     try:
         fut.add_done_callback(
             lambda f: logger.error("Answer turn failed", exc_info=f.exception()) if f.exception() is not None else None
@@ -1819,7 +2050,7 @@ def _wire_memory_service(memory_service: MemoryService) -> None:
 
 
 async def main() -> int:
-    global _main_event_bus
+    global _main_event_bus, _main_event_bus_registry
     loop = asyncio.get_running_loop()
     _orig_handler = loop.call_exception_handler
 
@@ -1857,20 +2088,40 @@ async def main() -> int:
     voice_diagnostic_traces: Dict[str, Any] = {}
     active_turn_id: Optional[str] = None
     active_task_id: Optional[str] = None
-    active_process_task: Optional[asyncio.Task] = None
     active_operation_name: Optional[str] = None
     active_operation_task_id: Optional[str] = None
     active_operation_cancellable = True
-    background_housekeeping_tasks: set[asyncio.Task] = set()
+    runtime_shutting_down = False
+    event_bus_registry = _EventBusSubmissionRegistry()
+    _main_event_bus_registry = event_bus_registry
 
-    def _cancel_housekeeping() -> None:
+    def _begin_shutdown() -> None:
+        nonlocal runtime_shutting_down
+        if runtime_shutting_down:
+            return
+        runtime_shutting_down = True
+        event_bus_registry.close()
+
+    global background_housekeeping_tasks
+    active_process_task: Optional[asyncio.Task] = None
+    # Keep the module-level mirror for existing launch-boundary diagnostics.
+    globals()["active_process_task"] = None
+    background_housekeeping_tasks.clear()
+
+    def _cancel_housekeeping() -> list[asyncio.Task]:
+        cancelled: list[asyncio.Task] = []
         for task in tuple(background_housekeeping_tasks):
-            task.cancel()
+            if not task.done():
+                task.cancel()
+                cancelled.append(task)
         if brain is not None:
             try:
-                brain.cancel_background_tasks()
+                brain_tasks = brain.cancel_background_tasks()
+                if brain_tasks:
+                    cancelled.extend([t for t in brain_tasks if isinstance(t, asyncio.Task)])
             except Exception:
                 pass
+        return cancelled
 
     try:
         try:
@@ -1920,7 +2171,7 @@ async def main() -> int:
             if active_audit_store is not None:
                 active_audit_store.record(name, args, "requested")
             if event_bus:
-                asyncio.run_coroutine_threadsafe(
+                _submit_event_threadsafe(
                     event_bus.emit(
                         "tool_call",
                         {"name": name, "args": args, "session_id": event_session_id},
@@ -1942,7 +2193,7 @@ async def main() -> int:
                 active_operation_cancellable = True
             event_session_id = session_id or current_web_session_id
             if event_bus:
-                asyncio.run_coroutine_threadsafe(
+                _submit_event_threadsafe(
                     event_bus.emit(
                         "tool_result",
                         {"name": name, "text": result, "session_id": event_session_id},
@@ -1985,7 +2236,7 @@ async def main() -> int:
                 if args:
                     summary = str(args)[:80]
                     desc += f" with {summary}"
-                asyncio.run_coroutine_threadsafe(
+                _submit_event_threadsafe(
                     event_bus.emit(
                         "thinking_update",
                         {"text": desc, "session_id": event_session_id},
@@ -2012,7 +2263,7 @@ async def main() -> int:
                 logger.warning("Ignored stale or unknown tool approval: %s", request_id)
                 return
             if event_bus is not None:
-                asyncio.run_coroutine_threadsafe(
+                _submit_event_threadsafe(
                     event_bus.emit(
                         "tool_approval_resolved",
                         {"request_id": request_id},
@@ -2020,7 +2271,7 @@ async def main() -> int:
                     ),
                     loop,
                 )
-                asyncio.run_coroutine_threadsafe(
+                _submit_event_threadsafe(
                     event_bus.emit(
                         "presentation_dismiss",
                         {"id": request_id},
@@ -2147,7 +2398,7 @@ async def main() -> int:
         ):
             # telegram_bot is None until its startup block below runs -- read at call time, not def time.
             if platform == "telegram" and telegram_bot and should_relay_approval(True, config.telegram_user_id):
-                asyncio.run_coroutine_threadsafe(
+                _submit_event_threadsafe(
                     telegram_bot.send_approval_request(config.telegram_user_id, request_id, tool_name, reason), loop
                 )
             if event_bus is None:
@@ -2175,7 +2426,7 @@ async def main() -> int:
                 replayable=True,
                 replace_key=f"approval:{request_id}",
             )
-            asyncio.run_coroutine_threadsafe(
+            _submit_event_threadsafe(
                 event_bus.emit(
                     "presentation_intent",
                     intent.to_dict(),
@@ -2211,7 +2462,7 @@ async def main() -> int:
                 preferred_zone=PreferredZone.TOP_RIGHT,
                 anchor=AnchorTarget.CORE,
             )
-            asyncio.run_coroutine_threadsafe(
+            _submit_event_threadsafe(
                 event_bus.emit(
                     "presentation_intent",
                     intent.to_dict(),
@@ -2263,7 +2514,7 @@ async def main() -> int:
             def _emit_events():
                 try:
                     cur_loop = asyncio.get_running_loop()
-                    cur_loop.create_task(
+                    _submit_event_task(
                         event_bus.emit(
                             "research_result",
                             payload,
@@ -2273,9 +2524,10 @@ async def main() -> int:
                                 session_id=session_id,
                                 turn_id=turn_id,
                             ),
-                        )
+                        ),
+                        cur_loop,
                     )
-                    cur_loop.create_task(
+                    _submit_event_task(
                         event_bus.emit(
                             "presentation_intent",
                             intent.to_dict(),
@@ -2286,10 +2538,11 @@ async def main() -> int:
                                 turn_id=turn_id,
                                 rationale="research presentation intent",
                             ),
-                        )
+                        ),
+                        cur_loop,
                     )
                 except RuntimeError:
-                    asyncio.run_coroutine_threadsafe(
+                    _submit_event_threadsafe(
                         event_bus.emit(
                             "research_result",
                             payload,
@@ -2302,7 +2555,7 @@ async def main() -> int:
                         ),
                         loop,
                     )
-                    asyncio.run_coroutine_threadsafe(
+                    _submit_event_threadsafe(
                         event_bus.emit(
                             "presentation_intent",
                             intent.to_dict(),
@@ -2444,7 +2697,7 @@ async def main() -> int:
                     return
                 store.update_session_title(session_id, candidate)
                 if event_bus:
-                    asyncio.run_coroutine_threadsafe(
+                    _submit_event_threadsafe(
                         event_bus.emit(
                             "session_updated",
                             {"session_id": session_id, "title": candidate},
@@ -2496,7 +2749,8 @@ async def main() -> int:
             await in between, making them atomic with respect to any other
             coroutine on this loop without needing a lock.
             """
-            nonlocal turn_active, active_process_task
+            nonlocal turn_active
+            nonlocal active_process_task
             from charlie.core import get_active_voice_approval
 
             trace = voice_diagnostic_traces.get(request.turn_id)
@@ -2601,11 +2855,14 @@ async def main() -> int:
                     active_task_id,
                 )
             active_process_task = asyncio.current_task()
+            globals()["active_process_task"] = active_process_task
             try:
                 await _process(request, brain, voice)
             finally:
                 if active_process_task is asyncio.current_task():
                     active_process_task = None
+                if globals().get("active_process_task") is asyncio.current_task():
+                    globals()["active_process_task"] = None
 
         def _cleanup_intent_decision(processor):
             """Release interactive route metadata after every processing outcome."""
@@ -2907,7 +3164,7 @@ async def main() -> int:
             # client-side echo of its own -- this event is its only way to get
             # recognized speech into the web UI transcript feed.
             if event_bus and platform == "voice":
-                asyncio.create_task(
+                _submit_event_task(
                     event_bus.emit(
                         "transcript",
                         {"text": text, "source": platform, "session_id": session_id},
@@ -2960,7 +3217,7 @@ async def main() -> int:
 
             # Emit thinking event
             if event_bus:
-                asyncio.create_task(
+                _submit_event_task(
                     event_bus.emit(
                         "thinking",
                         {"session_id": session_id},
@@ -3451,7 +3708,7 @@ async def main() -> int:
                                     ),
                                 )
 
-                            asyncio.create_task(
+                            _submit_event_task(
                                 _handle_terminal_command_request(request_id, terminal_session_id, command)
                             )
                     elif cmd_type == "stop":
@@ -3553,7 +3810,7 @@ async def main() -> int:
                                 ),
                             )
 
-                        asyncio.create_task(_run_self_extension(payload, request_id))
+                        _submit_event_task(_run_self_extension(payload, request_id))
                     elif cmd_type == "self_extension_rollback":
                         payload = cmd.get("payload", {})
                         tx_id = str(payload.get("tx_id", ""))
@@ -3674,7 +3931,6 @@ async def main() -> int:
                     logger.error(f"Error handling web command: {e}", exc_info=True)
 
         # Start web server subprocess.
-        _ensure_frontend_runtime()
         web_entry = os.path.join(os.path.dirname(__file__), "charlie", "web_server_entry.py")
         _web_env = os.environ.copy()
         _web_env["CHARLIE_LAUNCH_ID"] = _LAUNCH_ID
@@ -3737,7 +3993,7 @@ async def main() -> int:
         # TTS lifecycle callbacks for IPC events
         def on_tts_start():
             if event_bus:
-                asyncio.run_coroutine_threadsafe(
+                _submit_event_threadsafe(
                     event_bus.emit(
                         "speaking_start",
                         {"session_id": current_web_session_id},
@@ -3748,7 +4004,7 @@ async def main() -> int:
 
         def on_tts_stop():
             if event_bus:
-                asyncio.run_coroutine_threadsafe(
+                _submit_event_threadsafe(
                     event_bus.emit(
                         "speaking_stop",
                         {"session_id": current_web_session_id},
@@ -3803,7 +4059,7 @@ async def main() -> int:
 
         def on_wake_word():
             if event_bus:
-                asyncio.run_coroutine_threadsafe(
+                _submit_event_threadsafe(
                     event_bus.emit("wake_word", {}, meta=EventMeta(source=EventSource.VOICE)), loop
                 )
             if config.browser_enabled and config.browser_warm_on_wake:
@@ -4127,7 +4383,7 @@ async def main() -> int:
                 message = payload.get("message", reason)
                 logger.warning(f"Watcher signal: {message}")
                 try:
-                    asyncio.run_coroutine_threadsafe(
+                    _submit_event_threadsafe(
                         bus.emit(
                             event.get("type", "alert"),
                             payload,
@@ -4143,7 +4399,7 @@ async def main() -> int:
                     except Exception:
                         logger.warning("Failed to speak watcher alert", exc_info=True)
                     try:
-                        asyncio.run_coroutine_threadsafe(
+                        _submit_event_threadsafe(
                             _spawn_watcher_surface(event, message, reason, level), _watcher_loop
                         )
                     except Exception:
@@ -4174,8 +4430,8 @@ async def main() -> int:
                         log_entry = self.format(record)
                         try:
                             loop = asyncio.get_running_loop()
-                            loop.create_task(
-                                bus.emit("log", {"line": log_entry}, meta=EventMeta(source=EventSource.VOICE))
+                            _submit_event_task(
+                                bus.emit("log", {"line": log_entry}, meta=EventMeta(source=EventSource.VOICE)), loop
                             )
                         except RuntimeError:
                             pass
@@ -4190,16 +4446,27 @@ async def main() -> int:
             zmq_handler.setLevel(logging.INFO)
             logging.getLogger().addHandler(zmq_handler)
 
+            voice_idle_task = asyncio.create_task(_voice_loop_idle(voice), name="voice_loop_idle")
+            web_cmd_task = asyncio.create_task(consume_web_commands(bus, brain), name="consume_web_commands")
+            system_status_task = asyncio.create_task(_emit_system_status(bus), name="emit_system_status")
+            voice_health_task = asyncio.create_task(_monitor_voice_health(bus), name="monitor_voice_health")
+            calendar_task = asyncio.create_task(_calendar_reminder_loop(), name="calendar_reminder_loop")
+            steady_state_tasks = [
+                voice_idle_task,
+                web_cmd_task,
+                system_status_task,
+                voice_health_task,
+                calendar_task,
+            ]
+
             try:
-                await asyncio.gather(
-                    _voice_loop_idle(voice),
-                    consume_web_commands(bus, brain),
-                    _emit_system_status(bus),
-                    _monitor_voice_health(bus),
-                    mcp_start_task,
-                    _calendar_reminder_loop(),
-                )
+                await asyncio.gather(*steady_state_tasks)
+            except Exception as e:
+                exit_code = 1
+                logger.error("Steady-state runtime task failed: %s", e, exc_info=True)
+                raise
             finally:
+                _begin_shutdown()
                 logger.info("main_shutdown_begin | stage=before_event_bus_close")
                 if zmq_handler is not None:
                     try:
@@ -4207,12 +4474,32 @@ async def main() -> int:
                     except Exception as e:
                         logger.warning("Failed to remove ZMQ log handler: %s", e)
                     zmq_handler = None
+
+                if brain is not None:
+                    try:
+                        brain.cancel_chat()
+                    except Exception:
+                        pass
+
                 if voice is not None:
                     try:
                         voice.stop()
                     except Exception as e:
                         logger.warning("Voice subsystem stop error: %s", e)
                     voice = None
+
+                housekeeping_to_drain = _cancel_housekeeping()
+                active_process_for_shutdown = active_process_task or globals().get("active_process_task")
+                tasks_to_drain = [
+                    *steady_state_tasks,
+                    companion_monitor_task,
+                    active_process_for_shutdown,
+                    *housekeeping_to_drain,
+                    *tuple(background_housekeeping_tasks),
+                    mcp_start_task,
+                ]
+                await _cancel_and_drain(tasks_to_drain, label="event_bus_tasks")
+                await _drain_event_bus_submissions(event_bus_registry, loop=loop)
                 if calendar_store is not None:
                     try:
                         calendar_store.close()
@@ -4227,6 +4514,7 @@ async def main() -> int:
         exit_code = 1
         logger.error("Charlie runtime startup/execution failed: %s", e, exc_info=True)
     finally:
+        _begin_shutdown()
         logger.info("main_shutdown_begin | exit_code=%s", exit_code)
         if zmq_handler is not None:
             try:
@@ -4235,27 +4523,15 @@ async def main() -> int:
                 logger.warning("Failed to remove ZMQ log handler: %s", e)
             zmq_handler = None
 
-        if companion_monitor_task is not None and not companion_monitor_task.done():
-            companion_monitor_task.cancel()
-            try:
-                await companion_monitor_task
-            except asyncio.CancelledError:
-                logger.info("companion readiness monitor stopped")
-            except Exception:
-                logger.warning("Companion readiness monitor stopped with an error", exc_info=True)
-
-        if mcp_start_task is not None and not mcp_start_task.done():
-            mcp_start_task.cancel()
-            try:
-                await mcp_start_task
-            except asyncio.CancelledError:
-                logger.info("MCP startup task stopped")
-            except Exception:
-                logger.warning("MCP startup task stopped with an error", exc_info=True)
-
-        _cancel_housekeeping()
-        if active_process_task is not None and not active_process_task.done():
-            active_process_task.cancel()
+        active_process_for_shutdown = active_process_task or globals().get("active_process_task")
+        outer_tasks = [
+            companion_monitor_task,
+            mcp_start_task,
+            active_process_for_shutdown,
+            *tuple(background_housekeeping_tasks),
+        ]
+        await _cancel_and_drain(outer_tasks, label="outer_tasks")
+        await _drain_event_bus_submissions(event_bus_registry, loop=loop)
 
         if voice is not None:
             try:
@@ -4280,7 +4556,7 @@ async def main() -> int:
 
         if mcp_client is not None:
             try:
-                mcp_client.stop()
+                await asyncio.to_thread(mcp_client.stop)
                 logger.info("MCP subsystem stopped")
             except Exception as e:
                 logger.warning("MCP subsystem stop error: %s", e)
@@ -4336,13 +4612,15 @@ async def main() -> int:
                 logger.warning("SessionStore close error: %s", e)
 
         _main_event_bus = None
+        loop.call_exception_handler = _orig_handler
 
         _log_port_release(config.charlie_host, config.charlie_port)
         _log_port_release("127.0.0.1", 5555)
         _log_port_release("127.0.0.1", 5556)
 
         logging.shutdown()
-        return exit_code
+
+    return exit_code
 
 async def _voice_loop_idle(voice):
     """Keep the main coroutine alive while voice threads run."""

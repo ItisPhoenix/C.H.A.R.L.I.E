@@ -89,43 +89,21 @@ def _read_frontend_manifest(dist_dir: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _persistent_frontend_dist(root: Path) -> Path:
-    """Return the stable per-user cache used when repository dist is inaccessible."""
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        base = Path(local_app_data)
-    else:
-        base = Path.home() / "AppData" / "Local"
-    return base / "C.H.A.R.L.I.E" / "frontend-dist"
-
-
-def _temporary_frontend_dist(root: Path) -> Path:
-    """Return a stable user-owned fallback when the preferred cache is ACL-protected."""
-    return Path(tempfile.gettempdir()) / "C.H.A.R.L.I.E" / "frontend-dist"
-
-
-def _frontend_runtime_dist_candidates(root: Path) -> tuple[Path, ...]:
-    preferred = _persistent_frontend_dist(root)
-    fallback = _temporary_frontend_dist(root)
-    return (preferred,) if preferred == fallback else (preferred, fallback)
+from charlie.runtime_identity import git_build_identity as _runtime_git_build_identity
+from charlie.runtime_identity import persistent_frontend_dist as _persistent_frontend_dist
+from charlie.runtime_identity import temporary_frontend_dist as _temporary_frontend_dist
 
 
 def _git_build_identity(root: Path) -> tuple[str | None, bool | None]:
-    try:
-        git_sha = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=root, text=True, stderr=subprocess.DEVNULL
-        ).strip()
-        dirty = bool(
-            subprocess.check_output(
-                ["git", "status", "--porcelain", "--untracked-files=no"],
-                cwd=root,
-                text=True,
-                stderr=subprocess.DEVNULL,
-            ).strip()
-        )
-        return git_sha, dirty
-    except (OSError, subprocess.CalledProcessError):
-        return None, None
+    """Preserve run.py's tested identity seam over shared runtime identity."""
+    return _runtime_git_build_identity(root)
+
+
+def _frontend_runtime_dist_candidates(root: Path) -> tuple[Path, ...]:
+    """Keep launcher test/backward-compatibility seams over shared helpers."""
+    preferred = _persistent_frontend_dist(root)
+    fallback = _temporary_frontend_dist(root)
+    return (preferred,) if preferred == fallback else (preferred, fallback)
 
 
 def _frontend_build_is_stale(frontend_dir: Path, dist_dir: Path) -> bool:
@@ -313,9 +291,6 @@ def run_web_only() -> int:
     """Run just the web server -- no voice hardware needed."""
     check_and_build_frontend()
 
-    import signal
-    import threading
-
     import uvicorn
 
     from charlie.config import config
@@ -326,39 +301,7 @@ def run_web_only() -> int:
     print(f"  - React HUD: Active at http://{config.charlie_host}:{config.charlie_port}/")
     print("=" * 50)
 
-    # Force-exit safety net: if graceful shutdown hangs >5s, kill immediately.
-    _force_exit_timer: threading.Timer | None = None
-    _server_ref: list = []  # mutable cell so signal handler can access server
-
-    def _schedule_force_exit():
-        nonlocal _force_exit_timer
-        if _force_exit_timer is not None:
-            return
-        _force_exit_timer = threading.Timer(5.0, os._exit, args=[1])
-        _force_exit_timer.daemon = True
-        _force_exit_timer.start()
-
-    def _cancel_force_exit():
-        nonlocal _force_exit_timer
-        if _force_exit_timer is not None:
-            _force_exit_timer.cancel()
-            _force_exit_timer = None
-
-    def _sigint_handler(signum, frame):
-        _schedule_force_exit()  # 5s safety net
-        # Tell uvicorn to shut down gracefully.
-        if _server_ref:
-            _server_ref[0].should_exit = True
-        # Second Ctrl+C = immediate kill.
-        signal.signal(signal.SIGINT, lambda _s, _f: os._exit(1))
-
-    signal.signal(signal.SIGINT, _sigint_handler)
-
     try:
-        # loop="asyncio" hardcodes ProactorEventLoop on win32 regardless of the
-        # process-wide policy, which breaks pyzmq (needs add_reader, Proactor doesn't
-        # have it -- see charlie/web_server.py:start_server for the same fix).
-        # "none" defers loop creation to _configure_platform()'s WindowsSelectorEventLoopPolicy.
         server_config = uvicorn.Config(
             app,
             host=config.charlie_host,
@@ -367,7 +310,6 @@ def run_web_only() -> int:
             loop="none",
         )
         server = uvicorn.Server(server_config)
-        _server_ref.append(server)
         server.run()
         return 0
     except KeyboardInterrupt:
@@ -375,18 +317,40 @@ def run_web_only() -> int:
     except Exception as exc:
         print(f"Web server failed: {exc}", file=sys.stderr)
         return 1
-    finally:
-        _cancel_force_exit()
 
 
-if __name__ == "__main__":
+def cli_main(argv: list[str] | None = None) -> int:
+    """Canonical user-facing CLI launcher boundary."""
     parser = argparse.ArgumentParser(description="Charlie: voice assistant + React HUD")
     parser.add_argument(
         "--web-only",
         action="store_true",
         help="Start only the React HUD bridge (no voice pipeline)",
     )
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 1
 
-    exit_code = run_web_only() if args.web_only else run_full()
-    sys.exit(exit_code)
+    try:
+        check_and_build_frontend()
+    except KeyboardInterrupt:
+        return 0
+    except Exception as exc:
+        print(f"Frontend preflight failed: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        if args.web_only:
+            return run_web_only()
+        return run_full()
+    except KeyboardInterrupt:
+        return 0
+    except Exception as exc:
+        mode_str = "web-only" if args.web_only else "full"
+        print(f"Launcher failed in {mode_str} mode: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(cli_main())
