@@ -253,12 +253,25 @@ def test_doctor_memory_error_mapping_is_explicit(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_memory_stats_api_exposes_component_health(monkeypatch, graph):
+async def test_memory_stats_api_exposes_component_health(monkeypatch):
     from charlie import web_server
 
-    service = _memory_service(graph, _SemanticStore(available=False), semantic_expected=True)
-    monkeypatch.setattr(web_server, "_memory_service", service)
-    monkeypatch.setattr(web_server, "_get_memory_graph", lambda: graph)
+    async def request(operation, _payload):
+        assert operation == "stats"
+        return {
+            "request_id": "r",
+            "operation": operation,
+            "success": True,
+            "data": {
+                "status": "degraded",
+                "health": {
+                    "structured": {"status": "available"},
+                    "semantic": {"status": "unavailable"},
+                },
+            },
+        }
+
+    monkeypatch.setattr(web_server, "_request_authoritative_memory_operation", request)
 
     result = await web_server.get_memory_stats()
 

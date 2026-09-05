@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import logging
 import threading
 
 import pytest
+from fastapi import HTTPException
 
 import charlie.memory_service as memory_service_module
 import charlie.tools as tools_module
@@ -15,6 +18,122 @@ from charlie.core import Brain
 from charlie.memory_graph import MemoryGraph
 from charlie.memory_service import MemoryService
 from charlie.tools import graph_add_fact, graph_consolidate, graph_query, vector_memory
+
+
+def test_web_process_has_no_runtime_memory_constructors():
+    from charlie import web_server
+
+    tree = ast.parse(inspect.getsource(web_server))
+    constructors = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert not constructors.intersection({"MemoryService", "MemoryGraph", "MemoryStore"})
+    assert "_get_memory_graph" not in inspect.getsource(web_server)
+
+
+@pytest.mark.asyncio
+async def test_web_memory_request_correlation_and_empty_result(monkeypatch):
+    from charlie import web_server
+
+    sent = []
+
+    class Bus:
+        async def send_command(self, command):
+            sent.append(command)
+            return True
+
+    monkeypatch.setattr(web_server, "event_bus", Bus())
+    request = asyncio.create_task(web_server._request_authoritative_memory_operation("list_items", {}))
+    while not sent:
+        await asyncio.sleep(0)
+    payload = sent[0]["payload"]
+    web_server._resolve_memory_operation_result(
+        {
+            "request_id": payload["request_id"],
+            "operation": "list_items",
+            "success": True,
+            "runtime_status": "completed",
+            "data": {"items": []},
+        }
+    )
+    result = await request
+    assert result["success"] is True
+    assert result["data"] == {"items": []}
+    assert payload["operation"] == "list_items"
+
+
+@pytest.mark.asyncio
+async def test_web_memory_unavailable_and_timeout_are_truthful(monkeypatch):
+    from charlie import web_server
+
+    monkeypatch.setattr(web_server, "event_bus", None)
+    unavailable = await web_server._request_authoritative_memory_operation("stats", {})
+    assert unavailable["success"] is False
+    assert unavailable["runtime_status"] == "unavailable"
+
+    class Bus:
+        async def send_command(self, command):
+            return True
+
+    monkeypatch.setattr(web_server, "event_bus", Bus())
+    monkeypatch.setattr(web_server, "MEMORY_OPERATION_TIMEOUT_SECONDS", 0.001)
+    timed_out = await web_server._request_authoritative_memory_operation("stats", {})
+    assert timed_out["success"] is False
+    assert timed_out["runtime_status"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_memory_endpoint_distinguishes_empty_success_from_authority_failure(monkeypatch):
+    from charlie import web_server
+
+    async def empty(_operation, _payload):
+        return {"success": True, "data": {"items": []}}
+
+    monkeypatch.setattr(web_server, "_request_authoritative_memory_operation", empty)
+    assert await web_server.get_memory_items() == {"items": []}
+
+    async def failed(_operation, _payload):
+        return {"success": False, "runtime_status": "unavailable", "error": "memory unavailable"}
+
+    monkeypatch.setattr(web_server, "_request_authoritative_memory_operation", failed)
+    with pytest.raises(HTTPException) as caught:
+        await web_server.get_memory_items()
+    assert caught.value.status_code == 503
+    assert caught.value.detail["status"] == "error"
+
+
+def test_main_memory_operation_uses_canonical_service_and_reports_errors():
+    import main
+
+    class Service:
+        def get_health(self):
+            return {"status": "available", "structured": {"status": "available"}}
+
+        def list_items(self, **_kwargs):
+            return []
+
+        def get_stats(self):
+            return {"total_items": 0}
+
+    result = main.apply_memory_operation(
+        {"request_id": "r1", "operation": "list_items"},
+        Service(),
+    )
+    assert result["success"] is True
+    assert result["data"] == {"items": []}
+
+    class Broken(Service):
+        def list_items(self, **_kwargs):
+            raise RuntimeError("backend failed")
+
+    failed = main.apply_memory_operation(
+        {"request_id": "r2", "operation": "list_items"},
+        Broken(),
+    )
+    assert failed["success"] is False
+    assert failed["runtime_status"] == "failed"
 
 
 class _GraphSpy:

@@ -130,6 +130,20 @@ class MemoryService:
             return None
         return graph.search_facts(query, subject_filter=subject_filter, limit=limit)
 
+    def list_facts(self, limit: int = 500) -> Optional[List[Tuple[str, str, str]]]:
+        """List graph facts through the canonical memory facade."""
+        graph = self._get_graph()
+        if graph is None:
+            return None
+        return graph.get_all_facts(limit=limit)
+
+    def remove_fact(self, subject: str, predicate: str, obj: str) -> Optional[bool]:
+        """Remove one graph fact through the canonical memory facade."""
+        graph = self._get_graph()
+        if graph is None:
+            return None
+        return graph.remove_fact(subject, predicate, obj)
+
     def consolidate_graph(self) -> Optional[int]:
         """Consolidate graph-only relational facts and return removed count."""
         graph = self._get_graph()

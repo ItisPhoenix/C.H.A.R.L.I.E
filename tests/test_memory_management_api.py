@@ -293,8 +293,76 @@ async def test_web_server_memory_management_endpoints(monkeypatch):
         db_path = str(Path(tmpdir) / "test_web_memory.db")
         graph = MemoryGraph(db_path)
         service = MemoryService(graph=graph)
-        monkeypatch.setattr(web_server, "_get_memory_graph", lambda: graph)
-        monkeypatch.setattr(web_server, "_memory_service", service)
+
+        async def request(operation, payload):
+            if operation == "create_item":
+                return {"request_id": "r", "operation": operation, "success": True, "data": {"item": service.add_item(
+                    category=payload.get("category", "fact"),
+                    content=payload.get("content", ""),
+                    subject=payload.get("subject", ""),
+                    predicate=payload.get("predicate", ""),
+                    obj=payload.get("object", ""),
+                    metadata=payload.get("metadata"),
+                )}}
+            if operation == "list_items":
+                return {
+                    "request_id": "r",
+                    "operation": operation,
+                    "success": True,
+                    "data": {
+                        "items": service.list_items(
+                            category=payload.get("category"), limit=payload.get("limit", 200)
+                        )
+                    },
+                }
+            if operation == "search_items":
+                return {
+                    "request_id": "r",
+                    "operation": operation,
+                    "success": True,
+                    "data": {
+                        "items": service.search_items(
+                            payload.get("query", ""),
+                            category=payload.get("category"),
+                            limit=payload.get("limit", 50),
+                        )
+                    },
+                }
+            if operation == "update_item":
+                item = service.update_item(
+                    payload["item_id"],
+                    content=payload.get("content", ""),
+                    category=payload.get("category"),
+                    metadata=payload.get("metadata"),
+                )
+                return {
+                    "request_id": "r",
+                    "operation": operation,
+                    "success": item is not None,
+                    "runtime_status": "completed" if item else "not_found",
+                    "data": {"item": item},
+                }
+            if operation == "export":
+                return {"request_id": "r", "operation": operation, "success": True, "data": service.export_all()}
+            if operation == "clear":
+                return {
+                    "request_id": "r",
+                    "operation": operation,
+                    "success": True,
+                    "data": {"cleared_count": service.clear_category(payload.get("category"))},
+                }
+            if operation == "delete_item":
+                removed = service.delete_item(payload["item_id"])
+                return {
+                    "request_id": "r",
+                    "operation": operation,
+                    "success": removed,
+                    "runtime_status": "completed" if removed else "not_found",
+                    "data": {"removed": removed},
+                }
+            raise AssertionError(operation)
+
+        monkeypatch.setattr(web_server, "_request_authoritative_memory_operation", request)
 
         try:
             # 1. POST /api/memory/items

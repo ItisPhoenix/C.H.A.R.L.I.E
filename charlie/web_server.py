@@ -28,7 +28,6 @@ from fastapi.staticfiles import StaticFiles
 
 from charlie.config import Config, config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
-from charlie.memory_graph import MemoryGraph
 from charlie.session_store import SessionStore
 from charlie.utils import build_auth_headers
 from charlie.log_redaction import SensitiveDataFilter
@@ -44,7 +43,6 @@ from charlie.capabilities import build_capability_snapshot, get_capability_index
 import charlie.tools  # noqa: F401
 from charlie.events import CONTRACT_VERSION, EventValidationError, build_event, normalize_event, replay_event
 from charlie.settings_service import SettingsService, SettingValidationError
-from charlie.memory_service import MemoryService
 from charlie.privacy_service import PrivacyService
 from charlie.code_index import CodeIndex
 from charlie.runtime_introspector import RuntimeIntrospector
@@ -58,7 +56,6 @@ from run import _git_build_identity
 
 _SOURCE_IDENTITY, _SOURCE_DIRTY = _git_build_identity(Path(__file__).resolve().parent.parent)
 
-_memory_service = MemoryService()
 _privacy_service = PrivacyService()
 _code_index = CodeIndex()
 _shared_capability_index = get_capability_index()
@@ -284,9 +281,10 @@ EXTENSION_OPERATION_TIMEOUT_SECONDS = 10.0
 _pending_extension_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
 MCP_OPERATION_TIMEOUT_SECONDS = 10.0
 _pending_mcp_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
+MEMORY_OPERATION_TIMEOUT_SECONDS = 10.0
+_pending_memory_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
 LAUNCH_ID: str = config.charlie_launch_id
 _store: SessionStore | None = None
-_memory_graph_cache: "MemoryGraph | None" = None
 _terminal_manager = TerminalManager()
 _calendar_store: CalendarStore | None = None
 _media_adapter = WindowsMediaAdapter()
@@ -312,18 +310,6 @@ def _get_store() -> SessionStore:
     if _store is None:
         _store = SessionStore(config.session_db_path)
     return _store
-
-
-def _get_memory_graph() -> "MemoryGraph | None":
-    """Open the knowledge graph in this process (the web server runs in a child subprocess)."""
-    global _memory_graph_cache
-    if _memory_graph_cache is None:
-        try:
-            _memory_graph_cache = MemoryGraph(config.memory_graph_db)
-        except Exception as e:
-            logger.error(f"Failed to open MemoryGraph: {e}", exc_info=True)
-            return None
-    return _memory_graph_cache
 
 
 pipeline_state: str = "idle"
@@ -581,6 +567,8 @@ async def _event_bridge():
             _resolve_extension_operation_result(event.get("payload", {}))
         elif etype == "mcp_operation_result":
             _resolve_mcp_operation_result(event.get("payload", {}))
+        elif etype == "memory_operation_result":
+            _resolve_memory_operation_result(event.get("payload", {}))
         elif etype == "extension_proposed":
             await _stage_proposed_extension(event.get("payload", {}))
             return
@@ -1241,6 +1229,19 @@ def _resolve_mcp_operation_result(payload: object) -> None:
     future.set_result(dict(payload))
 
 
+def _resolve_memory_operation_result(payload: object) -> None:
+    """Resolve one web memory request by its canonical request ID."""
+    if not isinstance(payload, dict):
+        return
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return
+    future = _pending_memory_operations.get(request_id)
+    if future is None or future.done():
+        return
+    future.set_result(dict(payload))
+
+
 def _extension_operation_error(
     request_id: str,
     operation: str,
@@ -1302,6 +1303,101 @@ def _mcp_api_error(result: dict[str, Any]) -> dict[str, Any]:
         "runtime_status": result.get("runtime_status", "failed"),
         "message": str(result.get("error") or "Main runtime did not apply MCP operation")[:500],
     }
+
+
+def _memory_api_error(result: dict[str, Any]) -> dict[str, Any]:
+    """Return truthful REST failure semantics for a main memory result."""
+    return {
+        "status": "error",
+        "request_id": result.get("request_id"),
+        "operation": result.get("operation"),
+        "runtime_status": result.get("runtime_status", "failed"),
+        "message": str(result.get("error") or "Main runtime did not apply memory operation")[:500],
+    }
+
+
+async def _request_authoritative_memory_operation(
+    operation: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Send one memory operation to main and await its correlated result."""
+    request_id = uuid.uuid4().hex
+    request_payload = dict(payload)
+    request_payload["request_id"] = request_id
+    request_payload["operation"] = operation
+
+    if event_bus is None:
+        return {
+            "success": False,
+            "request_id": request_id,
+            "operation": operation,
+            "runtime_status": "unavailable",
+            "error": "Main memory authority is unavailable; operation was not applied.",
+        }
+
+    loop = asyncio.get_running_loop()
+    result_future: asyncio.Future[dict[str, Any]] = loop.create_future()
+    _pending_memory_operations[request_id] = result_future
+    try:
+        try:
+            sent = await event_bus.send_command({"type": "memory_operation", "payload": request_payload})
+            if sent is False:
+                return {
+                    "success": False,
+                    "request_id": request_id,
+                    "operation": operation,
+                    "runtime_status": "unavailable",
+                    "error": "Main memory authority is unavailable; operation was not applied.",
+                }
+        except Exception:
+            logger.warning("Failed to send memory operation to main", exc_info=True)
+            return {
+                "success": False,
+                "request_id": request_id,
+                "operation": operation,
+                "runtime_status": "unavailable",
+                "error": "Main memory authority is unavailable; operation was not applied.",
+            }
+        try:
+            result = await asyncio.wait_for(result_future, timeout=MEMORY_OPERATION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return {
+                "success": False,
+                "request_id": request_id,
+                "operation": operation,
+                "runtime_status": "timeout",
+                "error": "Main memory authority did not acknowledge operation before timeout.",
+            }
+    finally:
+        _pending_memory_operations.pop(request_id, None)
+
+    if not isinstance(result, dict):
+        return {
+            "success": False,
+            "request_id": request_id,
+            "operation": operation,
+            "runtime_status": "invalid_result",
+            "error": "Main memory authority returned an invalid result.",
+        }
+    if (
+        result.get("request_id") != request_id
+        or result.get("operation") != operation
+        or type(result.get("success")) is not bool
+    ):
+        return {
+            "success": False,
+            "request_id": request_id,
+            "operation": operation,
+            "runtime_status": "invalid_result",
+            "error": "Main memory authority returned a mismatched result.",
+        }
+    return result
+
+
+def _memory_http_error(result: dict[str, Any]) -> HTTPException:
+    status = result.get("runtime_status")
+    code = 404 if status == "not_found" else 503 if status in {"unavailable", "timeout"} else 500
+    return HTTPException(status_code=code, detail=_memory_api_error(result))
 
 
 async def _request_authoritative_mcp_operation(
@@ -1716,154 +1812,96 @@ async def get_mic_state():
 
 @app.get("/api/memory/facts")
 async def get_memory_facts():
-    """Retrieve all known facts (subject/predicate/object triples) from the
-    knowledge graph's edges, as stored by MemoryGraph.add_fact."""
-    graph = _get_memory_graph()
-    if graph:
-        try:
-            facts = [
-                {"subject": s, "predicate": p, "object": o}
-                for s, p, o in graph.get_all_facts()
-            ]
-            return {"facts": facts}
-        except Exception as e:
-            logger.error(f"Error fetching facts: {e}", exc_info=True)
-    return {"facts": []}
+    result = await _request_authoritative_memory_operation("get_facts", {})
+    if result.get("success") is not True:
+        raise _memory_http_error(result)
+    return result.get("data", {"facts": []})
 
 
 @app.get("/api/memory/items")
 async def get_memory_items(category: Optional[str] = None, limit: int = 200):
-    """List memory items with optional category filtering."""
-    service = _memory_service
-    if service._graph is None:
-        service._graph = _get_memory_graph()
-    try:
-        return {"items": service.list_items(category=category, limit=limit)}
-    except Exception as e:
-        logger.error(f"Error listing memory items: {e}", exc_info=True)
-        return {"items": []}
+    result = await _request_authoritative_memory_operation(
+        "list_items", {"category": category, "limit": limit}
+    )
+    if result.get("success") is not True:
+        raise _memory_http_error(result)
+    return result.get("data", {"items": []})
 
 
 @app.get("/api/memory/search")
 async def search_memory_items(q: str = "", category: Optional[str] = None, limit: int = 50):
-    """Search memory items by query string and category."""
-    service = _memory_service
-    if service._graph is None:
-        service._graph = _get_memory_graph()
-    try:
-        return {"items": service.search_items(query=q, category=category, limit=limit)}
-    except Exception as e:
-        logger.error(f"Error searching memory: {e}", exc_info=True)
-        return {"items": []}
+    result = await _request_authoritative_memory_operation(
+        "search_items", {"query": q, "category": category, "limit": limit}
+    )
+    if result.get("success") is not True:
+        raise _memory_http_error(result)
+    return result.get("data", {"items": []})
 
 
 @app.post("/api/memory/items")
 async def create_memory_item(data: dict):
-    """Create a new memory item."""
-    service = _memory_service
-    if service._graph is None:
-        service._graph = _get_memory_graph()
-    try:
-        category = str(data.get("category", "fact")).strip()
-        content = str(data.get("content", "")).strip()
-        subject = str(data.get("subject", "")).strip()
-        predicate = str(data.get("predicate", "")).strip()
-        obj = str(data.get("object", "")).strip()
-        metadata = data.get("metadata")
-
-        item = service.add_item(
-            category=category,
-            content=content,
-            subject=subject,
-            predicate=predicate,
-            obj=obj,
-            metadata=metadata,
-        )
-        return {"status": "ok", "item": item}
-    except Exception as e:
-        logger.error(f"Error creating memory item: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    result = await _request_authoritative_memory_operation(
+        "create_item",
+        {
+            "category": data.get("category", "fact"),
+            "content": data.get("content", ""),
+            "subject": data.get("subject", ""),
+            "predicate": data.get("predicate", ""),
+            "object": data.get("object", ""),
+            "metadata": data.get("metadata"),
+        },
+    )
+    if result.get("success") is not True:
+        raise _memory_http_error(result)
+    return {"status": "ok", **result.get("data", {})}
 
 
 @app.put("/api/memory/items/{item_id}")
 async def update_memory_item(item_id: str, data: dict):
-    """Update an existing memory item."""
-    service = _memory_service
-    if service._graph is None:
-        service._graph = _get_memory_graph()
-    try:
-        content = str(data.get("content", "")).strip()
-        category = data.get("category")
-        metadata = data.get("metadata")
-
-        updated = service.update_item(item_id, content=content, category=category, metadata=metadata)
-        if not updated:
-            raise HTTPException(status_code=404, detail="Memory item not found")
-        return {"status": "ok", "item": updated}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error updating memory item: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    result = await _request_authoritative_memory_operation(
+        "update_item",
+        {
+            "item_id": item_id,
+            "content": data.get("content", ""),
+            "category": data.get("category"),
+            "metadata": data.get("metadata"),
+        },
+    )
+    if result.get("success") is not True:
+        raise _memory_http_error(result)
+    return {"status": "ok", **result.get("data", {})}
 
 
 @app.delete("/api/memory/items/{item_id}")
 async def delete_memory_item(item_id: str):
-    """Delete a memory item by ID."""
-    service = _memory_service
-    if service._graph is None:
-        service._graph = _get_memory_graph()
-    try:
-        success = service.delete_item(item_id)
-        if not success:
-            raise HTTPException(status_code=404, detail="Memory item not found")
-        return {"status": "ok"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting memory item: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    result = await _request_authoritative_memory_operation("delete_item", {"item_id": item_id})
+    if result.get("success") is not True:
+        raise _memory_http_error(result)
+    return {"status": "ok"}
 
 
 @app.post("/api/memory/clear")
 async def clear_memory(data: Optional[dict] = None):
-    """Clear memory items by category or completely."""
-    service = _memory_service
-    if service._graph is None:
-        service._graph = _get_memory_graph()
-    try:
-        category = (data or {}).get("category")
-        cleared_count = service.clear_category(category=category)
-        return {"status": "ok", "cleared_count": cleared_count}
-    except Exception as e:
-        logger.error(f"Error clearing memory: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    result = await _request_authoritative_memory_operation("clear", {"category": (data or {}).get("category")})
+    if result.get("success") is not True:
+        raise _memory_http_error(result)
+    return {"status": "ok", **result.get("data", {})}
 
 
 @app.get("/api/memory/export")
 async def export_memory():
-    """Export complete memory dataset as structured JSON."""
-    service = _memory_service
-    if service._graph is None:
-        service._graph = _get_memory_graph()
-    try:
-        return service.export_all()
-    except Exception as e:
-        logger.error(f"Error exporting memory: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    result = await _request_authoritative_memory_operation("export", {})
+    if result.get("success") is not True:
+        raise _memory_http_error(result)
+    return result.get("data", {})
 
 
 @app.get("/api/memory/stats")
 async def get_memory_stats():
-    """Get memory statistics and category counts."""
-    service = _memory_service
-    if service._graph is None:
-        service._graph = _get_memory_graph()
-    try:
-        return service.get_stats()
-    except Exception as e:
-        logger.error(f"Error fetching memory stats: {e}", exc_info=True)
-        return {"status": "error", "error": "Memory statistics unavailable.", "stats": {}}
+    result = await _request_authoritative_memory_operation("stats", {})
+    if result.get("success") is not True:
+        raise _memory_http_error(result)
+    return result.get("data", {})
 
 
 @app.get("/api/privacy/summary")
@@ -2532,18 +2570,15 @@ async def reload_engine_config():
 
 @app.delete("/api/memory/facts")
 async def delete_memory_fact(subject: str, predicate: str, object: str):
-    """Delete a fact from the memory graph SQLite database."""
-    graph = _get_memory_graph()
-    if graph:
-        try:
-            success = graph.remove_fact(subject, predicate, object)
-            if success:
-                return {"status": "ok"}
-            else:
-                return {"status": "error", "message": "Failed to remove fact"}
-        except Exception as e:
-            logger.error(f"Error deleting fact: {e}", exc_info=True)
-            return {"status": "error", "message": str(e)}
+    result = await _request_authoritative_memory_operation(
+        "delete_fact",
+        {"subject": subject, "predicate": predicate, "object": object},
+    )
+    if result.get("success") is not True:
+        raise _memory_http_error(result)
+    if not result.get("data", {}).get("removed"):
+        return {"status": "error", "message": "Failed to remove fact"}
+    return {"status": "ok"}
 @app.get("/api/workspace/files")
 async def list_workspace_files():
     """Return real tree structure of workspace files."""

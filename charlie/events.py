@@ -56,6 +56,7 @@ class EventType(StrEnum):
     TOOL_SNAPSHOT = "tool_snapshot"
     MCP_SNAPSHOT = "mcp_snapshot"
     MCP_OPERATION_RESULT = "mcp_operation_result"
+    MEMORY_OPERATION_RESULT = "memory_operation_result"
     CHARLIE_STATE = "charlie_state"
     RESULT_STORED = "result_stored"
     BROWSER_TASK_STARTED = "browser_task_started"

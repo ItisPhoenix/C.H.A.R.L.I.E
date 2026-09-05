@@ -866,6 +866,153 @@ def _mcp_operation_result(
     return result
 
 
+def _memory_operation_result(
+    payload: dict[str, Any],
+    *,
+    success: bool,
+    data: Any = None,
+    error: Optional[str] = None,
+    runtime_status: str = "completed",
+) -> dict[str, Any]:
+    """Build one correlated result from the main-owned memory facade."""
+    result = {
+        "request_id": str(payload.get("request_id", "")),
+        "operation": str(payload.get("operation", "")),
+        "success": success,
+        "runtime_status": runtime_status,
+        "data": data,
+    }
+    if error:
+        result["error"] = error[:500]
+    return result
+
+
+def apply_memory_operation(payload: dict[str, Any], memory_service: Any) -> dict[str, Any]:
+    """Execute one web memory request against main's canonical facade."""
+    if not isinstance(payload, dict):
+        payload = {}
+    request_id = payload.get("request_id")
+    operation = payload.get("operation")
+    allowed = {
+        "get_facts",
+        "delete_fact",
+        "list_items",
+        "search_items",
+        "create_item",
+        "update_item",
+        "delete_item",
+        "clear",
+        "export",
+        "stats",
+    }
+    if not isinstance(request_id, str) or not request_id or operation not in allowed:
+        return _memory_operation_result(
+            payload,
+            success=False,
+            runtime_status="invalid_request",
+            error="Invalid memory operation request.",
+        )
+    if memory_service is None:
+        return _memory_operation_result(
+            payload,
+            success=False,
+            runtime_status="unavailable",
+            error="Main memory authority is unavailable.",
+        )
+
+    try:
+        health = memory_service.get_health()
+        structured = health.get("structured", {}) if isinstance(health, dict) else {}
+        if structured.get("status") != "available":
+            return _memory_operation_result(
+                payload,
+                success=False,
+                runtime_status="unavailable",
+                error="Main memory authority is unavailable.",
+            )
+
+        if operation == "get_facts":
+            facts = memory_service.list_facts(limit=int(payload.get("limit", 500)))
+            if facts is None:
+                raise RuntimeError("structured memory unavailable")
+            data = {"facts": [{"subject": s, "predicate": p, "object": o} for s, p, o in facts]}
+        elif operation == "delete_fact":
+            removed = memory_service.remove_fact(
+                str(payload.get("subject", "")),
+                str(payload.get("predicate", "")),
+                str(payload.get("object", "")),
+            )
+            if removed is None:
+                raise RuntimeError("structured memory unavailable")
+            data = {"removed": bool(removed)}
+        elif operation == "list_items":
+            data = {
+                "items": memory_service.list_items(
+                    category=payload.get("category"),
+                    limit=int(payload.get("limit", 200)),
+                )
+            }
+        elif operation == "search_items":
+            data = {
+                "items": memory_service.search_items(
+                    query=str(payload.get("query", "")),
+                    category=payload.get("category"),
+                    limit=int(payload.get("limit", 50)),
+                )
+            }
+        elif operation == "create_item":
+            data = {
+                "item": memory_service.add_item(
+                    category=str(payload.get("category", "fact")).strip(),
+                    content=str(payload.get("content", "")).strip(),
+                    subject=str(payload.get("subject", "")).strip(),
+                    predicate=str(payload.get("predicate", "")).strip(),
+                    obj=str(payload.get("object", "")).strip(),
+                    metadata=payload.get("metadata"),
+                )
+            }
+        elif operation == "update_item":
+            item = memory_service.update_item(
+                str(payload.get("item_id", "")),
+                content=str(payload.get("content", "")).strip(),
+                category=payload.get("category"),
+                metadata=payload.get("metadata"),
+            )
+            if item is None:
+                return _memory_operation_result(
+                    payload,
+                    success=False,
+                    runtime_status="not_found",
+                    error="Memory item not found.",
+                )
+            data = {"item": item}
+        elif operation == "delete_item":
+            removed = memory_service.delete_item(str(payload.get("item_id", "")))
+            if not removed:
+                return _memory_operation_result(
+                    payload,
+                    success=False,
+                    runtime_status="not_found",
+                    error="Memory item not found.",
+                )
+            data = {"removed": True}
+        elif operation == "clear":
+            data = {"cleared_count": memory_service.clear_category(payload.get("category"))}
+        elif operation == "export":
+            data = memory_service.export_all()
+        else:  # stats
+            data = memory_service.get_stats()
+        return _memory_operation_result(payload, success=True, data=data)
+    except Exception as exc:
+        logger.warning("Main memory operation failed: %s", type(exc).__name__, exc_info=True)
+        return _memory_operation_result(
+            payload,
+            success=False,
+            runtime_status="failed",
+            error=f"Memory operation failed ({type(exc).__name__}).",
+        )
+
+
 def apply_mcp_operation(
     payload: dict[str, Any],
     *,
@@ -3377,6 +3524,17 @@ async def main():
                         event_bus,
                         mcp_client=mcp_client,
                         brain=brain,
+                    )
+                elif cmd_type == "memory_operation":
+                    payload = cmd.get("payload", {})
+                    result = apply_memory_operation(payload, memory_service)
+                    await event_bus.emit(
+                        "memory_operation_result",
+                        result,
+                        meta=EventMeta(
+                            source=EventSource.BRAIN,
+                            rationale="authoritative main-runtime memory operation result",
+                        ),
                     )
                 elif cmd_type == "system_restart":
                     logger.info("System restart command received. Reloading configuration and engine...")

@@ -1,6 +1,5 @@
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import httpx
@@ -8,7 +7,6 @@ import pytest
 
 import charlie.web_server as web_server
 from charlie.config import config
-from charlie.memory_graph import MemoryGraph
 
 _REAL_HTTPX_ASYNC_CLIENT = httpx.AsyncClient
 
@@ -341,24 +339,13 @@ async def test_reload_engine_config_without_voice_process(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_delete_memory_fact(monkeypatch):
-    with tempfile.TemporaryDirectory(suffix="-web-facts-delete") as d:
-        db_path = str(Path(d) / "graph.db")
-        graph = MemoryGraph(db_path)
-        try:
-            graph.add_fact("Alice", "works_on", "graphs")
-            monkeypatch.setattr(web_server, "_get_memory_graph", lambda: graph)
+    removed = []
 
-            # Confirm fact is added
-            facts_before = graph.get_all_facts()
-            assert len(facts_before) == 1
+    async def request(operation, payload):
+        removed.append((operation, payload))
+        return {"request_id": "r", "operation": operation, "success": True, "data": {"removed": True}}
 
-            # Delete the fact
-            del_res = await web_server.delete_memory_fact("Alice", "works_on", "graphs")
-            assert del_res["status"] == "ok"
-
-            # Verify it is deleted from sqlite
-            facts_after = graph.get_all_facts()
-            assert len(facts_after) == 0
-        finally:
-            graph.close()
-            _remove_db(db_path)
+    monkeypatch.setattr(web_server, "_request_authoritative_memory_operation", request)
+    del_res = await web_server.delete_memory_fact("Alice", "works_on", "graphs")
+    assert del_res["status"] == "ok"
+    assert removed == [("delete_fact", {"subject": "Alice", "predicate": "works_on", "object": "graphs"})]
