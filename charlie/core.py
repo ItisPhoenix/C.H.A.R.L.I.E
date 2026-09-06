@@ -12,6 +12,7 @@ import os
 import re
 import threading
 import time
+from enum import StrEnum
 from functools import wraps
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -69,6 +70,23 @@ except ImportError:  # pragma: no cover - guard mirrors charlie/browser/__init__
     _BROWSER_AVAILABLE = False
 
 logger = logging.getLogger("charlie.core")
+
+
+class ApprovalDecision(StrEnum):
+    """Detailed approval outcome retained behind the public bool API."""
+
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    TIMED_OUT = "timed_out"
+    UNAVAILABLE = "unavailable"
+
+
+class OperationCancelled(asyncio.CancelledError):
+    """Cancellation carrying the finalized canonical operation result."""
+
+    def __init__(self, envelope: ResultEnvelope):
+        super().__init__("operation cancelled")
+        self.envelope = envelope
 
 
 def _invoke_callback_with_identity(
@@ -2149,6 +2167,31 @@ class Brain:
         task_id: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> bool:
+        """Backward-compatible bool approval facade."""
+        decision = await self._request_tool_approval_decision(
+            tool_name,
+            arguments,
+            reason,
+            platform=platform,
+            risk_class=risk_class,
+            turn_id=turn_id,
+            task_id=task_id,
+            session_id=session_id,
+        )
+        return decision is ApprovalDecision.APPROVED
+
+    async def _request_tool_approval_decision(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        reason: str,
+        platform: str = "voice",
+        risk_class: Optional[str] = None,
+        *,
+        turn_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> ApprovalDecision:
         """Ask the user to approve/decline a gated tool call and wait for the
         answer. Web dashboard is primary: broadcasts a "tool_approval_request"
         event and waits for a "tool_approve"/"tool_reject" WS command. If no
@@ -2212,17 +2255,394 @@ class Brain:
                 self.on_thought_callback(prompt)
             else:
                 logger.warning("Gated tool call with no approval channel available -- declining safely.")
-                return False
+                return ApprovalDecision.UNAVAILABLE
 
             try:
-                return await asyncio.wait_for(fut, timeout=self._approval_timeout)
+                approved = await asyncio.wait_for(fut, timeout=self._approval_timeout)
+                return ApprovalDecision.APPROVED if approved else ApprovalDecision.REJECTED
             except asyncio.TimeoutError:
                 logger.warning("Tool approval %s timed out, declining", request_id)
-                return False
+                return ApprovalDecision.TIMED_OUT
         finally:
             pending_tool_approvals.pop(request_id, None)
             if _active_voice_approval_id == request_id:
                 _active_voice_approval_id = None
+
+    async def execute_tool_operation(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        *,
+        request: str,
+        task_id: Optional[str],
+        session_id: Optional[str],
+        turn_id: Optional[str] = None,
+        platform: str = "web",
+    ) -> ResultEnvelope:
+        """Execute one non-LLM operation through the shared primitive."""
+        approval_requester = self._request_tool_approval_decision
+        if getattr(self.request_tool_approval, "__func__", None) is not Brain.request_tool_approval:
+            async def approval_requester(*args: Any, **kwargs: Any) -> ApprovalDecision:
+                approved = await self.request_tool_approval(*args, **kwargs)
+                return ApprovalDecision.APPROVED if approved else ApprovalDecision.REJECTED
+
+        return await self._execute_operation_primitive(
+            tool_name,
+            arguments,
+            request=request,
+            task_id=task_id,
+            session_id=session_id,
+            turn_id=turn_id,
+            platform=platform,
+            execution_owner_id=task_id,
+            approval_requester=approval_requester,
+            include_approval_status=True,
+            source="brain.operation",
+        )
+
+    def _finalize_operation_common(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        envelope: ResultEnvelope,
+        *,
+        session_id: Optional[str],
+        record_failure_event: bool = True,
+        before_publish: Optional[Callable[[ResultEnvelope], None]] = None,
+    ) -> ResultEnvelope:
+        """Apply downstream result truth shared by every operation caller."""
+        if record_failure_event and _operation_failed(envelope):
+            try:
+                self.world_model.record_event(
+                    "tool_error",
+                    f"{tool_name}: {_result_envelope_to_model_text(envelope)[:200]}",
+                )
+            except Exception:
+                logger.warning("World-model failure record failed for %s", tool_name, exc_info=True)
+        if before_publish is not None:
+            before_publish(envelope)
+        try:
+            _invoke_callback_with_identity(
+                self.on_tool_result,
+                tool_name,
+                _result_envelope_to_model_text(envelope),
+                turn_id=envelope.turn_id,
+                task_id=envelope.task_id,
+                session_id=envelope.session_id,
+            )
+        except Exception:
+            logger.warning("Tool result callback failed for %s", tool_name, exc_info=True)
+        operation_callback = getattr(self, "on_operation_result", None)
+        if operation_callback is not None:
+            try:
+                operation_callback(tool_name, envelope)
+            except Exception:
+                logger.warning("Operation result callback failed for %s", tool_name, exc_info=True)
+        if self.session_store:
+            try:
+                self.session_store.append_tool(
+                    turn_id=envelope.turn_id,
+                    tool_name=tool_name,
+                    args=arguments,
+                    result=envelope,
+                    session_id=envelope.session_id or session_id,
+                )
+            except Exception as persist_exc:
+                logger.debug("Tool result persist skipped: %s", persist_exc)
+        try:
+            telemetry.record_tool_call(tool_name, success=_operation_succeeded(envelope))
+        except Exception:
+            logger.warning("Tool telemetry recording failed for %s", tool_name, exc_info=True)
+        return envelope
+
+    async def _execute_operation_primitive(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        *,
+        request: str,
+        task_id: Optional[str],
+        session_id: Optional[str],
+        turn_id: Optional[str] = None,
+        platform: str = "web",
+        execution_owner_id: Optional[str] = None,
+        approval_requester: Optional[Callable[..., Any]] = None,
+        execute_override: Optional[Callable[[], Any]] = None,
+        recent_external_texts: Optional[List[str]] = None,
+        include_approval_status: bool = False,
+        source: str = "brain.tool_loop",
+        before_finalize: Optional[Callable[[ResultEnvelope], None]] = None,
+        apply_execution_controls: bool = True,
+    ) -> ResultEnvelope:
+        """Own common policy, execution, recovery, and result finalization."""
+        call_args = dict(arguments)
+        if tool_name == "shell_execute":
+            call_args["voice_mode"] = platform == "voice"
+
+        operation = capability_index.get_operation(tool_name)
+        is_com = bool(operation and operation.executor_type == "com_thread")
+        timeout = _tool_timeout(tool_name, operation)
+        required_leases = operation.required_leases if operation and operation.required_leases else ()
+        execution_owner_id = execution_owner_id or task_id or f"operation:{uuid4().hex}"
+        lock = self._tool_locks.setdefault(tool_name, asyncio.Lock())
+
+        _invoke_callback_with_identity(
+            self.on_thinking_update,
+            tool_name,
+            call_args,
+            turn_id=turn_id,
+            task_id=task_id,
+            session_id=session_id,
+        )
+        _invoke_callback_with_identity(
+            self.on_tool_call,
+            tool_name,
+            call_args,
+            turn_id=turn_id,
+            task_id=task_id,
+            session_id=session_id,
+        )
+
+        async def _publish(envelope: ResultEnvelope) -> ResultEnvelope:
+            return self._finalize_operation_common(
+                tool_name,
+                call_args,
+                envelope,
+                session_id=session_id,
+                before_publish=before_finalize,
+            )
+
+        requirement, risk_class, requirement_reason = autonomy_evaluate(
+            tool_name,
+            call_args,
+            recent_external_texts=recent_external_texts,
+        )
+        risk_value = getattr(risk_class, "value", risk_class)
+
+        def _finalize_cancelled(
+            reason: str,
+            *,
+            approval_status: Optional[str] = None,
+        ) -> ResultEnvelope:
+            data: dict[str, Any] = {"failure_kind": "cancellation"}
+            if include_approval_status:
+                data["approval_status"] = approval_status or (
+                    ApprovalDecision.APPROVED.value if requirement == Requirement.APPROVE else "not_required"
+                )
+            envelope = _normalize_tool_result(
+                tool_name,
+                f"Error: Tool '{tool_name}' was cancelled.",
+                request=request,
+                turn_id=turn_id,
+                task_id=task_id,
+                session_id=session_id,
+                status=ResultStatus.CANCELLED,
+                reason=reason,
+                risk_class=risk_value,
+                requires_approval=requirement == Requirement.APPROVE,
+                source=source,
+                data=data,
+            )
+            return self._finalize_operation_common(
+                tool_name,
+                call_args,
+                envelope,
+                session_id=session_id,
+            )
+
+        if requirement == Requirement.BLOCK:
+            block_data = {"failure_kind": "policy_block"}
+            if include_approval_status:
+                block_data["approval_status"] = "blocked"
+            return await _publish(
+                _normalize_tool_result(
+                    tool_name,
+                    f"Error: Command blocked -- {requirement_reason}",
+                    request=request,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    status=ResultStatus.BLOCKED,
+                    reason=requirement_reason,
+                    risk_class=risk_value,
+                    source=source,
+                    data=block_data,
+                )
+            )
+
+        gate_reason = requirement_reason if requirement == Requirement.APPROVE else None
+        decision = ApprovalDecision.APPROVED
+        if gate_reason:
+            requester = approval_requester or self._request_tool_approval_decision
+            try:
+                decision = await requester(
+                    tool_name,
+                    call_args,
+                    gate_reason,
+                    platform=platform,
+                    risk_class=risk_class,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                )
+            except asyncio.CancelledError as exc:
+                raise OperationCancelled(
+                    _finalize_cancelled("Approval wait was cancelled.", approval_status="cancelled")
+                ) from exc
+            if isinstance(decision, bool):
+                decision = ApprovalDecision.APPROVED if decision else ApprovalDecision.REJECTED
+        if gate_reason and decision is not ApprovalDecision.APPROVED:
+            rejection_reason = {
+                ApprovalDecision.REJECTED: f"Error: Command declined by user (required approval: {gate_reason}).",
+                ApprovalDecision.TIMED_OUT: "Error: Command approval timed out before execution.",
+                ApprovalDecision.UNAVAILABLE: "Error: Command approval channel unavailable.",
+            }.get(decision, "Error: Command approval was not granted.")
+            rejection_data = {"failure_kind": "approval_denied"}
+            if include_approval_status:
+                rejection_data["approval_status"] = decision.value
+            return await _publish(
+                _normalize_tool_result(
+                    tool_name,
+                    rejection_reason,
+                    request=request,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    status=ResultStatus.CANCELLED,
+                    reason=gate_reason,
+                    risk_class=risk_value,
+                    requires_approval=True,
+                    source=source,
+                    data=rejection_data,
+                )
+            )
+
+        async def _run() -> Any:
+            if execute_override is not None:
+                result = execute_override()
+                return await result if inspect.isawaitable(result) else result
+            executor = _UIA_EXECUTOR if is_com else None
+            execute = (
+                tool_registry.execute_tool_structured
+                if tool_name in {"web_search", "web_research"}
+                else tool_registry.execute_tool
+            )
+            return await asyncio.get_running_loop().run_in_executor(
+                executor,
+                execute,
+                tool_name,
+                call_args,
+            )
+
+        async def _run_with_leases() -> Any:
+            if required_leases:
+                from charlie.resource_locks import default_lease_manager
+
+                async with await default_lease_manager.acquire_many(required_leases, execution_owner_id):
+                    return await _run()
+            if tool_registry.is_interactive(tool_name):
+                async with lock:
+                    return await _run()
+            return await _run()
+
+        raw_result: Any
+        result_errors: List[str] = []
+        result_reason = ""
+        result_data: dict[str, Any] = {}
+        if include_approval_status:
+            result_data["approval_status"] = (
+                ApprovalDecision.APPROVED.value if gate_reason else "not_required"
+            )
+        policy_status: Optional[str] = None
+        try:
+            if not apply_execution_controls:
+                raw_result = await _run()
+            else:
+                raw_result = await asyncio.wait_for(_run_with_leases(), timeout=timeout)
+            if (
+                apply_execution_controls
+                and
+                tool_name in {"shell_execute", "file_write"}
+                and _legacy_tool_result_status(raw_result) == ResultStatus.FAILED.value
+            ):
+                from charlie.recovery import recover_tool
+
+                recovered_res = await recover_tool(
+                    self,
+                    tool_name,
+                    call_args,
+                    RuntimeError(_tool_result_text(raw_result)),
+                )
+                if recovered_res is not None:
+                    raw_result = recovered_res
+        except asyncio.CancelledError as exc:
+            raise OperationCancelled(
+                _finalize_cancelled(
+                    "Operation execution was cancelled.",
+                    approval_status=(
+                        ApprovalDecision.APPROVED.value if gate_reason else "not_required"
+                    ),
+                )
+            ) from exc
+        except asyncio.TimeoutError as exc:
+            if not apply_execution_controls:
+                raise
+            if tool_name in {"shell_execute", "file_write"}:
+                from charlie.recovery import recover_tool
+
+                recovered_res = await recover_tool(self, tool_name, call_args, exc)
+                if recovered_res is not None:
+                    raw_result = recovered_res
+                else:
+                    raw_result = f"Error: Tool '{tool_name}' timed out after {timeout}s"
+                    policy_status = ResultStatus.FAILED.value
+                    result_reason = f"Tool '{tool_name}' timed out."
+                    result_data.update({"failure_kind": "timeout", "timeout_seconds": timeout})
+                    result_errors.append(_tool_result_text(raw_result))
+            else:
+                raw_result = f"Error: Tool '{tool_name}' timed out after {timeout}s"
+                policy_status = ResultStatus.FAILED.value
+                result_reason = f"Tool '{tool_name}' timed out."
+                result_data.update({"failure_kind": "timeout", "timeout_seconds": timeout})
+                result_errors.append(_tool_result_text(raw_result))
+        except Exception as exc:
+            if not apply_execution_controls:
+                raise
+            if tool_name in {"shell_execute", "file_write"}:
+                from charlie.recovery import recover_tool
+
+                recovered_res = await recover_tool(self, tool_name, call_args, exc)
+                if recovered_res is not None:
+                    raw_result = recovered_res
+                else:
+                    raw_result = f"Error executing tool '{tool_name}': {exc}"
+                    policy_status = ResultStatus.FAILED.value
+                    result_reason = f"Tool '{tool_name}' raised an exception."
+                    result_data.update({"failure_kind": "exception", "exception_type": type(exc).__name__})
+                    result_errors.append(_tool_result_text(raw_result))
+            else:
+                raw_result = f"Error executing tool '{tool_name}': {exc}"
+                policy_status = ResultStatus.FAILED.value
+                result_reason = f"Tool '{tool_name}' raised an exception."
+                result_data.update({"failure_kind": "exception", "exception_type": type(exc).__name__})
+                result_errors.append(_tool_result_text(raw_result))
+
+        envelope = _normalize_tool_result(
+            tool_name,
+            raw_result,
+            request=request,
+            turn_id=turn_id,
+            task_id=task_id,
+            session_id=session_id,
+            status=policy_status,
+            reason=result_reason,
+            risk_class=risk_value,
+            requires_approval=bool(gate_reason),
+            source=source,
+            data=result_data,
+            errors=result_errors or None,
+        )
+        return await _publish(envelope)
 
     async def close(self) -> None:
         """Close brain-owned clients and any compatibility-local graph."""
@@ -3915,98 +4335,74 @@ class Brain:
             cache_result: bool = True,
             update_desktop_failure: bool = True,
             record_failure_event: bool = True,
+            common_finalized: bool = False,
         ) -> ResultEnvelope:
-            """Apply one canonical operation result to every downstream boundary."""
+            """Apply turn-local state around shared operation finalization."""
 
             tool_name = call["name"]
-            model_text = _result_envelope_to_model_text(envelope)
 
-            if diagnostic_trace is not None:
-                diagnostic_trace.mark(
-                    "tool_complete",
-                    fields={
-                        "tool_name": tool_name,
-                        "status": getattr(envelope.status, "value", envelope.status),
-                        "result_length": len(model_text),
-                    },
-                )
-
-            if tool_name in _DESKTOP_CONTROL_TOOLS:
-                executed_action_results.append(envelope)
-
-            if record_failure_event and _operation_failed(envelope):
-                self.world_model.record_event("tool_error", f"{tool_name}: {model_text[:200]}")
-
-            if tool_name == "memory" and _operation_succeeded(envelope):
-                self.reload_context()
-
-            _repeat_guard.record_result(
-                ck,
-                envelope,
-                state_changed=(
-                    _operation_succeeded(envelope)
-                    and tool_name
-                    not in {"desktop_observe", "desktop_read_screen", "desktop_screenshot", "desktop_windows"}
-                ),
-            )
-
-            # Anomaly auto-halt: repeated failure of the same call means looping, not progress.
-            if tool_name in _DESKTOP_CONTROL_TOOLS and update_desktop_failure:
-                if _operation_failed(envelope):
-                    _desktop_fail_counts[ck] = _desktop_fail_counts.get(ck, 0) + 1
-                    threshold = 1 if _is_low_confidence_desktop_call(tool_name, call["arguments"]) else 2
-                    if _desktop_fail_counts[ck] >= threshold:
-                        self._turn_halted = True
-                        logger.warning(
-                            "Desktop action %s failed %d time(s) (threshold %d) -- auto-halting.",
-                            tool_name,
-                            _desktop_fail_counts[ck],
-                            threshold,
-                        )
-                else:
-                    _desktop_fail_counts[ck] = 0
-
-            # Pop immediately (no await above) so a concurrent Brain can't overwrite it first.
-            if tool_name == "desktop_screenshot":
-                self._pending_vision_image_url = pop_pending_vision_image()
-
-            _invoke_callback_with_identity(
-                self.on_tool_result,
-                tool_name,
-                model_text,
-                turn_id=envelope.turn_id,
-                task_id=envelope.task_id,
-                session_id=envelope.session_id,
-            )
-            operation_callback = getattr(self, "on_operation_result", None)
-            if operation_callback is not None:
-                try:
-                    operation_callback(tool_name, envelope)
-                except Exception:
-                    logger.warning("Operation result callback failed for %s", tool_name, exc_info=True)
-
-            # Persist the canonical envelope; SessionStore projects it to the history text boundary.
-            if self.session_store:
-                try:
-                    self.session_store.append_tool(
-                        turn_id=envelope.turn_id,
-                        tool_name=tool_name,
-                        args=call["arguments"],
-                        result=envelope,
-                        session_id=envelope.session_id or session_id,
+            def _apply_turn_local(local_envelope: ResultEnvelope) -> None:
+                model_text = _result_envelope_to_model_text(local_envelope)
+                if diagnostic_trace is not None:
+                    diagnostic_trace.mark(
+                        "tool_complete",
+                        fields={
+                            "tool_name": tool_name,
+                            "status": getattr(local_envelope.status, "value", local_envelope.status),
+                            "result_length": len(model_text),
+                        },
                     )
-                except Exception as persist_exc:
-                    logger.debug("Tool result persist skipped: %s", persist_exc)
+                if tool_name in _DESKTOP_CONTROL_TOOLS:
+                    executed_action_results.append(local_envelope)
+                if tool_name == "memory" and _operation_succeeded(local_envelope):
+                    self.reload_context()
+                _repeat_guard.record_result(
+                    ck,
+                    local_envelope,
+                    state_changed=(
+                        _operation_succeeded(local_envelope)
+                        and tool_name
+                        not in {"desktop_observe", "desktop_read_screen", "desktop_screenshot", "desktop_windows"}
+                    ),
+                )
+                if tool_name in _DESKTOP_CONTROL_TOOLS and update_desktop_failure:
+                    if _operation_failed(local_envelope):
+                        _desktop_fail_counts[ck] = _desktop_fail_counts.get(ck, 0) + 1
+                        threshold = 1 if _is_low_confidence_desktop_call(tool_name, call["arguments"]) else 2
+                        if _desktop_fail_counts[ck] >= threshold:
+                            self._turn_halted = True
+                            logger.warning(
+                                "Desktop action %s failed %d time(s) (threshold %d) -- auto-halting.",
+                                tool_name,
+                                _desktop_fail_counts[ck],
+                                threshold,
+                            )
+                    else:
+                        _desktop_fail_counts[ck] = 0
+                if tool_name == "desktop_screenshot":
+                    self._pending_vision_image_url = pop_pending_vision_image()
 
+            if common_finalized:
+                if cache_result and not is_com:
+                    _seen_tool_calls[ck] = envelope
+                return envelope
+
+            self._finalize_operation_common(
+                tool_name,
+                call["arguments"],
+                envelope,
+                session_id=session_id,
+                record_failure_event=record_failure_event,
+                before_publish=_apply_turn_local,
+            )
             if cache_result and not is_com:
                 _seen_tool_calls[ck] = envelope
-            telemetry.record_tool_call(tool_name, success=_operation_succeeded(envelope))
             return envelope
 
         async def _exec_one(call: Dict[str, Any]) -> ResultEnvelope:
             nonlocal research_report
             tool_name = call["name"]
-            ck = f"{call['name']}({json.dumps(call['arguments'], sort_keys=True)})"
+            ck = f'{call["name"]}({json.dumps(call["arguments"], sort_keys=True)})'
             op = capability_index.get_operation(tool_name)
             is_com = bool(op and op.executor_type == "com_thread")
             if _repeat_guard.before(ck):
@@ -4044,200 +4440,170 @@ class Brain:
                     "tool_start",
                     fields={"tool_name": tool_name, "executor_type": "com_thread" if is_com else "async"},
                 )
-            timeout = _tool_timeout(tool_name, op)
-            required_leases = op.required_leases if (op and op.required_leases) else ()
-            lock = self._tool_locks.setdefault(tool_name, asyncio.Lock())
 
-            async def _run() -> Any:
-                executor = _UIA_EXECUTOR if is_com else None
-                execute = (
-                    tool_registry.execute_tool_structured
-                    if tool_name in {"web_search", "web_research"}
-                    else tool_registry.execute_tool
-                )
-                return await asyncio.get_running_loop().run_in_executor(
-                    executor, execute, call["name"], call["arguments"]
-                )
-
-            _invoke_callback_with_identity(
-                self.on_thinking_update,
-                call["name"],
-                call["arguments"],
-                turn_id=turn_id,
-                task_id=task_id,
-                session_id=session_id,
-            )
-            _invoke_callback_with_identity(
-                self.on_tool_call,
-                call["name"],
-                call["arguments"],
-                turn_id=turn_id,
-                task_id=task_id,
-                session_id=session_id,
-            )
-
-            if tool_name == "shell_execute":
-                # voice_mode is derived from the real turn platform, never trusted from the LLM-supplied call args.
-                call["arguments"]["voice_mode"] = platform == "voice"
-
-            # Approve/decline gate only -- BLOCK-tier stays enforced inside shell_execute() itself.
-            gate_reason: Optional[str] = None
-            policy_status: Optional[str] = None
-            policy_reason = ""
-            requirement, risk_class, requirement_reason = autonomy_evaluate(
-                tool_name, call["arguments"], recent_external_texts=_turn_external_texts
-            )
-            if requirement == Requirement.BLOCK:
-                policy_status = ResultStatus.BLOCKED.value
-                policy_reason = requirement_reason
-            elif requirement == Requirement.APPROVE:
-                gate_reason = requirement_reason
-
-            approved = True
-            if gate_reason:
-                approved = await self.request_tool_approval(
+            execute_override = None
+            if tool_name == "propose_new_tool":
+                async def execute_override():
+                    return await self._handle_propose_new_tool(call["arguments"])
+            elif tool_name == "start_background_task":
+                async def execute_override():
+                    return await self._handle_start_background_task(
+                        call["arguments"],
+                        session_id=session_id,
+                        turn_id=turn_id,
+                    )
+            elif tool_name == "browser_task":
+                async def execute_override():
+                    return await self.browser_task(
+                        call["arguments"].get("task", ""),
+                        platform=platform,
+                        task_id=task_id,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        return_envelope=True,
+                    )
+            elif tool_name in _DESKTOP_CONTROL_TOOLS and self._is_desktop_halted():
+                raw_result = "Error: Desktop control is halted (panic or repeated failure). Say 'continue' to resume."
+                envelope = _normalize_tool_result(
                     tool_name,
-                    call["arguments"],
-                    gate_reason,
+                    raw_result,
+                    request=original_user_input,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    status=ResultStatus.BLOCKED,
+                    reason="Desktop control is halted for this turn.",
+                    risk_class=op.risk_class if op is not None else "safe",
+                    source="brain.tool_loop",
+                )
+                return _finalize_operation_result(
+                    call,
+                    envelope,
+                    ck=ck,
+                    is_com=is_com,
+                    common_finalized=False,
+                )
+            elif tool_name in _DESKTOP_CONTROL_TOOLS and _desktop_action_count[0] >= self.config.desktop_max_actions:
+                raw_result = (
+                    f"Error: Desktop action limit reached "
+                    f"({self.config.desktop_max_actions} for this turn)."
+                )
+                envelope = _normalize_tool_result(
+                    tool_name,
+                    raw_result,
+                    request=original_user_input,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    status=ResultStatus.BLOCKED,
+                    reason="Desktop action limit reached for this turn.",
+                    risk_class=op.risk_class if op is not None else "safe",
+                    source="brain.tool_loop",
+                )
+                self._turn_halted = True
+                return _finalize_operation_result(
+                    call,
+                    envelope,
+                    ck=ck,
+                    is_com=is_com,
+                    common_finalized=False,
+                )
+            else:
+                if tool_name in _DESKTOP_CONTROL_TOOLS:
+                    _desktop_action_count[0] += 1
+
+            async def _legacy_approval(
+                approval_tool_name: str,
+                approval_arguments: Dict[str, Any],
+                reason: str,
+                platform: str = "voice",
+                risk_class: Optional[str] = None,
+                *,
+                turn_id: Optional[str] = None,
+                task_id: Optional[str] = None,
+                session_id: Optional[str] = None,
+            ) -> ApprovalDecision:
+                approved = await self.request_tool_approval(
+                    approval_tool_name,
+                    approval_arguments,
+                    reason,
                     platform=platform,
                     risk_class=risk_class,
                     turn_id=turn_id,
                     task_id=task_id,
                     session_id=session_id,
                 )
+                return ApprovalDecision.APPROVED if approved else ApprovalDecision.REJECTED
 
-            raw_result: Any
-            result_errors: List[str] = []
-            result_reason = policy_reason
-            result_data: Optional[dict[str, Any]] = None
-            if gate_reason and not approved:
-                raw_result = f"Error: Command declined by user (required approval: {gate_reason})."
-                policy_status = ResultStatus.CANCELLED.value
-                result_reason = gate_reason
-                result_data = {"failure_kind": "approval_denied"}
-            elif tool_name == "propose_new_tool":
-                raw_result = await self._handle_propose_new_tool(call["arguments"])
-            elif tool_name == "start_background_task":
-                raw_result = await self._handle_start_background_task(
-                    call["arguments"],
-                    session_id=session_id,
-                    turn_id=turn_id,
-                )
-            elif tool_name == "browser_task":
-                raw_result = await self.browser_task(
-                    call["arguments"].get("task", ""),
-                    platform=platform,
-                    task_id=task_id,
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    return_envelope=True,
-                )
-            elif tool_name in _DESKTOP_CONTROL_TOOLS and self._is_desktop_halted():
-                raw_result = "Error: Desktop control is halted (panic or repeated failure). Say 'continue' to resume."
-                policy_status = ResultStatus.BLOCKED.value
-                result_reason = "Desktop control is halted for this turn."
-            elif tool_name in _DESKTOP_CONTROL_TOOLS and _desktop_action_count[0] >= self.config.desktop_max_actions:
-                raw_result = f"Error: Desktop action limit reached ({self.config.desktop_max_actions} for this turn)."
-                policy_status = ResultStatus.BLOCKED.value
-                result_reason = "Desktop action limit reached for this turn."
-                self._turn_halted = True
-            else:
+            def _turn_local_finalize(local_envelope: ResultEnvelope) -> None:
+                model_text = _result_envelope_to_model_text(local_envelope)
+                if diagnostic_trace is not None:
+                    diagnostic_trace.mark(
+                        "tool_complete",
+                        fields={
+                            "tool_name": tool_name,
+                            "status": getattr(local_envelope.status, "value", local_envelope.status),
+                            "result_length": len(model_text),
+                        },
+                    )
                 if tool_name in _DESKTOP_CONTROL_TOOLS:
-                    _desktop_action_count[0] += 1
-                try:
-
-                    async def _run_with_leases() -> str:
-                        if required_leases:
-                            from charlie.resource_locks import default_lease_manager
-
-                            async with await default_lease_manager.acquire_many(required_leases, execution_owner_id):
-                                return await _run()
-                        elif tool_registry.is_interactive(tool_name):
-                            async with lock:
-                                return await _run()
-                        else:
-                            return await _run()
-
-                    raw_result = await asyncio.wait_for(_run_with_leases(), timeout=timeout)
-                    if isinstance(raw_result, ToolExecutionResult):
-                        if isinstance(raw_result.structured_data, ResearchReport):
-                            research_report = raw_result.structured_data
-                            turn_research_reports.append(research_report)
-
-                    # Check for standard returned shell/file failures to attempt recovery
-                    if (
-                        tool_name in {"shell_execute", "file_write"}
-                        and _legacy_tool_result_status(raw_result) == ResultStatus.FAILED.value
-                    ):
-                        logger.info("Tool %s returned an error. Running recovery pipeline...", tool_name)
-                        from charlie.recovery import recover_tool
-
-                        recovered_res = await recover_tool(
-                            self,
-                            tool_name,
-                            call["arguments"],
-                            RuntimeError(_tool_result_text(raw_result)),
-                        )
-                        if recovered_res is not None:
-                            raw_result = recovered_res
-                except asyncio.TimeoutError as te:
-                    if tool_name in ("shell_execute", "file_write"):
-                        logger.info("Tool %s timed out. Running recovery pipeline...", tool_name)
-                        from charlie.recovery import recover_tool
-
-                        recovered_res = await recover_tool(self, tool_name, call["arguments"], te)
-                        if recovered_res is not None:
-                            raw_result = recovered_res
-                        else:
-                            raw_result = f"Error: Tool '{tool_name}' timed out after {timeout}s"
-                            result_errors.append(_tool_result_text(raw_result))
-                            policy_status = ResultStatus.FAILED.value
-                            result_reason = f"Tool '{tool_name}' timed out."
-                            result_data = {"failure_kind": "timeout", "timeout_seconds": timeout}
+                    executed_action_results.append(local_envelope)
+                if tool_name == "memory" and _operation_succeeded(local_envelope):
+                    self.reload_context()
+                _repeat_guard.record_result(
+                    ck,
+                    local_envelope,
+                    state_changed=(
+                        _operation_succeeded(local_envelope)
+                        and tool_name
+                        not in {"desktop_observe", "desktop_read_screen", "desktop_screenshot", "desktop_windows"}
+                    ),
+                )
+                if tool_name in _DESKTOP_CONTROL_TOOLS:
+                    if _operation_failed(local_envelope):
+                        _desktop_fail_counts[ck] = _desktop_fail_counts.get(ck, 0) + 1
+                        threshold = 1 if _is_low_confidence_desktop_call(tool_name, call["arguments"]) else 2
+                        if _desktop_fail_counts[ck] >= threshold:
+                            self._turn_halted = True
+                            logger.warning(
+                                "Desktop action %s failed %d time(s) (threshold %d) -- auto-halting.",
+                                tool_name,
+                                _desktop_fail_counts[ck],
+                                threshold,
+                            )
                     else:
-                        raw_result = f"Error: Tool '{tool_name}' timed out after {timeout}s"
-                        result_errors.append(_tool_result_text(raw_result))
-                        policy_status = ResultStatus.FAILED.value
-                        result_reason = f"Tool '{tool_name}' timed out."
-                        result_data = {"failure_kind": "timeout", "timeout_seconds": timeout}
-                    logger.warning("Tool %s timed out", tool_name)
-                except Exception as e:
-                    if tool_name in ("shell_execute", "file_write"):
-                        logger.info("Tool %s raised exception. Running recovery pipeline...", tool_name)
-                        from charlie.recovery import recover_tool
+                        _desktop_fail_counts[ck] = 0
+                if tool_name == "desktop_screenshot":
+                    self._pending_vision_image_url = pop_pending_vision_image()
 
-                        recovered_res = await recover_tool(self, tool_name, call["arguments"], e)
-                        if recovered_res is not None:
-                            raw_result = recovered_res
-                        else:
-                            raw_result = f"Error executing tool '{tool_name}': {e}"
-                            result_errors.append(_tool_result_text(raw_result))
-                            policy_status = ResultStatus.FAILED.value
-                            result_reason = f"Tool '{tool_name}' raised an exception."
-                            result_data = {"failure_kind": "exception", "exception_type": type(e).__name__}
-                    else:
-                        raw_result = f"Error executing tool '{tool_name}': {e}"
-                        result_errors.append(_tool_result_text(raw_result))
-                        policy_status = ResultStatus.FAILED.value
-                        result_reason = f"Tool '{tool_name}' raised an exception."
-                        result_data = {"failure_kind": "exception", "exception_type": type(e).__name__}
-                    logger.warning("Tool %s raised an exception: %s", tool_name, e)
-
-            envelope = _normalize_tool_result(
+            envelope = await self._execute_operation_primitive(
                 tool_name,
-                raw_result,
+                call["arguments"],
                 request=original_user_input,
                 turn_id=turn_id,
                 task_id=task_id,
                 session_id=session_id,
-                status=policy_status,
-                reason=result_reason,
-                risk_class=getattr(risk_class, "value", risk_class),
-                requires_approval=bool(gate_reason),
-                data=result_data,
-                errors=result_errors or None,
+                platform=platform,
+                execution_owner_id=execution_owner_id,
+                approval_requester=_legacy_approval,
+                execute_override=execute_override,
+                recent_external_texts=_turn_external_texts,
+                include_approval_status=False,
+                source="brain.tool_loop",
+                before_finalize=_turn_local_finalize,
+                apply_execution_controls=execute_override is None,
             )
-            return _finalize_operation_result(call, envelope, ck=ck, is_com=is_com)
+            structured_data = envelope.data.get("structured_data")
+            if isinstance(structured_data, ResearchReport):
+                research_report = structured_data
+                turn_research_reports.append(research_report)
+            return _finalize_operation_result(
+                call,
+                envelope,
+                ck=ck,
+                is_com=is_com,
+                common_finalized=True,
+            )
 
         while True:
             # Re-check cancellation at the top of every tool cycle so a turn

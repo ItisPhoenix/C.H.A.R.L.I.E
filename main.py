@@ -14,6 +14,7 @@ import socket
 import sys
 import time
 import threading
+from collections import OrderedDict
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 # Windows event-loop policy (must precede zmq/asyncio imports)
@@ -104,7 +105,7 @@ for _logger_name in ("httpcore", "httpx", "asyncio", "comtypes", "trafilatura"):
 from charlie import background_task, telemetry
 from charlie.errors import ErrorClass, classify_exception
 from charlie.config import Config, config
-from charlie.core import Brain
+from charlie.core import Brain, OperationCancelled
 from charlie.presentation_control import PresentationRequest, get_presentation_controller
 from charlie.surface_intent import match_surface_request
 from charlie.events import EventMeta, EventSource, EventType
@@ -121,7 +122,7 @@ from charlie.session_store import SessionStore
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus
 from charlie.task_journal import TaskOrigin, TaskPriority, TaskStatus, get_task_journal
-from charlie.turn_contracts import IntentDecision, ResultEnvelope, TurnRequest
+from charlie.turn_contracts import IntentDecision, ResultEnvelope, ResultStatus, TurnRequest
 from charlie.presentation import (
     AnchorTarget,
     AttentionLevel as PresentationAttention,
@@ -167,6 +168,8 @@ _NON_CANCELLABLE_FOREGROUND_TOOLS = frozenset(
     }
 )
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
+# Bounded replay/idempotency window; evicted IDs may be treated as new requests.
+_TERMINAL_RESULT_CACHE_MAX = 512
 from charlie.runtime_identity import git_build_identity, persistent_frontend_dist
 
 _SOURCE_IDENTITY, _SOURCE_DIRTY = git_build_identity(Path(__file__).resolve().parent)
@@ -214,6 +217,180 @@ def _allocate_turn_request(text: str, session_id: str, channel: str) -> TurnRequ
     """Allocate one immutable request identity at normalized ingress."""
 
     return TurnRequest.allocate(text, session_id, channel)
+
+
+_TERMINAL_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def _normalize_terminal_request_id(value: Any) -> str:
+    """Keep valid web correlation IDs stable and replace malformed values."""
+    if isinstance(value, str):
+        candidate = value.strip()
+        if _TERMINAL_REQUEST_ID_RE.fullmatch(candidate):
+            return candidate
+    return uuid.uuid4().hex
+
+
+def _terminal_command_result_payload(
+    request_id: str,
+    terminal_session_id: str,
+    command: str,
+    envelope: Any,
+) -> dict[str, Any]:
+    result = envelope.to_dict()
+    approval_status = str((result.get("data") or {}).get("approval_status", "not_required"))
+    status = str(result.get("status", "failed"))
+    return {
+        "request_id": request_id,
+        "terminal_session_id": terminal_session_id,
+        "command": command,
+        "approved": approval_status == "approved",
+        "approval_status": approval_status,
+        "status": status,
+        "result": result,
+    }
+
+
+def _cache_terminal_result(
+    result_cache: OrderedDict[str, dict[str, Any]],
+    request_id: str,
+    payload: dict[str, Any],
+) -> None:
+    result_cache[request_id] = payload
+    result_cache.move_to_end(request_id)
+    while len(result_cache) > _TERMINAL_RESULT_CACHE_MAX:
+        result_cache.popitem(last=False)
+
+
+async def _handle_terminal_command_request(
+    brain: Any,
+    event_bus: Any,
+    *,
+    request_id: str,
+    terminal_session_id: str,
+    command: str,
+    result_cache: OrderedDict[str, dict[str, Any]],
+    in_flight: dict[str, asyncio.Task],
+) -> dict[str, Any] | None:
+    """Run one terminal request through main Brain authority exactly once."""
+    request_id = _normalize_terminal_request_id(request_id)
+    cached = result_cache.get(request_id)
+    if cached is not None:
+        await event_bus.emit(
+            "terminal_command_result",
+            cached,
+            meta=EventMeta(
+                source=EventSource.BRAIN,
+                task_id=request_id,
+                rationale="terminal command result replayed from main idempotency cache",
+            ),
+        )
+        return cached
+
+    existing = in_flight.get(request_id)
+    current = asyncio.current_task()
+    if existing is not None and existing is not current and not existing.done():
+        logger.info("Waiting for duplicate terminal command request: %s", request_id)
+        try:
+            await asyncio.shield(existing)
+        except asyncio.CancelledError:
+            cached = result_cache.get(request_id)
+            if cached is not None:
+                await event_bus.emit(
+                    "terminal_command_result",
+                    cached,
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=request_id,
+                        rationale="terminal cancellation result replayed to duplicate waiter",
+                    ),
+                )
+                return cached
+            raise
+        except Exception:
+            logger.warning("Shared terminal command request failed: %s", request_id, exc_info=True)
+        cached = result_cache.get(request_id)
+        if cached is not None:
+            await event_bus.emit(
+                "terminal_command_result",
+                cached,
+                meta=EventMeta(
+                    source=EventSource.BRAIN,
+                    task_id=request_id,
+                    rationale="terminal command result replayed to duplicate waiter",
+                ),
+            )
+            return cached
+        return None
+
+    if current is not None:
+        in_flight[request_id] = current
+    try:
+        try:
+            envelope = await brain.execute_tool_operation(
+                "shell_execute",
+                {"command": command},
+                request=command,
+                task_id=request_id,
+                session_id=None,
+                turn_id=None,
+                platform="web",
+            )
+        except OperationCancelled as cancelled:
+            payload = _terminal_command_result_payload(
+                request_id,
+                terminal_session_id,
+                command,
+                cancelled.envelope,
+            )
+            _cache_terminal_result(result_cache, request_id, payload)
+            try:
+                await event_bus.emit(
+                    "terminal_command_result",
+                    payload,
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=request_id,
+                        rationale="terminal command cancellation finalized",
+                    ),
+                )
+            except Exception:
+                logger.debug("Terminal cancellation result could not be published: %s", request_id, exc_info=True)
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            envelope = ResultEnvelope(
+                request=command,
+                task_id=request_id,
+                session_id=None,
+                capability="terminal",
+                operation="terminal.shell.execute",
+                status=ResultStatus.FAILED.value,
+                result=f"Error executing terminal command: {exc}",
+                reason="Terminal operation failed before canonical completion.",
+                source="brain.terminal_request",
+                data={"failure_kind": "exception", "approval_status": "unavailable"},
+                errors=[str(exc)],
+            )
+            finalizer = getattr(brain, "_finalize_operation_common", None)
+            if callable(finalizer):
+                finalizer("shell_execute", {"command": command}, envelope, session_id=None)
+        payload = _terminal_command_result_payload(request_id, terminal_session_id, command, envelope)
+        _cache_terminal_result(result_cache, request_id, payload)
+        await event_bus.emit(
+            "terminal_command_result",
+            payload,
+            meta=EventMeta(
+                source=EventSource.BRAIN,
+                task_id=request_id,
+                rationale="terminal command execution completed",
+            ),
+        )
+        return payload
+    finally:
+        if current is not None and in_flight.get(request_id) is current:
+            in_flight.pop(request_id, None)
 
 
 def _is_sustained_research_request(text: str, runtime_config: Any) -> bool:
@@ -2092,6 +2269,8 @@ async def main() -> int:
     active_operation_task_id: Optional[str] = None
     active_operation_cancellable = True
     runtime_shutting_down = False
+    terminal_command_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    terminal_command_in_flight: dict[str, asyncio.Task] = {}
     event_bus_registry = _EventBusSubmissionRegistry()
     _main_event_bus_registry = event_bus_registry
 
@@ -3682,34 +3861,20 @@ async def main() -> int:
                             _resolve_tool_approval_and_notify(request_id, False)
                     elif cmd_type == "terminal_command_request":
                         payload = cmd.get("payload", {})
-                        request_id = payload.get("request_id")
+                        request_id = _normalize_terminal_request_id(payload.get("request_id"))
                         terminal_session_id = payload.get("terminal_session_id")
                         command = payload.get("command")
-                        if request_id and terminal_session_id and isinstance(command, str):
-                            async def _handle_terminal_command_request(req_id: str, term_sid: str, cmd_str: str):
-                                approved = await brain.request_tool_approval(
-                                    "shell_execute",
-                                    {"command": cmd_str},
-                                    "A terminal command needs approval",
-                                    platform="web",
-                                    risk_class="security_sensitive",
-                                )
-                                await event_bus.emit(
-                                    "terminal_command_result",
-                                    {
-                                        "request_id": req_id,
-                                        "terminal_session_id": term_sid,
-                                        "command": cmd_str,
-                                        "approved": approved,
-                                    },
-                                    meta=EventMeta(
-                                        source=EventSource.BRAIN,
-                                        rationale="terminal command approval resolved",
-                                    ),
-                                )
-
+                        if terminal_session_id and isinstance(command, str) and command.strip():
                             _submit_event_task(
-                                _handle_terminal_command_request(request_id, terminal_session_id, command)
+                                _handle_terminal_command_request(
+                                    brain,
+                                    event_bus,
+                                    request_id=request_id,
+                                    terminal_session_id=terminal_session_id,
+                                    command=command,
+                                    result_cache=terminal_command_results,
+                                    in_flight=terminal_command_in_flight,
+                                )
                             )
                     elif cmd_type == "stop":
                         await _apply_voice_control(

@@ -4,15 +4,12 @@ import asyncio
 import ctypes
 import logging
 import os
-import re
 import sys
 import threading
-import time
 import uuid
 from ctypes import wintypes
 from typing import Dict, Optional, Set
 
-from charlie.autonomy import RiskClass, classify_action
 from charlie.resource_locks import default_lease_manager
 
 logger = logging.getLogger("charlie.terminal_service")
@@ -363,12 +360,9 @@ class TerminalSession:
         self.status: str = "running"
         self.exit_code: Optional[int] = None
         self.lease_holder: str = "idle"
-        self._last_user_input_time: float = 0.0
-        self._user_active_timeout: float = 1.5
 
         self._history: str = ""
         self._subscribers: Set[asyncio.Queue[str]] = set()
-        self._pending_transactions: Dict[str, asyncio.Future[dict]] = {}
         self._reader_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._closed = False
@@ -441,34 +435,6 @@ class TerminalSession:
     def _append_output(self, text: str) -> None:
         self._history = (self._history + text)[-_MAX_OUTPUT_CHARS:]
         self._broadcast_event({"type": "output", "data": text})
-        # Check for Charlie transaction completion marker: __CHARLIE_TX_END__:<tx_id>:<exit_code>
-        search_buf = self._history[-2000:]
-        if "__CHARLIE_TX_END__:" in search_buf:
-            matches = re.findall(r"__CHARLIE_TX_END__:([a-f0-9]{12}):(-?\d+)", search_buf)
-            for tx_id, code_str in matches:
-                fut = self._pending_transactions.pop(tx_id, None)
-                if fut and not fut.done():
-                    exit_code = int(code_str)
-                    status = "ok" if exit_code == 0 else "failed"
-                    try:
-                        fut.get_loop().call_soon_threadsafe(
-                            fut.set_result,
-                            {"status": status, "exit_code": exit_code, "tx_id": tx_id},
-                        )
-                    except Exception:
-                        pass
-
-    def _cancel_pending_transactions(self, reason: str = "Transaction cancelled") -> None:
-        for tx_id, fut in list(self._pending_transactions.items()):
-            if not fut.done():
-                try:
-                    fut.cancel()
-                except Exception:
-                    try:
-                        fut.get_loop().call_soon_threadsafe(fut.cancel)
-                    except Exception:
-                        pass
-        self._pending_transactions.clear()
 
     def _broadcast_event(self, event_data: dict) -> None:
         for q in list(self._subscribers):
@@ -482,20 +448,14 @@ class TerminalSession:
             raise RuntimeError("terminal session is not running")
 
         if source == "user":
-            self._last_user_input_time = time.monotonic()
             current = default_lease_manager.current_owner("terminal")
             if current is not None and current != "user":
                 default_lease_manager.manual_takeover(["terminal"])
             self.lease_holder = "user"
-            self._cancel_pending_transactions("Interrupted by user input")
 
         if isinstance(data, str):
             data = data.encode("utf-8")
         return self.backend.write(data)
-
-    def write(self, line: str, source: str = "charlie") -> int:
-        clean_line = line.rstrip("\r\n") + "\r\n"
-        return self.write_bytes(clean_line.encode("utf-8"), source=source)
 
     def resize(self, cols: int, rows: int) -> None:
         self.cols = max(1, cols)
@@ -506,8 +466,6 @@ class TerminalSession:
         # Ctrl+C = 0x03 into ConPTY input; repeat so a blocked Sleep still sees it
         default_lease_manager.manual_takeover(["terminal"])
         self.lease_holder = "user"
-        self._last_user_input_time = time.monotonic()
-        self._cancel_pending_transactions("Interrupted by user Ctrl+C")
         self.backend.write(b"\x03")
         self.backend.write(b"\x03")
 
@@ -546,7 +504,6 @@ class TerminalSession:
         self._closed = True
         self.status = "closed"
         self._stop_event.set()
-        self._cancel_pending_transactions("Terminal session closed")
         self.backend.close()
         for q in list(self._subscribers):
             try:
@@ -602,131 +559,6 @@ class TerminalManager:
         if session is None:
             raise KeyError(session_id)
         return session.snapshot()
-
-    async def execute_charlie_command(
-        self,
-        session_id: str,
-        command: str,
-        task_id: str = "charlie-agent",
-        audit_store: Optional[object] = None,
-        approved: bool = False,
-        timeout: float = 30.0,
-    ) -> dict:
-        """Execute a command as Charlie with capability lease arbitration,
-        autonomy policy, transaction tracking, and audit.
-        """
-        session = self._sessions.get(session_id)
-        if session is None:
-            if session_id == self._primary_id:
-                session = await self.get_or_create_primary()
-            else:
-                raise KeyError(session_id)
-
-        # 1. User contention check: if user interacted very recently, reject
-        if time.monotonic() - session._last_user_input_time < session._user_active_timeout:
-            raise RuntimeError("Terminal lease conflict: user is actively interacting with terminal")
-
-        # 2. Acquire terminal lease
-        lease = await default_lease_manager.acquire("terminal", owner_id=task_id, timeout=2.0)
-        try:
-            # 3. Autonomy policy evaluation
-            risk_class, reason = classify_action("shell_execute", {"command": command})
-
-            if risk_class == RiskClass.IRREVERSIBLE:
-                if audit_store is not None and hasattr(audit_store, "record"):
-                    audit_store.record(
-                        "terminal_exec",
-                        {"command": command, "task_id": task_id, "source": "charlie"},
-                        f"BLOCKED: {reason}",
-                    )
-                raise PermissionError(f"Command blocked by security policy: {reason}")
-
-            if risk_class in (RiskClass.DESTRUCTIVE, RiskClass.SECURITY_SENSITIVE) and not approved:
-                if audit_store is not None and hasattr(audit_store, "record"):
-                    audit_store.record(
-                        "terminal_exec",
-                        {"command": command, "task_id": task_id, "source": "charlie", "risk_class": str(risk_class)},
-                        "APPROVAL_REQUIRED",
-                    )
-                raise PermissionError(f"Approval required for command execution: {reason or str(risk_class)}")
-
-            # 4. Set lease holder and execute with transaction sentinel
-            session.lease_holder = task_id
-            tx_id = uuid.uuid4().hex[:12]
-            loop = asyncio.get_running_loop()
-            fut = loop.create_future()
-            session._pending_transactions[tx_id] = fut
-
-            # Construct wrapped command with transaction completion marker
-            if "powershell" in session.shell_name.lower():
-                wrapped = (
-                    f"$global:LASTEXITCODE = 0; try {{ {command};"
-                    " if ($?) { $charlie_code = if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) "
-                    "{ $LASTEXITCODE } else { 0 } } else { $charlie_code = if ($LASTEXITCODE -ne $null "
-                    "-and $LASTEXITCODE -ne 0) { $LASTEXITCODE } else { 1 } } } catch { $charlie_code = 1 }; "
-                    f'[Console]::WriteLine("__CHARLIE_TX_END__:{tx_id}:$charlie_code")'
-                )
-            elif "cmd" in session.shell_name.lower():
-                wrapped = (
-                    f"{command} & (if errorlevel 1 (echo __CHARLIE_TX_END__:{tx_id}:1) "
-                    f"else (echo __CHARLIE_TX_END__:{tx_id}:0))"
-                )
-            else:
-                wrapped = f"{command}; echo __CHARLIE_TX_END__:{tx_id}:$?"
-
-            session.write(wrapped, source="charlie")
-
-            # 5. Await command completion future
-            try:
-                res = await asyncio.wait_for(fut, timeout=timeout)
-                status = res.get("status", "ok")
-                exit_code = res.get("exit_code", 0)
-                outcome = "COMPLETED" if status == "ok" else f"FAILED (exit code {exit_code})"
-            except asyncio.TimeoutError:
-                outcome = "TIMEOUT"
-                session._pending_transactions.pop(tx_id, None)
-                raise TimeoutError(f"Terminal command timed out after {timeout}s")
-            except asyncio.CancelledError:
-                outcome = "CANCELLED (user takeover)"
-                session._pending_transactions.pop(tx_id, None)
-                raise
-            except Exception as e:
-                outcome = f"ERROR: {e}"
-                session._pending_transactions.pop(tx_id, None)
-                raise
-            finally:
-                if audit_store is not None and hasattr(audit_store, "record"):
-                    audit_store.record(
-                        "terminal_exec",
-                        {"command": command, "task_id": task_id, "source": "charlie", "tx_id": tx_id},
-                        outcome,
-                    )
-
-            return {
-                "status": status,
-                "session_id": session.session_id,
-                "task_id": task_id,
-                "command": command,
-                "tx_id": tx_id,
-                "exit_code": exit_code,
-                "risk_class": str(risk_class),
-            }
-        finally:
-            await lease.release()
-            session.lease_holder = "idle"
-
-    async def write(self, session_id: str, line: str, source: str = "charlie", task_id: str = "charlie-agent") -> None:
-        session = self._sessions.get(session_id)
-        if session is None:
-            raise KeyError(session_id)
-        if source == "charlie":
-            owner = default_lease_manager.current_owner("terminal")
-            if owner is not None and owner != task_id:
-                raise RuntimeError(f"Terminal lease conflict: owned by {owner}")
-            session.lease_holder = task_id
-        session.write(line, source=source)
-        if source == "charlie":
-            session.lease_holder = "idle"
 
     async def write_bytes(self, session_id: str, data: bytes | str, source: str = "user") -> None:
         session = self._sessions.get(session_id)

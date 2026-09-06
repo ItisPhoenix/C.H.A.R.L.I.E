@@ -350,12 +350,107 @@ async def test_terminal_input_routes_through_main_approval_channel(monkeypatch):
 
         async def send_command(self, command):
             self.commands.append(command)
+            return True
 
     bus = Bus()
     monkeypatch.setattr(web_server, "_terminal_manager", Manager())
     monkeypatch.setattr(web_server, "event_bus", bus)
 
-    result = await web_server.terminal_input("s1", {"line": "echo hi", "confirmed": True})
+    result = await web_server.terminal_input(
+        "s1",
+        {"line": "echo hi", "confirmed": True, "request_id": "terminal-request-1"},
+    )
 
     assert result["status"] == "approval_pending"
+    assert result["request_id"] == "terminal-request-1"
     assert bus.commands[0]["type"] == "terminal_command_request"
+    assert bus.commands[0]["payload"]["request_id"] == "terminal-request-1"
+
+
+@pytest.mark.asyncio
+async def test_terminal_input_generates_one_id_for_invalid_caller_id(monkeypatch):
+    class Manager:
+        def snapshot(self, session_id):
+            return {"session_id": session_id, "status": "running", "output": ""}
+
+    class Bus:
+        def __init__(self):
+            self.commands = []
+
+        async def send_command(self, command):
+            self.commands.append(command)
+            return True
+
+    bus = Bus()
+    monkeypatch.setattr(web_server, "_terminal_manager", Manager())
+    monkeypatch.setattr(web_server, "event_bus", bus)
+
+    result = await web_server.terminal_input(
+        "s1",
+        {"line": "echo hi", "confirmed": True, "request_id": "invalid id"},
+    )
+
+    assert result["request_id"] != "invalid id"
+    assert result["request_id"] == bus.commands[0]["payload"]["request_id"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_input_hard_block_does_not_claim_approval(monkeypatch):
+    class Manager:
+        def snapshot(self, session_id):
+            return {"session_id": session_id, "status": "running", "output": ""}
+
+    class Bus:
+        def __init__(self):
+            self.commands = []
+
+        async def send_command(self, command):
+            self.commands.append(command)
+            return True
+
+    bus = Bus()
+    monkeypatch.setattr(web_server, "_terminal_manager", Manager())
+    monkeypatch.setattr(web_server, "event_bus", bus)
+
+    with pytest.raises(web_server.HTTPException) as exc_info:
+        await web_server.terminal_input("s1", {"line": "format c: /q", "confirmed": True})
+
+    assert exc_info.value.detail["status"] == "blocked"
+    assert exc_info.value.detail["approval_required"] is False
+    assert bus.commands == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_result_event_is_projected_without_web_execution(monkeypatch):
+    from charlie.events import EventMeta, EventSource, build_event
+
+    class Bus:
+        async def consume_events(self, callback):
+            await callback(
+                build_event(
+                    "terminal_command_result",
+                    {
+                        "request_id": "terminal-result-1",
+                        "command": "echo hi",
+                        "terminal_session_id": "primary",
+                        "approved": True,
+                        "approval_status": "approved",
+                        "status": "completed",
+                        "result": {"status": "completed", "result": "hi"},
+                    },
+                    meta=EventMeta(source=EventSource.BRAIN, task_id="terminal-result-1"),
+                )
+            )
+
+    class Manager:
+        def __getattr__(self, name):
+            if name == "execute_charlie_command":
+                raise AssertionError("web must not execute Charlie terminal commands")
+            raise AttributeError(name)
+
+    monkeypatch.setattr(web_server, "event_bus", Bus())
+    monkeypatch.setattr(web_server, "_terminal_manager", Manager())
+    monkeypatch.setattr(web_server, "active_connections", set())
+
+    await web_server._event_bridge()
+    assert not hasattr(web_server, "_background_terminal_tasks")

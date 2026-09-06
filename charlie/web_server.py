@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager  # noqa: E402
 import ipaddress
 import json
 import logging
+import re
 import os
 import time
 import uuid
@@ -313,6 +314,18 @@ def _get_store() -> SessionStore:
     return _store
 
 
+_TERMINAL_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def _terminal_request_id(value: Any) -> str:
+    """Preserve a valid caller correlation key; otherwise allocate one."""
+    if isinstance(value, str):
+        candidate = value.strip()
+        if _TERMINAL_REQUEST_ID_RE.fullmatch(candidate):
+            return candidate
+    return uuid.uuid4().hex
+
+
 pipeline_state: str = "idle"
 
 @asynccontextmanager
@@ -456,40 +469,6 @@ async def broadcast(data: dict):
         ws_sessions.pop(ws, None)
 
 
-_background_terminal_tasks: set[asyncio.Task] = set()
-
-
-def _run_terminal_command_task(coro, task_id: str, command: str) -> asyncio.Task:
-    """Schedule background terminal command with robust lifecycle tracking and error handling."""
-    task = asyncio.create_task(coro)
-    _background_terminal_tasks.add(task)
-
-    def _on_done(t: asyncio.Task) -> None:
-        _background_terminal_tasks.discard(t)
-        if t.cancelled():
-            logger.info("Terminal background execution cancelled: task_id=%s", task_id)
-            return
-        exc = t.exception()
-        if exc is not None:
-            logger.error(
-                "Terminal background execution failed for task_id=%s, cmd=%s: %s",
-                task_id,
-                command,
-                exc,
-                exc_info=exc,
-            )
-            audit = _get_audit_store()
-            if audit is not None and hasattr(audit, "record"):
-                audit.record(
-                    "terminal_exec",
-                    {"command": command, "task_id": task_id, "source": "charlie"},
-                    f"BACKGROUND_TASK_ERROR: {exc}",
-                )
-
-    task.add_done_callback(_on_done)
-    return task
-
-
 async def _event_bridge():
     """Background task: ZeroMQ events -> WebSocket broadcast."""
     global pipeline_state
@@ -553,23 +532,6 @@ async def _event_bridge():
         elif etype == "hud_visibility":
             global _hud_visible
             _hud_visible = bool(event.get("payload", {}).get("visible", True))
-        elif etype == "terminal_command_result":
-            payload = event.get("payload", {})
-            if payload.get("approved") is True:
-                task_id = payload.get("task_id") or payload.get("request_id") or "charlie-agent"
-                cmd = payload.get("command", "")
-                session_id = payload.get("terminal_session_id") or "primary"
-                _run_terminal_command_task(
-                    _terminal_manager.execute_charlie_command(
-                        session_id=session_id,
-                        command=cmd,
-                        task_id=task_id,
-                        audit_store=_get_audit_store(),
-                        approved=True,
-                    ),
-                    task_id=task_id,
-                    command=cmd,
-                )
         elif etype == "extension_operation_result":
             _resolve_extension_operation_result(event.get("payload", {}))
         elif etype == "mcp_operation_result":
@@ -800,7 +762,10 @@ async def terminal_input(session_id: str, data: dict):
 
     requirement, _risk, reason = evaluate("shell_execute", {"command": line})
     if requirement is Requirement.BLOCK:
-        raise HTTPException(status_code=409, detail={"approval_required": True, "reason": reason})
+        raise HTTPException(
+            status_code=409,
+            detail={"status": "blocked", "approval_required": False, "reason": reason},
+        )
     if event_bus is None:
         raise HTTPException(status_code=503, detail="approval channel unavailable")
     try:
@@ -812,8 +777,8 @@ async def terminal_input(session_id: str, data: dict):
             target_sid = session_id
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="terminal session not found") from exc
-    request_id = uuid.uuid4().hex
-    await event_bus.send_command(
+    request_id = _terminal_request_id(data.get("request_id"))
+    sent = await event_bus.send_command(
         {
             "type": "terminal_command_request",
             "payload": {
@@ -823,6 +788,8 @@ async def terminal_input(session_id: str, data: dict):
             },
         }
     )
+    if not sent:
+        raise HTTPException(status_code=503, detail="approval channel unavailable")
     return {"status": "approval_pending", "request_id": request_id, "session_id": target_sid}
 
 
