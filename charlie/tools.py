@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 from charlie import recovery
 from charlie.config import config
 from charlie.events import EventMeta, EventSource
+from charlie.execution_context import ExecutionContext, get_current_execution_context, terminate_process_tree
 from charlie.known_apps import APP_REGISTRY
 from charlie.presentation_control import PresentationRequest, get_presentation_controller
 from charlie.results import ResultsStore
@@ -62,6 +63,8 @@ SHELL_TIMEOUT = 10.0
 # Bound on the post-kill drain call below -- its return value is discarded,
 # it only exists to reap the process, so it must never block indefinitely.
 _SHELL_KILL_DRAIN_TIMEOUT = 2.0
+_SHELL_POLL_INTERVAL = 0.05
+_SHELL_CANCEL_DRAIN_TIMEOUT = 0.5
 
 # --- Dashboard live view (desktop_frame event) ---
 _DESKTOP_FRAME_FPS = 2.0
@@ -684,7 +687,11 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
                 command = replacement
                 break
 
+    context = get_current_execution_context()
     try:
+        if context is not None:
+            return _shell_execute_owned(command, voice_mode=voice_mode, context=context)
+
         process = subprocess.Popen(
             command,
             shell=True,
@@ -721,17 +728,101 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
             parts.append(f"STDERR:\n{stderr.strip()}")
         if parts:
             return "\n".join(parts)
-        # Many commands (start, taskkill, etc.) return empty on success
-        if process.returncode == 0:
-            result = "Command succeeded (exit code 0). No output."
-        else:
-            result = f"Command finished with exit code {process.returncode}. No output."
-        if not voice_mode:
-            result = "WARNING: Shell commands are powerful. Be careful with destructive operations.\n\n" + result
-        return result
+        return _render_shell_result(stdout, stderr, process.returncode, voice_mode)
     except Exception as e:
         logger.exception("Shell command error: %s", command)
         return f"Error executing shell command: {e}"
+
+
+def _render_shell_result(stdout: str, stderr: str, returncode: Optional[int], voice_mode: bool) -> str:
+    parts = []
+    if stdout and stdout.strip():
+        parts.append(f"STDOUT:\n{stdout.strip()}")
+    if stderr and stderr.strip():
+        parts.append(f"STDERR:\n{stderr.strip()}")
+    if parts:
+        return "\n".join(parts)
+    # Many commands (start, taskkill, etc.) return empty on success
+    if returncode == 0:
+        result = "Command succeeded (exit code 0). No output."
+    else:
+        result = f"Command finished with exit code {returncode}. No output."
+    if not voice_mode:
+        result = "WARNING: Shell commands are powerful. Be careful with destructive operations.\n\n" + result
+    return result
+
+
+def _shell_process_creation_kwargs() -> dict[str, Any]:
+    if sys.platform == "win32":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
+
+
+def _cancel_owned_shell_process(owned_process: Any) -> bool:
+    process = owned_process.popen
+    quiescent = terminate_process_tree(owned_process, timeout=_SHELL_CANCEL_DRAIN_TIMEOUT)
+    try:
+        process.communicate(timeout=_SHELL_CANCEL_DRAIN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        quiescent = terminate_process_tree(owned_process, timeout=_SHELL_CANCEL_DRAIN_TIMEOUT)
+        try:
+            process.communicate(timeout=_SHELL_CANCEL_DRAIN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            quiescent = False
+    return quiescent
+
+
+def _shell_execute_owned(command: str, *, voice_mode: bool, context: ExecutionContext) -> str:
+    """Run shell with prompt cancellation and explicit process ownership."""
+    process = subprocess.Popen(
+        command,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **_shell_process_creation_kwargs(),
+    )
+    try:
+        owned_process = context.register_process(process)
+    except Exception:
+        try:
+            process.kill()
+            process.wait(timeout=_SHELL_CANCEL_DRAIN_TIMEOUT)
+        except Exception:
+            logger.error("Owned shell process identity could not be captured", exc_info=True)
+        raise
+    deadline = time.monotonic() + SHELL_TIMEOUT
+    try:
+        while True:
+            if context.cancellation_requested:
+                if _cancel_owned_shell_process(owned_process):
+                    return "Command cancelled."
+                time.sleep(_SHELL_POLL_INTERVAL)
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process.kill()
+                try:
+                    process.communicate(timeout=_SHELL_KILL_DRAIN_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    pass
+                return (
+                    f"Command is still running after {SHELL_TIMEOUT}s with no output "
+                    "(left running -- if this opened an app or window, it launched "
+                    "successfully)."
+                )
+            try:
+                stdout, stderr = process.communicate(timeout=min(_SHELL_POLL_INTERVAL, remaining))
+                if context.cancellation_requested:
+                    return "Command cancelled."
+                return _render_shell_result(stdout, stderr, process.returncode, voice_mode)
+            except subprocess.TimeoutExpired:
+                if context.cancellation_requested:
+                    if _cancel_owned_shell_process(owned_process):
+                        return "Command cancelled."
+                    continue
+    finally:
+        context.unregister_process(owned_process)
 
 
 # --- System diagnostics: fixed commands only, no user-supplied string ever reaches the shell.

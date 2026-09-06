@@ -361,7 +361,7 @@ async def test_terminal_input_routes_through_main_approval_channel(monkeypatch):
         {"line": "echo hi", "confirmed": True, "request_id": "terminal-request-1"},
     )
 
-    assert result["status"] == "approval_pending"
+    assert result["status"] == "submitted"
     assert result["request_id"] == "terminal-request-1"
     assert bus.commands[0]["type"] == "terminal_command_request"
     assert bus.commands[0]["payload"]["request_id"] == "terminal-request-1"
@@ -395,7 +395,7 @@ async def test_terminal_input_generates_one_id_for_invalid_caller_id(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_terminal_input_hard_block_does_not_claim_approval(monkeypatch):
+async def test_terminal_input_submits_policy_block_to_main(monkeypatch):
     class Manager:
         def snapshot(self, session_id):
             return {"session_id": session_id, "status": "running", "output": ""}
@@ -411,13 +411,18 @@ async def test_terminal_input_hard_block_does_not_claim_approval(monkeypatch):
     bus = Bus()
     monkeypatch.setattr(web_server, "_terminal_manager", Manager())
     monkeypatch.setattr(web_server, "event_bus", bus)
+    import charlie.autonomy as autonomy
 
-    with pytest.raises(web_server.HTTPException) as exc_info:
-        await web_server.terminal_input("s1", {"line": "format c: /q", "confirmed": True})
+    def fail_if_web_evaluates(*_args, **_kwargs):
+        raise AssertionError("web must not own shell policy evaluation")
 
-    assert exc_info.value.detail["status"] == "blocked"
-    assert exc_info.value.detail["approval_required"] is False
-    assert bus.commands == []
+    monkeypatch.setattr(autonomy, "evaluate", fail_if_web_evaluates)
+
+    result = await web_server.terminal_input("s1", {"line": "format c: /q", "confirmed": True})
+
+    assert result["status"] == "submitted"
+    assert bus.commands[0]["type"] == "terminal_command_request"
+    assert bus.commands[0]["payload"]["command"] == "format c: /q"
 
 
 @pytest.mark.asyncio

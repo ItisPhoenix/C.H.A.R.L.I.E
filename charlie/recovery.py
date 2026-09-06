@@ -169,6 +169,7 @@ async def request_recovery_approval(
     failure_class: str,
     explanation: str,
     source: str,
+    execution_context: Optional[Any] = None,
 ) -> Optional[str]:
     """Helper to request approval for a proposed command replacement.
 
@@ -176,6 +177,8 @@ async def request_recovery_approval(
     If approved, runs the command (after verifying safety) and returns output.
     If rejected, returns a descriptive error message indicating rejection.
     """
+    if execution_context is not None and execution_context.cancellation_requested:
+        return None
     if get_active_ws_count() == 0:
         logger.warning("No active WebSocket connections. Failing recovery proposal safely.")
         return None
@@ -224,6 +227,9 @@ async def request_recovery_approval(
 
     pending_proposals.pop(proposal_id, None)
 
+    if execution_context is not None and execution_context.cancellation_requested:
+        return None
+
     if not approved:
         logger.info(
             "Proposal Log: ID=%s | Source=%s | Decision=REJECTED | Proposed=%s",
@@ -245,6 +251,8 @@ async def request_recovery_approval(
         return "Error: Recovery command blocked by safety guardrails before execution."
 
     try:
+        if execution_context is not None and execution_context.cancellation_requested:
+            return None
         # Execute the approved command
         logger.info("Executing approved recovery command: %s", proposed_command)
         if failure_class == FailureClass.TIMEOUT.value:
@@ -277,11 +285,16 @@ async def recover_tool(
     brain: Any,
     tool_name: str,
     arguments: Dict[str, Any],
-    e: Exception
+    e: Exception,
+    *,
+    execution_context: Optional[Any] = None,
 ) -> Optional[str]:
     """Universal recovery coordinator. Tries cache, strategies, then fallback LLM.
     Returns the result of the successful recovery, or None if failed.
     """
+    if execution_context is not None and execution_context.cancellation_requested:
+        return None
+
     failure = normalize_exception(e)
     failure_class = failure["failure_class"]
     error_msg = failure["message"]
@@ -295,6 +308,8 @@ async def recover_tool(
 
     # 1. Handle file_write PermissionError/AccessDenied
     if tool_name == "file_write" and failure_class == FailureClass.PERMISSION:
+        if execution_context is not None and execution_context.cancellation_requested:
+            return None
         try:
             old_path = arguments.get("path", "")
             if old_path:
@@ -337,7 +352,8 @@ async def recover_tool(
                 proposed_command=cached_cmd,
                 failure_class=failure_class.value,
                 explanation="Resolution retrieved from local command recovery cache.",
-                source="cache"
+                source="cache",
+                execution_context=execution_context,
             )
             if approval_res is not None:
                 return approval_res
@@ -348,6 +364,8 @@ async def recover_tool(
                 logger.info("Attempting strategy: %s", type(strategy).__name__)
                 try:
                     res = await strategy.recover(command, failure)
+                    if execution_context is not None and execution_context.cancellation_requested:
+                        return None
                     if res.success and res.command:
                         if res.command == command:
                             if not is_safe_to_recover(res.command):
@@ -360,12 +378,15 @@ async def recover_tool(
                                     proposed_command=res.command,
                                     failure_class=failure_class.value,
                                     explanation=res.message or f"Retry requires approval: {gate_reason}",
-                                    source="strategy"
+                                    source="strategy",
+                                    execution_context=execution_context,
                                 )
                                 if approval_res is not None:
                                     return approval_res
                                 continue
                             try:
+                                if execution_context is not None and execution_context.cancellation_requested:
+                                    return None
                                 logger.info("Executing automatic local recovery strategy: %s", res.command)
                                 if type(strategy).__name__ == "DeclassProcessStrategy":
                                     subprocess.Popen(
@@ -387,7 +408,8 @@ async def recover_tool(
                                 proposed_command=res.command,
                                 failure_class=failure_class.value,
                                 explanation=explanation,
-                                source="strategy"
+                                source="strategy",
+                                execution_context=execution_context,
                             )
                             if approval_res is not None:
                                 if "rejected" not in approval_res.lower() and "error" not in approval_res.lower():

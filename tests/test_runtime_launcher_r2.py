@@ -7,8 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -1217,6 +1221,536 @@ async def test_eventbus_timeout_cancels_submissions_to_zero_live_entries():
     tracked_tasks, tracked_futures = registry.snapshot()
     assert tracked_tasks == ()
     assert tracked_futures == ()
+
+
+# ---------------------------------------------------------------------------
+# T1.1 R2 investigation: executor work outlives EventBus registry drain
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_terminal_executor_and_subprocess_outlive_eventbus_drain(monkeypatch):
+    from collections import OrderedDict
+
+    import charlie.core as core
+    from charlie.config import Config
+    from charlie.execution_context import get_current_execution_context, terminate_process_tree
+    from charlie.resource_locks import default_lease_manager
+
+    default_lease_manager.manual_takeover(["terminal"])
+    brain = core.Brain(
+        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy"),
+        register_panic_hotkey=False,
+    )
+    loop = asyncio.get_running_loop()
+    callable_started = asyncio.Event()
+    callable_finished = asyncio.Event()
+    process_box = {}
+
+    async def approve(*_args, **_kwargs):
+        return True
+
+    def controlled_shell(*_args):
+        process = subprocess.Popen([shutil.which("python") or sys.executable, "-c", "import time; time.sleep(5)"])
+        process_box["process"] = process
+        loop.call_soon_threadsafe(callable_started.set)
+        context = get_current_execution_context()
+        owned_process = context.register_process(process)
+        while process.poll() is None:
+            if context is not None and context.cancellation_requested:
+                terminate_process_tree(owned_process)
+                break
+            time.sleep(0.01)
+        process.wait()
+        loop.call_soon_threadsafe(callable_finished.set)
+        return "controlled shell complete"
+
+    class Bus:
+        async def emit(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(brain, "request_tool_approval", approve)
+    monkeypatch.setattr(core.tool_registry, "execute_tool", controlled_shell)
+    registry = main._EventBusSubmissionRegistry()
+    task = registry.submit_task(
+        main._handle_terminal_command_request(
+            brain,
+            Bus(),
+            request_id="terminal-r2-shutdown-probe",
+            terminal_session_id="primary",
+            command="controlled shell",
+            result_cache=OrderedDict(),
+            in_flight={},
+        ),
+        loop,
+    )
+
+    process = None
+    try:
+        await asyncio.wait_for(callable_started.wait(), timeout=2.0)
+        process = process_box["process"]
+        registry.close()
+        await main._drain_event_bus_submissions(registry, loop=loop, timeout=1.0)
+
+        callable_finished_at_drain = callable_finished.is_set()
+        process_alive_at_drain = process.poll() is None
+        assert task.done()
+        assert registry.is_empty()
+        assert callable_finished_at_drain
+        assert not process_alive_at_drain
+        assert process.wait(timeout=1) is not None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            await asyncio.to_thread(process.wait)
+        await brain.close()
+
+
+@pytest.mark.asyncio
+async def test_generic_executor_refusal_fails_closed_before_worker_quiescence(monkeypatch):
+    from collections import OrderedDict
+    from threading import Event
+
+    import charlie.core as core
+    from charlie.config import Config
+    from charlie.resource_locks import default_lease_manager
+
+    default_lease_manager.manual_takeover(["terminal"])
+    brain = core.Brain(
+        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy"),
+        register_panic_hotkey=False,
+    )
+    started = Event()
+    finished = Event()
+    release = Event()
+
+    async def approve(*_args, **_kwargs):
+        return True
+
+    def non_cooperative_worker(*_args):
+        started.set()
+        release.wait(2.0)
+        finished.set()
+        return "released"
+
+    class Bus:
+        async def emit(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(brain, "request_tool_approval", approve)
+    monkeypatch.setattr(core.tool_registry, "execute_tool", non_cooperative_worker)
+    registry = main._EventBusSubmissionRegistry()
+    loop = asyncio.get_running_loop()
+    task = registry.submit_task(
+        main._handle_terminal_command_request(
+            brain,
+            Bus(),
+            request_id="terminal-r2-generic-refusal",
+            terminal_session_id="primary",
+            command="non-cooperative",
+            result_cache=OrderedDict(),
+            in_flight={},
+        ),
+        loop,
+    )
+
+    try:
+        assert await asyncio.to_thread(started.wait, 2.0)
+        registry.close()
+        with pytest.raises(RuntimeError, match="quiescence"):
+            await main._drain_event_bus_submissions(registry, loop=loop, timeout=0)
+        assert not finished.is_set()
+        assert not task.done()
+
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 2.0)
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except asyncio.CancelledError:
+            pass
+        await main._drain_event_bus_submissions(registry, loop=loop, timeout=0)
+    finally:
+        release.set()
+        if not task.done():
+            try:
+                await asyncio.wait_for(task, timeout=2.0)
+            except asyncio.CancelledError:
+                pass
+        await brain.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_and_drain_is_bounded_for_non_cooperative_task():
+    release = asyncio.Event()
+
+    async def stubborn():
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                continue
+
+    task = asyncio.create_task(stubborn())
+    await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError, match="quiescence"):
+        await main._cancel_and_drain([task], label="bounded_test", timeout=0.05)
+    assert not task.done()
+
+    release.set()
+    task.cancel()
+    await task
+
+
+def test_windows_identity_mismatch_fails_closed_without_destructive_calls(monkeypatch):
+    import charlie.execution_context as execution_context
+
+    class FakePsutilProcess:
+        pid = 101
+
+        def is_running(self):
+            return True
+
+        def create_time(self):
+            return 2.0
+
+        def children(self, recursive=False):
+            return []
+
+        def terminate(self):
+            raise AssertionError("identity mismatch must not terminate")
+
+        def kill(self):
+            raise AssertionError("identity mismatch must not kill")
+
+    fake_psutil = SimpleNamespace(
+        Process=lambda _pid: FakePsutilProcess(),
+        NoSuchProcess=type("NoSuchProcess", (Exception,), {}),
+        ZombieProcess=type("ZombieProcess", (Exception,), {}),
+        AccessDenied=type("AccessDenied", (Exception,), {}),
+        Error=Exception,
+        wait_procs=lambda *_args, **_kwargs: ([], []),
+    )
+    monkeypatch.setattr(execution_context, "psutil", fake_psutil)
+    owned = execution_context.OwnedProcess(
+        popen=SimpleNamespace(pid=101),
+        identity=FakePsutilProcess(),
+        pid=101,
+        creation_time=1.0,
+        process_group_id=None,
+    )
+
+    assert execution_context.terminate_process_tree(owned) is False
+
+
+def test_already_exited_owned_process_is_quiescent_without_fallback(monkeypatch):
+    import charlie.execution_context as execution_context
+
+    class GoneIdentity:
+        pid = 102
+
+        def is_running(self):
+            return False
+
+        def create_time(self):
+            return 1.0
+
+    monkeypatch.setattr(
+        execution_context,
+        "psutil",
+        SimpleNamespace(
+            NoSuchProcess=type("NoSuchProcess", (Exception,), {}),
+            ZombieProcess=type("ZombieProcess", (Exception,), {}),
+            AccessDenied=type("AccessDenied", (Exception,), {}),
+            Error=Exception,
+        ),
+    )
+    owned = execution_context.OwnedProcess(
+        popen=SimpleNamespace(pid=102),
+        identity=GoneIdentity(),
+        pid=102,
+        creation_time=1.0,
+        process_group_id=None,
+    )
+
+    assert execution_context.terminate_process_tree(owned) is True
+
+
+def test_identity_bound_descendants_are_terminated_and_waited(monkeypatch):
+    import charlie.execution_context as execution_context
+
+    calls = []
+
+    class Identity:
+        def __init__(self, pid, created=1.0):
+            self.pid = pid
+            self.created = created
+            self.alive = True
+            self.descendants = []
+
+        def is_running(self):
+            return self.alive
+
+        def create_time(self):
+            return self.created
+
+        def children(self, recursive=False):
+            return list(self.descendants)
+
+        def terminate(self):
+            calls.append(("terminate", self.pid))
+            self.alive = False
+
+        def kill(self):
+            calls.append(("kill", self.pid))
+            self.alive = False
+
+    root = Identity(103)
+    child = Identity(104)
+    root.descendants = [child]
+    fake_psutil = SimpleNamespace(
+        NoSuchProcess=type("NoSuchProcess", (Exception,), {}),
+        ZombieProcess=type("ZombieProcess", (Exception,), {}),
+        AccessDenied=type("AccessDenied", (Exception,), {}),
+        Error=Exception,
+        wait_procs=lambda processes, timeout: (list(processes), []),
+    )
+    monkeypatch.setattr(execution_context, "psutil", fake_psutil)
+    owned = execution_context.OwnedProcess(
+        popen=SimpleNamespace(pid=103),
+        identity=root,
+        pid=103,
+        creation_time=1.0,
+        process_group_id=None,
+    )
+
+    assert execution_context.terminate_process_tree(owned) is True
+    assert calls == [("terminate", 104), ("terminate", 103)]
+
+
+def test_posix_identity_mismatch_does_not_signal_process_group(monkeypatch):
+    import charlie.execution_context as execution_context
+
+    class Identity:
+        pid = 105
+
+        def is_running(self):
+            return True
+
+        def create_time(self):
+            return 9.0
+
+    monkeypatch.setattr(execution_context.sys, "platform", "linux")
+    monkeypatch.setattr(
+        execution_context,
+        "psutil",
+        SimpleNamespace(
+            NoSuchProcess=type("NoSuchProcess", (Exception,), {}),
+            ZombieProcess=type("ZombieProcess", (Exception,), {}),
+            AccessDenied=type("AccessDenied", (Exception,), {}),
+            Error=Exception,
+        ),
+    )
+    owned = execution_context.OwnedProcess(
+        popen=SimpleNamespace(pid=105),
+        identity=Identity(),
+        pid=105,
+        creation_time=1.0,
+        process_group_id=105,
+    )
+
+    assert execution_context.terminate_process_tree(owned) is False
+
+
+@pytest.mark.asyncio
+async def test_real_shell_cancellation_quiesces_owned_process_tree():
+    from collections import OrderedDict
+
+    import psutil
+
+    import charlie.core as core
+    from charlie.config import Config
+    from charlie.resource_locks import default_lease_manager
+
+    default_lease_manager.manual_takeover(["terminal"])
+    brain = core.Brain(
+        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy"),
+        register_panic_hotkey=False,
+    )
+    pid = None
+
+    async def approve(*_args, **_kwargs):
+        return True
+
+    class Bus:
+        async def emit(self, *_args, **_kwargs):
+            return None
+
+    def wait_pid(path: Path) -> int:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                return int(path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, ValueError):
+                time.sleep(0.01)
+        raise AssertionError("shell child PID was not published")
+
+    with tempfile.TemporaryDirectory(prefix="charlie-r2-tree-") as temp_dir:
+        temp_root = Path(temp_dir)
+        pid_file = temp_root / "child.pid"
+        script = temp_root / "parent.py"
+        script.write_text(
+            "import pathlib, subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+            f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid), encoding='utf-8')\n"
+            "time.sleep(30)\n",
+            encoding="utf-8",
+        )
+        command = (
+            subprocess.list2cmdline([shutil.which("python") or sys.executable, str(script)])
+            if sys.platform == "win32"
+            else " ".join(shlex.quote(value) for value in (shutil.which("python") or sys.executable, str(script)))
+        )
+        registry = main._EventBusSubmissionRegistry()
+        loop = asyncio.get_running_loop()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(brain, "request_tool_approval", approve)
+        task = registry.submit_task(
+            main._handle_terminal_command_request(
+                brain,
+                Bus(),
+                request_id="terminal-r2-real-tree",
+                terminal_session_id="primary",
+                command=command,
+                result_cache=OrderedDict(),
+                in_flight={},
+            ),
+            loop,
+        )
+        try:
+            pid = await asyncio.to_thread(wait_pid, pid_file)
+            assert psutil.pid_exists(pid)
+            registry.close()
+            await main._drain_event_bus_submissions(registry, loop=loop, timeout=1.0)
+            assert task.done()
+            assert not psutil.pid_exists(pid)
+        finally:
+            monkeypatch.undo()
+            if pid is not None and psutil.pid_exists(pid):
+                process = psutil.Process(pid)
+                for child in process.children(recursive=True):
+                    child.kill()
+                process.kill()
+        await brain.close()
+
+
+@pytest.mark.asyncio
+async def test_shell_timeout_quiesces_process_before_failed_envelope(monkeypatch):
+    import psutil
+
+    import charlie.core as core
+    from charlie.config import Config
+    from charlie.resource_locks import default_lease_manager
+
+    default_lease_manager.manual_takeover(["terminal"])
+    brain = core.Brain(
+        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy"),
+        register_panic_hotkey=False,
+    )
+    pid = None
+
+    async def approve(*_args, **_kwargs):
+        return True
+
+    def wait_pid(path: Path) -> int:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                return int(path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, ValueError):
+                time.sleep(0.01)
+        raise AssertionError("shell PID was not published")
+
+    with tempfile.TemporaryDirectory(prefix="charlie-r2-timeout-") as temp_dir:
+        temp_root = Path(temp_dir)
+        pid_file = temp_root / "process.pid"
+        script = temp_root / "sleep.py"
+        script.write_text(
+            "import pathlib, os, time\n"
+            f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
+            "time.sleep(30)\n",
+            encoding="utf-8",
+        )
+        command = (
+            subprocess.list2cmdline([shutil.which("python") or sys.executable, str(script)])
+            if sys.platform == "win32"
+            else " ".join(shlex.quote(value) for value in (shutil.which("python") or sys.executable, str(script)))
+        )
+        monkeypatch.setattr(core, "_tool_timeout", lambda *_args: 0.1)
+        monkeypatch.setattr(brain, "request_tool_approval", approve)
+
+        recovery_calls = []
+
+        async def no_recovery(*_args, **_kwargs):
+            recovery_calls.append((_args, _kwargs))
+            return None
+
+        monkeypatch.setattr("charlie.recovery.recover_tool", no_recovery)
+        try:
+            operation = asyncio.create_task(
+                brain.execute_tool_operation(
+                    "shell_execute",
+                    {"command": command},
+                    request=command,
+                    task_id="terminal-r2-timeout",
+                    session_id=None,
+                )
+            )
+            pid = await asyncio.to_thread(wait_pid, pid_file)
+            assert psutil.pid_exists(pid)
+            result = await operation
+            assert result.status == "failed"
+            assert result.data["failure_kind"] == "timeout"
+            assert not psutil.pid_exists(pid)
+            assert recovery_calls == []
+        finally:
+            if pid is not None and psutil.pid_exists(pid):
+                process = psutil.Process(pid)
+                for child in process.children(recursive=True):
+                    child.kill()
+                process.kill()
+            await brain.close()
+
+
+@pytest.mark.asyncio
+async def test_canonical_shell_execute_normal_success_preserves_output():
+    import charlie.core as core
+    from charlie.config import Config
+    from charlie.resource_locks import default_lease_manager
+
+    default_lease_manager.manual_takeover(["terminal"])
+    brain = core.Brain(
+        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy"),
+        register_panic_hotkey=False,
+    )
+
+    async def approve(*_args, **_kwargs):
+        return True
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(brain, "request_tool_approval", approve)
+    try:
+        result = await brain.execute_tool_operation(
+            "shell_execute",
+            {"command": "echo r2-normal"},
+            request="echo r2-normal",
+            task_id="terminal-r2-normal",
+            session_id=None,
+        )
+    finally:
+        monkeypatch.undo()
+        await brain.close()
+
+    assert result.status == "completed"
+    assert "r2-normal" in result.result
 
 
 # ---------------------------------------------------------------------------

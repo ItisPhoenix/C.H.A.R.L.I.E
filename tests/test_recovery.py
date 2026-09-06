@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 
@@ -140,6 +141,46 @@ async def test_recover_tool_file_write_redirect(monkeypatch):
     assert "Redirected save" in res
     assert redirected_path is not None
     assert "Documents" in redirected_path
+
+
+@pytest.mark.asyncio
+async def test_recovery_approval_cancellation_blocks_late_execution(monkeypatch):
+    from charlie import recovery
+    from charlie.execution_context import ExecutionContext
+
+    class Bus:
+        async def emit(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(recovery, "get_active_ws_count", lambda: 1)
+    monkeypatch.setattr(recovery, "_event_bus", Bus())
+    popen_calls = []
+    monkeypatch.setattr(
+        recovery.subprocess,
+        "Popen",
+        lambda *args, **kwargs: popen_calls.append((args, kwargs)),
+    )
+    context = ExecutionContext()
+    task = asyncio.create_task(
+        recovery.request_recovery_approval(
+            original_command="timeout command",
+            proposed_command="timeout command",
+            failure_class=FailureClass.TIMEOUT.value,
+            explanation="test recovery",
+            source="test",
+            execution_context=context,
+        )
+    )
+    for _ in range(20):
+        if recovery.pending_proposals:
+            break
+        await asyncio.sleep(0)
+    assert recovery.pending_proposals
+    context.request_cancel()
+    next(iter(recovery.pending_proposals.values())).set_result(True)
+
+    assert await task is None
+    assert popen_calls == []
 
 
 @pytest.mark.asyncio

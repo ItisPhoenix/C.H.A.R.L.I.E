@@ -181,10 +181,10 @@ background_housekeeping_tasks: set[asyncio.Task] = set()
 
 
 async def _cancel_and_drain(
-    tasks: Iterable[Optional[asyncio.Task | asyncio.Future]], *, label: str = "tasks"
+    tasks: Iterable[Optional[asyncio.Task | asyncio.Future]], *, label: str = "tasks", timeout: float = 2.0
 ) -> None:
     current = asyncio.current_task()
-    pending: list[asyncio.Task] = []
+    pending: list[asyncio.Task | asyncio.Future] = []
     seen: set[asyncio.Task | asyncio.Future] = set()
 
     for item in tasks:
@@ -205,12 +205,15 @@ async def _cancel_and_drain(
     if not pending:
         return
 
-    results = await asyncio.gather(*pending, return_exceptions=True)
-    if results is not None:
-        for task, res in zip(pending, results, strict=False):
-            if isinstance(res, Exception) and not isinstance(res, asyncio.CancelledError):
-                name = getattr(task, "get_name", lambda: str(task))()
-                logger.warning("Error during %s task drain (%s): %s", label, name, res)
+    done, still_pending = await asyncio.wait(pending, timeout=timeout)
+    if still_pending:
+        logger.error("%s cancellation did not reach quiescence before shutdown timeout", label)
+        raise RuntimeError(f"{label} cancellation did not reach quiescence before shutdown timeout")
+    results = await asyncio.gather(*done, return_exceptions=True)
+    for task, res in zip(done, results, strict=False):
+        if isinstance(res, Exception) and not isinstance(res, asyncio.CancelledError):
+            name = getattr(task, "get_name", lambda: str(task))()
+            logger.warning("Error during %s task drain (%s): %s", label, name, res)
 
 
 def _allocate_turn_request(text: str, session_id: str, channel: str) -> TurnRequest:
@@ -229,6 +232,11 @@ def _normalize_terminal_request_id(value: Any) -> str:
         if _TERMINAL_REQUEST_ID_RE.fullmatch(candidate):
             return candidate
     return uuid.uuid4().hex
+
+
+def _terminal_request_fingerprint(terminal_session_id: str, command: str) -> tuple[str, str]:
+    """Bind a request ID to the terminal operation it first represents."""
+    return terminal_session_id, command
 
 
 def _terminal_command_result_payload(
@@ -262,6 +270,26 @@ def _cache_terminal_result(
         result_cache.popitem(last=False)
 
 
+def _terminal_request_id_conflict_payload(
+    request_id: str,
+    terminal_session_id: str,
+    command: str,
+) -> dict[str, Any]:
+    """Report correlation misuse without associating an unrelated result."""
+    message = "request_id is already bound to a different terminal operation"
+    return {
+        "request_id": request_id,
+        "terminal_session_id": terminal_session_id,
+        "command": command,
+        "approved": False,
+        "approval_status": "conflict",
+        "status": "request_id_conflict",
+        "result": {"status": "request_id_conflict", "reason": message},
+        "request_id_conflict": True,
+        "error": message,
+    }
+
+
 async def _handle_terminal_command_request(
     brain: Any,
     event_bus: Any,
@@ -270,12 +298,28 @@ async def _handle_terminal_command_request(
     terminal_session_id: str,
     command: str,
     result_cache: OrderedDict[str, dict[str, Any]],
-    in_flight: dict[str, asyncio.Task],
+    in_flight: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Run one terminal request through main Brain authority exactly once."""
     request_id = _normalize_terminal_request_id(request_id)
+    fingerprint = _terminal_request_fingerprint(terminal_session_id, command)
     cached = result_cache.get(request_id)
     if cached is not None:
+        cached_fingerprint = _terminal_request_fingerprint(
+            str(cached.get("terminal_session_id", "")), str(cached.get("command", ""))
+        )
+        if cached_fingerprint != fingerprint:
+            conflict = _terminal_request_id_conflict_payload(request_id, terminal_session_id, command)
+            await event_bus.emit(
+                "terminal_command_result",
+                conflict,
+                meta=EventMeta(
+                    source=EventSource.BRAIN,
+                    task_id=request_id,
+                    rationale="terminal request ID conflicts with completed operation",
+                ),
+            )
+            return conflict
         await event_bus.emit(
             "terminal_command_result",
             cached,
@@ -287,9 +331,25 @@ async def _handle_terminal_command_request(
         )
         return cached
 
-    existing = in_flight.get(request_id)
+    existing_entry = in_flight.get(request_id)
+    existing = existing_entry
+    existing_fingerprint = None
+    if isinstance(existing_entry, tuple) and len(existing_entry) == 2:
+        existing, existing_fingerprint = existing_entry
     current = asyncio.current_task()
     if existing is not None and existing is not current and not existing.done():
+        if existing_fingerprint is not None and existing_fingerprint != fingerprint:
+            conflict = _terminal_request_id_conflict_payload(request_id, terminal_session_id, command)
+            await event_bus.emit(
+                "terminal_command_result",
+                conflict,
+                meta=EventMeta(
+                    source=EventSource.BRAIN,
+                    task_id=request_id,
+                    rationale="terminal request ID conflicts with in-flight operation",
+                ),
+            )
+            return conflict
         logger.info("Waiting for duplicate terminal command request: %s", request_id)
         try:
             await asyncio.shield(existing)
@@ -324,7 +384,7 @@ async def _handle_terminal_command_request(
         return None
 
     if current is not None:
-        in_flight[request_id] = current
+        in_flight[request_id] = (current, fingerprint)
     try:
         try:
             envelope = await brain.execute_tool_operation(
@@ -389,7 +449,10 @@ async def _handle_terminal_command_request(
         )
         return payload
     finally:
-        if current is not None and in_flight.get(request_id) is current:
+        entry = in_flight.get(request_id)
+        if current is not None and (
+            entry is current or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] is current)
+        ):
             in_flight.pop(request_id, None)
 
 
@@ -793,7 +856,7 @@ async def _drain_event_bus_submissions(
         if not entry.future.done():
             entry.future.cancel()
 
-    cancellation_deadline = target_loop.time() + min(0.5, max(timeout, 0.05))
+    cancellation_deadline = target_loop.time() + min(2.0, max(timeout, 0.5))
     if await _wait_until(cancellation_deadline):
         return
     message = "EventBus submission cancellation did not reach quiescence before shutdown timeout"
@@ -2270,7 +2333,7 @@ async def main() -> int:
     active_operation_cancellable = True
     runtime_shutting_down = False
     terminal_command_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
-    terminal_command_in_flight: dict[str, asyncio.Task] = {}
+    terminal_command_in_flight: dict[str, Any] = {}
     event_bus_registry = _EventBusSubmissionRegistry()
     _main_event_bus_registry = event_bus_registry
 

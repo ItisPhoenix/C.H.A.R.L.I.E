@@ -116,6 +116,43 @@ async def test_terminal_operation_hard_block_does_not_request_approval_or_execut
 
 
 @pytest.mark.asyncio
+async def test_terminal_policy_block_reaches_main_result_event(monkeypatch):
+    from main import _handle_terminal_command_request
+
+    brain = _brain()
+    executed = []
+    monkeypatch.setattr(core.tool_registry, "execute_tool", lambda *args: executed.append(args) or "wrong")
+
+    class Bus:
+        def __init__(self):
+            self.events = []
+
+        async def emit(self, event_type, payload, meta=None):
+            self.events.append(build_event(event_type, payload, meta=meta))
+
+    bus = Bus()
+    try:
+        payload = await _handle_terminal_command_request(
+            brain,
+            bus,
+            request_id="terminal-request-policy-block",
+            terminal_session_id="primary",
+            command="echo hi && whoami",
+            result_cache=OrderedDict(),
+            in_flight={},
+        )
+    finally:
+        await brain.close()
+
+    assert payload["status"] == ResultStatus.BLOCKED
+    assert payload["approval_status"] == "blocked"
+    assert payload["result"]["status"] == ResultStatus.BLOCKED
+    assert bus.events[0]["type"] == "terminal_command_result"
+    assert bus.events[0]["payload"] == payload
+    assert executed == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("decision", ["timed_out", "unavailable"])
 async def test_terminal_approval_outcomes_are_truthful(monkeypatch, decision):
     from charlie.core import ApprovalDecision
@@ -254,6 +291,242 @@ async def test_terminal_request_id_dedupes_inflight_and_completed_requests():
     assert replay["status"] == "completed"
     assert bus.events[0]["payload"] == bus.events[1]["payload"] == bus.events[2]["payload"]
     assert bus.events[0]["payload"]["result"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_terminal_request_id_conflict_does_not_execute_or_replay_unrelated_result():
+    from main import _handle_terminal_command_request
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    class Brain:
+        async def execute_tool_operation(self, *_args, **_kwargs):
+            calls.append(1)
+            started.set()
+            await release.wait()
+            return ResultEnvelope(
+                request="echo once",
+                task_id="terminal-request-conflict",
+                status=ResultStatus.COMPLETED,
+                result="once",
+                capability="terminal",
+                operation="terminal.shell.execute",
+                data={"approval_status": "not_required"},
+            )
+
+    class Bus:
+        def __init__(self):
+            self.events = []
+
+        async def emit(self, event_type, payload, meta=None):
+            self.events.append(build_event(event_type, payload, meta=meta))
+
+    bus = Bus()
+    cache = OrderedDict()
+    in_flight = {}
+    owner = asyncio.create_task(
+        _handle_terminal_command_request(
+            Brain(),
+            bus,
+            request_id="terminal-request-conflict",
+            terminal_session_id="primary",
+            command="echo once",
+            result_cache=cache,
+            in_flight=in_flight,
+        )
+    )
+    await started.wait()
+
+    inflight_conflict = await _handle_terminal_command_request(
+        Brain(),
+        bus,
+        request_id="terminal-request-conflict",
+        terminal_session_id="primary",
+        command="echo different",
+        result_cache=cache,
+        in_flight=in_flight,
+    )
+    assert inflight_conflict["status"] == "request_id_conflict"
+    assert inflight_conflict["request_id_conflict"] is True
+    assert calls == [1]
+    assert cache == {}
+
+    release.set()
+    completed = await owner
+    completed_conflict = await _handle_terminal_command_request(
+        Brain(),
+        bus,
+        request_id="terminal-request-conflict",
+        terminal_session_id="other-session",
+        command="echo unrelated",
+        result_cache=cache,
+        in_flight=in_flight,
+    )
+
+    assert completed["status"] == "completed"
+    assert completed_conflict["status"] == "request_id_conflict"
+    assert completed_conflict["result"]["status"] == "request_id_conflict"
+    assert cache["terminal-request-conflict"] == completed
+    assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_terminal_duplicate_waiter_cancellation_leaves_owner_alive(monkeypatch):
+    import main
+    from main import _handle_terminal_command_request
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    waiter_entered_shield = asyncio.Event()
+    calls = []
+
+    class Brain:
+        async def execute_tool_operation(self, *_args, **_kwargs):
+            calls.append(1)
+            started.set()
+            await release.wait()
+            return ResultEnvelope(
+                request="echo once",
+                task_id="terminal-request-waiter-cancel",
+                status=ResultStatus.COMPLETED,
+                result="once",
+                capability="terminal",
+                operation="terminal.shell.execute",
+                data={"approval_status": "not_required"},
+            )
+
+    class Bus:
+        async def emit(self, *_args, **_kwargs):
+            return None
+
+    original_shield = main.asyncio.shield
+
+    def observed_shield(awaitable):
+        waiter_entered_shield.set()
+        return original_shield(awaitable)
+
+    monkeypatch.setattr(main.asyncio, "shield", observed_shield)
+    cache = OrderedDict()
+    in_flight = {}
+    owner = asyncio.create_task(
+        _handle_terminal_command_request(
+            Brain(),
+            Bus(),
+            request_id="terminal-request-waiter-cancel",
+            terminal_session_id="primary",
+            command="echo once",
+            result_cache=cache,
+            in_flight=in_flight,
+        )
+    )
+    await started.wait()
+    waiter = asyncio.create_task(
+        _handle_terminal_command_request(
+            Brain(),
+            Bus(),
+            request_id="terminal-request-waiter-cancel",
+            terminal_session_id="primary",
+            command="echo once",
+            result_cache=cache,
+            in_flight=in_flight,
+        )
+    )
+    await waiter_entered_shield.wait()
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert not owner.done()
+
+    release.set()
+    result = await owner
+    assert result["status"] == "completed"
+    assert cache["terminal-request-waiter-cancel"] == result
+    assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_terminal_operation_cancellation_is_cached_and_replayed_to_duplicate_waiter(monkeypatch):
+    import main
+    from charlie.core import OperationCancelled
+    from main import _handle_terminal_command_request
+
+    started = asyncio.Event()
+    waiter_entered_shield = asyncio.Event()
+    calls = []
+    cancelled_envelope = ResultEnvelope(
+        request="controlled cancellation",
+        task_id="terminal-request-operation-cancel",
+        status=ResultStatus.CANCELLED,
+        result="cancelled",
+        capability="terminal",
+        operation="terminal.shell.execute",
+        data={"failure_kind": "cancellation", "approval_status": "not_required"},
+    )
+
+    class Brain:
+        async def execute_tool_operation(self, *_args, **_kwargs):
+            calls.append(1)
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as exc:
+                raise OperationCancelled(cancelled_envelope) from exc
+
+    class Bus:
+        def __init__(self):
+            self.events = []
+
+        async def emit(self, event_type, payload, meta=None):
+            self.events.append(build_event(event_type, payload, meta=meta))
+
+    original_shield = main.asyncio.shield
+
+    def observed_shield(awaitable):
+        waiter_entered_shield.set()
+        return original_shield(awaitable)
+
+    monkeypatch.setattr(main.asyncio, "shield", observed_shield)
+    bus = Bus()
+    cache = OrderedDict()
+    in_flight = {}
+    owner = asyncio.create_task(
+        _handle_terminal_command_request(
+            Brain(),
+            bus,
+            request_id="terminal-request-operation-cancel",
+            terminal_session_id="primary",
+            command="controlled cancellation",
+            result_cache=cache,
+            in_flight=in_flight,
+        )
+    )
+    await started.wait()
+    waiter = asyncio.create_task(
+        _handle_terminal_command_request(
+            Brain(),
+            bus,
+            request_id="terminal-request-operation-cancel",
+            terminal_session_id="primary",
+            command="controlled cancellation",
+            result_cache=cache,
+            in_flight=in_flight,
+        )
+    )
+    await waiter_entered_shield.wait()
+
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    replay = await waiter
+
+    assert replay == cache["terminal-request-operation-cancel"]
+    assert replay["status"] == "cancelled"
+    assert replay["result"]["status"] == "cancelled"
+    assert calls == [1]
+    assert [event["payload"] for event in bus.events] == [replay, replay]
 
 
 def test_chat_loop_and_terminal_path_share_operation_primitive():

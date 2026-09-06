@@ -758,14 +758,6 @@ async def terminal_input(session_id: str, data: dict):
         raise HTTPException(
             status_code=409, detail="explicit confirmation is required before requesting command approval"
         )
-    from charlie.autonomy import Requirement, evaluate
-
-    requirement, _risk, reason = evaluate("shell_execute", {"command": line})
-    if requirement is Requirement.BLOCK:
-        raise HTTPException(
-            status_code=409,
-            detail={"status": "blocked", "approval_required": False, "reason": reason},
-        )
     if event_bus is None:
         raise HTTPException(status_code=503, detail="approval channel unavailable")
     try:
@@ -790,7 +782,7 @@ async def terminal_input(session_id: str, data: dict):
     )
     if not sent:
         raise HTTPException(status_code=503, detail="approval channel unavailable")
-    return {"status": "approval_pending", "request_id": request_id, "session_id": target_sid}
+    return {"status": "submitted", "request_id": request_id, "session_id": target_sid}
 
 
 @app.delete("/api/terminal/sessions/{session_id}")

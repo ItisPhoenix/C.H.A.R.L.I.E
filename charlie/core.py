@@ -25,6 +25,7 @@ from charlie.autonomy import evaluate as autonomy_evaluate
 from charlie.budget import IterationBudget
 from charlie.capabilities import build_capability_roster, capability_index
 from charlie.events import EventMeta, EventSource
+from charlie.execution_context import ExecutionContext, activate_execution_context, reset_execution_context
 from charlie.presentation_registry import get_presentation_registry
 from charlie.research.citations import strip_invalid_citations
 from charlie.research.engine import ResearchEngine
@@ -87,6 +88,17 @@ class OperationCancelled(asyncio.CancelledError):
     def __init__(self, envelope: ResultEnvelope):
         super().__init__("operation cancelled")
         self.envelope = envelope
+
+
+async def _await_executor_quiescence(worker: asyncio.Future[Any]) -> None:
+    """Wait for the actual worker future after its asyncio owner is cancelled."""
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            continue
+        except BaseException:
+            break
 
 
 def _invoke_callback_with_identity(
@@ -2412,6 +2424,8 @@ class Brain:
                 before_publish=before_finalize,
             )
 
+        execution_context: Optional[ExecutionContext] = None
+
         requirement, risk_class, requirement_reason = autonomy_evaluate(
             tool_name,
             call_args,
@@ -2518,6 +2532,7 @@ class Brain:
             )
 
         async def _run() -> Any:
+            nonlocal execution_context
             if execute_override is not None:
                 result = execute_override()
                 return await result if inspect.isawaitable(result) else result
@@ -2527,12 +2542,24 @@ class Brain:
                 if tool_name in {"web_search", "web_research"}
                 else tool_registry.execute_tool
             )
-            return await asyncio.get_running_loop().run_in_executor(
-                executor,
-                execute,
-                tool_name,
-                call_args,
-            )
+            context = ExecutionContext()
+            execution_context = context
+            loop = asyncio.get_running_loop()
+
+            def _invoke() -> Any:
+                token = activate_execution_context(context)
+                try:
+                    return execute(tool_name, call_args)
+                finally:
+                    reset_execution_context(token)
+
+            worker = loop.run_in_executor(executor, _invoke)
+            try:
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError as cancellation:
+                context.request_cancel()
+                await _await_executor_quiescence(worker)
+                raise cancellation
 
         async def _run_with_leases() -> Any:
             if required_leases:
@@ -2567,12 +2594,15 @@ class Brain:
             ):
                 from charlie.recovery import recover_tool
 
-                recovered_res = await recover_tool(
-                    self,
-                    tool_name,
-                    call_args,
-                    RuntimeError(_tool_result_text(raw_result)),
-                )
+                recovered_res = None
+                if execution_context is None or not execution_context.cancellation_requested:
+                    recovered_res = await recover_tool(
+                        self,
+                        tool_name,
+                        call_args,
+                        RuntimeError(_tool_result_text(raw_result)),
+                        execution_context=execution_context,
+                    )
                 if recovered_res is not None:
                     raw_result = recovered_res
         except asyncio.CancelledError as exc:
@@ -2587,18 +2617,32 @@ class Brain:
         except asyncio.TimeoutError as exc:
             if not apply_execution_controls:
                 raise
-            if tool_name in {"shell_execute", "file_write"}:
+            if tool_name in {"shell_execute", "file_write"} and not (
+                execution_context is not None and execution_context.cancellation_requested
+            ):
                 from charlie.recovery import recover_tool
 
-                recovered_res = await recover_tool(self, tool_name, call_args, exc)
+                recovered_res = await recover_tool(
+                    self,
+                    tool_name,
+                    call_args,
+                    exc,
+                    execution_context=execution_context,
+                )
                 if recovered_res is not None:
                     raw_result = recovered_res
                 else:
                     raw_result = f"Error: Tool '{tool_name}' timed out after {timeout}s"
                     policy_status = ResultStatus.FAILED.value
                     result_reason = f"Tool '{tool_name}' timed out."
-                    result_data.update({"failure_kind": "timeout", "timeout_seconds": timeout})
-                    result_errors.append(_tool_result_text(raw_result))
+                result_data.update({"failure_kind": "timeout", "timeout_seconds": timeout})
+                result_errors.append(_tool_result_text(raw_result))
+            elif execution_context is not None and execution_context.cancellation_requested:
+                raw_result = f"Error: Tool '{tool_name}' timed out after {timeout}s"
+                policy_status = ResultStatus.FAILED.value
+                result_reason = f"Tool '{tool_name}' timed out."
+                result_data.update({"failure_kind": "timeout", "timeout_seconds": timeout})
+                result_errors.append(_tool_result_text(raw_result))
             else:
                 raw_result = f"Error: Tool '{tool_name}' timed out after {timeout}s"
                 policy_status = ResultStatus.FAILED.value
@@ -2608,10 +2652,25 @@ class Brain:
         except Exception as exc:
             if not apply_execution_controls:
                 raise
+            if execution_context is not None and execution_context.cancellation_requested:
+                raise OperationCancelled(
+                    _finalize_cancelled(
+                        "Operation execution was cancelled.",
+                        approval_status=(
+                            ApprovalDecision.APPROVED.value if gate_reason else "not_required"
+                        ),
+                    )
+                ) from exc
             if tool_name in {"shell_execute", "file_write"}:
                 from charlie.recovery import recover_tool
 
-                recovered_res = await recover_tool(self, tool_name, call_args, exc)
+                recovered_res = await recover_tool(
+                    self,
+                    tool_name,
+                    call_args,
+                    exc,
+                    execution_context=execution_context,
+                )
                 if recovered_res is not None:
                     raw_result = recovered_res
                 else:
