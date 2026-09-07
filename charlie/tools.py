@@ -246,6 +246,8 @@ class ToolRegistry:
 
     def execute_tool(self, name: str, arguments: Dict[str, Any]) -> str:
         if name not in self._tools:
+            if name == "system_control":
+                return system_control(**arguments).model_text
             logger.error("Tool '%s' not found.", name)
             return f"Error: Tool '{name}' is not registered."
 
@@ -256,6 +258,8 @@ class ToolRegistry:
                 arguments = {k: v for k, v in arguments.items() if k in params}
             logger.info("Executing tool '%s' with arguments: %s", name, arguments)
             result = func(**arguments)
+            if isinstance(result, ToolExecutionResult):
+                return result.model_text
             return str(result)
         except Exception as e:  # pragma: no cover - defensive
             logger.exception("Error executing tool '%s': %s", name, e)
@@ -269,6 +273,12 @@ class ToolRegistry:
         if name in {"web_search", "web_research"}:
             report = _run_research_report(name, arguments)
             return ToolExecutionResult(report.legacy_text(), report, "research_report")
+        if name == "system_control":
+            return system_control(**arguments)
+        if name in {"media_control", "media_snapshot"}:
+            func = self._tools[name]["func"]
+            result = func(**arguments)
+            return result if isinstance(result, ToolExecutionResult) else ToolExecutionResult(str(result))
         return ToolExecutionResult(self.execute_tool(name, arguments))
 
     def set_memory_service(self, service: Any) -> None:
@@ -279,6 +289,74 @@ class ToolRegistry:
 
 # Global tool registry
 registry = ToolRegistry()
+
+_media_adapter = None
+MEDIA_ACTIONS = frozenset(
+    {
+        "volume_up",
+        "volume_down",
+        "set_volume",
+        "mute",
+        "unmute",
+        "play_pause",
+        "next_track",
+        "prev_track",
+        "stop",
+    }
+)
+MEDIA_OPERATION_IDS = {
+    "volume_up": "media.volume.adjust",
+    "volume_down": "media.volume.adjust",
+    "set_volume": "media.volume.set",
+    "mute": "media.mute.set",
+    "unmute": "media.mute.set",
+    "play_pause": "media.playback.toggle",
+    "next_track": "media.playback.next",
+    "prev_track": "media.playback.previous",
+    "stop": "media.playback.stop",
+}
+
+
+def media_operation_id(action: str) -> str | None:
+    return MEDIA_OPERATION_IDS.get(action)
+
+
+def _get_media_adapter():
+    global _media_adapter
+    if _media_adapter is None:
+        from charlie.media_adapter import WindowsMediaAdapter
+
+        _media_adapter = WindowsMediaAdapter()
+    return _media_adapter
+
+
+def _on_media_executor_thread() -> bool:
+    from charlie.media_runtime import media_executor_thread_id
+
+    return media_executor_thread_id() == threading.get_ident()
+
+
+def _media_result_text(action: str, result: dict) -> str:
+    if not result.get("ok"):
+        failure_kind = result.get("failure_kind")
+        prefix = "unsupported" if failure_kind == "unsupported" else "failed"
+        return f"Error: Media control '{action}' {prefix}: {result.get('reason', 'unavailable')}."
+    if action == "set_volume":
+        if result.get("verified") is False:
+            return "Volume command accepted; resulting volume could not be verified."
+        return f"Volume set to {result.get('volume_percent')}%."
+    if action in {"volume_up", "volume_down"}:
+        if result.get("verified") is False:
+            return "Volume adjustment accepted; resulting volume could not be verified."
+        return f"Volume adjusted to {result.get('volume_percent')}%."
+    if action in {"mute", "unmute"}:
+        if result.get("verified") is False:
+            return "Mute command accepted; resulting mute state could not be verified."
+        state = "muted" if result.get("muted") else "unmuted"
+        return f"Audio is now {state} (volume {result.get('volume_percent')}%)."
+    if result.get("verified") is False:
+        return f"Media action '{action}' accepted; playback state could not be verified."
+    return f"Media action '{action}' completed."
 
 
 @registry.register_tool(
@@ -2182,28 +2260,130 @@ def desktop_move_window(window: str, x: int, y: int, width: int, height: int) ->
 
 
 @registry.register_tool(
-    name="system_control",
+    name="media_control",
     description=(
-        "Control system volume and media playback via keyboard media keys: "
-        "volume_up, volume_down, mute, play_pause, next_track, prev_track."
+        "Canonical OS media control: volume_up, volume_down, set_volume, mute, unmute, "
+        "play_pause, next_track, prev_track, or stop."
     ),
     schema={
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["volume_up", "volume_down", "mute", "play_pause", "next_track", "prev_track"],
+                "enum": [
+                    "volume_up",
+                    "volume_down",
+                    "set_volume",
+                    "mute",
+                    "unmute",
+                    "play_pause",
+                    "next_track",
+                    "prev_track",
+                    "stop",
+                ],
             },
+            "percent": {"type": "number", "minimum": 0, "maximum": 100},
         },
         "required": ["action"],
     },
     is_interactive=True,
 )
-def system_control(action: str) -> str:
-    if not _desktop_ready():
-        return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.actions import system_control as _system_control
-    return _system_control(action)
+def media_control(action: str, percent: float | None = None) -> ToolExecutionResult:
+    if not isinstance(action, str) or action not in MEDIA_ACTIONS:
+        result = {
+            "ok": False,
+            "available": True,
+            "failure_kind": "unsupported",
+            "reason": "Unsupported media action",
+        }
+    elif action == "set_volume" and (
+        percent is None or isinstance(percent, bool) or not isinstance(percent, (int, float)) or not 0 <= percent <= 100
+    ):
+        result = {
+            "ok": False,
+            "available": True,
+            "failure_kind": "invalid_arguments",
+            "reason": "Volume percent must be between 0 and 100",
+        }
+    else:
+        if not _on_media_executor_thread():
+            from charlie.media_runtime import get_media_executor
+
+            return get_media_executor().submit(media_control, action, percent).result()
+        result = asyncio.run(_get_media_adapter().control(action, percent=percent))
+    return ToolExecutionResult(_media_result_text(action, result), result, "media_control")
+
+
+def system_control(action: str, percent: float | None = None) -> ToolExecutionResult:
+    """Legacy Python compatibility shim; intentionally not model-facing."""
+    return media_control(action, percent=percent)
+
+
+from charlie.capabilities import register_tool_in_index as _register_compatibility_operation
+
+_register_compatibility_operation(
+    name="system_control",
+    description="Legacy Python compatibility alias for canonical media_control.",
+    schema={
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": sorted(MEDIA_ACTIONS)},
+            "percent": {"type": "number", "minimum": 0, "maximum": 100},
+        },
+        "required": ["action"],
+        "additionalProperties": False,
+    },
+    owner="media",
+    is_interactive=True,
+)
+
+
+@registry.register_tool(
+    name="media_snapshot",
+    description="Read the current OS media session, playback, artwork, volume, and mute state.",
+    schema={"type": "object", "properties": {}, "additionalProperties": False},
+)
+def media_snapshot() -> ToolExecutionResult:
+    if not _on_media_executor_thread():
+        from charlie.media_runtime import get_media_executor
+
+        return get_media_executor().submit(media_snapshot).result()
+    result = asyncio.run(_get_media_adapter().snapshot())
+    if result.get("adapter_available") is False:
+        text = "Error: Media snapshot unavailable."
+    elif result.get("status") == "no_session":
+        text = "No active media session."
+    elif result.get("status") == "failed":
+        text = "Error: Media snapshot read failed."
+    else:
+        text = "Current media session state read."
+    return ToolExecutionResult(text, result, "media_snapshot")
+
+
+@registry.register_tool(
+    name="open_windows_settings",
+    description="Open a validated Windows Settings deep link.",
+    schema={
+        "type": "object",
+        "properties": {
+            "uri": {"type": "string", "description": "Validated ms-settings URI."},
+            "name": {"type": "string", "description": "Human-readable settings name."},
+        },
+        "required": ["uri"],
+        "additionalProperties": False,
+    },
+    is_interactive=True,
+)
+def open_windows_settings(uri: str, name: str = "settings") -> str:
+    if not isinstance(uri, str) or not uri.startswith("ms-settings:"):
+        return "Error: invalid Windows Settings URI."
+    if sys.platform != "win32":
+        return f"Windows Settings deep-linking requires Windows (detected {sys.platform})."
+    try:
+        os.startfile(uri)  # type: ignore[attr-defined]
+        return f"Opened Windows {name.capitalize()} Settings."
+    except Exception as exc:
+        return f"Failed to open {name} settings: {exc}"
 
 
 # --- Headless browser tools (Playwright + Chrome) -- gated, off by default.

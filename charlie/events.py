@@ -67,6 +67,7 @@ class EventType(StrEnum):
     VISION_OBSERVED = "vision_observed"
     HUD_VISIBILITY = "hud_visibility"
     TERMINAL_COMMAND_RESULT = "terminal_command_result"
+    MEDIA_OPERATION_RESULT = "media_operation_result"
     CHAT = "chat"
     PRESENTATION_INTENT = "presentation_intent"
     PRESENTATION_UPDATE = "presentation_update"

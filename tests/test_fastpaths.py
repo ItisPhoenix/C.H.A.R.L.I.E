@@ -11,8 +11,8 @@ from charlie.fastpaths import (
     match_filesystem_basic,
     match_focus_app,
     match_media_volume,
-    match_system_workspace,
     match_system_telemetry,
+    match_system_workspace,
     match_windows_settings,
 )
 
@@ -166,12 +166,12 @@ class TestMediaVolumeMatching:
         m = match_media_volume("set volume to 45%")
         assert m is not None
         assert m.intent == "volume_set_percent"
-        assert m.arguments == {"percent": 45}
+        assert m.arguments == {"action": "set_volume", "percent": 45}
         assert m.verifier_name == "verify_volume"
 
         m2 = match_media_volume("volume 80")
         assert m2 is not None
-        assert m2.arguments == {"percent": 80}
+        assert m2.arguments == {"action": "set_volume", "percent": 80}
 
     def test_mute_unmute(self):
         m_mute = match_media_volume("mute audio")

@@ -120,7 +120,15 @@ def _handle_full_system_status() -> FastPathResult:
                 if task.status.value not in active_statuses:
                     continue
                 progress = round((task.current_step / task.total_steps) * 100) if task.total_steps else 0
-                operations.append({"id": task.id, "title": task.title, "subtitle": task.status.value.upper(), "status": task.status.value.upper(), "progress": progress})
+                operations.append(
+                    {
+                        "id": task.id,
+                        "title": task.title,
+                        "subtitle": task.status.value.upper(),
+                        "status": task.status.value.upper(),
+                        "progress": progress,
+                    }
+                )
         except Exception as exc:
             logger.debug("Task journal unavailable for system workspace: %s", exc)
         data = {
@@ -135,7 +143,11 @@ def _handle_full_system_status() -> FastPathResult:
                         {"id": "disk", "label": "DISK", "value": float(disk.percent), "unit": "percent_0_100"},
                     ],
                 },
-                "processes": {"title": "WHAT IS RUNNING", "subtitle": "TOP LIVE PROCESSES BY MEMORY", "processes": process_rows},
+                "processes": {
+                    "title": "WHAT IS RUNNING",
+                    "subtitle": "TOP LIVE PROCESSES BY MEMORY",
+                    "processes": process_rows,
+                },
             }
         if operations:
             data["operations"] = operations
@@ -333,7 +345,7 @@ def match_system_telemetry(query: str) -> Optional[FastPathMatch]:
 # 2. Media and Volume Patterns
 # ---------------------------------------------------------------------------
 _SET_VOL_NUM_RE = re.compile(
-    r"\b(?:set\s+(?:the\s+)?volume\s+(?:to\s+)?(\d{1,3})%?|volume\s+(?:to\s+)?(\d{1,3})%?)\b",
+    r"(?<!\w)(?:set\s+(?:the\s+)?volume\s+(?:to\s+)?(-?\d{1,3})%?|volume\s+(?:to\s+)?(-?\d{1,3})%?)(?!\w)",
     re.IGNORECASE,
 )
 _VOL_UP_RE = re.compile(
@@ -354,108 +366,78 @@ _NEXT_TRACK_RE = re.compile(r"\b(?:next\s+track|next\s+song|skip\s+song|skip\s+t
 _PREV_TRACK_RE = re.compile(r"\b(?:previous\s+track|previous\s+song|prev\s+track|prev\s+song)\b", re.IGNORECASE)
 
 
-def _handle_volume_set(pct: float) -> str:
-    from charlie.media_adapter import _set_volume_percent
-
-    res = _set_volume_percent(pct)
-    if res.get("ok"):
-        return f"Volume set to {res.get('volume_percent')}%."
-    return f"Failed to set volume: {res.get('reason', 'audio endpoint unavailable')}."
-
-
-def _handle_volume_control(action: str) -> str:
-    from charlie.media_adapter import _volume_control
-
-    res = _volume_control(action)
-    if res.get("ok"):
-        if action in ("mute", "unmute"):
-            status = "muted" if res.get("muted") else "unmuted"
-            return f"Audio is now {status} (volume {res.get('volume_percent')}%)."
-        return f"Volume adjusted to {res.get('volume_percent')}%."
-    return f"Media control '{action}' failed: {res.get('reason', 'audio endpoint unavailable')}."
-
-
 def match_media_volume(query: str) -> Optional[FastPathMatch]:
     q = query.strip()
     m_num = _SET_VOL_NUM_RE.search(q)
     if m_num:
         val = int(m_num.group(1) or m_num.group(2))
-        pct = max(0, min(100, val))
         return FastPathMatch(
             intent="volume_set_percent",
             semantic_op_id="media.volume.set",
-            tool_name="set_volume",
-            arguments={"percent": pct},
+            tool_name="media_control",
+            arguments={"action": "set_volume", "percent": val},
             target_domain="media",
-            direct_handler=lambda: _handle_volume_set(float(pct)),
             verifier_name="verify_volume",
         )
     if _MUTE_RE.search(q):
         return FastPathMatch(
             intent="volume_mute",
-            semantic_op_id="media.volume.set",
-            tool_name="system_control",
+            semantic_op_id="media.mute.set",
+            tool_name="media_control",
             arguments={"action": "mute"},
             target_domain="media",
-            direct_handler=lambda: _handle_volume_control("mute"),
             verifier_name="verify_volume",
         )
     if _UNMUTE_RE.search(q):
         return FastPathMatch(
             intent="volume_unmute",
-            semantic_op_id="media.volume.set",
-            tool_name="system_control",
+            semantic_op_id="media.mute.set",
+            tool_name="media_control",
             arguments={"action": "unmute"},
             target_domain="media",
-            direct_handler=lambda: _handle_volume_control("unmute"),
             verifier_name="verify_volume",
         )
     if _VOL_UP_RE.search(q):
         return FastPathMatch(
             intent="volume_up",
-            semantic_op_id="media.volume.set",
-            tool_name="system_control",
+            semantic_op_id="media.volume.adjust",
+            tool_name="media_control",
             arguments={"action": "volume_up"},
             target_domain="media",
-            direct_handler=lambda: _handle_volume_control("volume_up"),
             verifier_name="verify_volume",
         )
     if _VOL_DOWN_RE.search(q):
         return FastPathMatch(
             intent="volume_down",
-            semantic_op_id="media.volume.set",
-            tool_name="system_control",
+            semantic_op_id="media.volume.adjust",
+            tool_name="media_control",
             arguments={"action": "volume_down"},
             target_domain="media",
-            direct_handler=lambda: _handle_volume_control("volume_down"),
             verifier_name="verify_volume",
         )
     if _PLAY_PAUSE_RE.search(q):
         return FastPathMatch(
             intent="media_play_pause",
-            semantic_op_id="media.volume.set",
-            tool_name="system_control",
+            semantic_op_id="media.playback.toggle",
+            tool_name="media_control",
             arguments={"action": "play_pause"},
             target_domain="media",
-            direct_handler=lambda: _handle_volume_control("play_pause"),
         )
     if _NEXT_TRACK_RE.search(q):
         return FastPathMatch(
             intent="media_next_track",
-            semantic_op_id="media.volume.set",
-            tool_name="system_control",
+            semantic_op_id="media.playback.next",
+            tool_name="media_control",
             arguments={"action": "next_track"},
             target_domain="media",
-            direct_handler=lambda: _handle_volume_control("next_track"),
         )
     if _PREV_TRACK_RE.search(q):
         return FastPathMatch(
             intent="media_prev_track",
-            semantic_op_id="media.volume.set",
-            tool_name="system_control",
+            semantic_op_id="media.playback.previous",
+            tool_name="media_control",
             arguments={"action": "prev_track"},
             target_domain="media",
-            direct_handler=lambda: _handle_volume_control("prev_track"),
         )
     return None
 
@@ -499,16 +481,6 @@ _SETTINGS_RE = re.compile(
 )
 
 
-def _handle_open_settings(uri: str, name: str) -> str:
-    if sys.platform == "win32":
-        try:
-            os.startfile(uri)  # type: ignore[attr-defined]
-            return f"Opened Windows {name.capitalize()} Settings."
-        except Exception as e:
-            return f"Failed to open {name} settings: {e}"
-    return f"Windows Settings deep-linking requires Windows (detected {sys.platform})."
-
-
 def match_windows_settings(query: str) -> Optional[FastPathMatch]:
     m = _SETTINGS_RE.match(query.strip())
     if not m:
@@ -517,12 +489,10 @@ def match_windows_settings(query: str) -> Optional[FastPathMatch]:
     uri = _SETTINGS_MAP.get(target, "ms-settings:")
     return FastPathMatch(
         intent="open_windows_settings",
-        semantic_op_id="system.control.execute",
-        tool_name="system_control",
-        arguments={"action": "open_settings", "uri": uri},
+        semantic_op_id="system.settings.open",
+        tool_name="open_windows_settings",
+        arguments={"uri": uri, "name": target},
         target_domain="system",
-        direct_handler=lambda: _handle_open_settings(uri, target),
-        verifier_name="verify_app_launch",
     )
 
 
@@ -701,6 +671,11 @@ def match_fast_path(query: str) -> Optional[FastPathMatch]:
 def execute_fast_path(match: FastPathMatch) -> FastPathResult:
     """Execute a matched deterministic fast-path operation safely."""
     logger.info("Executing fast-path: intent=%s, op=%s", match.intent, match.semantic_op_id)
+    if match.target_domain == "media":
+        return FastPathResult(
+            "Error: Media fast-paths require Brain's canonical media operation.",
+            {"available": False, "reason": "Media fast-path execution is owned by Brain."},
+        )
     if match.direct_handler is not None:
         try:
             result = match.direct_handler()

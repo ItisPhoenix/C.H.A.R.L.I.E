@@ -170,6 +170,7 @@ _NON_CANCELLABLE_FOREGROUND_TOOLS = frozenset(
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
 # Bounded replay/idempotency window; evicted IDs may be treated as new requests.
 _TERMINAL_RESULT_CACHE_MAX = 512
+_MEDIA_RESULT_CACHE_MAX = 512
 from charlie.runtime_identity import git_build_identity, persistent_frontend_dist
 
 _SOURCE_IDENTITY, _SOURCE_DIRTY = git_build_identity(Path(__file__).resolve().parent)
@@ -283,6 +284,40 @@ def _terminal_request_id_conflict_payload(
         "command": command,
         "approved": False,
         "approval_status": "conflict",
+        "status": "request_id_conflict",
+        "result": {"status": "request_id_conflict", "reason": message},
+        "request_id_conflict": True,
+        "error": message,
+    }
+
+
+def _cache_media_result(
+    result_cache: OrderedDict[str, dict[str, Any]],
+    request_id: str,
+    payload: dict[str, Any],
+    fingerprint_cache: Optional[dict[str, str]] = None,
+    fingerprint: Optional[tuple[Any, ...]] = None,
+) -> None:
+    result_cache[request_id] = payload
+    result_cache.move_to_end(request_id)
+    if fingerprint_cache is not None and fingerprint is not None:
+        fingerprint_cache[request_id] = fingerprint
+    while len(result_cache) > _MEDIA_RESULT_CACHE_MAX:
+        evicted_id, _ = result_cache.popitem(last=False)
+        if fingerprint_cache is not None:
+            fingerprint_cache.pop(evicted_id, None)
+
+
+def _media_request_id_conflict_payload(
+    request_id: str,
+    payload: dict[str, Any],
+    fingerprint: str,
+) -> dict[str, Any]:
+    message = "request_id is already bound to a different media operation"
+    return {
+        "request_id": request_id,
+        "operation": payload.get("operation"),
+        "request_fingerprint": fingerprint,
         "status": "request_id_conflict",
         "result": {"status": "request_id_conflict", "reason": message},
         "request_id_conflict": True,
@@ -448,6 +483,173 @@ async def _handle_terminal_command_request(
             ),
         )
         return payload
+    finally:
+        entry = in_flight.get(request_id)
+        if current is not None and (
+            entry is current or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] is current)
+        ):
+            in_flight.pop(request_id, None)
+
+
+async def _handle_media_operation_request(
+    brain: Any,
+    event_bus: Any,
+    payload: Any,
+    *,
+    result_cache: Optional[OrderedDict[str, dict[str, Any]]] = None,
+    in_flight: Optional[dict[str, Any]] = None,
+    fingerprint_cache: Optional[dict[str, str]] = None,
+) -> dict[str, Any] | None:
+    """Own correlated OS media snapshot and mutation requests from the web process."""
+    from charlie.media_runtime import canonical_media_request_fingerprint
+    from charlie.tools import MEDIA_ACTIONS, media_operation_id
+
+    payload = payload if isinstance(payload, dict) else {}
+    result_cache = result_cache if result_cache is not None else OrderedDict()
+    in_flight = in_flight if in_flight is not None else {}
+    fingerprint_cache = fingerprint_cache if fingerprint_cache is not None else {}
+    request_id = _normalize_terminal_request_id(payload.get("request_id"))
+    operation = payload.get("operation")
+    fingerprint = canonical_media_request_fingerprint(
+        str(operation or "invalid"),
+        action=payload.get("action"),
+        percent=payload.get("percent"),
+    )
+    supplied_fingerprint = payload.get("request_fingerprint")
+
+    async def _publish(
+        result_payload: dict[str, Any],
+        *,
+        rationale: str,
+        cache: bool = True,
+    ) -> dict[str, Any]:
+        if cache:
+            _cache_media_result(result_cache, request_id, result_payload, fingerprint_cache, fingerprint)
+        await event_bus.emit(
+            "media_operation_result",
+            result_payload,
+            meta=EventMeta(source=EventSource.BRAIN, task_id=request_id, rationale=rationale),
+        )
+        return result_payload
+
+    cached = result_cache.get(request_id)
+    if cached is not None:
+        if fingerprint_cache.get(request_id) != fingerprint:
+            return await _publish(
+                _media_request_id_conflict_payload(request_id, payload, fingerprint),
+                rationale="media request ID conflicts with completed operation",
+                cache=False,
+            )
+        return await _publish(cached, rationale="media operation result replayed from main idempotency cache")
+
+    existing_entry = in_flight.get(request_id)
+    existing = existing_entry[0] if isinstance(existing_entry, tuple) else existing_entry
+    existing_fingerprint = existing_entry[1] if isinstance(existing_entry, tuple) and len(existing_entry) == 2 else None
+    current = asyncio.current_task()
+    if existing is not None and existing is not current and not existing.done():
+        if existing_fingerprint != fingerprint:
+            return await _publish(
+                _media_request_id_conflict_payload(request_id, payload, fingerprint),
+                rationale="media request ID conflicts with in-flight operation",
+                cache=False,
+            )
+        try:
+            await asyncio.shield(existing)
+        except asyncio.CancelledError:
+            cached = result_cache.get(request_id)
+            if cached is not None:
+                return await _publish(cached, rationale="media cancellation result replayed to duplicate waiter")
+            raise
+        cached = result_cache.get(request_id)
+        if cached is not None:
+            return await _publish(cached, rationale="media operation result replayed to duplicate waiter")
+        return None
+
+    if current is not None:
+        in_flight[request_id] = (current, fingerprint)
+
+    result_payload: dict[str, Any] = {
+        "request_id": request_id,
+        "operation": operation,
+        "request_fingerprint": fingerprint,
+        "status": "failed",
+        "result": {"available": False, "reason": "Invalid media operation request."},
+    }
+    try:
+        if not isinstance(supplied_fingerprint, str) or supplied_fingerprint != fingerprint:
+            result_payload["status"] = "request_id_conflict"
+            result_payload["result"] = {
+                "status": "request_id_conflict",
+                "reason": "Media request fingerprint is invalid or does not match its arguments.",
+            }
+            return await _publish(result_payload, rationale="invalid media request fingerprint", cache=False)
+        if not isinstance(operation, str) or operation not in {"snapshot", "control"}:
+            return await _publish(result_payload, rationale="invalid media operation request")
+        try:
+            if operation == "snapshot":
+                envelope = await brain.execute_tool_operation(
+                    "media_snapshot",
+                    {},
+                    request="read media snapshot",
+                    task_id=request_id,
+                    session_id=None,
+                    turn_id=None,
+                    platform="web",
+                )
+                structured = envelope.data.get("structured_data")
+                outer_status = envelope.status
+                if isinstance(structured, dict) and structured.get("adapter_available") is False:
+                    outer_status = "unavailable"
+                result_payload.update({"status": outer_status, "result": envelope.to_dict()})
+            else:
+                action = payload.get("action")
+                if not isinstance(action, str) or action not in MEDIA_ACTIONS:
+                    result_payload["result"] = {
+                        "available": True,
+                        "failure_kind": "unsupported",
+                        "reason": "Unsupported media action.",
+                    }
+                    return await _publish(result_payload, rationale="unsupported media action")
+                arguments: dict[str, Any] = {"action": action}
+                if "percent" in payload:
+                    arguments["percent"] = payload.get("percent")
+                if action == "set_volume":
+                    percent = payload.get("percent")
+                    if (
+                        percent is None
+                        or isinstance(percent, bool)
+                        or not isinstance(percent, (int, float))
+                        or not 0 <= percent <= 100
+                    ):
+                        result_payload["result"] = {
+                            "available": True,
+                            "reason": "Volume percent must be between 0 and 100.",
+                        }
+                        return await _publish(result_payload, rationale="invalid media volume request")
+                envelope = await brain.execute_tool_operation(
+                    "media_control",
+                    arguments,
+                    request=f"media control: {action}",
+                    task_id=request_id,
+                    session_id=None,
+                    turn_id=None,
+                    platform="web",
+                    operation_override=media_operation_id(action),
+                )
+                structured = envelope.data.get("structured_data")
+                outer_status = envelope.status
+                if isinstance(structured, dict) and structured.get("available") is False:
+                    outer_status = "unavailable"
+                result_payload.update({"status": outer_status, "result": envelope.to_dict()})
+        except Exception as exc:
+            logger.warning("Main media operation failed: %s", type(exc).__name__, exc_info=True)
+            result_payload.update(
+                {
+                    "status": ResultStatus.FAILED.value,
+                    "result": {"available": False, "reason": f"Media operation failed: {type(exc).__name__}"},
+                }
+            )
+        return await _publish(result_payload, rationale="main media authority result")
     finally:
         entry = in_flight.get(request_id)
         if current is not None and (
@@ -2334,6 +2536,9 @@ async def main() -> int:
     runtime_shutting_down = False
     terminal_command_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
     terminal_command_in_flight: dict[str, Any] = {}
+    media_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    media_operation_in_flight: dict[str, Any] = {}
+    media_operation_fingerprints: dict[str, str] = {}
     event_bus_registry = _EventBusSubmissionRegistry()
     _main_event_bus_registry = event_bus_registry
 
@@ -3939,6 +4144,17 @@ async def main() -> int:
                                     in_flight=terminal_command_in_flight,
                                 )
                             )
+                    elif cmd_type == "media_operation":
+                        _submit_event_task(
+                            _handle_media_operation_request(
+                                brain,
+                                event_bus,
+                                cmd.get("payload", {}),
+                                result_cache=media_operation_results,
+                                in_flight=media_operation_in_flight,
+                                fingerprint_cache=media_operation_fingerprints,
+                            )
+                        )
                     elif cmd_type == "stop":
                         await _apply_voice_control(
                             "stop",
@@ -4760,6 +4976,13 @@ async def main() -> int:
         ]
         await _cancel_and_drain(outer_tasks, label="outer_tasks")
         await _drain_event_bus_submissions(event_bus_registry, loop=loop)
+
+        try:
+            from charlie.media_runtime import shutdown_media_executor
+
+            shutdown_media_executor()
+        except Exception as e:
+            logger.warning("Media executor shutdown error: %s", e)
 
         if voice is not None:
             try:

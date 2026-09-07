@@ -17,6 +17,8 @@ async def test_media_adapter_reports_unavailable_without_a_session(monkeypatch):
     snapshot = await WindowsMediaAdapter().snapshot()
 
     assert snapshot["available"] is False
+    assert snapshot["adapter_available"] is True
+    assert snapshot["status"] == "no_session"
     assert snapshot["title"] == ""
 
 
@@ -49,4 +51,3 @@ def test_volume_snapshot_degrades_without_windows_audio_endpoint(monkeypatch):
     from charlie.media_adapter import _volume_snapshot
     monkeypatch.setattr("charlie.media_adapter._audio_endpoint", None)
     assert _volume_snapshot() == {"volume_percent": None, "muted": None}
-

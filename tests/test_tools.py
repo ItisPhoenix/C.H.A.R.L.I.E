@@ -72,7 +72,9 @@ def test_registry_registration_and_schema():
         "desktop_focus",
         "desktop_window",
         "desktop_move_window",
-        "system_control",
+        "media_control",
+        "media_snapshot",
+        "open_windows_settings",
         "charlie_self_query",
         "charlie_doctor_diagnose",
         "charlie_self_extension_propose",
@@ -124,8 +126,8 @@ def test_window_management_tools_registered():
         assert tool in names
 
 
-def test_system_control_tool_registered():
-    assert "system_control" in registry.get_tool_names()
+def test_system_control_is_compatibility_only():
+    assert "system_control" not in registry.get_tool_names()
 
 
 def test_file_write_and_file_read(tmp_path):

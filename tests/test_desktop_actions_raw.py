@@ -108,13 +108,25 @@ def test_halted_scroll_raises(fake_pyautogui):
     actions.clear_halt()
 
 
-def test_system_control_volume_up(fake_pyautogui):
+def test_system_control_volume_up(monkeypatch, fake_pyautogui):
+    from charlie import tools
+
+    class Adapter:
+        async def control(self, action, percent=None):
+            assert action == "volume_up"
+            assert percent is None
+            return {"ok": True, "verified": True, "volume_percent": 55, "muted": False}
+
+    monkeypatch.setattr(tools, "_get_media_adapter", lambda: Adapter())
     result = actions.system_control("volume_up")
-    fake_pyautogui.press.assert_called_once_with("volumeup")
-    assert "Done" in result
+    fake_pyautogui.press.assert_not_called()
+    assert "55%" in result
 
 
-def test_system_control_unknown_action_errors(fake_pyautogui):
+def test_system_control_unknown_action_errors(monkeypatch, fake_pyautogui):
+    from charlie import tools
+
+    monkeypatch.setattr(tools, "_get_media_adapter", lambda: None)
     result = actions.system_control("teleport")
     assert "Error" in result
     assert "teleport" in result

@@ -933,6 +933,13 @@ def _legacy_tool_result_status(raw_result: Any) -> str:
     operation status; callers downstream consume the resulting envelope.
     """
 
+    if isinstance(raw_result, ToolExecutionResult) and isinstance(raw_result.structured_data, dict):
+        if raw_result.structured_data.get("ok") is False:
+            return ResultStatus.FAILED.value
+        if raw_result.structured_data.get("adapter_available") is False:
+            return ResultStatus.FAILED.value
+        if raw_result.structured_data.get("verified") is False:
+            return ResultStatus.UNVERIFIED.value
     return (
         ResultStatus.FAILED.value
         if _tool_result_text(raw_result).startswith("Error")
@@ -2290,6 +2297,7 @@ class Brain:
         session_id: Optional[str],
         turn_id: Optional[str] = None,
         platform: str = "web",
+        operation_override: Optional[str] = None,
     ) -> ResultEnvelope:
         """Execute one non-LLM operation through the shared primitive."""
         approval_requester = self._request_tool_approval_decision
@@ -2310,6 +2318,7 @@ class Brain:
             approval_requester=approval_requester,
             include_approval_status=True,
             source="brain.operation",
+            operation_override=operation_override,
         )
 
     def _finalize_operation_common(
@@ -2385,6 +2394,7 @@ class Brain:
         source: str = "brain.tool_loop",
         before_finalize: Optional[Callable[[ResultEnvelope], None]] = None,
         apply_execution_controls: bool = True,
+        operation_override: Optional[str] = None,
     ) -> ResultEnvelope:
         """Own common policy, execution, recovery, and result finalization."""
         call_args = dict(arguments)
@@ -2393,6 +2403,7 @@ class Brain:
 
         operation = capability_index.get_operation(tool_name)
         is_com = bool(operation and operation.executor_type == "com_thread")
+        is_media = capability_index.get_operation_domain(tool_name) == "media"
         timeout = _tool_timeout(tool_name, operation)
         required_leases = operation.required_leases if operation and operation.required_leases else ()
         execution_owner_id = execution_owner_id or task_id or f"operation:{uuid4().hex}"
@@ -2426,11 +2437,14 @@ class Brain:
 
         execution_context: Optional[ExecutionContext] = None
 
-        requirement, risk_class, requirement_reason = autonomy_evaluate(
-            tool_name,
-            call_args,
-            recent_external_texts=recent_external_texts,
-        )
+        if recent_external_texts is None:
+            requirement, risk_class, requirement_reason = autonomy_evaluate(tool_name, call_args)
+        else:
+            requirement, risk_class, requirement_reason = autonomy_evaluate(
+                tool_name,
+                call_args,
+                recent_external_texts=recent_external_texts,
+            )
         risk_value = getattr(risk_class, "value", risk_class)
 
         def _finalize_cancelled(
@@ -2456,6 +2470,7 @@ class Brain:
                 requires_approval=requirement == Requirement.APPROVE,
                 source=source,
                 data=data,
+                operation_override=operation_override,
             )
             return self._finalize_operation_common(
                 tool_name,
@@ -2471,7 +2486,7 @@ class Brain:
             return await _publish(
                 _normalize_tool_result(
                     tool_name,
-                    f"Error: Command blocked -- {requirement_reason}",
+                    f"Error: Command blocked by security policy -- {requirement_reason}",
                     request=request,
                     turn_id=turn_id,
                     task_id=task_id,
@@ -2481,6 +2496,7 @@ class Brain:
                     risk_class=risk_value,
                     source=source,
                     data=block_data,
+                    operation_override=operation_override,
                 )
             )
 
@@ -2528,6 +2544,7 @@ class Brain:
                     requires_approval=True,
                     source=source,
                     data=rejection_data,
+                    operation_override=operation_override,
                 )
             )
 
@@ -2536,10 +2553,15 @@ class Brain:
             if execute_override is not None:
                 result = execute_override()
                 return await result if inspect.isawaitable(result) else result
-            executor = _UIA_EXECUTOR if is_com else None
+            if is_media:
+                from charlie.media_runtime import get_media_executor
+
+                executor = get_media_executor()
+            else:
+                executor = _UIA_EXECUTOR if is_com else None
             execute = (
                 tool_registry.execute_tool_structured
-                if tool_name in {"web_search", "web_research"}
+                if tool_name in {"web_search", "web_research", "media_control", "media_snapshot", "system_control"}
                 else tool_registry.execute_tool
             )
             context = ExecutionContext()
@@ -2700,6 +2722,7 @@ class Brain:
             source=source,
             data=result_data,
             errors=result_errors or None,
+            operation_override=operation_override,
         )
         return await _publish(envelope)
 
@@ -3716,7 +3739,7 @@ class Brain:
 
         fp_match = match_fast_path(user_input)
         if fp_match is not None:
-            fastpath_capability = {"media": "system"}.get(fp_match.target_domain, fp_match.target_domain)
+            fastpath_capability = fp_match.target_domain
             fastpath_intent = (
                 "system"
                 if fp_match.target_domain == "system"
@@ -3737,6 +3760,19 @@ class Brain:
                 fp_match.intent,
                 fp_match.target_domain,
             )
+            if fp_match.target_domain == "media" or fp_match.tool_name == "open_windows_settings":
+                envelope = await self.execute_tool_operation(
+                    fp_match.tool_name,
+                    fp_match.arguments,
+                    request=user_input,
+                    task_id=task_id,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    platform=platform,
+                    operation_override=fp_match.semantic_op_id,
+                )
+                yield _result_envelope_to_model_text(envelope)
+                return
             requirement, risk_class, requirement_reason = autonomy_evaluate(fp_match.tool_name, fp_match.arguments)
             if requirement == Requirement.BLOCK:
                 msg = f"Operation '{fp_match.intent}' is blocked by security policy: {requirement_reason}"

@@ -34,7 +34,6 @@ from charlie.utils import build_auth_headers
 from charlie.log_redaction import SensitiveDataFilter
 from charlie.terminal_service import TerminalManager
 from charlie.calendar_store import CalendarStore
-from charlie.media_adapter import WindowsMediaAdapter
 from charlie.audit_store import AuditStore
 from charlie.backup_service import export_snapshot
 from charlie.capabilities import build_capability_snapshot, get_capability_index
@@ -43,6 +42,7 @@ from charlie.capabilities import build_capability_snapshot, get_capability_index
 # does not start plugins or MCP; those remain lazy in lifespan/endpoints.
 import charlie.tools  # noqa: F401
 from charlie.events import CONTRACT_VERSION, EventValidationError, build_event, normalize_event, replay_event
+from charlie.media_runtime import canonical_media_request_fingerprint
 from charlie.settings_service import SettingsService, SettingValidationError
 from charlie.privacy_service import PrivacyService
 from charlie.code_index import CodeIndex
@@ -285,11 +285,13 @@ MCP_OPERATION_TIMEOUT_SECONDS = 10.0
 _pending_mcp_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
 MEMORY_OPERATION_TIMEOUT_SECONDS = 10.0
 _pending_memory_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
+MEDIA_OPERATION_TIMEOUT_SECONDS = 10.0
+_pending_media_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
+_pending_media_fingerprints: dict[str, str] = {}
 LAUNCH_ID: str = config.charlie_launch_id
 _store: SessionStore | None = None
 _terminal_manager = TerminalManager()
 _calendar_store: CalendarStore | None = None
-_media_adapter = WindowsMediaAdapter()
 _audit_store: AuditStore | None = None
 
 
@@ -538,6 +540,8 @@ async def _event_bridge():
             _resolve_mcp_operation_result(event.get("payload", {}))
         elif etype == "memory_operation_result":
             _resolve_memory_operation_result(event.get("payload", {}))
+        elif etype == "media_operation_result":
+            _resolve_media_operation_result(event.get("payload", {}))
         elif etype == "extension_proposed":
             await _stage_proposed_extension(event.get("payload", {}))
             return
@@ -830,33 +834,54 @@ async def delete_calendar_event(event_id: str):
 
 @app.get("/api/media")
 async def media_snapshot():
-    try:
-        return await asyncio.wait_for(_media_adapter.snapshot(), timeout=2.0)
-    except asyncio.TimeoutError:
-        return {
-            "available": False,
-            "title": "",
-            "artist": "",
-            "album": "",
-            "app": "",
-            "status": "unavailable",
-            "position_seconds": 0.0,
-            "duration_seconds": 0.0,
-            "art_uri": None,
-            "volume_percent": None,
-            "muted": None,
-        }
+    response = await _request_authoritative_media_operation("snapshot", {})
+    envelope = response.get("result")
+    structured = envelope.get("data", {}).get("structured_data") if isinstance(envelope, dict) else None
+    if response.get("status") == "completed" and isinstance(structured, dict):
+        return structured
+    reason = "Media snapshot unavailable"
+    if isinstance(envelope, dict):
+        reason = str(envelope.get("reason") or envelope.get("result") or reason)
+    return {
+        "available": False,
+        "title": "",
+        "artist": "",
+        "album": "",
+        "app": "",
+        "status": "unavailable",
+        "position_seconds": 0.0,
+        "duration_seconds": 0.0,
+        "art_uri": None,
+        "volume_percent": None,
+        "muted": None,
+        "runtime_status": response.get("status", "unavailable"),
+        "reason": reason,
+    }
 
 
 @app.post("/api/media/control")
 async def media_control(data: dict):
     action = data.get("action")
-    if not isinstance(action, str):
+    allowed = {
+        "volume_up",
+        "volume_down",
+        "set_volume",
+        "mute",
+        "unmute",
+        "play_pause",
+        "next_track",
+        "prev_track",
+        "stop",
+    }
+    if not isinstance(action, str) or action not in allowed:
         raise HTTPException(status_code=400, detail="action is required")
-    result = await _media_adapter.control(action)
-    if not result.get("ok") and result.get("reason") == "Unsupported media action":
-        raise HTTPException(status_code=400, detail=result)
-    return result
+    payload: dict[str, Any] = {"action": action}
+    if action == "set_volume":
+        percent = data.get("percent")
+        if isinstance(percent, bool) or not isinstance(percent, (int, float)) or not 0 <= percent <= 100:
+            raise HTTPException(status_code=400, detail="percent must be a number between 0 and 100")
+        payload["percent"] = percent
+    return await _request_authoritative_media_operation("control", payload, request_id=data.get("request_id"))
 
 
 @app.get("/api/audit")
@@ -1224,6 +1249,100 @@ def _resolve_memory_operation_result(payload: object) -> None:
     if future is None or future.done():
         return
     future.set_result(dict(payload))
+
+
+def _resolve_media_operation_result(payload: object) -> None:
+    """Resolve one web media request by its main-owned correlation key."""
+    if not isinstance(payload, dict):
+        return
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return
+    future = _pending_media_operations.get(request_id)
+    if future is None or future.done():
+        return
+    expected_fingerprint = _pending_media_fingerprints.get(request_id)
+    if payload.get("request_fingerprint") != expected_fingerprint:
+        logger.warning("Ignoring media result with mismatched request fingerprint: %s", request_id)
+        return
+    future.set_result(dict(payload))
+
+
+async def _request_authoritative_media_operation(
+    operation: str,
+    payload: dict[str, Any],
+    *,
+    request_id: Any = None,
+) -> dict[str, Any]:
+    request_id = _terminal_request_id(request_id)
+    request_payload = dict(payload)
+    fingerprint = canonical_media_request_fingerprint(
+        operation,
+        action=request_payload.get("action"),
+        percent=request_payload.get("percent"),
+    )
+    request_payload.update(
+        {"request_id": request_id, "operation": operation, "request_fingerprint": fingerprint}
+    )
+    if event_bus is None:
+        return {
+            "request_id": request_id,
+            "operation": operation,
+            "status": "unavailable",
+            "result": {"available": False, "reason": "Main media authority is unavailable."},
+        }
+    loop = asyncio.get_running_loop()
+    existing = _pending_media_operations.get(request_id)
+    if existing is not None and not existing.done():
+        if _pending_media_fingerprints.get(request_id) != fingerprint:
+            return {
+                "request_id": request_id,
+                "operation": operation,
+                "request_fingerprint": fingerprint,
+                "status": "request_id_conflict",
+                "result": {"available": False, "reason": "request_id is already bound to a different media operation"},
+            }
+        return await asyncio.shield(existing)
+    result_future: asyncio.Future[dict[str, Any]] = loop.create_future()
+    _pending_media_operations[request_id] = result_future
+    _pending_media_fingerprints[request_id] = fingerprint
+    try:
+        sent = await event_bus.send_command({"type": "media_operation", "payload": request_payload})
+        if sent is False:
+            return {
+                "request_id": request_id,
+                "operation": operation,
+                "status": "unavailable",
+                "result": {"available": False, "reason": "Main media authority is unavailable."},
+            }
+        try:
+            result = await asyncio.wait_for(result_future, timeout=MEDIA_OPERATION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return {
+                "request_id": request_id,
+                "operation": operation,
+                "status": "timeout",
+                "result": {"available": False, "reason": "Main media authority timed out."},
+            }
+    except Exception:
+        logger.warning("Failed to request main media operation", exc_info=True)
+        return {
+            "request_id": request_id,
+            "operation": operation,
+            "status": "unavailable",
+            "result": {"available": False, "reason": "Main media authority is unavailable."},
+        }
+    finally:
+        _pending_media_operations.pop(request_id, None)
+        _pending_media_fingerprints.pop(request_id, None)
+    if not isinstance(result, dict) or result.get("request_id") != request_id:
+        return {
+            "request_id": request_id,
+            "operation": operation,
+            "status": "invalid_result",
+            "result": {"available": False, "reason": "Main media authority returned an invalid result."},
+        }
+    return result
 
 
 def _extension_operation_error(
