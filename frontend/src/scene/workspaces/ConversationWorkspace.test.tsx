@@ -1,8 +1,13 @@
-import { describe, expect, test, beforeEach } from "vitest";
+import { describe, expect, test, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { ConversationWorkspace } from "./ConversationWorkspace";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
 import { useCharlieStore } from "../../store/charlie";
+import { sendCommand } from "../../runtime/bridge";
+
+vi.mock("../../runtime/bridge", () => ({
+  sendCommand: vi.fn(),
+}));
 
 describe("ConversationWorkspace Component", () => {
   const mockWorkspace: WorkspaceInstance = {
@@ -23,6 +28,7 @@ describe("ConversationWorkspace Component", () => {
   };
 
   beforeEach(() => {
+    vi.clearAllMocks();
     useCharlieStore.setState({
       chatMessages: [
         { id: "m1", role: "user", text: "Hello Charlie", pending: false },
@@ -32,6 +38,8 @@ describe("ConversationWorkspace Component", () => {
       activities: [],
       coreState: "idle",
       connected: true,
+      activeSessionId: null,
+      activeSessionTitle: null,
     });
   });
 
@@ -158,6 +166,52 @@ describe("ConversationWorkspace Component", () => {
     });
 
     expect(await screen.findByText("session_abc_789")).toBeDefined();
+    global.fetch = originalFetch;
+  });
+
+  test("uses HTTP fallback alone while disconnected", async () => {
+    useCharlieStore.setState({ connected: false });
+    const originalFetch = global.fetch;
+    const calls: Array<{ url: string; body?: string }> = [];
+    global.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, body: init?.body as string | undefined });
+      if (url.includes("/api/session/active")) {
+        return { ok: true, json: async () => ({ active_session: "session-http" }) } as Response;
+      }
+      return { ok: true, json: async () => ({ messages: [] }) } as Response;
+    };
+
+    render(<ConversationWorkspace workspace={mockWorkspace} />);
+    const textarea = await screen.findByPlaceholderText(/Send prompt to Charlie/i);
+    fireEvent.change(textarea, { target: { value: "Fallback chat" } });
+    fireEvent.click(screen.getByText("Send"));
+
+    expect(sendCommand).not.toHaveBeenCalledWith("chat", expect.anything());
+    const chatCall = calls.find((call) => call.url.includes("/chat"));
+    expect(chatCall).toBeDefined();
+    expect(JSON.parse(chatCall?.body ?? "{}")).toMatchObject({ text: "Fallback chat" });
+    global.fetch = originalFetch;
+  });
+
+  test("marks optimistic HTTP chat failed when main rejects admission", async () => {
+    useCharlieStore.setState({ connected: false });
+    const originalFetch = global.fetch;
+    global.fetch = async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/session/active")) {
+        return { ok: true, json: async () => ({ active_session: "session-reject" }) } as Response;
+      }
+      return { ok: false, json: async () => ({ status: "not_found" }) } as Response;
+    };
+
+    render(<ConversationWorkspace workspace={mockWorkspace} />);
+    const textarea = await screen.findByPlaceholderText(/Send prompt to Charlie/i);
+    fireEvent.change(textarea, { target: { value: "Rejected chat" } });
+    fireEvent.click(screen.getByText("Send"));
+
+    expect(await screen.findByText("[failed]")).toBeDefined();
+    expect(useCharlieStore.getState().chatMessages.at(-1)?.failed).toBe(true);
     global.fetch = originalFetch;
   });
 });

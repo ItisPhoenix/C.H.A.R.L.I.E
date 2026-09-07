@@ -30,6 +30,7 @@ from charlie.core import Brain, _invoke_callback_with_identity
 from charlie.events import EventMeta, EventSource, EventType
 from charlie.resource_locks import CapabilityLease, CapabilityLeaseManager
 from charlie.results import ResultsStore
+from charlie.session_store import SessionNotFoundError
 from charlie.task_journal import (
     TaskOrigin,
     TaskPriority,
@@ -41,7 +42,7 @@ from charlie.task_journal import (
 from charlie.task_journal import (
     TaskStatus as CanonicalTaskStatus,
 )
-from charlie.tasks import TaskManager
+from charlie.tasks import TaskManager, TaskManagerAdmissionClosed
 from charlie.tools import get_path_gate_reason, is_shell_command_gated
 from charlie.utils import json_dumps, json_loads, make_id
 
@@ -655,8 +656,14 @@ async def start(
     await task completion. _run_loop reports progress asynchronously via
     "background_task" events."""
     global _current_task, _active_event_bus
+    if not _manager.accepting:
+        raise TaskManagerAdmissionClosed("Background task admission is closed")
     _active_event_bus = event_bus
     _manager.max_parallel = config.background_max_parallel_tasks
+    if session_store is not None and session_id:
+        session_checker = getattr(session_store, "session_exists", None)
+        if callable(session_checker) and not session_checker(session_id):
+            raise SessionNotFoundError(f"Session '{session_id}' does not exist")
 
     effective_origin = origin if isinstance(origin, TaskOrigin) else TaskOrigin(origin)
     requirements = (
@@ -701,9 +708,6 @@ async def start(
         task.steps = [f"Research: {research_query}"]
         task.flagged_steps = []
 
-    record = _record_task_lifecycle(task, status=CanonicalTaskStatus.PLANNING)
-    await _emit_task_event(event_bus, record, task=task)
-
     if research_query is None:
         plan_prompt = (
             "Break the following task into a short numbered list of concrete steps. "
@@ -721,7 +725,16 @@ async def start(
         else:
             task.capability_requirements = ()
 
-    _manager.submit(task, lambda: _run_loop(task, event_bus, voice))
+    try:
+        if session_store is not None and session_id:
+            session_checker = getattr(session_store, "session_exists", None)
+            if callable(session_checker) and not session_checker(session_id):
+                await task.brain.close()
+                raise SessionNotFoundError(f"Session '{session_id}' does not exist")
+        _manager.submit(task, lambda: _run_loop(task, event_bus, voice))
+    except TaskManagerAdmissionClosed:
+        await task.brain.close()
+        raise
     if announce:
         await _announce(event_bus, voice, "info", f"Starting background task: {text}")
     return task
@@ -747,6 +760,16 @@ def cancel_all() -> List[str]:
         if cancel(task.id):
             cancelled.append(task.id)
     return cancelled
+
+
+async def shutdown() -> None:
+    """Drain manager-owned task bodies before shared runtime stores close."""
+    await _manager.shutdown()
+
+
+def close_admission() -> None:
+    """Close task admission before runtime shutdown begins."""
+    _manager.close_admission()
 
 
 def find_task(query: Optional[str] = None) -> Optional[BackgroundTask]:

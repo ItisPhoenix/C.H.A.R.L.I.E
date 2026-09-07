@@ -64,6 +64,23 @@ describe("applyEvent", () => {
     expect(useCharlieStore.getState().activeToolApproval?.request_id).toBe("r2");
   });
 
+  test("session rename and delete update current session metadata", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "session_active",
+      payload: { session_id: "s1", title: "New Chat" },
+    });
+    useCharlieStore.getState().applyEvent({
+      type: "session_updated",
+      payload: { session_id: "s1", title: "Renamed" },
+    });
+    expect(useCharlieStore.getState().activeSessionTitle).toBe("Renamed");
+    useCharlieStore.getState().applyEvent({
+      type: "session_updated",
+      payload: { session_id: "s1", deleted: true },
+    });
+    expect(useCharlieStore.getState().activeSessionId).toBeNull();
+  });
+
   test("multiple approval requests queue behind one actionable projection", () => {
     useCharlieStore.getState().applyEvent({
       type: "tool_approval_request",

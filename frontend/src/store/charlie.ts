@@ -23,6 +23,8 @@ export interface ChatMessage {
   role: "user" | "charlie";
   text: string;
   pending: boolean;
+  requestId?: string;
+  failed?: boolean;
   turnId?: string;
   taskId?: string;
 }
@@ -134,10 +136,13 @@ interface CharlieState {
   micMuted: boolean | null;
   audioLevel: number;
   hudVisible: boolean;
+  activeSessionId: string | null;
+  activeSessionTitle: string | null;
   setConnected: (connected: boolean) => void;
   setActiveToolApproval: (req: ToolApprovalRequest | null) => void;
   seedMcpStatus: (servers: Record<string, boolean>) => void;
-  addUserMessage: (text: string) => void;
+  addUserMessage: (text: string, requestId?: string) => string;
+  markUserMessageFailed: (requestId: string) => void;
   setChatMessages: (messages: ChatMessage[]) => void;
   dismissAlert: () => void;
   dismissPresentationIntent: (id: string) => void;
@@ -164,6 +169,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   micMuted: null,
   audioLevel: 0,
   hudVisible: true,
+  activeSessionId: null,
+  activeSessionTitle: null,
 
   setConnected: (connected) => set({ connected }),
   dismissAlert: () => set({ activeAlert: null }),
@@ -196,9 +203,18 @@ export const useCharlieStore = create<CharlieState>((set) => ({
       }
       return { mcpStatus: next };
     }),
-  addUserMessage: (text) =>
+  addUserMessage: (text, requestId) => {
+    const id = `${Date.now()}`;
     set((s) => ({
-      chatMessages: [...s.chatMessages, { id: `${Date.now()}`, role: "user", text, pending: false }],
+      chatMessages: [...s.chatMessages, { id, role: "user", text, pending: false, requestId }],
+    }));
+    return id;
+  },
+  markUserMessageFailed: (requestId) =>
+    set((s) => ({
+      chatMessages: s.chatMessages.map((message) =>
+        message.requestId === requestId ? { ...message, failed: true } : message,
+      ),
     })),
   setChatMessages: (chatMessages) => set({ chatMessages }),
 
@@ -299,6 +315,21 @@ export const useCharlieStore = create<CharlieState>((set) => ({
       }
       case "hud_visibility":
         set({ hudVisible: Boolean(payload.visible) });
+        return;
+      case "session_active":
+        set({
+          activeSessionId: typeof payload.session_id === "string" ? payload.session_id : null,
+          activeSessionTitle: typeof payload.title === "string" ? payload.title : null,
+        });
+        return;
+      case "session_updated":
+        if (typeof payload.session_id === "string") {
+          set((s) => {
+            if (s.activeSessionId !== payload.session_id) return {};
+            if (payload.deleted) return { activeSessionId: null, activeSessionTitle: null };
+            return typeof payload.title === "string" ? { activeSessionTitle: payload.title } : {};
+          });
+        }
         return;
       case "token":
         set((s) => {

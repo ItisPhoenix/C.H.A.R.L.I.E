@@ -15,6 +15,10 @@ from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Set
 
 ManagedTaskStatus = Literal["queued", "running", "done", "failed", "cancelled"]
 
+class TaskManagerAdmissionClosed(RuntimeError):
+    """New work cannot be accepted after shutdown admission closes."""
+
+
 logger = logging.getLogger("charlie.tasks")
 
 
@@ -36,6 +40,8 @@ class TaskManager:
         self._tasks: Dict[str, ManagedTask] = {}
         self._run_fns: Dict[str, Callable[[], Awaitable[None]]] = {}
         self._running_ids: Set[str] = set()
+        self._task_handles: Dict[str, asyncio.Task] = {}
+        self._accepting = True
 
     def _set_status(self, task: ManagedTask, status: ManagedTaskStatus) -> None:
         task.status = status
@@ -43,6 +49,8 @@ class TaskManager:
             self._on_status_change(task)
 
     def submit(self, task: ManagedTask, run_fn: Callable[[], Awaitable[None]]) -> None:
+        if not self._accepting:
+            raise TaskManagerAdmissionClosed("Task manager is shutting down")
         self._tasks[task.id] = task
         self._run_fns[task.id] = run_fn
         self._set_status(task, "queued")
@@ -95,7 +103,19 @@ class TaskManager:
                 break
             self._set_status(task, "running")
             self._running_ids.add(task.id)
-            asyncio.create_task(self._run(task))
+            handle = asyncio.create_task(self._run(task), name=f"managed-task:{task.id}")
+            self._task_handles[task.id] = handle
+
+    @property
+    def accepting(self) -> bool:
+        return self._accepting
+
+    def close_admission(self) -> None:
+        """Atomically reject all submissions after shutdown starts."""
+        self._accepting = False
+        for task in self._tasks.values():
+            if task.status == "queued":
+                self._set_status(task, "cancelled")
 
     async def _run(self, task: ManagedTask) -> None:
         try:
@@ -110,6 +130,27 @@ class TaskManager:
                 self._set_status(task, "failed")
         finally:
             self._running_ids.discard(task.id)
+            self._task_handles.pop(task.id, None)
             if task.status == "running":
                 self._set_status(task, "done")
             self._schedule()
+
+    async def shutdown(self, timeout: float = 5.0) -> None:
+        """Cancel queued/running work and wait for task bodies to quiesce."""
+        self.close_admission()
+        for task in self._tasks.values():
+            if task.status == "queued":
+                self._set_status(task, "cancelled")
+            elif task.status == "running":
+                task.cancel_requested = True
+        handles = list(self._task_handles.values())
+        for handle in handles:
+            if not handle.done():
+                handle.cancel()
+        if handles:
+            try:
+                await asyncio.wait_for(asyncio.gather(*handles, return_exceptions=True), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.error("Task manager shutdown timed out; tasks are not quiescent")
+                raise
+        self._running_ids.clear()

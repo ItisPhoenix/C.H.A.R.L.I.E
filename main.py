@@ -5,6 +5,7 @@ import dataclasses
 import errno
 import http.client
 import io
+import inspect
 import json
 import logging
 import logging.handlers
@@ -118,7 +119,14 @@ from charlie.personality import (
     parse_voice_command,
     parse_yes_no,
 )
-from charlie.session_store import SessionStore
+from charlie.session_store import (
+    SessionConflictError,
+    SessionNotFoundError,
+    SessionOutcomeUnknownError,
+    SessionStore,
+    SessionStoreError,
+    canonical_session_request_fingerprint,
+)
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus
 from charlie.task_journal import TaskOrigin, TaskPriority, TaskStatus, get_task_journal
@@ -168,10 +176,12 @@ _NON_CANCELLABLE_FOREGROUND_TOOLS = frozenset(
     }
 )
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
+config.charlie_launch_id = _LAUNCH_ID
 # Bounded replay/idempotency window; evicted IDs may be treated as new requests.
 _TERMINAL_RESULT_CACHE_MAX = 512
 _MEDIA_RESULT_CACHE_MAX = 512
 _CALENDAR_RESULT_CACHE_MAX = 512
+_SESSION_RESULT_CACHE_MAX = 512
 from charlie.runtime_identity import git_build_identity, persistent_frontend_dist
 
 _SOURCE_IDENTITY, _SOURCE_DIRTY = git_build_identity(Path(__file__).resolve().parent)
@@ -824,6 +834,312 @@ async def _handle_calendar_operation_request(
             in_flight.pop(request_id, None)
 
 
+def _cache_session_result(
+    result_cache: OrderedDict[str, dict[str, Any]],
+    request_id: str,
+    payload: dict[str, Any],
+    fingerprint_cache: dict[str, str],
+    fingerprint: str,
+) -> None:
+    result_cache[request_id] = payload
+    result_cache.move_to_end(request_id)
+    fingerprint_cache[request_id] = fingerprint
+    while len(result_cache) > _SESSION_RESULT_CACHE_MAX:
+        evicted_id, _ = result_cache.popitem(last=False)
+        fingerprint_cache.pop(evicted_id, None)
+
+
+def _session_request_id_conflict_payload(
+    request_id: str,
+    operation: Any,
+    fingerprint: str,
+) -> dict[str, Any]:
+    message = "request_id is already bound to a different session operation"
+    return {
+        "request_id": request_id,
+        "request_fingerprint": fingerprint,
+        "operation": operation,
+        "status": "request_id_conflict",
+        "result": {"ok": False, "failure_kind": "request_id_conflict", "reason": message},
+        "request_id_conflict": True,
+        "error": message,
+    }
+
+
+async def _handle_session_operation_request(
+    store: SessionStore,
+    event_bus: Any,
+    payload: Any,
+    *,
+    result_cache: Optional[OrderedDict[str, dict[str, Any]]] = None,
+    in_flight: Optional[dict[str, Any]] = None,
+    fingerprint_cache: Optional[dict[str, str]] = None,
+    active_session_id: Optional[str] = None,
+    active_turn_session_id: Optional[str] = None,
+    queued_session_ids: tuple[str, ...] = (),
+    background_session_ids: tuple[str, ...] = (),
+    accept_callback: Optional[Callable[[], Any]] = None,
+    launch_id: str,
+) -> dict[str, Any]:
+    """Apply one main-owned session mutation and publish its persisted truth."""
+    payload = payload if isinstance(payload, dict) else {}
+    result_cache = result_cache if result_cache is not None else OrderedDict()
+    in_flight = in_flight if in_flight is not None else {}
+    fingerprint_cache = fingerprint_cache if fingerprint_cache is not None else {}
+    operation = str(payload.get("operation") or "invalid")
+    request_id = _normalize_terminal_request_id(payload.get("request_id"))
+    fingerprint = canonical_session_request_fingerprint(operation, payload)
+
+    async def _publish(result_payload: dict[str, Any], *, cache: bool = True) -> dict[str, Any]:
+        if cache:
+            _cache_session_result(result_cache, request_id, result_payload, fingerprint_cache, fingerprint)
+        await event_bus.emit(
+            "session_operation_result",
+            result_payload,
+            meta=EventMeta(
+                source=EventSource.RUNTIME,
+                task_id=request_id,
+                session_id=payload.get("session_id") if isinstance(payload.get("session_id"), str) else None,
+                rationale="main session authority result",
+            ),
+        )
+        return result_payload
+
+    cached = result_cache.get(request_id)
+    if cached is not None:
+        if fingerprint_cache.get(request_id) != fingerprint:
+            return await _publish(
+                _session_request_id_conflict_payload(request_id, operation, fingerprint),
+                cache=False,
+            )
+        replay = dict(cached)
+        replay_result = dict(replay.get("result") or {})
+        replay_result["replayed"] = True
+        replay["result"] = replay_result
+        return await _publish(replay, cache=False)
+
+    existing_entry = in_flight.get(request_id)
+    existing = existing_entry[0] if isinstance(existing_entry, tuple) else existing_entry
+    existing_fingerprint = (
+        existing_entry[1] if isinstance(existing_entry, tuple) and len(existing_entry) == 2 else None
+    )
+    current = asyncio.current_task()
+    if existing is not None and existing is not current and not existing.done():
+        if existing_fingerprint != fingerprint:
+            return await _publish(
+                _session_request_id_conflict_payload(request_id, operation, fingerprint),
+                cache=False,
+            )
+        await asyncio.shield(existing)
+        cached = result_cache.get(request_id)
+        replay = dict(cached) if cached is not None else {
+            "request_id": request_id,
+            "request_fingerprint": fingerprint,
+            "operation": operation,
+            "status": "failed",
+            "result": {"ok": False, "reason": "Session operation produced no result."},
+        }
+        replay_result = dict(replay.get("result") or {})
+        replay_result["replayed"] = True
+        replay["result"] = replay_result
+        return await _publish(
+            replay,
+            cache=False,
+        )
+
+    if current is not None:
+        in_flight[request_id] = (current, fingerprint)
+
+    result_payload: dict[str, Any] = {
+        "request_id": request_id,
+        "request_fingerprint": fingerprint,
+        "operation": operation,
+        "status": "failed",
+        "result": {"ok": False, "reason": "Invalid session operation request."},
+    }
+    session_id = payload.get("session_id")
+    try:
+        supplied_fingerprint = payload.get("request_fingerprint")
+        if supplied_fingerprint != fingerprint:
+            result_payload.update(
+                status="request_id_conflict",
+                result={
+                    "ok": False,
+                    "failure_kind": "request_id_conflict",
+                    "reason": "Session request fingerprint is invalid or does not match its arguments.",
+                },
+            )
+            return await _publish(result_payload, cache=False)
+
+        if operation == "create":
+            if not isinstance(session_id, str) or not session_id.strip():
+                result_payload.update(status="invalid", result={"ok": False, "reason": "session_id is required"})
+            else:
+                row = store.create_session(
+                    session_id,
+                    title=str(payload.get("title") or "New Chat"),
+                    source="web",
+                    launch_id=launch_id,
+                    parent_session_id=payload.get("parent_session_id"),
+                )
+                result_payload.update(status="completed", result={"ok": True, "session": row})
+        elif operation == "rename":
+            if not isinstance(session_id, str) or not isinstance(payload.get("title"), str):
+                result_payload.update(
+                    status="invalid",
+                    result={"ok": False, "reason": "session_id and title are required"},
+                )
+            else:
+                store.update_session_title(session_id, payload["title"])
+                row = store.get_session_record(session_id)
+                result_payload.update(status="completed", result={"ok": True, "session": row})
+                await event_bus.emit(
+                    "session_updated",
+                    {"session_id": session_id, "title": row["title"] if row else payload["title"]},
+                    meta=EventMeta(source=EventSource.RUNTIME, session_id=session_id),
+                )
+        elif operation == "delete":
+            if not isinstance(session_id, str):
+                result_payload.update(status="invalid", result={"ok": False, "reason": "session_id is required"})
+            elif (
+                session_id == active_turn_session_id
+                or session_id in set(queued_session_ids)
+                or session_id in set(background_session_ids)
+            ):
+                result_payload.update(
+                    status="session_busy",
+                    result={
+                        "ok": False,
+                        "failure_kind": "session_busy",
+                        "reason": "Session owns an active or queued turn.",
+                    },
+                )
+            else:
+                deleted = store.delete_session(session_id)
+                next_active = None if session_id == active_session_id else active_session_id
+                result_payload.update(
+                    status="completed",
+                    result={"ok": True, "deleted": True, "session": deleted, "active_session_id": next_active},
+                )
+                await event_bus.emit(
+                    "session_updated",
+                    {"session_id": session_id, "deleted": True},
+                    meta=EventMeta(source=EventSource.RUNTIME, session_id=session_id),
+                )
+                if session_id == active_session_id:
+                    await event_bus.emit(
+                        "session_active",
+                        {"session_id": None},
+                        meta=EventMeta(source=EventSource.RUNTIME),
+                    )
+        elif operation == "active":
+            if not isinstance(session_id, str):
+                result_payload.update(status="invalid", result={"ok": False, "reason": "session_id is required"})
+            else:
+                row = store.get_session_record(session_id)
+                if row is None:
+                    result_payload.update(
+                        status="not_found",
+                        result={
+                            "ok": False,
+                            "failure_kind": "session_not_found",
+                            "reason": "Session does not exist.",
+                        },
+                    )
+                    await event_bus.emit(
+                        "session_active",
+                        {"session_id": None},
+                        meta=EventMeta(source=EventSource.RUNTIME),
+                    )
+                elif row.get("launch_id") not in (None, launch_id):
+                    result_payload.update(
+                        status="conflict",
+                        result={
+                            "ok": False,
+                            "failure_kind": "launch_mismatch",
+                            "reason": "Session belongs to another launch.",
+                        },
+                    )
+                    await event_bus.emit(
+                        "session_active",
+                        {"session_id": None},
+                        meta=EventMeta(source=EventSource.RUNTIME),
+                    )
+                else:
+                    result_payload.update(
+                        status="completed",
+                        result={"ok": True, "active_session_id": session_id, "session": row},
+                    )
+                    await event_bus.emit(
+                        "session_active",
+                        {"session_id": session_id, "title": row.get("title")},
+                        meta=EventMeta(source=EventSource.RUNTIME, session_id=session_id),
+                    )
+        elif operation == "chat":
+            if not isinstance(session_id, str):
+                result_payload.update(status="invalid", result={"ok": False, "reason": "session_id is required"})
+            else:
+                row = store.get_session_record(session_id)
+                if row is None:
+                    result_payload.update(
+                        status="not_found",
+                        result={
+                            "ok": False,
+                            "failure_kind": "session_not_found",
+                            "reason": "Session does not exist.",
+                        },
+                    )
+                elif row.get("launch_id") not in (None, launch_id):
+                    result_payload.update(
+                        status="conflict",
+                        result={
+                            "ok": False,
+                            "failure_kind": "launch_mismatch",
+                            "reason": "Session belongs to another launch.",
+                        },
+                    )
+                else:
+                    result_payload.update(status="accepted", result={"ok": True, "session_id": session_id})
+                    if accept_callback is not None:
+                        accepted_data = accept_callback()
+                        if inspect.isawaitable(accepted_data):
+                            accepted_data = await accepted_data
+                        result_payload["result"].update(dict(accepted_data or {}))
+        else:
+            result_payload.update(
+                status="unsupported",
+                result={"ok": False, "reason": "Unsupported session operation."},
+            )
+    except SessionNotFoundError as exc:
+        result_payload.update(
+            status="not_found",
+            result={"ok": False, "failure_kind": "session_not_found", "reason": str(exc)},
+        )
+    except SessionConflictError as exc:
+        result_payload.update(
+            status="conflict",
+            result={"ok": False, "failure_kind": "session_conflict", "reason": str(exc)},
+        )
+    except SessionOutcomeUnknownError as exc:
+        result_payload.update(
+            status="failed",
+            result={"ok": False, "failure_kind": "storage_outcome_unknown", "reason": str(exc)},
+        )
+    except SessionStoreError as exc:
+        logger.warning("Session authority persistence failed: %s", type(exc).__name__)
+        result_payload.update(status="failed", result={"ok": False, "failure_kind": "storage", "reason": str(exc)})
+    except Exception as exc:
+        logger.warning("Main session operation failed: %s", type(exc).__name__, exc_info=True)
+        result_payload.update(status="failed", result={"ok": False, "failure_kind": "exception", "reason": str(exc)})
+    finally:
+        entry = in_flight.get(request_id)
+        if current is not None and (
+            entry is current or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] is current)
+        ):
+            in_flight.pop(request_id, None)
+    return await _publish(result_payload)
+
+
 def _is_sustained_research_request(text: str, runtime_config: Any) -> bool:
     """Classify explicit long research as a task without backgrounding every lookup."""
     if not getattr(runtime_config, "research_enabled", True):
@@ -853,6 +1169,14 @@ async def _start_sustained_research_task(
             try:
                 store.append("user", request.input, session_id=request.session_id, turn_id=request.turn_id)
                 store.touch_session(request.session_id)
+            except SessionNotFoundError:
+                logger.warning(
+                    "session_persistence_dropped | phase=sustained_research | session_id=%s "
+                    "| turn_id=%s | reason=session_deleted",
+                    request.session_id,
+                    request.turn_id,
+                )
+                raise
             except Exception:
                 logger.warning("sustained_research_user_message_archive_failed", exc_info=True)
         if event_bus is not None and request.channel == "voice":
@@ -2695,6 +3019,7 @@ async def main() -> int:
     pending_turn_times: Dict[str, float] = {}
     voice_diagnostic_traces: Dict[str, Any] = {}
     active_turn_id: Optional[str] = None
+    active_turn_session_id: Optional[str] = None
     active_task_id: Optional[str] = None
     active_operation_name: Optional[str] = None
     active_operation_task_id: Optional[str] = None
@@ -2708,6 +3033,9 @@ async def main() -> int:
     calendar_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
     calendar_operation_in_flight: dict[str, Any] = {}
     calendar_operation_fingerprints: dict[str, str] = {}
+    session_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    session_operation_in_flight: dict[str, Any] = {}
+    session_operation_fingerprints: dict[str, str] = {}
     event_bus_registry = _EventBusSubmissionRegistry()
     _main_event_bus_registry = event_bus_registry
 
@@ -2716,6 +3044,7 @@ async def main() -> int:
         if runtime_shutting_down:
             return
         runtime_shutting_down = True
+        background_task.close_admission()
         event_bus_registry.close()
 
     global background_housekeeping_tasks
@@ -2742,6 +3071,11 @@ async def main() -> int:
     try:
         try:
             store = SessionStore(config.session_db_path)
+            orphan_counter = getattr(store, "count_legacy_orphans", None)
+            if callable(orphan_counter):
+                orphan_counts = orphan_counter()
+                if any(orphan_counts.values()):
+                    logger.warning("legacy_session_orphans | counts=%s", orphan_counts)
         except Exception as e:
             logger.error(f"Failed to initialize SessionStore: {e}")
             raise
@@ -2831,6 +3165,8 @@ async def main() -> int:
                 active_audit_store = None
             if active_audit_store is not None:
                 status = getattr(envelope.status, "value", envelope.status)
+                if envelope.data.get("persistence_status") == "failed":
+                    status = f"{status}:persistence_failed"
                 active_audit_store.record(name, {}, str(status))
 
         def on_intent_decision(decision: IntentDecision):
@@ -3292,7 +3628,11 @@ async def main() -> int:
             if not session_id:
                 return
             try:
-                store.create_session(session_id, title="New Chat", source="voice", launch_id=_LAUNCH_ID)
+                row = store.get_session_record(session_id)
+                if row is None:
+                    store.create_session(session_id, title="New Chat", source="voice", launch_id=_LAUNCH_ID)
+                elif row.get("launch_id") not in (None, _LAUNCH_ID):
+                    raise SessionConflictError(f"Session '{session_id}' belongs to another launch")
             except Exception as exc:
                 logger.debug(f"ensure_session_ready skipped: {exc}")
 
@@ -3300,18 +3640,11 @@ async def main() -> int:
             if not session_id or not user_text:
                 return
             try:
-                rows = store.get_sessions()
-                session_map = {row[0]: row for row in rows}
-                session = session_map.get(session_id)
-                if not session:
-                    return
-                current_title = session[1] or "New Chat"
-                if current_title != "New Chat":
-                    return
                 candidate = " ".join(user_text.strip().split()[:6]).strip()
                 if not candidate:
                     return
-                store.update_session_title(session_id, candidate)
+                if not store.auto_title_session(session_id, candidate):
+                    return
                 if event_bus:
                     _submit_event_threadsafe(
                         event_bus.emit(
@@ -3495,7 +3828,8 @@ async def main() -> int:
 
         @_cleanup_intent_decision
         async def _process(request: TurnRequest, brain, voice):
-            nonlocal speech_echo_cooldown, last_emotion, turn_active, active_turn_id, active_task_id
+            nonlocal speech_echo_cooldown, last_emotion, turn_active
+            nonlocal active_turn_id, active_turn_session_id, active_task_id
             nonlocal active_operation_name, active_operation_task_id, active_operation_cancellable
             text = request.input
             session_id = request.session_id
@@ -3504,6 +3838,7 @@ async def main() -> int:
             queued_at = pending_turn_times.pop(request.turn_id, None)
             dispatch_timestamp = time.monotonic()
             active_turn_id = request.turn_id
+            active_turn_session_id = session_id
             active_task_id = None
             if trace is not None:
                 trace.bind(turn_id=request.turn_id, session_id=session_id)
@@ -3798,6 +4133,12 @@ async def main() -> int:
                 store.append("user", text, session_id=session_id, turn_id=request.turn_id)
                 store.touch_session(session_id)
                 update_session_title_from_text(session_id, text)
+            except SessionNotFoundError:
+                logger.warning(
+                    "session_persistence_dropped | phase=user | session_id=%s | turn_id=%s | reason=session_deleted",
+                    session_id,
+                    request.turn_id,
+                )
             except Exception as e:
                 logger.warning(f"Failed to archive user message or touch session: {e}")
             # Voice command detection (before LLM call)
@@ -3976,6 +4317,13 @@ async def main() -> int:
                     try:
                         store.append("assistant", final_reply, session_id=session_id, turn_id=request.turn_id)
                         store.touch_session(session_id)
+                    except SessionNotFoundError:
+                        logger.warning(
+                            "session_persistence_dropped | phase=assistant | session_id=%s "
+                            "| turn_id=%s | reason=session_deleted",
+                            session_id,
+                            request.turn_id,
+                        )
                     except Exception as e:
                         logger.warning(f"Failed to archive assistant message or touch session: {e}")
                     if platform == "telegram" and telegram_bot:
@@ -4070,6 +4418,7 @@ async def main() -> int:
                     active_operation_cancellable = True
                 if active_turn_id == request.turn_id:
                     active_turn_id = None
+                    active_turn_session_id = None
                     active_task_id = None
                 voice_diagnostic_traces.pop(request.turn_id, None)
                 clear_diagnostic_context = getattr(voice, "set_diagnostic_context", None)
@@ -4239,27 +4588,108 @@ async def main() -> int:
         async def consume_web_commands(event_bus, brain):
             """Read commands from the web UI and dispatch them."""
             nonlocal current_web_session_id, voice, mcp_client
+
+            async def _session_request(payload, operation=None, accept_callback=None):
+                request_payload = dict(payload or {})
+                if operation is not None:
+                    request_payload["operation"] = operation
+                request_payload.setdefault("request_id", f"session-{id(request_payload)}")
+                try:
+                    session_handler = _handle_session_operation_request
+                except NameError:
+                    if operation == "chat":
+                        result = await accept_callback() if accept_callback is not None else {}
+                        return {"status": "accepted", "result": {"ok": True, **(result or {})}}
+                    raise
+                result = await session_handler(
+                    store,
+                    event_bus,
+                    request_payload,
+                    result_cache=session_operation_results,
+                    in_flight=session_operation_in_flight,
+                    fingerprint_cache=session_operation_fingerprints,
+                    active_session_id=current_web_session_id,
+                    active_turn_session_id=active_turn_session_id,
+                    queued_session_ids=tuple(item.session_id for item in pending_turns),
+                    background_session_ids=tuple(
+                        task.session_id
+                        for task in background_task.list_tasks()
+                        if task.status in {"queued", "running"}
+                    ),
+                    accept_callback=accept_callback,
+                    launch_id=_LAUNCH_ID,
+                )
+                result_data = result.get("result") if isinstance(result.get("result"), dict) else {}
+                if result.get("status") == "completed" and request_payload.get("operation") == "active":
+                    current_web_session_id = result_data.get("active_session_id")
+                    from charlie.recovery import set_active_session_id
+
+                    set_active_session_id(current_web_session_id or _voice_fallback_session_id)
+                elif result.get("status") == "completed" and request_payload.get("operation") == "delete":
+                    if result_data.get("active_session_id") is None:
+                        current_web_session_id = _voice_fallback_session_id
+                        from charlie.recovery import set_active_session_id
+
+                        set_active_session_id(_voice_fallback_session_id)
+                return result
+
             while True:
                 try:
                     cmd = await event_bus.next_command()
                     logger.debug(f"ZMQ received command: {cmd}")
                     cmd_type = cmd.get("type")
-                    if cmd_type == "chat":
-                        payload_sid = cmd.get("payload", {}).get("session_id")
-                        current_web_session_id = cmd.get("session_id") or payload_sid or _voice_fallback_session_id
-                        from charlie.recovery import set_active_session_id
+                    if cmd_type == "session_operation":
+                        await _session_request(cmd.get("payload", {}))
+                    elif cmd_type == "session_chat":
+                        payload = dict(cmd.get("payload") or {})
+                        async def accept_http_chat():
+                            request = _allocate_turn_request(
+                                str(payload.get("text") or ""),
+                                str(payload.get("session_id") or ""),
+                                "web",
+                            )
+                            await _dispatch_or_queue(request)
+                            return {"turn_id": request.turn_id}
 
-                        set_active_session_id(current_web_session_id)
-                        chat_text = cmd.get("text") or cmd.get("payload", {}).get("text", "")
-                        request = _allocate_turn_request(chat_text, current_web_session_id, "web")
-                        await _dispatch_or_queue(request)
+                        result = await _session_request(
+                            payload,
+                            operation="chat",
+                            accept_callback=accept_http_chat,
+                        )
+                    elif cmd_type == "chat":
+                        payload_sid = cmd.get("payload", {}).get("session_id")
+                        chat_payload = dict(cmd.get("payload") or {})
+                        chat_payload.setdefault("session_id", cmd.get("session_id") or payload_sid)
+                        chat_payload.setdefault("text", cmd.get("text") or chat_payload.get("text", ""))
+                        async def accept_ws_chat():
+                            nonlocal current_web_session_id
+                            current_web_session_id = chat_payload.get("session_id") or _voice_fallback_session_id
+                            from charlie.recovery import set_active_session_id
+
+                            set_active_session_id(current_web_session_id)
+                            request = _allocate_turn_request(
+                                chat_payload.get("text", ""),
+                                current_web_session_id,
+                                "web",
+                            )
+                            await _dispatch_or_queue(request)
+                            return {"turn_id": request.turn_id}
+
+                        await _session_request(
+                            chat_payload,
+                            operation="chat",
+                            accept_callback=accept_ws_chat,
+                        )
                     elif cmd_type == "session_active":
                         payload_sid = cmd.get("payload", {}).get("session_id")
-                        current_web_session_id = cmd.get("session_id") or payload_sid or _voice_fallback_session_id
-                        from charlie.recovery import set_active_session_id
-
-                        set_active_session_id(current_web_session_id)
-                        logger.info(f"Active session updated to: {current_web_session_id}")
+                        await _session_request(
+                            {
+                                "session_id": cmd.get("session_id") or payload_sid,
+                                "request_id": cmd.get("request_id") or cmd.get("payload", {}).get("request_id"),
+                            },
+                            operation="active",
+                        )
+                        logger.info("Active session request processed")
                     elif cmd_type == "ws_connection_count":
                         global hud_client_count
                         hud_client_count = cmd.get("count", 0)
@@ -4528,6 +4958,9 @@ async def main() -> int:
                         from charlie import background_task
 
                         try:
+                            task_session_id = payload.get("session_id") or current_web_session_id
+                            if not isinstance(task_session_id, str) or not store.session_exists(task_session_id):
+                                raise SessionNotFoundError("Background task session does not exist")
                             await background_task.start(
                                 config,
                                 event_bus,
@@ -4537,6 +4970,7 @@ async def main() -> int:
                                 memory_graph=memory_graph,
                                 memory_service=memory_service,
                                 voice=voice,
+                                session_id=task_session_id,
                             )
                         except RuntimeError as ex:
                             await event_bus.emit(
@@ -5135,6 +5569,7 @@ async def main() -> int:
                     mcp_start_task,
                 ]
                 await _cancel_and_drain(tasks_to_drain, label="event_bus_tasks")
+                await background_task.shutdown()
                 await _drain_event_bus_submissions(event_bus_registry, loop=loop)
                 if calendar_runtime is not None:
                     try:
@@ -5170,6 +5605,7 @@ async def main() -> int:
             *tuple(background_housekeeping_tasks),
         ]
         await _cancel_and_drain(outer_tasks, label="outer_tasks")
+        await background_task.shutdown()
         await _drain_event_bus_submissions(event_bus_registry, loop=loop)
 
         try:

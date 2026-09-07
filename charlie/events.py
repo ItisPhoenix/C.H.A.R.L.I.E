@@ -42,6 +42,7 @@ class EventType(StrEnum):
     RESEARCH_RESULT = "research_result"
     SESSION_UPDATED = "session_updated"
     SESSION_ACTIVE = "session_active"
+    SESSION_OPERATION_RESULT = "session_operation_result"
     SYSTEM_STATUS = "system_status"
     SUBSYSTEM_HEALTH = "subsystem_health"
     ALERT = "alert"

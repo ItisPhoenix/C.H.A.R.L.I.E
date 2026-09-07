@@ -32,6 +32,7 @@ from charlie.research.engine import ResearchEngine
 from charlie.research.models import ResearchProgress, ResearchReport, SearchResult, SourceDocument
 from charlie.research.router import route as route_research
 from charlie.security.provenance import trust_level_for_tool
+from charlie.session_store import SessionNotFoundError
 from charlie.streaming import (
     FollowupStreamState,
     TextStreamFilter,
@@ -1038,6 +1039,19 @@ def _operation_succeeded(envelope: ResultEnvelope) -> bool:
     """Return whether execution completed, independent of display text or verification."""
 
     return envelope.status == ResultStatus.COMPLETED.value
+
+
+def _mark_persistence_failure(envelope: ResultEnvelope, error: BaseException) -> None:
+    """Keep physical execution truth while exposing history persistence loss."""
+    data = dict(envelope.data or {})
+    data["persistence_status"] = "failed"
+    kind = "session_not_found" if isinstance(error, SessionNotFoundError) else type(error).__name__.lower()
+    data["persistence_error"] = kind
+    envelope.data = data
+    errors = list(envelope.errors or [])
+    if kind not in errors:
+        errors.append(kind)
+    envelope.errors = errors
 
 
 def _operation_failed(envelope: ResultEnvelope) -> bool:
@@ -2342,6 +2356,18 @@ class Brain:
                 logger.warning("World-model failure record failed for %s", tool_name, exc_info=True)
         if before_publish is not None:
             before_publish(envelope)
+        if self.session_store:
+            try:
+                self.session_store.append_tool(
+                    turn_id=envelope.turn_id,
+                    tool_name=tool_name,
+                    args=arguments,
+                    result=envelope,
+                    session_id=envelope.session_id or session_id,
+                )
+            except Exception as persist_exc:
+                _mark_persistence_failure(envelope, persist_exc)
+                logger.warning("Tool result persistence degraded for %s: %s", tool_name, type(persist_exc).__name__)
         try:
             _invoke_callback_with_identity(
                 self.on_tool_result,
@@ -2359,17 +2385,6 @@ class Brain:
                 operation_callback(tool_name, envelope)
             except Exception:
                 logger.warning("Operation result callback failed for %s", tool_name, exc_info=True)
-        if self.session_store:
-            try:
-                self.session_store.append_tool(
-                    turn_id=envelope.turn_id,
-                    tool_name=tool_name,
-                    args=arguments,
-                    result=envelope,
-                    session_id=envelope.session_id or session_id,
-                )
-            except Exception as persist_exc:
-                logger.debug("Tool result persist skipped: %s", persist_exc)
         try:
             telemetry.record_tool_call(tool_name, success=_operation_succeeded(envelope))
         except Exception:
@@ -3394,12 +3409,6 @@ class Brain:
         ) -> None:
             """Send deterministic outcomes through canonical callback/persistence boundaries."""
 
-            operation_callback = getattr(self, "on_operation_result", None)
-            if operation_callback is not None:
-                try:
-                    operation_callback(tool_name, envelope)
-                except Exception:
-                    logger.warning("Operation result callback failed for %s", tool_name, exc_info=True)
             if self.session_store:
                 try:
                     self.session_store.append_tool(
@@ -3410,7 +3419,18 @@ class Brain:
                         session_id=envelope.session_id or session_id,
                     )
                 except Exception as persist_exc:
-                    logger.debug("Tool result persist skipped: %s", persist_exc)
+                    _mark_persistence_failure(envelope, persist_exc)
+                    logger.warning(
+                        "Tool result persistence degraded for %s: %s",
+                        tool_name,
+                        type(persist_exc).__name__,
+                    )
+            operation_callback = getattr(self, "on_operation_result", None)
+            if operation_callback is not None:
+                try:
+                    operation_callback(tool_name, envelope)
+                except Exception:
+                    logger.warning("Operation result callback failed for %s", tool_name, exc_info=True)
             telemetry.record_tool_call(tool_name, success=_operation_succeeded(envelope))
 
         def _direct_operation_result(

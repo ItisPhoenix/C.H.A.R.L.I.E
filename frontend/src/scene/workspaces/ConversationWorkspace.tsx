@@ -10,11 +10,12 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
   const connected = useCharlieStore((s) => s.connected);
   const activeToolApproval = useCharlieStore((s) => s.activeToolApproval);
   const activities = useCharlieStore((s) => s.activities);
+  const projectedSessionId = useCharlieStore((s) => s.activeSessionId);
+  const activeSessionTitle = useCharlieStore((s) => s.activeSessionTitle);
 
   const isThinking = coreState === "thinking" || coreState === "working";
   const [inputVal, setInputVal] = useState("");
   const [sending, setSending] = useState(false);
-  const [canonicalSessionId, setCanonicalSessionId] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -25,7 +26,10 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (!isMounted || !data || !data.active_session) return;
-        setCanonicalSessionId(data.active_session);
+        useCharlieStore.getState().applyEvent({
+          type: "session_active",
+          payload: { session_id: data.active_session },
+        });
       })
       .catch(() => {
         // Fallback default only if mount remains active
@@ -38,11 +42,11 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
 
   // Hydrate session messages on mount or canonical session change
   useEffect(() => {
-    if (!canonicalSessionId) return;
-    sendCommand("session_active", { session_id: canonicalSessionId });
+    if (!projectedSessionId) return;
+    sendCommand("session_active", { session_id: projectedSessionId });
 
     let isMounted = true;
-    void fetch(`/api/sessions/${canonicalSessionId}/messages`)
+    void fetch(`/api/sessions/${projectedSessionId}/messages`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (!isMounted || !data || !Array.isArray(data.messages)) return;
@@ -65,7 +69,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
     return () => {
       isMounted = false;
     };
-  }, [canonicalSessionId]);
+  }, [projectedSessionId]);
 
   useEffect(() => {
     if (typeof endRef.current?.scrollIntoView === "function") {
@@ -75,28 +79,36 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
 
   const handleSendMessage = async () => {
     const text = inputVal.trim();
-    if (!text || sending || !canonicalSessionId) return;
+    if (!text || sending || !projectedSessionId) return;
 
     setInputVal("");
     setSending(true);
 
+    const requestId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `chat-${Date.now()}`;
+
     // Optimistically add user message to timeline
-    useCharlieStore.getState().addUserMessage(text);
+    useCharlieStore.getState().addUserMessage(text, requestId);
 
     try {
-      // 1. Send via primary WebSocket command bridge
-      sendCommand("chat", { text, session_id: canonicalSessionId });
-
-      // 2. If WS is disconnected, fallback to HTTP endpoint
-      if (!connected) {
-        await fetch(`/api/sessions/${canonicalSessionId}/chat`, {
+      // Select one transport. Disconnected HTTP fallback must not leave a
+      // queued WebSocket command that can replay after reconnect.
+      if (connected) {
+        sendCommand("chat", { text, session_id: projectedSessionId, request_id: requestId });
+      } else {
+        const response = await fetch(`/api/sessions/${projectedSessionId}/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text }),
+          body: JSON.stringify({ text, request_id: requestId }),
         });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !["accepted", "completed"].includes(String(result.status))) {
+          useCharlieStore.getState().markUserMessageFailed(requestId);
+        }
       }
     } catch {
-      // Error handling handled by store / alert events
+      useCharlieStore.getState().markUserMessageFailed(requestId);
     } finally {
       setSending(false);
       textareaRef.current?.focus();
@@ -129,7 +141,8 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
             CONVERSATION & DIALOGUE LOG
           </span>
           <span className="text-[10px] text-slate-400 font-mono">
-            SESSION: <strong className="text-cyan-200">{canonicalSessionId ?? "CONNECTING..."}</strong>
+            SESSION: <strong className="text-cyan-200">{projectedSessionId ?? "CONNECTING..."}</strong>
+            {activeSessionTitle && <span className="text-[10px] text-slate-500">[{activeSessionTitle}]</span>}
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -171,6 +184,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
               >
                 <div className="flex items-center gap-1.5 text-[9px] text-cyan-400/70 uppercase">
                   <span>{isUser ? "OPERATOR" : "CHARLIE"}</span>
+                  {msg.failed && <span className="text-rose-400 text-[8px]">[failed]</span>}
                   {msg.pending && (
                     <span className="text-cyan-400 animate-pulse text-[8px]">[streaming...]</span>
                   )}
@@ -235,17 +249,17 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
           onChange={(e) => setInputVal(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={
-            canonicalSessionId
+              projectedSessionId
               ? "Send prompt to Charlie... (Enter to send, Shift+Enter for newline)"
               : "Connecting to active session..."
           }
-          disabled={!canonicalSessionId}
+            disabled={!projectedSessionId}
           className="flex-1 bg-transparent border-none outline-none text-xs text-slate-200 placeholder-slate-500 font-sans resize-none focus:ring-0 leading-relaxed disabled:opacity-50"
         />
         <div className="flex flex-col gap-1">
           <button
             type="button"
-            disabled={!canonicalSessionId || !inputVal.trim() || sending}
+            disabled={!projectedSessionId || !inputVal.trim() || sending}
             onClick={() => void handleSendMessage()}
             className="px-4 py-2 text-xs font-bold rounded-lg bg-cyan-950 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-900 transition disabled:opacity-40 cursor-pointer"
           >

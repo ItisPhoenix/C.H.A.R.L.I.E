@@ -1,6 +1,8 @@
 import os
 
-from charlie.session_store import SessionStore
+import pytest
+
+from charlie.session_store import SessionNotFoundError, SessionStore
 
 
 def test_session_store_append_and_search():
@@ -13,6 +15,7 @@ def test_session_store_append_and_search():
 
     store = SessionStore(db_path)
     try:
+        store.create_session("default", title="New Chat", source="test")
         # Test appending message
         store.append("user", "how is the weather in Paris?")
         store.append("assistant", "The weather in Paris is sunny today.")
@@ -167,6 +170,7 @@ def test_tool_content_in_session_messages():
 
     store = SessionStore(db_path)
     try:
+        store.create_session("s1", title="Tool Test", source="test")
         store.append("user", "search for cats", session_id="s1")
         store.append_tool(
             turn_id="t1",
@@ -254,4 +258,30 @@ def test_active_session_defaults_to_primary_voice_session(monkeypatch):
     monkeypatch.setattr(web_server, "_active_frontend_session", None)
     monkeypatch.setattr(web_server.config, "charlie_launch_id", "launch-1")
     assert web_server._primary_session_id() == "voice_launch-1"
+
+
+def test_session_parent_integrity_and_delete_cascade(tmp_path):
+    store = SessionStore(str(tmp_path / "integrity.db"))
+    store.create_session("s1", "One", source="test")
+    store.append_tool_event("s1", "tool_call", "demo", "ok")
+
+    with pytest.raises(SessionNotFoundError):
+        store.append("user", "orphan", session_id="missing")
+    with pytest.raises(SessionNotFoundError):
+        store.append_tool_event("missing", "tool_call", "demo", "orphan")
+
+    store.append("user", "kept", session_id="s1")
+    store.delete_session("s1")
+    assert store.get_session_messages("s1") == []
+    assert store.get_tool_events("s1") == []
+    store.close()
+
+
+def test_auto_title_is_conditional(tmp_path):
+    store = SessionStore(str(tmp_path / "title.db"))
+    store.create_session("s1", "New Chat", source="test")
+    assert store.auto_title_session("s1", "Automatic") is True
+    assert store.auto_title_session("s1", "Stale") is False
+    assert store.get_session_record("s1")["title"] == "Automatic"
+    store.close()
 

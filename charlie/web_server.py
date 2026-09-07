@@ -11,6 +11,7 @@ _configure_platform()  # noqa: E402
 
 import asyncio  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
+from collections import OrderedDict
 
 import ipaddress
 import json
@@ -29,7 +30,8 @@ from fastapi.staticfiles import StaticFiles
 
 from charlie.config import Config, config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
-from charlie.session_store import SessionStore
+from charlie.session_read_projection import SessionProjectionUnavailable, SessionReadProjection
+from charlie.session_store import canonical_session_request_fingerprint
 from charlie.utils import build_auth_headers
 from charlie.log_redaction import SensitiveDataFilter
 from charlie.terminal_service import TerminalManager
@@ -291,8 +293,13 @@ _pending_media_fingerprints: dict[str, str] = {}
 CALENDAR_OPERATION_TIMEOUT_SECONDS = 10.0
 _pending_calendar_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
 _pending_calendar_fingerprints: dict[str, str] = {}
+SESSION_OPERATION_TIMEOUT_SECONDS = 10.0
+_pending_session_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
+_pending_session_fingerprints: dict[str, str] = {}
+_completed_session_operations: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_completed_session_fingerprints: dict[str, str] = {}
 LAUNCH_ID: str = config.charlie_launch_id
-_store: SessionStore | None = None
+_session_projection: SessionReadProjection | None = None
 _terminal_manager = TerminalManager()
 _audit_store: AuditStore | None = None
 
@@ -304,11 +311,20 @@ def _get_audit_store() -> AuditStore:
     return _audit_store
 
 
-def _get_store() -> SessionStore:
-    global _store
-    if _store is None:
-        _store = SessionStore(config.session_db_path)
-    return _store
+def _get_session_projection() -> SessionReadProjection:
+    global _session_projection
+    if _session_projection is None:
+        _session_projection = SessionReadProjection(config.session_db_path)
+    return _session_projection
+
+
+async def _read_session_projection(method: str, *args: Any, **kwargs: Any) -> Any:
+    """Run blocking read-only SQLite work outside FastAPI's event loop."""
+    try:
+        projection = _get_session_projection()
+        return await asyncio.to_thread(getattr(projection, method), *args, **kwargs)
+    except SessionProjectionUnavailable:
+        return None
 
 
 _TERMINAL_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
@@ -331,7 +347,7 @@ async def lifespan(app: FastAPI):
     arrive from main over IPC.
     Shutdown: tear down EventBus."""
     # --- startup ---
-    global event_bus, plugin_manager, _audit_store
+    global event_bus, plugin_manager, _audit_store, _session_projection
     global _tool_snapshot, _tool_snapshot_event, _mcp_snapshot, _mcp_snapshot_event
     global _projected_telemetry, _projected_telemetry_event
     # This process never owns executable tool activation. Start each web
@@ -368,6 +384,9 @@ async def lifespan(app: FastAPI):
 
     # --- shutdown ---
     await _terminal_manager.close_all()
+    if _session_projection is not None:
+        _session_projection.close()
+        _session_projection = None
     if _audit_store is not None:
         _audit_store.close()
         _audit_store = None
@@ -536,6 +555,26 @@ async def _event_bridge():
             _resolve_media_operation_result(event.get("payload", {}))
         elif etype == "calendar_operation_result":
             _resolve_calendar_operation_result(event.get("payload", {}))
+        elif etype == "session_operation_result":
+            _resolve_session_operation_result(event.get("payload", {}))
+        elif etype == "session_active":
+            global _active_frontend_session
+            _active_frontend_session = event.get("payload", {}).get("session_id")
+            if isinstance(_active_frontend_session, str):
+                _deleted_session_ids.discard(_active_frontend_session)
+            for ws in active_connections:
+                ws_sessions[ws] = _active_frontend_session
+        elif etype == "session_updated":
+            payload = event.get("payload", {})
+            if payload.get("deleted"):
+                deleted_id = payload.get("session_id")
+                if isinstance(deleted_id, str):
+                    _deleted_session_ids.add(deleted_id)
+                if deleted_id == _active_frontend_session:
+                    _active_frontend_session = None
+                for ws, subscribed in list(ws_sessions.items()):
+                    if subscribed == deleted_id:
+                        ws_sessions[ws] = None
         elif etype == "extension_proposed":
             await _stage_proposed_extension(event.get("payload", {}))
             return
@@ -596,11 +635,17 @@ async def websocket_endpoint(ws: WebSocket):
 
                 # Session sync: frontend tells us which session is active
                 if msg_type == "session_active":
-                    _active_frontend_session = msg.get("session_id") or msg.get("payload", {}).get("session_id")
-                    ws_sessions[ws] = _active_frontend_session
-                    logger.info("Active session synced: %s", _active_frontend_session)
                     if event_bus:
-                        await event_bus.send_command(msg)
+                        payload = dict(msg.get("payload") or {})
+                        payload.update(
+                            {
+                                "operation": "active",
+                                "session_id": msg.get("session_id") or payload.get("session_id"),
+                                "request_id": msg.get("request_id") or payload.get("request_id") or uuid.uuid4().hex,
+                            }
+                        )
+                        payload["request_fingerprint"] = canonical_session_request_fingerprint("active", payload)
+                        await event_bus.send_command({"type": "session_operation", "payload": payload})
                 elif msg_type in (
                     "terminal_command_result",
                     "tool_approval_request",
@@ -705,8 +750,14 @@ async def terminal_ws_endpoint(ws: WebSocket, session_id: str = "primary"):
 
 @app.get("/api/history")
 async def history(limit: int = 50):
-    store = _get_store()
-    messages = store.get_recent(limit=limit)
+    fallback_session = _primary_session_id()
+    messages = (
+        await _read_session_projection("get_session_messages", fallback_session, limit=limit)
+        if fallback_session
+        else []
+    )
+    if messages is None:
+        return {"status": "unavailable", "reason": "Session history is unavailable.", "messages": []}
     return {"messages": [{"role": r, "content": c} for r, c in messages]}
 
 
@@ -984,10 +1035,11 @@ async def list_tasks():
 @app.get("/api/sessions")
 async def list_sessions(request: Request):
     """List sessions, optionally filtered by launch_id or source."""
-    store = _get_store()
     launch_id = request.query_params.get("launch_id")
     source = request.query_params.get("source")
-    sessions = store.get_sessions(source=source, launch_id=launch_id)
+    sessions = await _read_session_projection("get_sessions", source=source, launch_id=launch_id)
+    if sessions is None:
+        return {"status": "unavailable", "reason": "Session history is unavailable.", "sessions": []}
     return {
         "sessions": [
             {
@@ -1004,21 +1056,19 @@ async def list_sessions(request: Request):
 
 @app.post("/api/sessions")
 async def create_session(data: dict):
-    """Create a new session."""
+    """Request main-runtime session creation."""
     session_id = data.get("session_id", str(uuid.uuid4()))
     title = data.get("title", "New Chat")
-    source = data.get("source", "web")
-    # Fall back to the process-level launch_id so web-created sessions are
-    # captured by the "This Launch" sidebar filter.
-    launch_id = data.get("launch_id") or config.charlie_launch_id or None
-    store = _get_store()
-    store.create_session(session_id, title, source=source, launch_id=launch_id)
-    return {
-        "session_id": session_id,
-        "title": title,
-        "source": source,
-        "launch_id": launch_id,
-    }
+    result = await _request_authoritative_session_operation(
+        "create",
+        {
+            "session_id": session_id,
+            "title": title,
+            "parent_session_id": data.get("parent_session_id"),
+        },
+        request_id=data.get("request_id"),
+    )
+    return result
 
 
 @app.get("/api/sessions/{session_id}/messages")
@@ -1029,8 +1079,9 @@ async def session_messages(session_id: str, limit: int = 50):
     (e.g. [web_search args=...]) never reaches the chat UI.
     """
     _HIDDEN_ROLES = {"tool", "system"}
-    store = _get_store()
-    messages = store.get_session_messages(session_id, limit=limit)
+    messages = await _read_session_projection("get_session_messages", session_id, limit=limit)
+    if messages is None:
+        return {"status": "unavailable", "reason": "Session history is unavailable.", "messages": []}
     return {
         "messages": [
             {"role": r, "content": c}
@@ -1042,52 +1093,41 @@ async def session_messages(session_id: str, limit: int = 50):
 
 @app.put("/api/sessions/{session_id}")
 async def update_session(session_id: str, data: dict):
-    """Update session title."""
+    """Request main-runtime session rename."""
     title = data.get("title", "New Chat")
-    store = _get_store()
-    store.update_session_title(session_id, title)
-    # Broadcast title update to all connected WebSocket clients
-    await broadcast({
-        "type": "session_updated",
-        "session_id": session_id,
-        "title": title,
-    })
-    return {"session_id": session_id, "title": title}
+    return await _request_authoritative_session_operation(
+        "rename",
+        {"session_id": session_id, "title": title},
+        request_id=data.get("request_id"),
+    )
 
 
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str):
-    """Delete a session and all its messages."""
-    store = _get_store()
-    store.delete_session(session_id)
-    await broadcast(
-        {
-            "type": "session_updated",
-            "payload": {"session_id": session_id, "deleted": True},
-        }
-    )
-    return {"session_id": session_id, "deleted": True}
+    """Request main-runtime session deletion."""
+    return await _request_authoritative_session_operation("delete", {"session_id": session_id})
 
 @app.post("/api/sessions/{session_id}/chat")
 async def session_chat(session_id: str, data: dict):
     """HTTP fallback for chat when WebSocket is down.
 
-    Persists the user turn and forwards it to the voice process as a `chat`
-    command so the brain generates a reply and streams `token` events back
-    over the WebSocket, exactly like the live path.
+    Forwards one correlated admission request to main. The web process never
+    persists the user turn itself.
     """
     text = str(data.get("text") or data.get("message") or "").strip()
     if not text:
         return {"status": "error", "detail": "empty message"}
-    if event_bus:
-        await event_bus.send_command(
-            {"type": "chat", "session_id": session_id, "text": text}
+    if event_bus is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "reason": "Main session authority is unavailable."},
         )
-    else:
-        # In web-only mode there is no main-process turn handler to persist the
-        # user message. Full mode persists it exactly once in main.py.
-        _get_store().append("user", text, session_id=session_id)
-    return {"status": "ok"}
+    result = await _request_authoritative_session_operation(
+        "chat",
+        {"session_id": session_id, "text": text},
+        request_id=data.get("request_id"),
+    )
+    return result
 # ---------------------------------------------------------------------------
 _system_status: dict = {}
 _subsystem_health: dict = {}
@@ -1100,6 +1140,7 @@ _mcp_snapshot_event: dict[str, Any] | None = None
 _projected_telemetry: dict[str, Any] | None = None
 _projected_telemetry_event: dict[str, Any] | None = None
 _active_frontend_session: str | None = None
+_deleted_session_ids: set[str] = set()
 _audio_state: dict = {
     "muted": False,
     "volume": 1.0,
@@ -1114,13 +1155,20 @@ _pending_approvals: dict = {}
 _active_presentation_intents: dict = {}
 
 
-def _primary_session_id() -> str:
-    return _active_frontend_session or f"voice_{config.charlie_launch_id}"
+def _primary_session_id() -> Optional[str]:
+    if _active_frontend_session:
+        return _active_frontend_session
+    fallback = f"voice_{config.charlie_launch_id}"
+    return None if fallback in _deleted_session_ids else fallback
 
 
 @app.get("/api/session/active")
 async def get_active_session():
     session_id = _primary_session_id()
+    if session_id and _active_frontend_session is None:
+        exists = await _read_session_projection("session_exists", session_id)
+        if exists is False:
+            session_id = None
     return {"session_id": session_id, "active_session": session_id}
 
 
@@ -1437,6 +1485,134 @@ async def _request_authoritative_calendar_operation(
             "status": "invalid_result",
             "result": {"ok": False, "reason": "Main calendar authority returned an invalid result."},
         }
+    return result
+
+
+def _cache_completed_session_operation(request_id: str, payload: dict[str, Any], fingerprint: str) -> None:
+    _completed_session_operations[request_id] = payload
+    _completed_session_operations.move_to_end(request_id)
+    _completed_session_fingerprints[request_id] = fingerprint
+    while len(_completed_session_operations) > 512:
+        evicted_id, _ = _completed_session_operations.popitem(last=False)
+        _completed_session_fingerprints.pop(evicted_id, None)
+
+
+def _resolve_session_operation_result(payload: object) -> None:
+    if not isinstance(payload, dict):
+        return
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return
+    fingerprint = payload.get("request_fingerprint")
+    expected = _pending_session_fingerprints.get(request_id)
+    if expected is not None and fingerprint != expected:
+        logger.warning("Ignoring session result with mismatched request fingerprint: %s", request_id)
+        return
+    future = _pending_session_operations.get(request_id)
+    if future is not None and not future.done():
+        future.set_result(dict(payload))
+
+
+async def _request_authoritative_session_operation(
+    operation: str,
+    payload: dict[str, Any],
+    *,
+    request_id: Any = None,
+) -> dict[str, Any]:
+    request_id = _terminal_request_id(request_id)
+    request_payload = dict(payload)
+    request_payload["operation"] = operation
+    request_payload["request_id"] = request_id
+    fingerprint = canonical_session_request_fingerprint(operation, request_payload)
+    request_payload["request_fingerprint"] = fingerprint
+    cached = _completed_session_operations.get(request_id)
+    if cached is not None:
+        if _completed_session_fingerprints.get(request_id) != fingerprint:
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "request_id_conflict",
+                "result": {"ok": False, "failure_kind": "request_id_conflict"},
+            }
+        return cached
+    if event_bus is None:
+        return {
+            "request_id": request_id,
+            "request_fingerprint": fingerprint,
+            "operation": operation,
+            "status": "unavailable",
+            "result": {
+                "ok": False,
+                "failure_kind": "runtime_unavailable",
+                "reason": "Main session authority is unavailable.",
+            },
+        }
+    loop = asyncio.get_running_loop()
+    existing = _pending_session_operations.get(request_id)
+    if existing is not None and not existing.done():
+        if _pending_session_fingerprints.get(request_id) != fingerprint:
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "request_id_conflict",
+                "result": {"ok": False, "failure_kind": "request_id_conflict"},
+            }
+        return await asyncio.shield(existing)
+    future: asyncio.Future[dict[str, Any]] = loop.create_future()
+    _pending_session_operations[request_id] = future
+    _pending_session_fingerprints[request_id] = fingerprint
+    try:
+        command_type = "session_chat" if operation == "chat" else "session_operation"
+        sent = await event_bus.send_command({"type": command_type, "payload": request_payload})
+        if sent is False:
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "unavailable",
+                "result": {
+                    "ok": False,
+                    "failure_kind": "runtime_unavailable",
+                    "reason": "Main session authority is unavailable.",
+                },
+            }
+        try:
+            result = await asyncio.wait_for(future, timeout=SESSION_OPERATION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "timeout",
+                "result": {"ok": False, "failure_kind": "timeout", "reason": "Main session authority timed out."},
+            }
+    finally:
+        _pending_session_operations.pop(request_id, None)
+        _pending_session_fingerprints.pop(request_id, None)
+    if not isinstance(result, dict) or result.get("request_id") != request_id:
+        return {
+            "request_id": request_id,
+            "request_fingerprint": fingerprint,
+            "operation": operation,
+            "status": "invalid_result",
+            "result": {
+                "ok": False,
+                "failure_kind": "invalid_result",
+                "reason": "Main returned an invalid session result.",
+            },
+        }
+    if result.get("status") == "completed":
+        result_data = result.get("result") if isinstance(result.get("result"), dict) else {}
+        if operation == "active":
+            global _active_frontend_session
+            _active_frontend_session = result_data.get("active_session_id")
+        elif operation == "delete" and result_data.get("active_session_id") is None:
+            _active_frontend_session = None
+            for ws in active_connections:
+                ws_sessions[ws] = None
+    _cache_completed_session_operation(request_id, result, fingerprint)
     return result
 
 
@@ -2764,20 +2940,17 @@ async def rollback_extension_transaction(tx_id: str):
 
 @app.post("/api/session/active")
 async def set_active_session(data: dict):
-    """Frontend signals which session is active (for voice routing)."""
-    global _active_frontend_session
-    _active_frontend_session = data.get("session_id")
-    logger.info("Active frontend session: %s", _active_frontend_session)
-    # Also update WS client subscriptions and route the switch to the voice
-    # process so microphone speech lands in the right session. The WS
-    # `session_active` path already does this; the POST path must too.
-    for ws in active_connections:
-        ws_sessions[ws] = _active_frontend_session
-    if event_bus:
-        await event_bus.send_command(
-            {"type": "session_active", "session_id": _active_frontend_session}
-        )
-    return {"active_session": _active_frontend_session}
+    """Request main validation and canonical active-session switching."""
+    result = await _request_authoritative_session_operation(
+        "active",
+        {"session_id": data.get("session_id")},
+        request_id=data.get("request_id"),
+    )
+    if result.get("status") == "completed":
+        session_id = result.get("result", {}).get("active_session_id")
+        for ws in active_connections:
+            ws_sessions[ws] = session_id
+    return result
 
 
 _settings_service = SettingsService(config)

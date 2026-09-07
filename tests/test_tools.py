@@ -876,6 +876,12 @@ def test_session_search_formatting(tmp_path, monkeypatch):
     monkeypatch.setattr("charlie.tools.config.session_db_path", db_path)
     store = SessionStore(db_path)
     try:
+        store.create_session(
+            "default",
+            title="New Chat",
+            source="test",
+            launch_id=tools_module.config.charlie_launch_id or None,
+        )
         store.append("user", "remember this secret")
         store.append("assistant", "remembered the secret")
         formatted = session_search("secret")

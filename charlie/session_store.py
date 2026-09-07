@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sqlite3
@@ -16,16 +17,81 @@ logger = logging.getLogger("charlie.session_store")
 _TOOL_PERSIST_MAX_CHARS = 500  # cap stored tool result length to prevent DB bloat
 
 
+class SessionStoreError(RuntimeError):
+    """Base class for truthful session persistence failures."""
+
+
+class SessionNotFoundError(SessionStoreError):
+    """A message/tool/session mutation referenced no existing session."""
+
+
+class SessionConflictError(SessionStoreError):
+    """A session ID is already bound to incompatible immutable metadata."""
+
+
+class SessionStorageError(SessionStoreError):
+    """SQLite failed a session persistence operation."""
+
+
+class SessionOutcomeUnknownError(SessionStorageError):
+    """Commit outcome could not be established; mutation was not retried."""
+
+
+class _WriteContext:
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+        self.dml_started = False
+
+    def execute(self, sql: str, parameters: tuple[Any, ...] = ()):
+        keyword = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ""
+        if keyword in {"INSERT", "UPDATE", "DELETE", "REPLACE"}:
+            self.dml_started = True
+        return self.connection.execute(sql, parameters)
+
+
+def canonical_session_request_fingerprint(operation: str, payload: dict[str, Any]) -> str:
+    """Stable identity for main-owned session mutations."""
+    if operation == "create":
+        identity = {
+            "operation": operation,
+            "session_id": payload.get("session_id"),
+            "title": str(payload.get("title", "New Chat")).strip(),
+            "source": payload.get("source"),
+            "parent_session_id": payload.get("parent_session_id"),
+        }
+    elif operation == "rename":
+        identity = {
+            "operation": operation,
+            "session_id": payload.get("session_id"),
+            "title": str(payload.get("title", "")).strip(),
+        }
+    elif operation in {"delete", "active", "chat"}:
+        identity = {
+            "operation": operation,
+            "session_id": payload.get("session_id"),
+        }
+        if operation == "chat":
+            identity["text"] = str(payload.get("text") or "")
+    else:
+        identity = {"operation": operation, **payload}
+    return json.dumps(identity, sort_keys=True, separators=(",", ":"))
+
+
 class SessionStore:
     """Persistent SQLite-backed session history store with FTS5 search."""
 
     def __init__(self, db_path: str = "sessions.db"):
         self.db_path = db_path
         self._local = threading.local()
+        self._connections: set[sqlite3.Connection] = set()
+        self._connections_lock = threading.Lock()
+        self._closed = False
         self.init_db()
 
     @property
     def conn(self):
+        if self._closed:
+            raise SessionStorageError("SessionStore is closed")
         if not hasattr(self._local, "conn") or self._local.conn is None:
             self._local.conn = self._get_connection()
         return self._local.conn
@@ -44,12 +110,12 @@ class SessionStore:
                 if db_dir and not os.path.exists(db_dir):
                     os.makedirs(db_dir, exist_ok=True)
 
-                conn = sqlite3.connect(
-                    self.db_path, timeout=5.0
-                )
+                conn = sqlite3.connect(self.db_path, timeout=5.0, check_same_thread=False)
                 # Enable foreign keys and set WAL mode for better concurrency
                 conn.execute("PRAGMA foreign_keys = ON;")
                 conn.execute("PRAGMA journal_mode = WAL;")
+                with self._connections_lock:
+                    self._connections.add(conn)
                 return conn
             except sqlite3.OperationalError as e:
                 if "database is locked" in str(e) and attempt < retries - 1:
@@ -87,11 +153,79 @@ class SessionStore:
                 if reraise:
                     raise
                 return None
+
             except sqlite3.Error as e:
                 logger.error("%s failed: %s", op_name, e)
                 if reraise:
                     raise
                 return None
+
+    def _mutate(self, op: Callable[[_WriteContext], T], op_name: str) -> T:
+        """Run stage-aware transaction; never replay DML after uncertain commit."""
+        for begin_attempt in range(2):
+            connection = self.conn
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower() and begin_attempt == 0:
+                    time.sleep(0.05)
+                    continue
+                raise SessionStorageError(f"{op_name} could not begin") from exc
+            context = _WriteContext(connection)
+            try:
+                result = op(context)
+            except SessionStoreError:
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                if "session_not_found" in str(exc):
+                    raise SessionNotFoundError("Referenced session does not exist") from exc
+                raise SessionStorageError(f"{op_name} integrity failure") from exc
+            except sqlite3.OperationalError as exc:
+                connection.rollback()
+                if "locked" in str(exc).lower() and not context.dml_started and begin_attempt == 0:
+                    time.sleep(0.05)
+                    continue
+                if "locked" in str(exc).lower() and context.dml_started:
+                    raise SessionOutcomeUnknownError(f"{op_name} outcome is unknown") from exc
+                raise SessionStorageError(f"{op_name} failed") from exc
+            except sqlite3.Error as exc:
+                connection.rollback()
+                raise SessionStorageError(f"{op_name} failed") from exc
+            except Exception:
+                connection.rollback()
+                raise
+
+            commit_error: Optional[BaseException] = None
+            for _ in range(2):
+                try:
+                    connection.commit()
+                    commit_error = None
+                    break
+                except sqlite3.OperationalError as exc:
+                    commit_error = exc
+                    if "locked" not in str(exc).lower():
+                        break
+                    time.sleep(0.05)
+                except sqlite3.Error as exc:
+                    commit_error = exc
+                    break
+            if commit_error is not None:
+                self._retire_connection(connection)
+                raise SessionOutcomeUnknownError(f"{op_name} commit outcome is unknown") from commit_error
+            return result
+        raise SessionStorageError(f"{op_name} could not acquire transaction")
+
+    def _retire_connection(self, connection: sqlite3.Connection) -> None:
+        with self._connections_lock:
+            self._connections.discard(connection)
+        if getattr(self._local, "conn", None) is connection:
+            self._local.conn = None
+        try:
+            connection.close()
+        except sqlite3.Error:
+            logger.debug("Failed to retire unusable session connection", exc_info=True)
 
     def init_db(self) -> None:
         """Initializes tables and FTS5 search virtualization on first use."""
@@ -201,6 +335,43 @@ class SessionStore:
                         created_at TEXT NOT NULL
                     )"""
                 )
+                # Existing databases predate declared foreign keys. These
+                # idempotent triggers enforce the same parent-session invariant
+                # without rebuilding historical tables in place.
+                self.conn.execute(
+                    """CREATE TRIGGER IF NOT EXISTS messages_require_session
+                    BEFORE INSERT ON messages
+                    WHEN NEW.session_id IS NULL OR NOT EXISTS (
+                        SELECT 1 FROM sessions WHERE session_id = NEW.session_id
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'session_not_found');
+                    END;"""
+                )
+                self.conn.execute(
+                    """CREATE TRIGGER IF NOT EXISTS tool_events_require_session
+                    BEFORE INSERT ON tool_events
+                    WHEN NOT EXISTS (
+                        SELECT 1 FROM sessions WHERE session_id = NEW.session_id
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'session_not_found');
+                    END;"""
+                )
+                self.conn.execute(
+                    """CREATE TRIGGER IF NOT EXISTS sessions_delete_messages
+                    AFTER DELETE ON sessions
+                    BEGIN
+                        DELETE FROM messages WHERE session_id = OLD.session_id;
+                    END;"""
+                )
+                self.conn.execute(
+                    """CREATE TRIGGER IF NOT EXISTS sessions_delete_tool_events
+                    AFTER DELETE ON sessions
+                    BEGIN
+                        DELETE FROM tool_events WHERE session_id = OLD.session_id;
+                    END;"""
+                )
         except sqlite3.Error as e:
             logger.error(f"Database initialization failed: {e}")
             raise
@@ -213,19 +384,18 @@ class SessionStore:
         turn_id: Optional[str] = None,
     ) -> None:
         """Appends a single message to history and bumps the session timestamp."""
-        def _do():
-            with self.conn:
-                self.conn.execute(
-                    "INSERT INTO messages (role, content, session_id, turn_id) "
-                    "VALUES (?, ?, ?, ?);",
-                    (role, content, session_id, turn_id),
-                )
-                # Keep updated_at current so the sidebar sorts by latest activity
-                self.conn.execute(
-                    "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-                    (utc_now_iso(), session_id),
-                )
-        self._with_retry(_do, "append message to history")
+        def _do(tx: _WriteContext):
+            tx.execute(
+                "INSERT INTO messages (role, content, session_id, turn_id) "
+                "VALUES (?, ?, ?, ?);",
+                (role, content, session_id, turn_id),
+            )
+            # Keep updated_at current so the sidebar sorts by latest activity
+            tx.execute(
+                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                (utc_now_iso(), session_id),
+            )
+        self._mutate(_do, "append message to history")
 
 
     def append_tool(
@@ -289,12 +459,13 @@ class SessionStore:
                 else:
                     cursor.execute(
                         """
-                        SELECT role, content FROM messages
-                        WHERE id IN (
+                        SELECT messages.role, messages.content FROM messages
+                        JOIN sessions ON sessions.session_id = messages.session_id
+                        WHERE messages.id IN (
                             SELECT rowid FROM messages_fts
                             WHERE messages_fts MATCH ?
                         )
-                        ORDER BY id DESC LIMIT ?;
+                        ORDER BY messages.id DESC LIMIT ?;
                         """,
                         (query, limit),
                     )
@@ -314,9 +485,10 @@ class SessionStore:
                 else:
                     cursor.execute(
                         """
-                        SELECT role, content FROM messages
-                        WHERE content LIKE ?
-                        ORDER BY id DESC LIMIT ?;
+                        SELECT messages.role, messages.content FROM messages
+                        JOIN sessions ON sessions.session_id = messages.session_id
+                        WHERE messages.content LIKE ?
+                        ORDER BY messages.id DESC LIMIT ?;
                         """,
                         (f"%{query}%", limit),
                     )
@@ -332,7 +504,9 @@ class SessionStore:
         def _do():
             cursor = self.conn.cursor()
             cursor.execute(
-                "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                "SELECT messages.role, messages.content FROM messages "
+                "JOIN sessions ON sessions.session_id = messages.session_id "
+                "WHERE messages.session_id = ? ORDER BY messages.id DESC LIMIT ?",
                 (session_id, limit),
             )
             return list(reversed(cursor.fetchall()))
@@ -346,25 +520,71 @@ class SessionStore:
         source: str = "voice",
         launch_id: Optional[str] = None,
         parent_session_id: Optional[str] = None,
-    ) -> None:
-        """Creates a session metadata row with origin tracking."""
+    ) -> dict[str, Any]:
+        """Create or return one canonical session row."""
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("session_id is required")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError("title is required")
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError("source is required")
+        def _do(tx: _WriteContext) -> dict[str, Any]:
+            existing = tx.execute(
+                "SELECT session_id, title, created_at, updated_at, source, launch_id, parent_session_id "
+                "FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing[4] != source
+                    or existing[5] != launch_id
+                    or existing[6] != parent_session_id
+                ):
+                    raise SessionConflictError(
+                        f"Session '{session_id}' is bound to incompatible lineage"
+                    )
+                return self._session_record(existing)
+            tx.execute(
+                "INSERT INTO sessions "
+                "(session_id, title, source, launch_id, parent_session_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, title, source, launch_id, parent_session_id),
+            )
+            row = tx.execute(
+                "SELECT session_id, title, created_at, updated_at, source, launch_id, parent_session_id "
+                "FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                raise SessionStorageError(f"Session '{session_id}' was not persisted")
+            return self._session_record(row)
+        return self._mutate(_do, "create session")
+
+    @staticmethod
+    def _session_record(row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "session_id": row[0],
+            "title": row[1],
+            "created_at": row[2],
+            "updated_at": row[3],
+            "source": row[4],
+            "launch_id": row[5],
+            "parent_session_id": row[6],
+        }
+
+    def get_session_record(self, session_id: str) -> Optional[dict[str, Any]]:
         try:
-            with self.conn:
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO sessions "
-                    "(session_id, title, source, launch_id, parent_session_id) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (session_id, title, source, launch_id, parent_session_id),
-                )
-                # If the row already exists but source/launch_id were NULL,
-                # backfill them so filtering works for sessions created before this migration.
-                self.conn.execute(
-                    "UPDATE sessions SET source = COALESCE(source, ?), "
-                    " launch_id = COALESCE(launch_id, ?) WHERE session_id = ?",
-                    (source, launch_id, session_id),
-                )
-        except sqlite3.Error as e:
-            logger.error(f"create_session failed: {e}")
+            row = self.conn.execute(
+                "SELECT session_id, title, created_at, updated_at, source, launch_id, parent_session_id "
+                "FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            return self._session_record(row) if row is not None else None
+        except sqlite3.Error as exc:
+            raise SessionStorageError(f"Failed to read session '{session_id}'") from exc
+
+    def session_exists(self, session_id: str) -> bool:
+        return self.get_session_record(session_id) is not None
 
     def get_sessions(
         self,
@@ -397,38 +617,58 @@ class SessionStore:
             return []
 
     def update_session_title(self, session_id: str, title: str) -> None:
-        """Updates the title and updated_at of a session."""
-        try:
-            with self.conn:
-                self.conn.execute(
-                    "UPDATE sessions SET title = ?, updated_at = ? WHERE session_id = ?",
-                    (title, utc_now_iso(), session_id),
-                )
-        except sqlite3.Error as e:
-            logger.error(f"update_session_title failed: {e}")
+        """Update title; raise when session is missing or storage fails."""
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError("title is required")
+
+        def _do(tx: _WriteContext) -> None:
+            cursor = tx.execute(
+                "UPDATE sessions SET title = ?, updated_at = ? WHERE session_id = ?",
+                (title, utc_now_iso(), session_id),
+            )
+            if cursor.rowcount != 1:
+                raise SessionNotFoundError(f"Session '{session_id}' does not exist")
+        self._mutate(_do, "rename session")
+
+    def auto_title_session(self, session_id: str, title: str) -> bool:
+        """Set first-turn title only while it is still the placeholder."""
+        if not isinstance(title, str) or not title.strip():
+            return False
+        def _do(tx: _WriteContext) -> bool:
+            cursor = tx.execute(
+                "UPDATE sessions SET title = ?, updated_at = ? "
+                "WHERE session_id = ? AND title = 'New Chat'",
+                (title, utc_now_iso(), session_id),
+            )
+            return cursor.rowcount == 1
+        return self._mutate(_do, "auto-title session")
 
     def touch_session(self, session_id: str) -> None:
-        """Updates updated_at timestamp for a session (marks last activity)."""
-        try:
-            with self.conn:
-                self.conn.execute(
-                    "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-                    (utc_now_iso(), session_id),
-                )
-        except sqlite3.Error as e:
-            logger.error(f"touch_session failed: {e}")
+        """Update activity timestamp; raise when session is missing."""
+        def _do(tx: _WriteContext) -> None:
+            cursor = tx.execute(
+                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                (utc_now_iso(), session_id),
+            )
+            if cursor.rowcount != 1:
+                raise SessionNotFoundError(f"Session '{session_id}' does not exist")
+        self._mutate(_do, "touch session")
 
-    def delete_session(self, session_id: str) -> None:
-        """Deletes a session and all its messages."""
-        try:
-            with self.conn:
-                cursor = self.conn.cursor()
-                cursor.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-                cursor.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
-            logger.info(f"delete_session | session_id={session_id}")
-        except Exception as e:
-            logger.error(f"delete_session failed: {e}")
-            raise
+    def delete_session(self, session_id: str) -> dict[str, Any]:
+        """Delete one session and all related rows atomically."""
+        def _do(tx: _WriteContext) -> dict[str, Any]:
+            row = tx.execute(
+                "SELECT session_id, title, created_at, updated_at, source, launch_id, parent_session_id "
+                "FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                raise SessionNotFoundError(f"Session '{session_id}' does not exist")
+            tx.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+            return self._session_record(row)
+        deleted = self._mutate(_do, "delete session")
+        logger.info("delete_session | session_id=%s", session_id)
+        return deleted
 
     def get_session_messages(
         self, session_id: str, limit: int = 50
@@ -444,15 +684,13 @@ class SessionStore:
         text: Optional[str] = None,
     ) -> None:
         """Records a structured tool activity (call/result) for a session."""
-        try:
-            with self.conn:
-                self.conn.execute(
-                    "INSERT INTO tool_events (session_id, kind, name, text, created_at) "
-                    "VALUES (?,?,?,?,?)",
-                    (session_id, kind, name, text, utc_now_iso()),
-                )
-        except sqlite3.Error as e:
-            logger.error(f"append_tool_event failed: {e}")
+        def _do(tx: _WriteContext) -> None:
+            tx.execute(
+                "INSERT INTO tool_events (session_id, kind, name, text, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (session_id, kind, name, text, utc_now_iso()),
+            )
+        self._mutate(_do, "append tool event")
 
     def get_tool_events(self, session_id: str) -> List[Tuple[str, str, Optional[str]]]:
         """Returns (kind, name, text) tool events for a session, oldest first."""
@@ -462,15 +700,36 @@ class SessionStore:
                 (session_id,),
             ).fetchall()
             return [(r[0], r[1], r[2]) for r in rows]
-        except sqlite3.Error as e:
-            logger.error(f"get_tool_events failed: {e}")
-            return []
+        except sqlite3.Error as exc:
+            raise SessionStorageError(f"Failed to read tool events for '{session_id}'") from exc
+
+    def count_legacy_orphans(self) -> dict[str, int]:
+        """Count pre-existing rows that violate the new parent-session invariant."""
+        try:
+            messages = self.conn.execute(
+                "SELECT COUNT(*) FROM messages "
+                "WHERE session_id IS NULL OR NOT EXISTS "
+                "(SELECT 1 FROM sessions WHERE sessions.session_id = messages.session_id)"
+            ).fetchone()[0]
+            tool_events = self.conn.execute(
+                "SELECT COUNT(*) FROM tool_events "
+                "WHERE NOT EXISTS "
+                "(SELECT 1 FROM sessions WHERE sessions.session_id = tool_events.session_id)"
+            ).fetchone()[0]
+            return {"messages": int(messages), "tool_events": int(tool_events)}
+        except sqlite3.Error as exc:
+            raise SessionStorageError("Failed to count legacy session orphans") from exc
 
     def close(self) -> None:
         """Closes connection cleanly."""
-        if self.conn:
+        with self._connections_lock:
+            connections = list(self._connections)
+            self._connections.clear()
+            self._closed = True
+        for connection in connections:
             try:
-                self.conn.close()
+                connection.close()
             except sqlite3.Error:
                 pass
-            self.conn = None
+        if hasattr(self._local, "conn"):
+            self._local.conn = None
