@@ -275,7 +275,15 @@ class ToolRegistry:
             return ToolExecutionResult(report.legacy_text(), report, "research_report")
         if name == "system_control":
             return system_control(**arguments)
-        if name in {"media_control", "media_snapshot"}:
+        if name in {
+            "media_control",
+            "media_snapshot",
+            "calendar_list",
+            "calendar_create",
+            "calendar_update",
+            "calendar_delete",
+            "calendar_get",
+        }:
             func = self._tools[name]["func"]
             result = func(**arguments)
             return result if isinstance(result, ToolExecutionResult) else ToolExecutionResult(str(result))
@@ -2384,6 +2392,135 @@ def open_windows_settings(uri: str, name: str = "settings") -> str:
         return f"Opened Windows {name.capitalize()} Settings."
     except Exception as exc:
         return f"Failed to open {name} settings: {exc}"
+
+
+def _calendar_tool_result(operation: str, action: Callable[[], Any]) -> ToolExecutionResult:
+    try:
+        result = action()
+        return ToolExecutionResult(f"Calendar {operation} completed.", result, operation)
+    except KeyError as exc:
+        result = {"ok": False, "failure_kind": "not_found", "reason": f"Calendar event not found: {exc.args[0]}"}
+        return ToolExecutionResult(f"Error: {result['reason']}", result, operation)
+    except ValueError as exc:
+        result = {"ok": False, "failure_kind": "invalid_arguments", "reason": str(exc)}
+        return ToolExecutionResult(f"Error: {exc}", result, operation)
+    except RuntimeError as exc:
+        result = {"ok": False, "failure_kind": "unavailable", "reason": str(exc)}
+        return ToolExecutionResult(f"Error: {exc}", result, operation)
+
+
+@registry.register_tool(
+    name="calendar_list",
+    description="List events from Charlie's canonical local calendar.",
+    schema={
+        "type": "object",
+        "properties": {"day": {"type": "string", "description": "UTC calendar day YYYY-MM-DD."}},
+        "additionalProperties": False,
+    },
+)
+def calendar_list(day: str | None = None) -> ToolExecutionResult:
+    from charlie.calendar_runtime import calendar_runtime_required
+
+    return _calendar_tool_result(
+        "list",
+        lambda: {"events": calendar_runtime_required().execute_sync("list_events", day)},
+    )
+
+
+@registry.register_tool(
+    name="calendar_create",
+    description="Create an event or reminder in Charlie's canonical local calendar.",
+    schema={
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "start_at": {"type": "string"},
+            "end_at": {"type": "string"},
+            "reminder_at": {"type": "string"},
+        },
+        "required": ["title", "start_at"],
+        "additionalProperties": False,
+    },
+)
+def calendar_create(
+    title: str,
+    start_at: str,
+    end_at: str | None = None,
+    reminder_at: str | None = None,
+) -> ToolExecutionResult:
+    from charlie.calendar_runtime import calendar_runtime_required
+
+    return _calendar_tool_result(
+        "create",
+        lambda: calendar_runtime_required().execute_sync(
+            "create_event", title, start_at, end_at=end_at, reminder_at=reminder_at
+        ),
+    )
+
+
+@registry.register_tool(
+    name="calendar_update",
+    description="Update an event or reminder in Charlie's canonical local calendar.",
+    schema={
+        "type": "object",
+        "properties": {
+            "event_id": {"type": "string"},
+            "title": {"type": "string"},
+            "start_at": {"type": "string"},
+            "end_at": {"type": "string"},
+            "reminder_at": {"type": "string"},
+            "completed": {"type": "integer", "enum": [0, 1]},
+        },
+        "required": ["event_id"],
+        "additionalProperties": False,
+    },
+)
+def calendar_update(event_id: str, **values: Any) -> ToolExecutionResult:
+    from charlie.calendar_runtime import calendar_runtime_required
+
+    return _calendar_tool_result(
+        "update",
+        lambda: calendar_runtime_required().execute_sync("update_event", event_id, values),
+    )
+
+
+@registry.register_tool(
+    name="calendar_delete",
+    description="Delete an event or reminder from Charlie's canonical local calendar.",
+    schema={
+        "type": "object",
+        "properties": {"event_id": {"type": "string"}},
+        "required": ["event_id"],
+        "additionalProperties": False,
+    },
+)
+def calendar_delete(event_id: str) -> ToolExecutionResult:
+    from charlie.calendar_runtime import calendar_runtime_required
+
+    def delete() -> dict:
+        calendar_runtime_required().execute_sync("delete_event", event_id)
+        return {"status": "deleted", "id": event_id}
+
+    return _calendar_tool_result("delete", delete)
+
+
+@registry.register_tool(
+    name="calendar_get",
+    description="Read one event from Charlie's canonical local calendar.",
+    schema={
+        "type": "object",
+        "properties": {"event_id": {"type": "string"}},
+        "required": ["event_id"],
+        "additionalProperties": False,
+    },
+)
+def calendar_get(event_id: str) -> ToolExecutionResult:
+    from charlie.calendar_runtime import calendar_runtime_required
+
+    return _calendar_tool_result(
+        "get",
+        lambda: calendar_runtime_required().execute_sync("get_event", event_id),
+    )
 
 
 # --- Headless browser tools (Playwright + Chrome) -- gated, off by default.

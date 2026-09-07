@@ -2561,7 +2561,18 @@ class Brain:
                 executor = _UIA_EXECUTOR if is_com else None
             execute = (
                 tool_registry.execute_tool_structured
-                if tool_name in {"web_search", "web_research", "media_control", "media_snapshot", "system_control"}
+                if tool_name in {
+                    "web_search",
+                    "web_research",
+                    "media_control",
+                    "media_snapshot",
+                    "calendar_list",
+                    "calendar_create",
+                    "calendar_update",
+                    "calendar_delete",
+                    "calendar_get",
+                    "system_control",
+                }
                 else tool_registry.execute_tool
             )
             context = ExecutionContext()

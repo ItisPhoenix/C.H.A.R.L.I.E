@@ -171,6 +171,7 @@ _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all his
 # Bounded replay/idempotency window; evicted IDs may be treated as new requests.
 _TERMINAL_RESULT_CACHE_MAX = 512
 _MEDIA_RESULT_CACHE_MAX = 512
+_CALENDAR_RESULT_CACHE_MAX = 512
 from charlie.runtime_identity import git_build_identity, persistent_frontend_dist
 
 _SOURCE_IDENTITY, _SOURCE_DIRTY = git_build_identity(Path(__file__).resolve().parent)
@@ -318,6 +319,38 @@ def _media_request_id_conflict_payload(
         "request_id": request_id,
         "operation": payload.get("operation"),
         "request_fingerprint": fingerprint,
+        "status": "request_id_conflict",
+        "result": {"status": "request_id_conflict", "reason": message},
+        "request_id_conflict": True,
+        "error": message,
+    }
+
+
+def _cache_calendar_result(
+    result_cache: OrderedDict[str, dict[str, Any]],
+    request_id: str,
+    payload: dict[str, Any],
+    fingerprint_cache: dict[str, str],
+    fingerprint: str,
+) -> None:
+    result_cache[request_id] = payload
+    result_cache.move_to_end(request_id)
+    fingerprint_cache[request_id] = fingerprint
+    while len(result_cache) > _CALENDAR_RESULT_CACHE_MAX:
+        evicted_id, _ = result_cache.popitem(last=False)
+        fingerprint_cache.pop(evicted_id, None)
+
+
+def _calendar_request_id_conflict_payload(
+    request_id: str,
+    operation: Any,
+    fingerprint: str,
+) -> dict[str, Any]:
+    message = "request_id is already bound to a different calendar operation"
+    return {
+        "request_id": request_id,
+        "request_fingerprint": fingerprint,
+        "operation": operation,
         "status": "request_id_conflict",
         "result": {"status": "request_id_conflict", "reason": message},
         "request_id_conflict": True,
@@ -650,6 +683,139 @@ async def _handle_media_operation_request(
                 }
             )
         return await _publish(result_payload, rationale="main media authority result")
+    finally:
+        entry = in_flight.get(request_id)
+        if current is not None and (
+            entry is current or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] is current)
+        ):
+            in_flight.pop(request_id, None)
+
+
+async def _handle_calendar_operation_request(
+    brain: Any,
+    event_bus: Any,
+    payload: Any,
+    *,
+    result_cache: Optional[OrderedDict[str, dict[str, Any]]] = None,
+    in_flight: Optional[dict[str, Any]] = None,
+    fingerprint_cache: Optional[dict[str, str]] = None,
+) -> dict[str, Any] | None:
+    from charlie.calendar_runtime import canonical_calendar_request_fingerprint
+
+    payload = payload if isinstance(payload, dict) else {}
+    result_cache = result_cache if result_cache is not None else OrderedDict()
+    in_flight = in_flight if in_flight is not None else {}
+    fingerprint_cache = fingerprint_cache if fingerprint_cache is not None else {}
+    request_id = _normalize_terminal_request_id(payload.get("request_id"))
+    operation = payload.get("operation")
+    fingerprint = canonical_calendar_request_fingerprint(str(operation or "invalid"), payload)
+    supplied_fingerprint = payload.get("request_fingerprint")
+
+    async def _publish(result_payload: dict[str, Any], *, rationale: str, cache: bool = True) -> dict[str, Any]:
+        if cache:
+            _cache_calendar_result(result_cache, request_id, result_payload, fingerprint_cache, fingerprint)
+        await event_bus.emit(
+            "calendar_operation_result",
+            result_payload,
+            meta=EventMeta(source=EventSource.BRAIN, task_id=request_id, rationale=rationale),
+        )
+        return result_payload
+
+    cached = result_cache.get(request_id)
+    if cached is not None:
+        if fingerprint_cache.get(request_id) != fingerprint:
+            return await _publish(
+                _calendar_request_id_conflict_payload(request_id, operation, fingerprint),
+                rationale="calendar request ID conflicts with completed operation",
+                cache=False,
+            )
+        return await _publish(cached, rationale="calendar operation result replayed from main idempotency cache")
+
+    existing_entry = in_flight.get(request_id)
+    existing = existing_entry[0] if isinstance(existing_entry, tuple) else existing_entry
+    existing_fingerprint = existing_entry[1] if isinstance(existing_entry, tuple) and len(existing_entry) == 2 else None
+    current = asyncio.current_task()
+    if existing is not None and existing is not current and not existing.done():
+        if existing_fingerprint != fingerprint:
+            return await _publish(
+                _calendar_request_id_conflict_payload(request_id, operation, fingerprint),
+                rationale="calendar request ID conflicts with in-flight operation",
+                cache=False,
+            )
+        await asyncio.shield(existing)
+        cached = result_cache.get(request_id)
+        if cached is not None:
+            return await _publish(cached, rationale="calendar operation result replayed to duplicate waiter")
+        return None
+
+    if current is not None:
+        in_flight[request_id] = (current, fingerprint)
+
+    result_payload: dict[str, Any] = {
+        "request_id": request_id,
+        "request_fingerprint": fingerprint,
+        "operation": operation,
+        "status": ResultStatus.FAILED.value,
+        "result": {"ok": False, "reason": "Invalid calendar operation request."},
+    }
+    tool_map = {
+        "list": ("calendar_list", {"day": payload.get("day")} if payload.get("day") is not None else {}),
+        "create": (
+            "calendar_create",
+            {
+                key: payload.get(key)
+                for key in ("title", "start_at", "end_at", "reminder_at")
+                if key in payload
+            },
+        ),
+        "update": (
+            "calendar_update",
+            {
+                key: payload.get(key)
+                for key in ("event_id", "title", "start_at", "end_at", "reminder_at", "completed")
+                if key in payload
+            },
+        ),
+        "delete": ("calendar_delete", {"event_id": payload.get("event_id")}),
+        "get": ("calendar_get", {"event_id": payload.get("event_id")}),
+    }
+    try:
+        if not isinstance(supplied_fingerprint, str) or supplied_fingerprint != fingerprint:
+            result_payload["status"] = "request_id_conflict"
+            result_payload["result"] = {
+                "ok": False,
+                "failure_kind": "request_id_conflict",
+                "reason": "Calendar request fingerprint is invalid or does not match its arguments.",
+            }
+            return await _publish(result_payload, rationale="invalid calendar request fingerprint", cache=False)
+        if operation not in tool_map:
+            result_payload["result"] = {
+                "ok": False,
+                "failure_kind": "unsupported",
+                "reason": "Unsupported calendar operation.",
+            }
+            return await _publish(result_payload, rationale="unsupported calendar operation")
+        tool_name, arguments = tool_map[operation]
+        envelope = await brain.execute_tool_operation(
+            tool_name,
+            arguments,
+            request=f"calendar {operation}",
+            task_id=request_id,
+            session_id=None,
+            turn_id=None,
+            platform="web",
+        )
+        result_payload.update({"status": envelope.status, "result": envelope.to_dict()})
+        return await _publish(result_payload, rationale="main calendar authority result")
+    except Exception as exc:
+        logger.warning("Main calendar operation failed: %s", type(exc).__name__, exc_info=True)
+        result_payload.update(
+            {
+                "status": ResultStatus.FAILED.value,
+                "result": {"ok": False, "failure_kind": "exception", "reason": f"{type(exc).__name__}: {exc}"},
+            }
+        )
+        return await _publish(result_payload, rationale="main calendar operation failed")
     finally:
         entry = in_flight.get(request_id)
         if current is not None and (
@@ -2508,7 +2674,7 @@ async def main() -> int:
     audit_store = None
     memory_graph = None
     brain = None
-    calendar_store = None
+    calendar_runtime = None
     zmq_handler = None
     speech_echo_cooldown = 0.0
     last_emotion = "neutral"
@@ -2539,6 +2705,9 @@ async def main() -> int:
     media_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
     media_operation_in_flight: dict[str, Any] = {}
     media_operation_fingerprints: dict[str, str] = {}
+    calendar_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    calendar_operation_in_flight: dict[str, Any] = {}
+    calendar_operation_fingerprints: dict[str, str] = {}
     event_bus_registry = _EventBusSubmissionRegistry()
     _main_event_bus_registry = event_bus_registry
 
@@ -4155,6 +4324,17 @@ async def main() -> int:
                                 fingerprint_cache=media_operation_fingerprints,
                             )
                         )
+                    elif cmd_type == "calendar_operation":
+                        _submit_event_task(
+                            _handle_calendar_operation_request(
+                                brain,
+                                event_bus,
+                                cmd.get("payload", {}),
+                                result_cache=calendar_operation_results,
+                                in_flight=calendar_operation_in_flight,
+                                fingerprint_cache=calendar_operation_fingerprints,
+                            )
+                        )
                     elif cmd_type == "stop":
                         await _apply_voice_control(
                             "stop",
@@ -4747,25 +4927,37 @@ async def main() -> int:
                 doctor=doctor,
             )
 
+            from charlie.calendar_runtime import CalendarRuntime, configure_calendar_runtime
             from charlie.calendar_scheduler import deliver_due_reminders
-            from charlie.calendar_store import CalendarStore
             from charlie.utils import utc_now_iso
 
-            calendar_store = CalendarStore(config.session_db_path)
+            calendar_runtime = CalendarRuntime(config.session_db_path)
+            configure_calendar_runtime(calendar_runtime)
 
             async def _calendar_reminder_loop() -> None:
                 while True:
-
-                    async def _deliver(event: dict) -> None:
+                    async def _deliver_alert(event: dict) -> None:
                         message = f"Reminder: {event['title']}"
                         await bus.emit(
                             "alert",
                             {"severity": "info", "message": message, "reminder_id": event["id"]},
                             meta=EventMeta(source=EventSource.WATCHER, rationale="local reminder became due"),
                         )
-                        voice.speak(message, "neutral")
 
-                    await deliver_due_reminders(calendar_store, utc_now_iso(), _deliver)
+                    async def _deliver_voice(event: dict) -> None:
+                        voice.speak(f"Reminder: {event['title']}", "neutral")
+
+                    try:
+                        await deliver_due_reminders(
+                            calendar_runtime,
+                            utc_now_iso(),
+                            alert_callback=_deliver_alert,
+                            voice_callback=_deliver_voice,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.warning("Calendar reminder iteration failed; continuing", exc_info=True)
                     await asyncio.sleep(15)
 
             from charlie import background_task as _background_task
@@ -4944,12 +5136,15 @@ async def main() -> int:
                 ]
                 await _cancel_and_drain(tasks_to_drain, label="event_bus_tasks")
                 await _drain_event_bus_submissions(event_bus_registry, loop=loop)
-                if calendar_store is not None:
+                if calendar_runtime is not None:
                     try:
-                        calendar_store.close()
+                        calendar_runtime.close()
                     except Exception as e:
-                        logger.warning("Calendar store close error: %s", e)
-                    calendar_store = None
+                        logger.warning("Calendar runtime close error: %s", e)
+                    from charlie.calendar_runtime import configure_calendar_runtime
+
+                    configure_calendar_runtime(None)
+                    calendar_runtime = None
     except KeyboardInterrupt:
         logger.info("Interrupt received, shutting down...")
     except asyncio.CancelledError:
@@ -4998,12 +5193,15 @@ async def main() -> int:
             except Exception as e:
                 logger.warning("Telegram bot stop error: %s", e)
 
-        if calendar_store is not None:
+        if calendar_runtime is not None:
             try:
-                calendar_store.close()
+                calendar_runtime.close()
             except Exception as e:
-                logger.warning("Calendar store close error: %s", e)
-            calendar_store = None
+                logger.warning("Calendar runtime close error: %s", e)
+            from charlie.calendar_runtime import configure_calendar_runtime
+
+            configure_calendar_runtime(None)
+            calendar_runtime = None
 
         if mcp_client is not None:
             try:

@@ -53,6 +53,7 @@
     "hud_visibility": {"category": "snapshot", "replay": true, "required": []},
     "terminal_command_result": {"category": "result", "replay": false, "required": ["request_id", "command", "terminal_session_id", "approved", "approval_status", "status", "result"]},
     "media_operation_result": {"category": "result", "replay": false, "required": ["request_id", "request_fingerprint", "operation", "status", "result"]},
+    "calendar_operation_result": {"category": "result", "replay": false, "required": ["request_id", "request_fingerprint", "operation", "status", "result"]},
     "chat": {"category": "transient", "replay": false, "required": []},
     "presentation_intent": {"category": "snapshot", "replay": true, "required": ["id", "kind"]},
     "presentation_update": {"category": "snapshot", "replay": true, "required": ["id", "kind"]},

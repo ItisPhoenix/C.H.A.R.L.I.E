@@ -12,5 +12,5 @@ def test_calendar_events_survive_store_reopen(tmp_path):
 
     assert events[0]["id"] == created["id"]
     assert events[0]["title"] == "Dentist"
-    assert events[0]["reminder_at"] == "2026-08-20T08:45:00+05:30"
+    assert events[0]["reminder_at"] == "2026-08-20T03:15:00.000000Z"
     second.close()

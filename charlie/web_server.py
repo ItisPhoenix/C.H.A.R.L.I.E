@@ -33,7 +33,7 @@ from charlie.session_store import SessionStore
 from charlie.utils import build_auth_headers
 from charlie.log_redaction import SensitiveDataFilter
 from charlie.terminal_service import TerminalManager
-from charlie.calendar_store import CalendarStore
+from charlie.calendar_runtime import canonical_calendar_request_fingerprint
 from charlie.audit_store import AuditStore
 from charlie.backup_service import export_snapshot
 from charlie.capabilities import build_capability_snapshot, get_capability_index
@@ -288,18 +288,13 @@ _pending_memory_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
 MEDIA_OPERATION_TIMEOUT_SECONDS = 10.0
 _pending_media_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
 _pending_media_fingerprints: dict[str, str] = {}
+CALENDAR_OPERATION_TIMEOUT_SECONDS = 10.0
+_pending_calendar_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
+_pending_calendar_fingerprints: dict[str, str] = {}
 LAUNCH_ID: str = config.charlie_launch_id
 _store: SessionStore | None = None
 _terminal_manager = TerminalManager()
-_calendar_store: CalendarStore | None = None
 _audit_store: AuditStore | None = None
-
-
-def _get_calendar_store() -> CalendarStore:
-    global _calendar_store
-    if _calendar_store is None:
-        _calendar_store = CalendarStore(config.session_db_path)
-    return _calendar_store
 
 
 def _get_audit_store() -> AuditStore:
@@ -336,7 +331,7 @@ async def lifespan(app: FastAPI):
     arrive from main over IPC.
     Shutdown: tear down EventBus."""
     # --- startup ---
-    global event_bus, plugin_manager, _calendar_store, _audit_store
+    global event_bus, plugin_manager, _audit_store
     global _tool_snapshot, _tool_snapshot_event, _mcp_snapshot, _mcp_snapshot_event
     global _projected_telemetry, _projected_telemetry_event
     # This process never owns executable tool activation. Start each web
@@ -373,9 +368,6 @@ async def lifespan(app: FastAPI):
 
     # --- shutdown ---
     await _terminal_manager.close_all()
-    if _calendar_store is not None:
-        _calendar_store.close()
-        _calendar_store = None
     if _audit_store is not None:
         _audit_store.close()
         _audit_store = None
@@ -542,6 +534,8 @@ async def _event_bridge():
             _resolve_memory_operation_result(event.get("payload", {}))
         elif etype == "media_operation_result":
             _resolve_media_operation_result(event.get("payload", {}))
+        elif etype == "calendar_operation_result":
+            _resolve_calendar_operation_result(event.get("payload", {}))
         elif etype == "extension_proposed":
             await _stage_proposed_extension(event.get("payload", {}))
             return
@@ -797,7 +791,8 @@ async def close_terminal_session(session_id: str):
 
 @app.get("/api/calendar/events")
 async def list_calendar_events(day: Optional[str] = None):
-    return {"events": _get_calendar_store().list_events(day)}
+    result = await _request_authoritative_calendar_operation("list", {"day": day} if day else {})
+    return _project_calendar_result(result, fallback={"events": []})
 
 
 @app.post("/api/calendar/events")
@@ -806,30 +801,30 @@ async def create_calendar_event(data: dict):
     start_at = data.get("start_at")
     if not isinstance(title, str) or not title.strip() or not isinstance(start_at, str) or not start_at.strip():
         raise HTTPException(status_code=400, detail="title and start_at are required")
-    event = _get_calendar_store().create_event(
-        title,
-        start_at,
-        end_at=data.get("end_at") if isinstance(data.get("end_at"), str) else None,
-        reminder_at=data.get("reminder_at") if isinstance(data.get("reminder_at"), str) else None,
-    )
-    return event
+    payload = {
+        "title": title,
+        "start_at": start_at,
+        "end_at": data.get("end_at") if isinstance(data.get("end_at"), str) else None,
+        "reminder_at": data.get("reminder_at") if isinstance(data.get("reminder_at"), str) else None,
+    }
+    result = await _request_authoritative_calendar_operation("create", payload, request_id=data.get("request_id"))
+    return _project_calendar_result(result)
 
 
 @app.put("/api/calendar/events/{event_id}")
 async def update_calendar_event(event_id: str, data: dict):
-    try:
-        return _get_calendar_store().update_event(event_id, data)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="calendar event not found") from exc
+    payload = dict(data or {})
+    payload["event_id"] = event_id
+    result = await _request_authoritative_calendar_operation("update", payload, request_id=data.get("request_id"))
+    return _project_calendar_result(result)
 
 
 @app.delete("/api/calendar/events/{event_id}")
-async def delete_calendar_event(event_id: str):
-    try:
-        _get_calendar_store().delete_event(event_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="calendar event not found") from exc
-    return {"status": "deleted", "id": event_id}
+async def delete_calendar_event(event_id: str, request_id: Optional[str] = None):
+    result = await _request_authoritative_calendar_operation(
+        "delete", {"event_id": event_id}, request_id=request_id
+    )
+    return _project_calendar_result(result)
 
 
 @app.get("/api/media")
@@ -1341,6 +1336,106 @@ async def _request_authoritative_media_operation(
             "operation": operation,
             "status": "invalid_result",
             "result": {"available": False, "reason": "Main media authority returned an invalid result."},
+        }
+    return result
+
+
+def _resolve_calendar_operation_result(payload: object) -> None:
+    if not isinstance(payload, dict):
+        return
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return
+    future = _pending_calendar_operations.get(request_id)
+    if future is None or future.done():
+        return
+    if payload.get("request_fingerprint") != _pending_calendar_fingerprints.get(request_id):
+        logger.warning("Ignoring calendar result with mismatched request fingerprint: %s", request_id)
+        return
+    future.set_result(dict(payload))
+
+
+def _project_calendar_result(response: dict[str, Any], fallback: Any = None) -> Any:
+    envelope = response.get("result") if isinstance(response, dict) else None
+    if response.get("status") == "completed" and isinstance(envelope, dict):
+        structured = envelope.get("data", {}).get("structured_data")
+        if structured is not None:
+            return structured
+    if fallback is not None:
+        return fallback
+    if isinstance(envelope, dict):
+        return {
+            "status": response.get("status", "failed"),
+            "reason": envelope.get("reason") or envelope.get("result") or "Calendar operation failed",
+        }
+    return {"status": response.get("status", "failed"), "reason": "Calendar operation failed"}
+
+
+async def _request_authoritative_calendar_operation(
+    operation: str,
+    payload: dict[str, Any],
+    *,
+    request_id: Any = None,
+) -> dict[str, Any]:
+    request_id = _terminal_request_id(request_id)
+    request_payload = dict(payload)
+    fingerprint = canonical_calendar_request_fingerprint(operation, request_payload)
+    request_payload.update(
+        {"request_id": request_id, "operation": operation, "request_fingerprint": fingerprint}
+    )
+    if event_bus is None:
+        return {
+            "request_id": request_id,
+            "request_fingerprint": fingerprint,
+            "operation": operation,
+            "status": "unavailable",
+            "result": {"ok": False, "reason": "Main calendar authority is unavailable."},
+        }
+    loop = asyncio.get_running_loop()
+    existing = _pending_calendar_operations.get(request_id)
+    if existing is not None and not existing.done():
+        if _pending_calendar_fingerprints.get(request_id) != fingerprint:
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "request_id_conflict",
+                "result": {"ok": False, "reason": "request_id is bound to a different calendar operation"},
+            }
+        return await asyncio.shield(existing)
+    future: asyncio.Future[dict[str, Any]] = loop.create_future()
+    _pending_calendar_operations[request_id] = future
+    _pending_calendar_fingerprints[request_id] = fingerprint
+    try:
+        sent = await event_bus.send_command({"type": "calendar_operation", "payload": request_payload})
+        if sent is False:
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "unavailable",
+                "result": {"ok": False, "reason": "Main calendar authority is unavailable."},
+            }
+        try:
+            result = await asyncio.wait_for(future, timeout=CALENDAR_OPERATION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "timeout",
+                "result": {"ok": False, "reason": "Main calendar authority timed out."},
+            }
+    finally:
+        _pending_calendar_operations.pop(request_id, None)
+        _pending_calendar_fingerprints.pop(request_id, None)
+    if not isinstance(result, dict) or result.get("request_id") != request_id:
+        return {
+            "request_id": request_id,
+            "request_fingerprint": fingerprint,
+            "operation": operation,
+            "status": "invalid_result",
+            "result": {"ok": False, "reason": "Main calendar authority returned an invalid result."},
         }
     return result
 
