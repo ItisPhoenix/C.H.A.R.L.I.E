@@ -55,13 +55,13 @@ from charlie.utils import build_auth_headers, make_id, parse_json_object
 
 try:
     from charlie.desktop import DESKTOP_AVAILABLE as _DESKTOP_AVAILABLE
-    from charlie.desktop import UIA_EXECUTOR as _UIA_EXECUTOR
     from charlie.desktop import actions as desktop_actions
+    from charlie.desktop import get_uia_executor as _get_uia_executor
     from charlie.desktop import session as desktop_session
     from charlie.desktop import uia as desktop_uia
 except ImportError:  # pragma: no cover - guard mirrors charlie/desktop/__init__.py
     _DESKTOP_AVAILABLE = False
-    _UIA_EXECUTOR = None
+    _get_uia_executor = None
     desktop_actions = None
     desktop_session = None
     desktop_uia = None
@@ -190,7 +190,21 @@ _DESKTOP_CONTROL_TOOLS = frozenset(
         "desktop_focus",
         "desktop_window",
         "desktop_move_window",
-        "system_control",
+        "desktop_open_app",
+        "desktop_close_app",
+        "desktop_open_url",
+    }
+)
+_DESKTOP_PHYSICAL_INPUT_TOOLS = frozenset(
+    {
+        "desktop_click",
+        "desktop_type",
+        "desktop_invoke",
+        "desktop_key",
+        "desktop_click_at",
+        "desktop_move",
+        "desktop_drag",
+        "desktop_scroll",
     }
 )
 # Narrower sibling of router.SCREEN_QUERY_RE: phrasing that implies the user wants
@@ -1848,6 +1862,7 @@ class Brain:
         task_id: Optional[str] = None,
         session_id: Optional[str] = None,
         turn_id: Optional[str] = None,
+        execution_owner_id: Optional[str] = None,
     ) -> ResultEnvelope:
         """Fast-path callers' safety net -- same timeout bound _exec_one already gives the LLM-dispatched path."""
         try:
@@ -1858,6 +1873,7 @@ class Brain:
                     task_id=task_id,
                     session_id=session_id,
                     turn_id=turn_id,
+                    execution_owner_id=execution_owner_id,
                     return_envelope=True,
                 ),
                 timeout=_tool_timeout("browser_task"),
@@ -1887,6 +1903,7 @@ class Brain:
         task_id: Optional[str] = None,
         session_id: Optional[str] = None,
         turn_id: Optional[str] = None,
+        execution_owner_id: Optional[str] = None,
         return_envelope: bool = False,
     ) -> Any:
         """Resolve `task` through charlie.browser's tier cascade and report back.
@@ -1920,7 +1937,6 @@ class Brain:
 
         from charlie.browser import controller as browser_controller
         from charlie.browser import intent as browser_intent
-        from charlie.browser.actions import open_in_real_browser
         from charlie.browser.observation import extract_visible_text
         from charlie.browser.session import get_session
         from charlie.browser.task import resolve as resolve_browser_task
@@ -2129,7 +2145,18 @@ class Brain:
             )
 
         if result.success and result.url and open_intent:
-            opened = await loop.run_in_executor(None, open_in_real_browser, result.url)
+            host_outcome = await self.execute_tool_operation(
+                "desktop_open_url",
+                {"url": result.url},
+                request=task,
+                task_id=task_id,
+                session_id=session_id,
+                turn_id=turn_id,
+                platform=platform,
+                execution_owner_id=execution_owner_id,
+            )
+            opened = _operation_succeeded(host_outcome)
+            outcome.data["host_effect"] = host_outcome.to_dict()
             parts = ([result.answer] if result.answer else []) + [
                 f"Opened {result.url}." if opened else f"Found {result.url} but couldn't open your browser."
             ]
@@ -2312,6 +2339,7 @@ class Brain:
         turn_id: Optional[str] = None,
         platform: str = "web",
         operation_override: Optional[str] = None,
+        execution_owner_id: Optional[str] = None,
     ) -> ResultEnvelope:
         """Execute one non-LLM operation through the shared primitive."""
         approval_requester = self._request_tool_approval_decision
@@ -2328,7 +2356,7 @@ class Brain:
             session_id=session_id,
             turn_id=turn_id,
             platform=platform,
-            execution_owner_id=task_id,
+            execution_owner_id=execution_owner_id,
             approval_requester=approval_requester,
             include_approval_status=True,
             source="brain.operation",
@@ -2515,7 +2543,9 @@ class Brain:
                 )
             )
 
-        gate_reason = requirement_reason if requirement == Requirement.APPROVE else None
+        gate_reason = None
+        if requirement == Requirement.APPROVE:
+            gate_reason = requirement_reason or f"operation '{tool_name}' requires approval"
         decision = ApprovalDecision.APPROVED
         if gate_reason:
             requester = approval_requester or self._request_tool_approval_decision
@@ -2573,7 +2603,7 @@ class Brain:
 
                 executor = get_media_executor()
             else:
-                executor = _UIA_EXECUTOR if is_com else None
+                executor = _get_uia_executor() if is_com and _get_uia_executor is not None else None
             execute = (
                 tool_registry.execute_tool_structured
                 if tool_name in {
@@ -2610,14 +2640,25 @@ class Brain:
                 raise cancellation
 
         async def _run_with_leases() -> Any:
+            async def _run_with_physical_input_session() -> Any:
+                if tool_name not in _DESKTOP_PHYSICAL_INPUT_TOOLS:
+                    return await _run()
+                from charlie.desktop.takeover import user_takeover_detector
+
+                user_takeover_detector.start_session(execution_owner_id)
+                try:
+                    return await _run()
+                finally:
+                    user_takeover_detector.end_session()
+
             if required_leases:
                 from charlie.resource_locks import default_lease_manager
 
                 async with await default_lease_manager.acquire_many(required_leases, execution_owner_id):
-                    return await _run()
+                    return await _run_with_physical_input_session()
             if tool_registry.is_interactive(tool_name):
                 async with lock:
-                    return await _run()
+                    return await _run_with_physical_input_session()
             return await _run()
 
         raw_result: Any
@@ -3471,6 +3512,7 @@ class Brain:
                 task_id=task_id,
                 session_id=session_id,
                 turn_id=turn_id,
+                execution_owner_id=execution_owner_id,
             )
             if isinstance(outcome, ResultEnvelope):
                 _publish_direct_operation_result(
@@ -3974,7 +4016,7 @@ class Brain:
             yield intent.spoken_text or _result_envelope_to_model_text(outcome)
             return
 
-        # --- Fast-path: close app (matcher pure, taskkill runs only after a confirmed match) ---
+        # --- Fast-path: close app (matcher pure; execution stays canonical) ---
         close_match = await asyncio.to_thread(
             router.match_close_app,
             user_input,
@@ -3988,25 +4030,28 @@ class Brain:
                 confidence=1.0,
                 rationale="close-app matcher selected desktop app lifecycle",
             )
-            close_res = await asyncio.to_thread(router.execute_close_app, close_match[0], close_match[1])
-            logger.info("Fast-path close app result: %s -> %s", user_input, close_res)
-            self.world_model.record_event("app_close", close_res)
-            close_outcome = _direct_operation_result(
-                tool_name="desktop_focus",
-                capability="desktop",
-                operation="desktop.app.close",
-                raw_result=close_res,
-                args={"apps": close_match[0], "processes": close_match[1]},
-                status=ResultStatus.FAILED if "Failed to close" in close_res else ResultStatus.COMPLETED,
+            close_args = {"apps": close_match[0], "processes": close_match[1]}
+            close_outcome = await self.execute_tool_operation(
+                "desktop_close_app",
+                close_args,
+                request=original_user_input,
+                task_id=task_id,
+                session_id=session_id,
+                turn_id=turn_id,
+                platform=platform,
+                execution_owner_id=execution_owner_id,
             )
-            if "Failed to close" not in close_res:
+            close_res = _result_envelope_to_model_text(close_outcome)
+            logger.info("Fast-path close app result: %s -> %s", user_input, close_res)
+            if _operation_succeeded(close_outcome):
+                self.world_model.record_event("app_close", close_res)
                 self._recent_deterministic_apps = [
                     app for app in self._recent_deterministic_apps if app not in close_match[0]
                 ]
             yield _result_envelope_to_model_text(close_outcome)
             return
 
-        # --- Fast-path: open app (matcher pure, launch/focus runs only after a confirmed match) ---
+        # --- Fast-path: open app (matcher pure; execution stays canonical) ---
         open_match = await asyncio.to_thread(router.match_open_app, user_input)
         if open_match is not None:
             open_apps, open_commands, open_remaining = open_match
@@ -4031,17 +4076,20 @@ class Brain:
                     confidence=1.0,
                     rationale="open-app matcher selected desktop app lifecycle",
                 )
-                open_msg = await asyncio.to_thread(router.execute_open_app, open_apps, open_commands)
-                self.world_model.record_event("app_open", open_msg)
-                open_outcome = _direct_operation_result(
-                    tool_name="system_control",
-                    capability="desktop",
-                    operation="desktop.app.open",
-                    raw_result=open_msg,
-                    args={"apps": open_apps, "commands": open_commands},
-                    status=ResultStatus.FAILED if "could not open" in open_msg.lower() else ResultStatus.COMPLETED,
+                open_args = {"apps": open_apps, "commands": open_commands}
+                open_outcome = await self.execute_tool_operation(
+                    "desktop_open_app",
+                    open_args,
+                    request=original_user_input,
+                    task_id=task_id,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    platform=platform,
+                    execution_owner_id=execution_owner_id,
                 )
-                if "could not open" not in open_msg.lower():
+                open_msg = _result_envelope_to_model_text(open_outcome)
+                if _operation_succeeded(open_outcome):
+                    self.world_model.record_event("app_open", open_msg)
                     self._recent_deterministic_apps = list(
                         dict.fromkeys((*self._recent_deterministic_apps, *open_apps))
                     )[-8:]
@@ -4145,17 +4193,20 @@ class Brain:
                     return
                 if classifier_match.name == "open_app":
                     app = classifier_match.args["app"]
-                    msg = await asyncio.to_thread(router.execute_open_app, [app], [router.open_command_for(app)])
-                    self.world_model.record_event("app_open", msg)
-                    outcome = _direct_operation_result(
-                        tool_name="system_control",
-                        capability="desktop",
-                        operation="desktop.app.open",
-                        raw_result=msg,
-                        args={"apps": [app], "commands": [router.open_command_for(app)]},
-                        status=ResultStatus.FAILED if "could not open" in msg.lower() else ResultStatus.COMPLETED,
+                    open_args = {"apps": [app], "commands": [router.open_command_for(app)]}
+                    outcome = await self.execute_tool_operation(
+                        "desktop_open_app",
+                        open_args,
+                        request=original_user_input,
+                        task_id=task_id,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        platform=platform,
+                        execution_owner_id=execution_owner_id,
                     )
-                    if "could not open" not in msg.lower():
+                    msg = _result_envelope_to_model_text(outcome)
+                    if _operation_succeeded(outcome):
+                        self.world_model.record_event("app_open", msg)
                         self._recent_deterministic_apps = list(
                             dict.fromkeys((*self._recent_deterministic_apps, app))
                         )[-8:]
@@ -4163,17 +4214,20 @@ class Brain:
                     return
                 if classifier_match.name == "close_app":
                     app = classifier_match.args["app"]
-                    msg = await asyncio.to_thread(router.execute_close_app, [app], [router.close_process_for(app)])
-                    self.world_model.record_event("app_close", msg)
-                    outcome = _direct_operation_result(
-                        tool_name="desktop_focus",
-                        capability="desktop",
-                        operation="desktop.app.close",
-                        raw_result=msg,
-                        args={"apps": [app], "processes": [router.close_process_for(app)]},
-                        status=ResultStatus.FAILED if "Failed to close" in msg else ResultStatus.COMPLETED,
+                    close_args = {"apps": [app], "processes": [router.close_process_for(app)]}
+                    outcome = await self.execute_tool_operation(
+                        "desktop_close_app",
+                        close_args,
+                        request=original_user_input,
+                        task_id=task_id,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        platform=platform,
+                        execution_owner_id=execution_owner_id,
                     )
-                    if "Failed to close" not in msg:
+                    msg = _result_envelope_to_model_text(outcome)
+                    if _operation_succeeded(outcome):
+                        self.world_model.record_event("app_close", msg)
                         self._recent_deterministic_apps = [
                             existing for existing in self._recent_deterministic_apps if existing != app
                         ]
@@ -4276,9 +4330,17 @@ class Brain:
         # it to the wrong, text-only client.
         if self.config.desktop_control_enabled and direct_screen_query:
             try:
-                screen_observation = await asyncio.get_running_loop().run_in_executor(
-                    _UIA_EXECUTOR, tool_registry.execute_tool, "desktop_observe", {}
+                screen_observation_outcome = await self.execute_tool_operation(
+                    "desktop_observe",
+                    {},
+                    request=original_user_input,
+                    task_id=task_id,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    platform=platform,
+                    execution_owner_id=execution_owner_id,
                 )
+                screen_observation = _result_envelope_to_model_text(screen_observation_outcome)
                 search_results = f"{search_results}\n\n{screen_observation}" if search_results else screen_observation
                 logger.info("Forced fresh screen observation for screen-content query")
             except Exception:
@@ -4586,6 +4648,7 @@ class Brain:
                         task_id=task_id,
                         session_id=session_id,
                         turn_id=turn_id,
+                        execution_owner_id=execution_owner_id,
                         return_envelope=True,
                     )
             elif tool_name in _DESKTOP_CONTROL_TOOLS and self._is_desktop_halted():

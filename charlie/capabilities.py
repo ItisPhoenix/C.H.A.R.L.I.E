@@ -234,6 +234,30 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "timeout_sec": 15.0,
     },
     # Desktop
+    "desktop_open_app": {
+        "id": "desktop.app.open",
+        "domain": "desktop",
+        "tool_registry_owner": "desktop",
+        "risk_class": "reversible",
+        "required_leases": ("desktop",),
+        "timeout_sec": 15.0,
+    },
+    "desktop_close_app": {
+        "id": "desktop.app.close",
+        "domain": "desktop",
+        "tool_registry_owner": "desktop",
+        "risk_class": "destructive",
+        "required_leases": ("desktop",),
+        "timeout_sec": 15.0,
+    },
+    "desktop_open_url": {
+        "id": "desktop.browser.open_url",
+        "domain": "desktop",
+        "tool_registry_owner": "desktop",
+        "risk_class": "reversible",
+        "required_leases": ("desktop",),
+        "timeout_sec": 15.0,
+    },
     "desktop_observe": {
         "id": "desktop.screen.observe",
         "domain": "desktop",

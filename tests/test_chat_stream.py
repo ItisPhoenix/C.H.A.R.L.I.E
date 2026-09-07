@@ -8,13 +8,14 @@ import pytest
 from charlie import router
 from charlie.config import Config
 from charlie.core import Brain
+from charlie.desktop import apps as desktop_apps
 from charlie.streaming import FollowupStreamState
 
 
 def _detect_close_app(query: str) -> Optional[str]:
     """Test helper: compose router's match/execute split back into the old single-call shape."""
     matched = router.match_close_app(query)
-    return None if matched is None else router.execute_close_app(matched[0], matched[1])
+    return None if matched is None else desktop_apps.close_apps(matched[0], matched[1])
 
 
 def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
@@ -23,7 +24,7 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
     if matched is None:
         return None
     apps, commands, leftover = matched
-    return router.execute_open_app(apps, commands), leftover
+    return desktop_apps.launch_apps(apps, commands), leftover
 
 
 def test_social_freshness_phrase_does_not_trigger_core_research():
@@ -247,25 +248,25 @@ def test_detect_close_app(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", mock_run)
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr(router, "is_process_running", lambda _: False)
+    monkeypatch.setattr(desktop_apps, "is_process_running", lambda _: False)
 
     # 1. Test match and successful taskkill (single)
     res = _detect_close_app("close chrome")
     assert res == "Chrome has been closed for you."
-    assert "taskkill /IM chrome.exe /F" in called_cmds
+    assert ["taskkill", "/IM", "chrome.exe", "/F"] in called_cmds
 
     # 2. Test direct .exe usage
     res = _detect_close_app("charlie, close notepad.exe")
     assert res == "Notepad has been closed for you."
-    assert "taskkill /IM notepad.exe /F" in called_cmds
+    assert ["taskkill", "/IM", "notepad.exe", "/F"] in called_cmds
 
     # 3. Test closing multiple apps
     called_cmds.clear()
     res = _detect_close_app("close chrome and notepad")
     assert "Notepad and Chrome" in res
     assert "closed for you" in res
-    assert "taskkill /IM chrome.exe /F" in called_cmds
-    assert "taskkill /IM notepad.exe /F" in called_cmds
+    assert ["taskkill", "/IM", "chrome.exe", "/F"] in called_cmds
+    assert ["taskkill", "/IM", "notepad.exe", "/F"] in called_cmds
 
     # 4. Test closing running and not running mix
     called_cmds.clear()
@@ -274,9 +275,9 @@ def test_detect_close_app(monkeypatch):
         called_cmds.append(cmd)
 
         class MockResult:
-            returncode = 128 if "chrome" in cmd else 0
+            returncode = 128 if "chrome.exe" in cmd else 0
             stdout = ""
-            stderr = "ERROR: The process not found." if "chrome" in cmd else ""
+            stderr = "ERROR: The process not found." if "chrome.exe" in cmd else ""
 
         return MockResult()
 
@@ -319,7 +320,7 @@ def test_calculator_close_prefers_verified_window_identity(monkeypatch):
         lambda *args, **kwargs: pytest.fail("must not taskkill a resolved window"),
     )
 
-    assert router.execute_close_app(["calculator"], ["calc.exe"]) == "Calculator has been closed for you."
+    assert desktop_apps.close_apps(["calculator"], ["calc.exe"]) == "Calculator has been closed for you."
     assert closed == ["Calculator"]
 
 
@@ -338,12 +339,15 @@ def test_calculator_close_tries_modern_candidate_after_legacy_candidate_is_absen
 
     monkeypatch.setattr(subprocess, "run", mock_run)
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr(router, "is_process_running", lambda _: False)
+    monkeypatch.setattr(desktop_apps, "is_process_running", lambda _: False)
 
-    result = router.execute_close_app(["calculator"], ["calc.exe"])
+    result = desktop_apps.close_apps(["calculator"], ["calc.exe"])
 
     assert result == "Calculator has been closed for you."
-    assert called_cmds == ["taskkill /IM calc.exe /F", "taskkill /IM CalculatorApp.exe /F"]
+    assert called_cmds == [
+        ["taskkill", "/IM", "calc.exe", "/F"],
+        ["taskkill", "/IM", "CalculatorApp.exe", "/F"],
+    ]
 
 
 def test_calculator_close_reports_not_running_when_all_candidates_are_absent(monkeypatch):
@@ -358,10 +362,13 @@ def test_calculator_close_reports_not_running_when_all_candidates_are_absent(mon
     monkeypatch.setattr(subprocess, "run", mock_run)
     monkeypatch.setattr("sys.platform", "win32")
 
-    result = router.execute_close_app(["calculator"], ["calc.exe"])
+    result = desktop_apps.close_apps(["calculator"], ["calc.exe"])
 
     assert result == "Calculator is not currently running."
-    assert called_cmds == ["taskkill /IM calc.exe /F", "taskkill /IM CalculatorApp.exe /F"]
+    assert called_cmds == [
+        ["taskkill", "/IM", "calc.exe", "/F"],
+        ["taskkill", "/IM", "CalculatorApp.exe", "/F"],
+    ]
 
 
 def test_calculator_close_reports_failure_when_candidate_termination_fails(monkeypatch):
@@ -374,7 +381,7 @@ def test_calculator_close_reports_failure_when_candidate_termination_fails(monke
     )
     monkeypatch.setattr("sys.platform", "win32")
 
-    result = router.execute_close_app(["calculator"], ["calc.exe"])
+    result = desktop_apps.close_apps(["calculator"], ["calc.exe"])
 
     assert result == "Failed to close Calculator."
 
@@ -388,9 +395,9 @@ def test_close_app_verifies_successful_taskkill_postcondition(monkeypatch):
         lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
     )
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr(router, "is_process_running", lambda _: True)
+    monkeypatch.setattr(desktop_apps, "is_process_running", lambda _: True)
 
-    result = router.execute_close_app(["calculator"], ["calc.exe"])
+    result = desktop_apps.close_apps(["calculator"], ["calc.exe"])
 
     assert result == "Failed to close Calculator."
 
@@ -408,16 +415,16 @@ def test_close_app_keeps_per_app_truth_for_multiple_apps(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", mock_run)
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr(router, "is_process_running", lambda _: False)
+    monkeypatch.setattr(desktop_apps, "is_process_running", lambda _: False)
 
-    result = router.execute_close_app(["calculator", "notepad"], ["calc.exe", "notepad.exe"])
+    result = desktop_apps.close_apps(["calculator", "notepad"], ["calc.exe", "notepad.exe"])
 
     assert "Calculator is not currently running." in result
     assert "Notepad has been closed for you." in result
     assert called_cmds == [
-        "taskkill /IM calc.exe /F",
-        "taskkill /IM CalculatorApp.exe /F",
-        "taskkill /IM notepad.exe /F",
+        ["taskkill", "/IM", "calc.exe", "/F"],
+        ["taskkill", "/IM", "CalculatorApp.exe", "/F"],
+        ["taskkill", "/IM", "notepad.exe", "/F"],
     ]
 
 
@@ -743,25 +750,29 @@ def test_detect_open_app(monkeypatch):
         class MockProcess:
             pid = 12345
 
+            def poll(self):
+                return None
+
         return MockProcess()
 
     monkeypatch.setattr(subprocess, "Popen", mock_popen)
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.router.is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
 
     # 1. Test opening single app
     res = _detect_open_app("open calculator")
     msg, remaining = res
     assert msg == "I've opened Calculator for you."
     assert remaining is None
-    assert 'start "" calc' in called_cmds
+    assert ["calc"] in called_cmds
     called_cmds.clear()
     res = _detect_open_app("open chrome and calculator")
     msg, remaining = res
     assert "Calculator and Chrome" in msg
     assert remaining is None
-    assert 'start "" chrome' in called_cmds
-    assert 'start "" calc' in called_cmds
+    assert ["chrome"] in called_cmds
+    assert ["calc"] in called_cmds
 
     # Bare websites belong to Charlie BrowserSession, not external OS launch.
     called_cmds.clear()
@@ -790,7 +801,7 @@ def test_detect_open_app(monkeypatch):
     msg, remaining = res
     assert "Notepad" in msg
     assert remaining == "and write hello"
-    assert 'start "" notepad' in called_cmds
+    assert ["notepad"] in called_cmds
 
 
 def test_detect_open_app_partial_failure(monkeypatch):
@@ -808,6 +819,9 @@ def test_detect_open_app_partial_failure(monkeypatch):
         class MockProcess:
             pid = 12345
 
+            def poll(self):
+                return None
+
         # First call succeeds, second call fails
         if call_count == 1:
             return MockProcess()
@@ -819,7 +833,8 @@ def test_detect_open_app_partial_failure(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", mock_popen)
     monkeypatch.setattr(os, "startfile", mock_startfile, raising=False)
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.router.is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
 
     # Test: open two apps, one fails
     res = _detect_open_app("open chrome notepad")
@@ -847,7 +862,8 @@ def test_detect_open_app_all_failures(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", mock_fail)
     monkeypatch.setattr(os, "startfile", mock_fail, raising=False)
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.router.is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
 
     res = _detect_open_app("open chrome notepad")
     assert res is not None
@@ -876,11 +892,16 @@ def test_detect_open_app_focuses_already_running_instead_of_relaunching(monkeypa
 
 
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.router.is_process_running", lambda name: name == "notepad.exe")
+    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: name == "notepad.exe")
 
     popen_calls = []
+
+    class MockProcess:
+        def poll(self):
+            return None
+
     monkeypatch.setattr(
-        subprocess, "Popen", lambda cmd, *a, **kw: popen_calls.append(cmd)
+        subprocess, "Popen", lambda cmd, *a, **kw: (popen_calls.append(cmd) or MockProcess())
     )
 
     focus_calls = []
@@ -905,12 +926,17 @@ def test_detect_open_app_mixed_running_and_not_running(monkeypatch):
 
 
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.router.is_process_running", lambda name: name == "notepad.exe")
+    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: name == "notepad.exe")
 
     popen_calls = []
+    class MockProcess:
+        def poll(self):
+            return None
+
     monkeypatch.setattr(
-        subprocess, "Popen", lambda cmd, *a, **kw: popen_calls.append(cmd)
+        subprocess, "Popen", lambda cmd, *a, **kw: (popen_calls.append(cmd) or MockProcess())
     )
+    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
 
     focus_calls = []
     monkeypatch.setattr(
@@ -925,7 +951,7 @@ def test_detect_open_app_mixed_running_and_not_running(monkeypatch):
     assert "already open" in msg
     assert "opened" in msg.lower()
     assert focus_calls == ["notepad"]
-    assert 'start "" calc' in popen_calls
+    assert ["calc"] in popen_calls
 
 
 def test_detect_open_app_does_not_open_filename_as_website(monkeypatch):
@@ -937,8 +963,9 @@ def test_detect_open_app_does_not_open_filename_as_website(monkeypatch):
 
 
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.router.is_process_running", lambda name: False)
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: None)
+    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: False)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("P", (), {"poll": lambda self: None})())
+    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
 
     res = _detect_open_app("open notepad and write this is a test and save it as test.txt")
     assert res is not None
@@ -963,12 +990,17 @@ async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
     def mock_popen(cmd, *args, **kwargs):
         class MockProcess:
             pid = 12345
+
+            def poll(self):
+                return None
         return MockProcess()
 
     monkeypatch.setattr(subprocess, "run", mock_run)
     monkeypatch.setattr(subprocess, "Popen", mock_popen)
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.router.is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
+    monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
 
     called_stream = False
 
@@ -977,6 +1009,10 @@ async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
         called_stream = True
 
     brain = Brain(brain_config)
+    async def approve(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(brain, "request_tool_approval", approve)
     monkeypatch.setattr(brain.client, "stream", mock_stream)
 
     # Test close fast-path integration
@@ -1038,9 +1074,15 @@ async def test_chat_stream_compound_open_app_continues_with_llm(monkeypatch, bra
 
     from charlie.core import Brain
 
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("P", (), {"pid": 1})())
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *a, **kw: type("P", (), {"pid": 1, "poll": lambda self: None})(),
+    )
     monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.router.is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: False)
+    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
+    monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
 
     brain = Brain(brain_config)
 

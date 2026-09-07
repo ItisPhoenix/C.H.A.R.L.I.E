@@ -6,6 +6,7 @@ now, without building a permanent installed-application database.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -15,6 +16,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+from charlie.known_apps import APP_REGISTRY
+from charlie.text_utils import format_app_list
+from charlie.utils import is_process_running
+
+logger = logging.getLogger("charlie.desktop.apps")
 
 
 @dataclass(frozen=True)
@@ -169,3 +176,170 @@ def launch_and_verify(resolution: AppResolution, timeout_s: float = 3.0) -> bool
             return True
         time.sleep(0.1)
     return False
+
+
+def close_apps(matched_apps: list[str], launched_processes: list[str]) -> str:
+    """Close resolved apps and report per-app process/window verification."""
+    if sys.platform != "win32":
+        return f"App closing is only supported on Windows (detected {sys.platform})."
+
+    success_apps: list[str] = []
+    not_running_apps: list[str] = []
+    failed_apps: list[str] = []
+    for index, app in enumerate(matched_apps):
+        key = str(app).strip().casefold()
+        entry = APP_REGISTRY.get(key)
+        if entry is None or not entry.close_processes:
+            failed_apps.append(str(app))
+            continue
+
+        window_closed: Optional[bool] = None
+        for title in entry.close_window_titles:
+            try:
+                from charlie.desktop import windows as desktop_windows
+
+                if desktop_windows._user32 is None:
+                    break
+                if desktop_windows.find_window(title) is not None:
+                    logger.info("Closing %s through resolved window identity '%s'", app, title)
+                    window_closed = desktop_windows.close_window_and_verify(title)
+                    break
+            except Exception:
+                logger.warning("Window close resolution failed for %s", app, exc_info=True)
+                window_closed = False
+                break
+        if window_closed is True:
+            success_apps.append(str(app))
+            continue
+        if window_closed is False:
+            failed_apps.append(str(app))
+            continue
+
+        candidates = entry.close_processes
+        fallback = launched_processes[index] if index < len(launched_processes) else None
+        if fallback in candidates:
+            candidates = (fallback, *(candidate for candidate in candidates if candidate != fallback))
+        closed = False
+        failed = False
+        for process in candidates:
+            try:
+                result = subprocess.run(
+                    ["taskkill", "/IM", process, "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                stderr = (result.stderr or "").lower()
+                if result.returncode == 0:
+                    try:
+                        still_running = is_process_running(process)
+                    except Exception:
+                        still_running = True
+                    if still_running:
+                        failed = True
+                    else:
+                        closed = True
+                    break
+                if "not found" in stderr or result.returncode == 128:
+                    continue
+                failed = True
+                break
+            except Exception as exc:
+                logger.error("Failed to taskkill %s (%s): %s", app, process, exc, exc_info=True)
+                failed = True
+                break
+        if closed:
+            success_apps.append(str(app))
+        elif failed:
+            failed_apps.append(str(app))
+        else:
+            not_running_apps.append(str(app))
+
+    parts: list[str] = []
+    if success_apps:
+        parts.append(f"{format_app_list(success_apps)} has been closed for you.")
+    if not_running_apps:
+        parts.append(f"{format_app_list(not_running_apps)} is not currently running.")
+    if failed_apps:
+        parts.append(f"Failed to close {format_app_list(failed_apps)}.")
+    return " ".join(parts) or "Error: no app was provided to close."
+
+
+def launch_apps(matched_apps: list[str], launched_commands: Optional[list[str]] = None) -> str:
+    """Focus or launch resolved local apps and verify the resulting host state."""
+    if sys.platform != "win32":
+        return f"App launching is only supported on Windows (detected {sys.platform})."
+
+    success_apps: list[str] = []
+    already_open_apps: list[str] = []
+    failed_apps: list[tuple[str, str]] = []
+    for app in matched_apps:
+        name = str(app).strip()
+        key = name.casefold()
+        entry = APP_REGISTRY.get(key)
+        if entry is None or entry.is_website:
+            resolution = resolve_local_app(name)
+            if resolution is None or not launch_and_verify(resolution):
+                failed_apps.append((name, "runtime-verification-failed"))
+            else:
+                already_open = bool(resolution.window_title or resolution.process_name)
+                (already_open_apps if already_open else success_apps).append(name)
+            continue
+
+        process_name = entry.close_process
+        if process_name and is_process_running(process_name):
+            from charlie.desktop.windows import focus_window
+
+            focus_window(process_name.removesuffix(".exe"))
+            already_open_apps.append(name)
+            continue
+
+        resolution = resolve_local_app(name)
+        if resolution and (resolution.launch_target or resolution.window_title):
+            already_open = bool(resolution.window_title or resolution.process_name)
+            if launch_and_verify(resolution):
+                (already_open_apps if already_open else success_apps).append(name)
+            else:
+                failed_apps.append((name, "runtime-verification-failed"))
+            continue
+
+        try:
+            launched = launch_and_verify(
+                AppResolution(name=name, launch_target=entry.open_cmd, process_name=entry.close_process)
+            )
+        except Exception as exc:
+            logger.debug("App launch failed for %s: %s", name, exc)
+            launched = False
+        if launched:
+            success_apps.append(name)
+        else:
+            failed_apps.append((name, "runtime-verification-failed"))
+
+    if not success_apps and not already_open_apps:
+        failed_names = [f"{name} ({error})" for name, error in failed_apps]
+        return f"I could not open {', '.join(failed_names)}."
+
+    parts: list[str] = []
+    if success_apps:
+        parts.append(f"I've opened {format_app_list(success_apps)} for you.")
+    if already_open_apps:
+        parts.append(f"{format_app_list(already_open_apps)} was already open -- switched to it.")
+    if failed_apps:
+        parts.append(f"(Failed to open: {format_app_list([name for name, _ in failed_apps])})")
+    return " ".join(parts)
+
+
+def open_url_in_default_browser(url: str) -> bool:
+    """Open one validated URL through Windows' default browser association."""
+    if sys.platform != "win32":
+        return False
+    from charlie.known_apps import resolve_website_url
+
+    normalized = resolve_website_url(url)
+    if normalized is None:
+        return False
+    try:
+        os.startfile(normalized)  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return False
+    return True

@@ -189,7 +189,7 @@ class WorldModel:
         sample_size app_open events for consecutive pairs within
         window_seconds. Returns (app_a, app_b, occurrences) for the most
         common pair, or None. App names are extracted from the event detail
-        string's leading "I've opened X for you." shape (see router.execute_open_app);
+        string's leading "I've opened X for you." shape (see charlie.desktop.apps.launch_apps);
         best-effort, skips events it can't parse.
         """
         def _op():

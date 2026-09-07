@@ -8,6 +8,7 @@ import pytest
 
 from charlie.config import Config
 from charlie.core import Brain
+from charlie.desktop import apps as desktop_apps
 
 
 @pytest.fixture
@@ -65,8 +66,14 @@ class TestMachineEventWriters:
 
         brain = Brain(brain_config)
         monkeypatch.setattr("sys.platform", "win32")
-        monkeypatch.setattr("charlie.router.is_process_running", lambda name: False)
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("P", (), {"pid": 1})())
+        monkeypatch.setattr(desktop_apps, "is_process_running", lambda name: False)
+        monkeypatch.setattr(desktop_apps, "resolve_local_app", lambda _name: None)
+        monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
+        monkeypatch.setattr(
+            subprocess,
+            "Popen",
+            lambda *a, **kw: type("P", (), {"pid": 1, "poll": lambda self: None})(),
+        )
         await _collect(brain, "open notepad")
         events = brain.world_model.recent_events(event_type="app_open")
         assert len(events) == 1

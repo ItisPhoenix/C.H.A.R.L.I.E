@@ -1,32 +1,24 @@
-"""Declarative fast-path router. Matchers here are pure -- given
-an utterance they return a RouteMatch (intent name + extracted args) or
-None, with no side effects. Anything that actually launches/kills a
-process, talks to a background task, etc. is a separate execute_*
-function, called by the caller (Brain.chat_stream) only once a match is
-confirmed -- fixes the audit finding that _detect_open_app/_detect_close_app
-used to run taskkill/Popen calls directly inside what was meant to be a pure
-detector. Memory-writing detectors (correction, opinion teaching, standing
-instruction, set goal, verbosity feedback) stay in core.py -- they need
-direct access to Brain.history/memory files, and folding them in here would
-force this module to depend on Brain.
+"""Declarative fast-path router.
+
+Matchers here are pure: given an utterance they return a RouteMatch (intent
+name plus extracted args) or None. Host effects belong to the canonical
+DesktopCapability operations in ``charlie.desktop.apps`` and are invoked by
+Brain only after policy and lease checks. Memory-writing detectors stay in
+core.py because they need direct access to Brain history and memory files.
 """
 
 import logging
-import os
 import re
-import subprocess
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
-from charlie.desktop.apps import launch_and_verify, resolve_local_app
+from charlie.desktop.apps import resolve_local_app
 from charlie.known_apps import APP_REGISTRY as _APP_REGISTRY
 from charlie.known_apps import resolve_website_url
 from charlie.task_journal import TaskStatus, normalize_task_status
-from charlie.text_utils import format_app_list
-from charlie.utils import is_process_running, make_id
+from charlie.utils import make_id
 
 logger = logging.getLogger("charlie.router")
 
@@ -193,81 +185,6 @@ def match_close_app(
         return None
 
     return matched_apps, launched_processes
-
-
-def execute_close_app(matched_apps: List[str], launched_processes: List[str]) -> str:
-    """Close each matched app once, then verify its process is gone."""
-    logger.info("Fast-path close apps: apps=%s, processes=%s", matched_apps, launched_processes)
-    if sys.platform != "win32":
-        return f"App closing is only supported on Windows (detected {sys.platform})."
-
-    success_apps, not_running_apps, failed_apps = [], [], []
-    for app, fallback_process in zip(matched_apps, launched_processes):
-        window_closed = None
-        for title in _CLOSE_WINDOW_TITLES.get(app, ()):
-            try:
-                from charlie.desktop import windows as desktop_windows
-
-                if desktop_windows._user32 is None:
-                    break
-                find_window = desktop_windows.find_window
-                close_window_and_verify = desktop_windows.close_window_and_verify
-
-                if find_window(title) is not None:
-                    logger.info("Closing %s through resolved window identity '%s'", app, title)
-                    window_closed = close_window_and_verify(title)
-                    break
-            except Exception:
-                logger.warning("Window close resolution failed for %s", app, exc_info=True)
-                window_closed = False
-                break
-        if window_closed is True:
-            success_apps.append(app)
-            continue
-        if window_closed is False:
-            failed_apps.append(app)
-            continue
-
-        candidates = _CLOSE_PROCESS_CANDIDATES.get(app) or ((fallback_process,) if fallback_process else ())
-        closed = False
-        failed = False
-        for process in candidates:
-            try:
-                cmd = f"taskkill /IM {process} /F"
-                res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
-                if res.returncode == 0:
-                    try:
-                        still_running = is_process_running(process)
-                    except Exception:
-                        still_running = True
-                    if still_running:
-                        failed = True
-                    else:
-                        closed = True
-                    break
-                if "not found" in res.stderr.lower() or res.returncode == 128:
-                    continue
-                failed = True
-                break
-            except Exception as e:
-                logger.error("Failed to taskkill %s (%s): %s", app, process, e, exc_info=True)
-                failed = True
-                break
-        if closed:
-            success_apps.append(app)
-        elif failed:
-            failed_apps.append(app)
-        else:
-            not_running_apps.append(app)
-
-    parts = []
-    if success_apps:
-        parts.append(f"{format_app_list(success_apps)} has been closed for you.")
-    if not_running_apps:
-        parts.append(f"{format_app_list(not_running_apps)} is not currently running.")
-    if failed_apps:
-        parts.append(f"Failed to close {format_app_list(failed_apps)}.")
-    return " ".join(parts)
 
 
 def _match_route_close_app(query: str) -> Optional[RouteMatch]:
@@ -552,70 +469,6 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
         )
 
     return matched_apps, launched_commands, leftover_instruction
-
-
-def execute_open_app(matched_apps: List[str], launched_commands: List[str]) -> str:
-    """Side effects: focus already-running apps, launch the rest, build the status message."""
-    logger.info("Fast-path open apps: apps=%s, commands=%s", matched_apps, launched_commands)
-    if sys.platform != "win32":
-        return f"App launching is only supported on Windows (detected {sys.platform})."
-
-    success_apps, already_open_apps, failed_apps = [], [], []
-    for app, cmd in zip(matched_apps, launched_commands):
-        process_name = _CLOSE_APP_MAP.get(app)
-        if process_name and is_process_running(process_name):
-            from charlie.desktop.windows import focus_window
-
-            focus_window(process_name.removesuffix(".exe"))
-            already_open_apps.append(app)
-            continue
-
-        if app not in _OPEN_APP_MAP:
-            resolution = resolve_local_app(app)
-            if resolution:
-                already_open = bool(resolution.window_title or resolution.process_name)
-                if launch_and_verify(resolution):
-                    (already_open_apps if already_open else success_apps).append(app)
-                else:
-                    failed_apps.append((app, "runtime-verification-failed"))
-                continue
-
-        launched = False
-        last_error = None
-        try:
-            full_cmd = f'start "" {cmd}'
-            subprocess.Popen(full_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            launched = True
-        except Exception as e:
-            last_error = e
-            logger.debug("start command failed for %s: %s", app, e)
-        if not launched and not cmd.startswith(("http://", "https://")):
-            try:
-                os.startfile(cmd)
-                launched = True
-            except Exception as e:
-                last_error = e
-                logger.debug("os.startfile failed for %s: %s", app, e)
-        if launched:
-            success_apps.append(app)
-        else:
-            error_detail = type(last_error).__name__ if last_error else "unknown error"
-            logger.error("Failed to launch %s (%s): %s", app, cmd, last_error)
-            failed_apps.append((app, error_detail))
-
-    if not success_apps and not already_open_apps:
-        failed_names = [f"{name} ({err})" for name, err in failed_apps]
-        return f"I could not open {', '.join(failed_names)}."
-
-    msg_parts = []
-    if success_apps:
-        msg_parts.append(f"I've opened {format_app_list(success_apps)} for you.")
-    if already_open_apps:
-        msg_parts.append(f"{format_app_list(already_open_apps)} was already open -- switched to it.")
-    if failed_apps:
-        failed_names = [name for name, _ in failed_apps]
-        msg_parts.append(f"(Failed to open: {format_app_list(failed_names)})")
-    return " ".join(msg_parts)
 
 
 def _match_route_open_app(query: str) -> Optional[RouteMatch]:

@@ -276,6 +276,9 @@ class ToolRegistry:
         if name == "system_control":
             return system_control(**arguments)
         if name in {
+            "desktop_open_app",
+            "desktop_close_app",
+            "desktop_open_url",
             "media_control",
             "media_snapshot",
             "calendar_list",
@@ -1916,6 +1919,132 @@ def _grounding_marks(elements: List[Any]) -> List[Any]:
         logger.warning("Grounding fallback pass failed", exc_info=True)
         return elements
     return merge_ocr_elements(elements, grounded) if grounded else elements
+
+
+def _coerce_desktop_strings(value: Any, field: str) -> tuple[list[str], Optional[str]]:
+    values = [value] if isinstance(value, str) else value
+    if not isinstance(values, (list, tuple)) or not values:
+        return [], f"Error: '{field}' must contain at least one string."
+    cleaned = [item.strip() if isinstance(item, str) else "" for item in values]
+    if any(not item for item in cleaned):
+        return [], f"Error: '{field}' must contain only non-empty strings."
+    return cleaned, None
+
+
+@registry.register_tool(
+    name="desktop_open_app",
+    description="Open or focus one or more local Windows applications.",
+    schema={
+        "type": "object",
+        "properties": {
+            "apps": {"type": "array", "items": {"type": "string"}, "description": "App names to open."},
+            "commands": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional compatibility hints from deterministic app matching.",
+            },
+        },
+        "required": ["apps"],
+        "additionalProperties": False,
+    },
+    is_interactive=True,
+)
+def desktop_open_app(apps: list[str] | str, commands: list[str] | str | None = None) -> ToolExecutionResult:
+    app_list, error = _coerce_desktop_strings(apps, "apps")
+    if error:
+        return ToolExecutionResult(error, {"ok": False, "failure_kind": "invalid_arguments"}, "desktop_app_open")
+    command_list: list[str] = []
+    if commands is not None:
+        command_list, error = _coerce_desktop_strings(commands, "commands")
+        if error or len(command_list) != len(app_list):
+            message = error or "Error: 'commands' must match 'apps' length."
+            return ToolExecutionResult(message, {"ok": False, "failure_kind": "invalid_arguments"}, "desktop_app_open")
+    if not _desktop_ready():
+        return ToolExecutionResult(
+            _DESKTOP_DISABLED_MSG, {"ok": False, "failure_kind": "unavailable"}, "desktop_app_open"
+        )
+    from charlie.desktop.apps import launch_apps
+
+    result = launch_apps(app_list, command_list)
+    ok = "could not open" not in result.lower()
+    return ToolExecutionResult(result, {"ok": ok, "apps": app_list}, "desktop_app_open")
+
+
+@registry.register_tool(
+    name="desktop_close_app",
+    description="Close one or more local Windows applications; closing can lose unsaved state.",
+    schema={
+        "type": "object",
+        "properties": {
+            "apps": {"type": "array", "items": {"type": "string"}, "description": "App names to close."},
+            "processes": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional compatibility process hints from deterministic app matching.",
+            },
+        },
+        "required": ["apps"],
+        "additionalProperties": False,
+    },
+    is_interactive=True,
+)
+def desktop_close_app(apps: list[str] | str, processes: list[str] | str | None = None) -> ToolExecutionResult:
+    app_list, error = _coerce_desktop_strings(apps, "apps")
+    if error:
+        return ToolExecutionResult(error, {"ok": False, "failure_kind": "invalid_arguments"}, "desktop_app_close")
+    process_list: list[str] = []
+    if processes is not None:
+        process_list, error = _coerce_desktop_strings(processes, "processes")
+        if error or len(process_list) != len(app_list):
+            message = error or "Error: 'processes' must match 'apps' length."
+            return ToolExecutionResult(message, {"ok": False, "failure_kind": "invalid_arguments"}, "desktop_app_close")
+    if not _desktop_ready():
+        return ToolExecutionResult(
+            _DESKTOP_DISABLED_MSG, {"ok": False, "failure_kind": "unavailable"}, "desktop_app_close"
+        )
+    from charlie.desktop.apps import close_apps
+
+    result = close_apps(app_list, process_list)
+    ok = "failed to close" not in result.lower()
+    return ToolExecutionResult(result, {"ok": ok, "apps": app_list}, "desktop_app_close")
+
+
+@registry.register_tool(
+    name="desktop_open_url",
+    description="Open one validated HTTP(S) URL in the user's real default browser.",
+    schema={
+        "type": "object",
+        "properties": {"url": {"type": "string", "description": "HTTP(S) URL to open."}},
+        "required": ["url"],
+        "additionalProperties": False,
+    },
+    is_interactive=True,
+)
+def desktop_open_url(url: str) -> ToolExecutionResult:
+    if not isinstance(url, str) or not url.strip():
+        return ToolExecutionResult(
+            "Error: 'url' must be a non-empty HTTP(S) URL.",
+            {"ok": False, "failure_kind": "invalid_arguments"},
+            "desktop_url_open",
+        )
+    if not _desktop_ready():
+        return ToolExecutionResult(
+            _DESKTOP_DISABLED_MSG, {"ok": False, "failure_kind": "unavailable"}, "desktop_url_open"
+        )
+    from charlie.desktop.apps import open_url_in_default_browser
+
+    opened = open_url_in_default_browser(url)
+    if not opened:
+        return ToolExecutionResult(
+            f"Error: Could not open {url} in the default browser.",
+            {"ok": False, "verified": False, "url": url},
+            "desktop_url_open",
+        )
+    return ToolExecutionResult(
+        f"Opened {url} in the default browser.",
+        {"ok": True, "verified": True, "url": url},
+        "desktop_url_open",
+    )
 
 
 @registry.register_tool(

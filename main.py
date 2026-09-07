@@ -5609,6 +5609,14 @@ async def main() -> int:
         await _drain_event_bus_submissions(event_bus_registry, loop=loop)
 
         try:
+            from charlie.desktop import shutdown_uia_executor
+
+            shutdown_uia_executor()
+            logger.info("Desktop UIA executor shut down")
+        except Exception as e:
+            logger.warning("Desktop UIA executor shutdown error: %s", e)
+
+        try:
             from charlie.media_runtime import shutdown_media_executor
 
             shutdown_media_executor()

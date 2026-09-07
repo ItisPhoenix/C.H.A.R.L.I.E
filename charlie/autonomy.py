@@ -57,7 +57,6 @@ _DESKTOP_EFFECTOR_TOOLS = frozenset({
     "desktop_scroll",
     "desktop_window",
     "desktop_move_window",
-    "system_control",
 })
 
 
@@ -82,6 +81,9 @@ def classify_action(
         if gated:
             return RiskClass.DESTRUCTIVE, gated
         return RiskClass.SECURITY_SENSITIVE, "arbitrary shell commands require explicit approval"
+
+    if tool_name == "desktop_window" and str(arguments.get("action", "")).casefold() == "close":
+        return RiskClass.DESTRUCTIVE, "closing a window may discard unsaved user state"
 
     if tool_name in _DESKTOP_EFFECTOR_TOOLS:
         return RiskClass.SAFE, ""

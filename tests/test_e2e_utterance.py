@@ -15,6 +15,7 @@ import pytest
 
 from charlie.config import Config
 from charlie.core import Brain
+from charlie.desktop import apps as desktop_apps
 from charlie.research.citations import assign_citations
 from charlie.research.models import EvidenceItem, ResearchMode, ResearchReport, SearchResult, SourceDocument
 from charlie.voice_diagnostics import VoiceDiagnostics
@@ -301,8 +302,14 @@ class TestFastPathsBypassLlm:
     async def test_open_known_app_never_calls_llm(self, monkeypatch, brain_config):
         brain = Brain(brain_config)
         monkeypatch.setattr("sys.platform", "win32")
-        monkeypatch.setattr("charlie.router.is_process_running", lambda name: False)
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("P", (), {"pid": 1})())
+        monkeypatch.setattr(desktop_apps, "is_process_running", lambda name: False)
+        monkeypatch.setattr(desktop_apps, "resolve_local_app", lambda _name: None)
+        monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
+        monkeypatch.setattr(
+            subprocess,
+            "Popen",
+            lambda *a, **kw: type("P", (), {"pid": 1, "poll": lambda self: None})(),
+        )
 
         def fail_if_called(*a, **kw):
             raise AssertionError("LLM should not be called for a fast-path open-app query")
@@ -315,7 +322,13 @@ class TestFastPathsBypassLlm:
     async def test_close_known_app_never_calls_llm(self, monkeypatch, brain_config):
         brain = Brain(brain_config)
         monkeypatch.setattr("sys.platform", "win32")
-        monkeypatch.setattr("charlie.router.is_process_running", lambda _: False)
+        monkeypatch.setattr(desktop_apps, "is_process_running", lambda _: False)
+        monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
+
+        async def approve(*_args, **_kwargs):
+            return True
+
+        monkeypatch.setattr(brain, "request_tool_approval", approve)
 
         def mock_run(cmd, *a, **kw):
             return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
@@ -897,8 +910,14 @@ class TestRouterClassifierFallback:
         brain_config.router_classifier_enabled = True
         brain = Brain(brain_config)
         monkeypatch.setattr("sys.platform", "win32")
-        monkeypatch.setattr("charlie.router.is_process_running", lambda name: False)
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("P", (), {"pid": 1})())
+        monkeypatch.setattr(desktop_apps, "is_process_running", lambda name: False)
+        monkeypatch.setattr(desktop_apps, "resolve_local_app", lambda _name: None)
+        monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
+        monkeypatch.setattr(
+            subprocess,
+            "Popen",
+            lambda *a, **kw: type("P", (), {"pid": 1, "poll": lambda self: None})(),
+        )
 
         def fail_if_called(*a, **kw):
             raise AssertionError("Normal tool-calling LLM stream should not fire when classifier resolves it")

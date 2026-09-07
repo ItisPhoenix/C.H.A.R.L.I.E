@@ -54,15 +54,15 @@ def test_desktop_control_tools_frozenset():
         "desktop_click", "desktop_type", "desktop_invoke", "desktop_key",
         "desktop_click_at", "desktop_move", "desktop_drag", "desktop_scroll",
         "desktop_focus", "desktop_window", "desktop_move_window",
-        "system_control",
+        "desktop_open_app", "desktop_close_app", "desktop_open_url",
     }
 
 
-def test_system_control_is_gated():
-    """Media-key presses mutate real system volume/playback state, same as
-    desktop_key sending a chord -- it must go through the same consent-arm/
-    panic-halt/rate-limit/idempotency-exclusion gate as every other effector."""
-    assert "system_control" in _DESKTOP_CONTROL_TOOLS
+def test_system_control_is_media_owned():
+    from charlie.capabilities import capability_index
+
+    assert "system_control" not in _DESKTOP_CONTROL_TOOLS
+    assert capability_index.get_operation_domain("system_control") == "media"
 
 
 def test_desktop_tools_disabled_by_default():
@@ -326,7 +326,10 @@ def test_screen_query_phrase_matches():
 def test_desktop_operations_use_canonical_com_dispatch_metadata():
     from charlie.capabilities import capability_index
 
-    desktop_com_names = _DESKTOP_CONTROL_TOOLS | {
+    desktop_com_names = {
+        "desktop_click", "desktop_type", "desktop_invoke", "desktop_key",
+        "desktop_click_at", "desktop_move", "desktop_drag", "desktop_scroll",
+        "desktop_focus", "desktop_window", "desktop_move_window",
         "desktop_observe", "desktop_read_screen", "desktop_screenshot",
     }
     for tool_name in desktop_com_names:
@@ -336,10 +339,8 @@ def test_desktop_operations_use_canonical_com_dispatch_metadata():
 
 
 def test_uia_executor_matches_desktop_availability():
-    # Single dedicated COM-initialized thread when UIA is usable, None otherwise
-    # (None means _exec_one falls back to the default pool, but desktop tools
-    # are gated behind DESKTOP_AVAILABLE before ever reaching it either way).
-    assert (UIA_EXECUTOR is not None) == DESKTOP_AVAILABLE
+    # Executor is lazy so web-only processes do not create a UIA worker at import.
+    assert UIA_EXECUTOR is None or DESKTOP_AVAILABLE
     if UIA_EXECUTOR is not None:
         assert UIA_EXECUTOR._max_workers == 1
 

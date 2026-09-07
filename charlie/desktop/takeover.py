@@ -3,7 +3,7 @@
 Monitors physical input devices during automated mouse/keyboard control sessions.
 If genuine user interaction is detected:
 1. Halts automated control immediately (no fighting for the cursor).
-2. Releases physical mouse/keyboard capability leases.
+2. Revokes canonical desktop capability ownership.
 3. Sets a clean cancellation flag.
 
 Zero-keylogging guarantee: captures no keystrokes, no coordinates, and stores no input logs.
@@ -101,21 +101,20 @@ class UserTakeoverDetector:
             return False
 
     def _trigger_halt(self) -> None:
-        """Halt actions and release physical leases."""
+        """Halt actions and revoke the canonical desktop lease."""
         try:
             from charlie.desktop import actions
 
             actions.halt()
         except Exception:
-            pass
+            logger.error("Failed to halt desktop actions during user takeover", exc_info=True)
 
         try:
             from charlie.resource_locks import default_lease_manager
 
-            default_lease_manager.release("physical_mouse")
-            default_lease_manager.release("keyboard")
+            default_lease_manager.manual_takeover(("desktop",))
         except Exception:
-            pass
+            logger.error("Failed to revoke canonical desktop lease during user takeover", exc_info=True)
 
     def is_physical_control_active(self) -> bool:
         with self._lock:

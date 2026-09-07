@@ -54,10 +54,10 @@ class TestClassifyActionInjection:
 
 
 class TestClassifyActionDesktop:
-    def test_desktop_window_close_is_allowed(self):
+    def test_desktop_window_close_requires_approval(self):
         risk, reason = classify_action("desktop_window", {"window": "notepad", "action": "close"})
-        assert risk == RiskClass.SAFE
-        assert reason == ""
+        assert risk == RiskClass.DESTRUCTIVE
+        assert "unsaved" in reason
 
     def test_desktop_window_minimize_is_allowed(self):
         risk, reason = classify_action("desktop_window", {"window": "notepad", "action": "minimize"})
