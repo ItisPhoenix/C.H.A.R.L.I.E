@@ -57,6 +57,7 @@ class SelfExtensionOrchestrator:
         introspector: Optional[Any] = None,
         tx_store_path: Optional[Path] = None,
         settings_snapshot_callback: Optional[Callable[[str], None]] = None,
+        runtime_extension_operation: Optional[Callable[..., Dict[str, Any]]] = None,
     ) -> None:
         self._repo_root = (repo_root or Path(os.getcwd())).resolve()
         self._config = config or Config()
@@ -64,6 +65,7 @@ class SelfExtensionOrchestrator:
             raise ValueError("SelfExtensionOrchestrator requires main-owned SettingsService")
         self._settings_service = settings_service
         self._settings_snapshot_callback = settings_snapshot_callback
+        self._runtime_extension_operation = runtime_extension_operation
         self._capability_index = capability_index if capability_index is not None else get_capability_index()
         self._event_bus = event_bus
         self._event_loop = event_loop
@@ -99,6 +101,7 @@ class SelfExtensionOrchestrator:
             capability_index=self._capability_index,
             mcp_client=self._mcp_client,
             tool_registry=self._tool_registry,
+            runtime_extension_operation=runtime_extension_operation,
         )
         self._code_adapter = CodeAdapter(
             repo_root=self._repo_root,
@@ -116,10 +119,15 @@ class SelfExtensionOrchestrator:
             capability_index=self._capability_index,
             mcp_client=self._mcp_client,
             tool_registry=self._tool_registry,
+            activate_mcp=False,
         )
 
         # Resume any transactions left in RESTARTING state
         self._resume_restarting_transactions()
+
+    def rehydrate_mcp_runtime(self):
+        """Restore durable MCP records through main EXT-1 authority."""
+        return self._registry.rehydrate_mcp_runtime(self._runtime_extension_operation)
 
     def _notify_settings_snapshot(self, rationale: str) -> None:
         if self._settings_snapshot_callback is None:

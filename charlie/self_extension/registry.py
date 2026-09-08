@@ -6,7 +6,7 @@ import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from charlie.self_extension.models import ExtensionKind
 
@@ -154,6 +154,8 @@ class ExtensionRegistry:
         code_worker_module: Any = None,
         mcp_client: Any = None,
         tool_registry: Any = None,
+        activate_mcp: bool = True,
+        runtime_extension_operation: Optional[Callable[..., Dict[str, Any]]] = None,
     ) -> RehydrationReport:
         """Restore capabilities from the durable manifest into *capability_index*.
 
@@ -183,7 +185,17 @@ class ExtensionRegistry:
                 elif kind == ExtensionKind.SKILL:
                     self._rehydrate_skill(ext_id, entry, capability_index)
                 elif kind == ExtensionKind.MCP_TOOL:
-                    self._rehydrate_mcp(ext_id, entry, capability_index, mcp_client, tool_registry)
+                    if not activate_mcp:
+                        report.details.append({"id": ext_id, "status": "deferred"})
+                        continue
+                    self._rehydrate_mcp(
+                        ext_id,
+                        entry,
+                        capability_index,
+                        mcp_client,
+                        tool_registry,
+                        runtime_extension_operation,
+                    )
                 else:
                     # CONFIG / ARCHITECTURE_LARGE: no runtime capability descriptor needed
                     pass
@@ -196,6 +208,42 @@ class ExtensionRegistry:
                 report.failed += 1
                 report.details.append({"id": ext_id, "status": "failed", "error": str(exc)})
 
+        return report
+
+    def rehydrate_mcp_runtime(
+        self,
+        runtime_extension_operation: Optional[Callable[..., Dict[str, Any]]],
+    ) -> RehydrationReport:
+        """Restore durable MCP records through main runtime authority."""
+        report = RehydrationReport()
+        for entry in list(self._entries.values()):
+            if not entry.enabled or entry.kind != ExtensionKind.MCP_TOOL:
+                continue
+            meta = entry.metadata or {}
+            try:
+                if runtime_extension_operation is None:
+                    raise RuntimeError("Canonical EXT-1 MCP runtime seam is unavailable")
+                result = runtime_extension_operation(
+                    "install",
+                    entry.name,
+                    str(meta.get("command", "")),
+                    list(meta.get("args", [])),
+                    dict(meta.get("env", {})),
+                )
+                if not isinstance(result, dict) or result.get("success") is not True:
+                    error = result.get("error") if isinstance(result, dict) else "MCP runtime restoration failed"
+                    raise RuntimeError(str(error))
+                entry.declared_tools = [str(name) for name in result.get("tool_names", [])]
+                entry.verification_status = "verified"
+                self._save()
+                report.restored += 1
+                report.details.append({"id": entry.extension_id, "status": "restored"})
+            except Exception as exc:
+                entry.verification_status = "failed"
+                self._save()
+                report.failed += 1
+                report.details.append({"id": entry.extension_id, "status": "failed", "error": str(exc)})
+                logger.warning("Canonical MCP rehydration failed for '%s': %s", entry.name, exc)
         return report
 
     def _rehydrate_code(
@@ -286,11 +334,28 @@ class ExtensionRegistry:
         capability_index: Any,
         mcp_client: Any,
         tool_registry: Any,
+        runtime_extension_operation: Optional[Callable[..., Dict[str, Any]]] = None,
     ) -> None:
         from charlie.capabilities import CapabilityDescriptor, CapabilityOperation
 
         name = entry.name
         discovered: list = entry.declared_tools or []
+
+        if runtime_extension_operation is not None:
+            meta = entry.metadata or {}
+            result = runtime_extension_operation(
+                "install",
+                entry.name,
+                str(meta.get("command", "")),
+                list(meta.get("args", [])),
+                dict(meta.get("env", {})),
+            )
+            if not isinstance(result, dict) or result.get("success") is not True:
+                error = result.get("error") if isinstance(result, dict) else "MCP runtime restoration failed"
+                raise RuntimeError(str(error))
+            entry.declared_tools = [str(name) for name in result.get("tool_names", [])]
+            self._save()
+            return
 
         if mcp_client is not None:
             try:
@@ -355,4 +420,3 @@ class ExtensionRegistry:
             availability_check=_avail,
         )
         capability_index.register_capability(desc)
-

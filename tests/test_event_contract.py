@@ -48,6 +48,23 @@ def test_registry_exposes_category_and_replay_policy():
     assert spec.version == 1
 
 
+def test_extension_operation_result_contract_requires_request_fingerprint():
+    spec = event_spec("extension_operation_result")
+    assert "request_fingerprint" in spec.required_payload
+    with pytest.raises(EventValidationError):
+        build_event(
+            "extension_operation_result",
+            {
+                "request_id": "req-1",
+                "operation": "install",
+                "kind": "generated",
+                "name": "demo",
+                "success": True,
+                "tool_names": ["demo"],
+            },
+        )
+
+
 def test_python_event_vocabulary_matches_shared_contract_registry():
     assert {event.value for event in EventType} == set(EVENT_REGISTRY)
 

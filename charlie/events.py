@@ -52,6 +52,7 @@ class EventType(StrEnum):
     EXTENSION_PROPOSED = "extension_proposed"
     EXTENSION_PENDING = "extension_pending"
     EXTENSION_OPERATION_RESULT = "extension_operation_result"
+    EXTENSION_SNAPSHOT = "extension_snapshot"
     BACKGROUND_TASK = "background_task"
     TASK_SNAPSHOT = "task_snapshot"
     RUNTIME_TELEMETRY = "runtime_telemetry"

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from charlie.self_extension.models import ExtensionKind
 from charlie.self_extension.registry import ExtensionEntry, ExtensionRegistry
@@ -36,11 +36,13 @@ class MCPAdapter:
         capability_index: Optional[Any] = None,
         mcp_client: Optional[Any] = None,
         tool_registry: Optional[Any] = None,
+        runtime_extension_operation: Optional[Callable[..., Dict[str, Any]]] = None,
     ) -> None:
         self._registry = registry or ExtensionRegistry(capability_index=capability_index)
         self._capability_index = capability_index
         self._mcp_client = mcp_client
         self._tool_registry = tool_registry
+        self._runtime_extension_operation = runtime_extension_operation
 
     def register_mcp_server(
         self,
@@ -53,54 +55,57 @@ class MCPAdapter:
         args = list(args or [])
         env = dict(env or {})
 
-        if self._mcp_client is None:
+        if self._runtime_extension_operation is None and self._mcp_client is None:
             return MCPAdapterResult(
                 success=False,
                 message="MCPClient unavailable; refusing registry-only MCP installation.",
                 server_name=name,
             )
 
-        if self._tool_registry is None:
+        if self._runtime_extension_operation is None and self._tool_registry is None:
             return MCPAdapterResult(
                 success=False,
                 message="MCP registration requires tool_registry for enable_server().",
                 server_name=name,
             )
 
-        from charlie.mcp_client import MCPServerConfig
-
-        config = MCPServerConfig(name=name, command=command, args=args, env=env)
-        try:
-            self._mcp_client.add_server(config)
-        except Exception as exc:
-            return MCPAdapterResult(
-                success=False,
-                message=f"Failed to register MCP server '{name}': {exc}",
-                server_name=name,
-            )
-
         discovered_names: List[str] = []
-        try:
-            self._mcp_client.enable_server(self._tool_registry, name)
-            discovered_names = [
-                t.name
-                for t in self._mcp_client.list_tools()
-                if getattr(t, "server_name", "") == name
-            ]
-            if not discovered_names and not self._mcp_client.health_check().get(name, False):
-                raise RuntimeError(
-                    f"Server '{name}' connected but reports unhealthy and discovered no tools."
+        if self._runtime_extension_operation is not None:
+            result = self._runtime_extension_operation("install", name, command, args, env)
+            if not isinstance(result, dict) or result.get("success") is not True:
+                error = result.get("error") if isinstance(result, dict) else "Canonical MCP extension install failed"
+                return MCPAdapterResult(
+                    success=False,
+                    message=str(error),
+                    server_name=name,
                 )
-        except Exception as exc:
+            discovered_names = [str(tool_name) for tool_name in result.get("tool_names", [])]
+        else:
+            from charlie.mcp_client import MCPServerConfig
+
+            config = MCPServerConfig(name=name, command=command, args=args, env=env)
             try:
-                self._mcp_client.remove_server(self._tool_registry, name)
-            except Exception:
-                pass
-            return MCPAdapterResult(
-                success=False,
-                message=f"MCP server '{name}' connect/discover failed, rolled back: {exc}",
-                server_name=name,
-            )
+                self._mcp_client.add_server(config)
+                self._mcp_client.enable_server(self._tool_registry, name)
+                discovered_names = [
+                    t.name
+                    for t in self._mcp_client.list_tools()
+                    if getattr(t, "server_name", "") == name
+                ]
+                if not discovered_names and not self._mcp_client.health_check().get(name, False):
+                    raise RuntimeError(
+                        f"Server '{name}' connected but reports unhealthy and discovered no tools."
+                    )
+            except Exception as exc:
+                try:
+                    self._mcp_client.remove_server(self._tool_registry, name)
+                except Exception:
+                    pass
+                return MCPAdapterResult(
+                    success=False,
+                    message=f"MCP server '{name}' connect/discover failed, rolled back: {exc}",
+                    server_name=name,
+                )
 
         raw_spec = json.dumps({"name": name, "command": command, "args": args, "env": env})
         content_hash = hashlib.sha256(raw_spec.encode()).hexdigest()[:16]
@@ -177,7 +182,14 @@ class MCPAdapter:
     def rollback_mcp_server(self, name: str) -> MCPAdapterResult:
         ext_id = f"mcp_{name}"
 
-        if self._mcp_client is not None and self._tool_registry is not None:
+        if self._runtime_extension_operation is not None:
+            try:
+                result = self._runtime_extension_operation("uninstall", name, "", [], {})
+                if not isinstance(result, dict) or result.get("success") is not True:
+                    logger.warning("Canonical MCP rollback for '%s' failed: %s", name, result)
+            except Exception as exc:
+                logger.warning("Canonical MCP rollback for '%s' failed: %s", name, exc)
+        elif self._mcp_client is not None and self._tool_registry is not None:
             try:
                 self._mcp_client.remove_server(self._tool_registry, name)
             except Exception as exc:

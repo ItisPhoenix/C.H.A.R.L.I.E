@@ -9,9 +9,12 @@ Brain.request_tool_approval so nothing activates silently.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional
+
+from charlie.log_redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
     from charlie.core import Brain
@@ -115,6 +118,84 @@ class InstalledExtension:
     card: SkillCard
     enabled: bool = True
     tool_names: List[str] = field(default_factory=list)
+
+
+@dataclass
+class RuntimeExtension:
+    """Main-process extension runtime entry with private reinstall material."""
+
+    name: str
+    kind: str
+    source: str
+    card: SkillCard
+    raw_text: str = ""
+    enabled: bool = True
+    tool_names: List[str] = field(default_factory=list)
+    runtime_warning: Optional[str] = None
+
+    def snapshot(self) -> Dict[str, object]:
+        safe_warnings = []
+        for warning in self.card.warnings:
+            if warning.startswith("Possible hidden instruction"):
+                safe_warnings.append("Possible hidden instruction detected")
+            elif warning.startswith("Suspicious endpoint referenced"):
+                safe_warnings.append("Suspicious endpoint referenced")
+            else:
+                safe_warnings.append("Extension content warning")
+        if self.runtime_warning:
+            safe_warnings.append("Runtime extension degraded")
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "source": "mcp" if self.kind == "mcp" else redact_sensitive_text(self.source)[:500],
+            "enabled": self.enabled,
+            "tool_names": list(self.tool_names),
+            "warnings": safe_warnings,
+            "content_hash": self.card.content_hash,
+        }
+
+
+class ExtensionRuntimeRegistry:
+    """Process-lifetime main authority for installed extension runtime state."""
+
+    def __init__(self) -> None:
+        self._entries: Dict[str, RuntimeExtension] = {}
+
+    def get(self, name: str) -> Optional[RuntimeExtension]:
+        return self._entries.get(name)
+
+    def list(self) -> List[RuntimeExtension]:
+        return list(self._entries.values())
+
+    def record(self, entry: RuntimeExtension) -> None:
+        if entry.name in self._entries:
+            raise ValueError(f"Extension '{entry.name}' is already installed in main runtime.")
+        self._entries[entry.name] = entry
+
+    def remove(self, name: str) -> Optional[RuntimeExtension]:
+        return self._entries.pop(name, None)
+
+    def snapshot(self) -> List[Dict[str, object]]:
+        return [entry.snapshot() for entry in self._entries.values()]
+
+
+def canonical_extension_request_fingerprint(operation: str, payload: Dict[str, object]) -> str:
+    """Stable identity without retaining raw extension material."""
+    identity: Dict[str, object] = {
+        "operation": operation,
+        "name": payload.get("name"),
+    }
+    if operation == "install":
+        raw_text = str(payload.get("raw_text", ""))
+        source = str(payload.get("source", ""))
+        identity.update(
+            {
+                "kind": payload.get("kind"),
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                "raw_sha256": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
+            }
+        )
+    return json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
 
 
 class ExtensionManager:

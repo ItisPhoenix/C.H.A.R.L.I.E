@@ -13,7 +13,12 @@ import pytest
 
 import main
 from charlie.events import CONTRACT_VERSION, EventMeta, EventSource
-from charlie.extensions import ExtensionManager, InstalledExtension, build_skill_card
+from charlie.extensions import (
+    ExtensionManager,
+    InstalledExtension,
+    build_skill_card,
+    canonical_extension_request_fingerprint,
+)
 
 MAIN_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py")
 MAIN_SOURCE = open(MAIN_PATH, "r", encoding="utf-8").read()
@@ -55,6 +60,11 @@ class _BridgeBus:
 
 
 def _result_event(payload: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(payload)
+    payload.setdefault(
+        "request_fingerprint",
+        canonical_extension_request_fingerprint(str(payload.get("operation", "invalid")), payload),
+    )
     return {
         "type": "extension_operation_result",
         "version": CONTRACT_VERSION,
@@ -63,6 +73,30 @@ def _result_event(payload: dict[str, Any]) -> dict[str, Any]:
         "source": EventSource.BRAIN.value,
         "replay": False,
         "payload": payload,
+    }
+
+
+def _extension_snapshot_event(extensions: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "type": "extension_snapshot",
+        "version": CONTRACT_VERSION,
+        "id": "extension-snapshot-event",
+        "timestamp": "2026-08-30T00:00:00+00:00",
+        "source": EventSource.BRAIN.value,
+        "replay": False,
+        "payload": {"authority": "main_runtime", "status": "available", "extensions": extensions},
+    }
+
+
+def _extension_projection(*, enabled: bool = True, tool_names: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "name": "calendar",
+        "kind": "plugin",
+        "source": "plugin",
+        "enabled": enabled,
+        "tool_names": list(tool_names or []),
+        "warnings": [],
+        "content_hash": "test-hash",
     }
 
 
@@ -83,6 +117,13 @@ def _fresh_web_extension_state(monkeypatch: pytest.MonkeyPatch):
     from charlie import web_server
 
     monkeypatch.setattr(web_server, "_extension_manager", ExtensionManager())
+    monkeypatch.setattr(
+        web_server,
+        "_extension_snapshot",
+        {"authority": "main_runtime", "status": "available", "extensions": []},
+    )
+    monkeypatch.setattr(web_server, "_extension_snapshot_event", None)
+    monkeypatch.setattr(web_server, "_extension_pending_material", {})
     monkeypatch.setattr(web_server, "event_bus", None)
     monkeypatch.setattr(web_server, "active_connections", set())
     monkeypatch.setattr(web_server, "_pending_extension_operations", {}, raising=False)
@@ -128,7 +169,7 @@ async def test_approved_install_waits_for_main_before_mutating_web_mirror(
 
     await bus.command_seen.wait()
     assert not operation.done()
-    assert await web_server.list_extensions() == {"extensions": []}
+    assert await web_server.list_extensions() == {"extensions": [], "authority": "main_runtime"}
     command = bus.commands[0]
     assert command["type"] == "extension_operation"
     assert command["payload"]["operation"] == "install"
@@ -146,6 +187,7 @@ async def test_approved_install_waits_for_main_before_mutating_web_mirror(
             }
         )
     )
+    await bus.events.put(_extension_snapshot_event([_extension_projection(tool_names=["main_calendar_tool"])]))
     result = await operation
     await _stop_bridge(bus, bridge)
 
@@ -229,7 +271,7 @@ async def test_timeout_main_cannot_claim_install_success(monkeypatch: pytest.Mon
 @pytest.mark.asyncio
 async def test_enable_commits_web_state_only_after_main_success(monkeypatch: pytest.MonkeyPatch) -> None:
     web_server, bus, bridge = await _start_bridge(monkeypatch)
-    web_server._extension_manager.record(_extension(enabled=False))
+    web_server._apply_extension_snapshot_event(_extension_snapshot_event([_extension_projection(enabled=False)]))
     operation = asyncio.create_task(web_server.enable_extension("calendar"))
     await bus.command_seen.wait()
     assert not operation.done()
@@ -247,6 +289,9 @@ async def test_enable_commits_web_state_only_after_main_success(monkeypatch: pyt
             }
         )
     )
+    await bus.events.put(
+        _extension_snapshot_event([_extension_projection(enabled=True, tool_names=["main_calendar_tool"])])
+    )
     result = await operation
     await _stop_bridge(bus, bridge)
 
@@ -258,7 +303,7 @@ async def test_enable_commits_web_state_only_after_main_success(monkeypatch: pyt
 @pytest.mark.asyncio
 async def test_failed_enable_preserves_disabled_web_state(monkeypatch: pytest.MonkeyPatch) -> None:
     web_server, bus, bridge = await _start_bridge(monkeypatch)
-    web_server._extension_manager.record(_extension(enabled=False))
+    web_server._apply_extension_snapshot_event(_extension_snapshot_event([_extension_projection(enabled=False)]))
     operation = asyncio.create_task(web_server.enable_extension("calendar"))
     await bus.command_seen.wait()
     payload = bus.commands[0]["payload"]
@@ -285,7 +330,9 @@ async def test_failed_enable_preserves_disabled_web_state(monkeypatch: pytest.Mo
 @pytest.mark.asyncio
 async def test_disable_commits_web_state_only_after_main_success(monkeypatch: pytest.MonkeyPatch) -> None:
     web_server, bus, bridge = await _start_bridge(monkeypatch)
-    web_server._extension_manager.record(_extension(enabled=True))
+    web_server._apply_extension_snapshot_event(
+        _extension_snapshot_event([_extension_projection(enabled=True, tool_names=["main_calendar_tool"])])
+    )
     operation = asyncio.create_task(web_server.disable_extension("calendar"))
     await bus.command_seen.wait()
     assert not operation.done()
@@ -303,6 +350,7 @@ async def test_disable_commits_web_state_only_after_main_success(monkeypatch: py
             }
         )
     )
+    await bus.events.put(_extension_snapshot_event([_extension_projection(enabled=False)]))
     result = await operation
     await _stop_bridge(bus, bridge)
 
@@ -313,7 +361,9 @@ async def test_disable_commits_web_state_only_after_main_success(monkeypatch: py
 @pytest.mark.asyncio
 async def test_failed_disable_preserves_enabled_web_state(monkeypatch: pytest.MonkeyPatch) -> None:
     web_server, bus, bridge = await _start_bridge(monkeypatch)
-    web_server._extension_manager.record(_extension(enabled=True))
+    web_server._apply_extension_snapshot_event(
+        _extension_snapshot_event([_extension_projection(enabled=True, tool_names=["main_calendar_tool"])])
+    )
     operation = asyncio.create_task(web_server.disable_extension("calendar"))
     await bus.command_seen.wait()
     payload = bus.commands[0]["payload"]
@@ -340,7 +390,9 @@ async def test_failed_disable_preserves_enabled_web_state(monkeypatch: pytest.Mo
 @pytest.mark.asyncio
 async def test_uninstall_commits_web_removal_only_after_main_success(monkeypatch: pytest.MonkeyPatch) -> None:
     web_server, bus, bridge = await _start_bridge(monkeypatch)
-    web_server._extension_manager.record(_extension(enabled=True))
+    web_server._apply_extension_snapshot_event(
+        _extension_snapshot_event([_extension_projection(enabled=True, tool_names=["main_calendar_tool"])])
+    )
     operation = asyncio.create_task(web_server.uninstall_extension("calendar"))
     await bus.command_seen.wait()
     assert not operation.done()
@@ -359,6 +411,7 @@ async def test_uninstall_commits_web_removal_only_after_main_success(monkeypatch
             }
         )
     )
+    await bus.events.put(_extension_snapshot_event([]))
     result = await operation
     await _stop_bridge(bus, bridge)
 
@@ -369,7 +422,9 @@ async def test_uninstall_commits_web_removal_only_after_main_success(monkeypatch
 @pytest.mark.asyncio
 async def test_failed_uninstall_preserves_installed_web_state(monkeypatch: pytest.MonkeyPatch) -> None:
     web_server, bus, bridge = await _start_bridge(monkeypatch)
-    web_server._extension_manager.record(_extension(enabled=True))
+    web_server._apply_extension_snapshot_event(
+        _extension_snapshot_event([_extension_projection(enabled=True, tool_names=["main_calendar_tool"])])
+    )
     operation = asyncio.create_task(web_server.uninstall_extension("calendar"))
     await bus.command_seen.wait()
     payload = bus.commands[0]["payload"]
@@ -496,11 +551,32 @@ async def test_main_command_loop_calls_authoritative_mutation_seam() -> None:
     async def publish_tool_snapshot(bus, tool_registry):
         bus.events.append(("tool_snapshot", {"registry": tool_registry}, None))
 
+    submitted: list[asyncio.Task] = []
+
+    def submit(coroutine):
+        task = asyncio.create_task(coroutine)
+        submitted.append(task)
+        return task
+
+    async def handle(payload, **kwargs):
+        result, returned_mcp = apply(
+            payload,
+            brain=kwargs["brain"],
+            plugin_manager=kwargs["plugin_manager"],
+            mcp_client=kwargs["mcp_client"],
+            runtime_config=kwargs["runtime_config"],
+            tool_registry=kwargs["tool_registry"],
+        )
+        await publish_tool_snapshot(kwargs["event_bus"], kwargs["tool_registry"])
+        await kwargs["event_bus"].emit("extension_operation_result", result, meta=None)
+        return result, returned_mcp
+
     namespace = {
         "asyncio": asyncio,
         "logger": _NullLogger(),
         "_log_received_web_command": main._log_received_web_command,
-        "apply_extension_operation": apply,
+        "_submit_event_task": submit,
+        "_handle_extension_operation_request": handle,
         "_publish_tool_snapshot": publish_tool_snapshot,
         "EventMeta": EventMeta,
         "EventSource": EventSource,
@@ -513,6 +589,11 @@ async def test_main_command_loop_calls_authoritative_mutation_seam() -> None:
         "    mcp_client = None\n"
         "    plugin_manager = object()\n"
         "    config = SimpleNamespace(plugin_allow_dirs=[])\n"
+        "    extension_runtime_registry = object()\n"
+        "    extension_operation_results = {}\n"
+        "    extension_operation_in_flight = {}\n"
+        "    extension_operation_fingerprints = {}\n"
+        "    settings_operation_lock = asyncio.Lock()\n"
         + textwrap.indent(source, "    ")
         + "\n    return consume_web_commands\n"
     )
@@ -523,6 +604,7 @@ async def test_main_command_loop_calls_authoritative_mutation_seam() -> None:
 
     with pytest.raises(_StopCommandLoop):
         await consume(bus, object())
+    await asyncio.gather(*submitted)
 
     assert len(calls) == 1
     assert calls[0]["payload"]["request_id"] == "req-1"
@@ -535,7 +617,7 @@ def test_main_exposes_one_authoritative_extension_mutation_seam() -> None:
 
     assert callable(getattr(main, "apply_extension_operation", None))
     source = _function_source("consume_web_commands")
-    assert "apply_extension_operation(" in source
+    assert "_handle_extension_operation_request(" in source
     assert "extension_installed" not in source
     assert "extension_enabled" not in source
     assert "extension_disabled" not in source

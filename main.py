@@ -92,7 +92,7 @@ console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(console_formatter)
 
 root_logger.handlers = []
-from charlie.log_redaction import SensitiveDataFilter
+from charlie.log_redaction import SensitiveDataFilter, redact_sensitive_text
 
 redaction_filter = SensitiveDataFilter()
 file_handler.addFilter(redaction_filter)
@@ -107,6 +107,12 @@ from charlie import background_task, telemetry
 from charlie.errors import ErrorClass, classify_exception
 from charlie.config import Config, config
 from charlie.core import Brain, OperationCancelled
+from charlie.extensions import (
+    ExtensionRuntimeRegistry,
+    RuntimeExtension,
+    build_skill_card,
+    canonical_extension_request_fingerprint,
+)
 from charlie.presentation_control import PresentationRequest, get_presentation_controller
 from charlie.surface_intent import match_surface_request
 from charlie.events import EventMeta, EventSource, EventType
@@ -188,6 +194,7 @@ _MEDIA_RESULT_CACHE_MAX = 512
 _CALENDAR_RESULT_CACHE_MAX = 512
 _SESSION_RESULT_CACHE_MAX = 512
 _SETTINGS_RESULT_CACHE_MAX = 512
+_EXTENSION_RESULT_CACHE_MAX = 512
 from charlie.runtime_identity import git_build_identity, persistent_frontend_dist
 
 _SOURCE_IDENTITY, _SOURCE_DIRTY = git_build_identity(Path(__file__).resolve().parent)
@@ -419,6 +426,17 @@ def _log_received_web_command(command: Any) -> None:
             sorted(str(key) for key in updates),
         )
         return
+    if isinstance(command, dict) and command.get("type") == "extension_operation":
+        payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+        logger.debug(
+            "ZMQ received extension command: operation=%s request_id=%s kind=%s name=%s fingerprint=%s",
+            payload.get("operation"),
+            payload.get("request_id"),
+            payload.get("kind"),
+            payload.get("name"),
+            canonical_extension_request_fingerprint(str(payload.get("operation") or "invalid"), payload),
+        )
+        return
     logger.debug("ZMQ received command: %s", command)
 
 
@@ -449,6 +467,55 @@ def _reload_plugin_tools_state(
 
     set_health("plugins", HealthStatus.DISABLED)
     return True, "", empty_manager_factory()
+
+
+async def _reconcile_mcp_extension_runtime(
+    extension_registry: ExtensionRuntimeRegistry,
+    mcp_client: Any,
+    tool_registry: Any,
+    plugin_manager: Any,
+    runtime_config: Any,
+) -> tuple[Any, list[str]]:
+    """Reapply main-owned MCP extensions after canonical client replacement."""
+    from charlie.extensions.install import install_extension
+
+    failed: list[str] = []
+    for extension in extension_registry.list():
+        if extension.kind != "mcp":
+            continue
+        if mcp_client is not None and extension.name in getattr(mcp_client, "_servers", {}):
+            mcp_client.remove_server(tool_registry, extension.name)
+        if not extension.enabled:
+            extension.tool_names = []
+            extension.runtime_warning = None
+            continue
+        if mcp_client is None:
+            extension.enabled = False
+            extension.tool_names = []
+            extension.runtime_warning = "Runtime extension degraded"
+            failed.append(extension.name)
+            continue
+        try:
+            tool_names, mcp_client = await asyncio.to_thread(
+                install_extension,
+                "mcp",
+                extension.name,
+                extension.source,
+                extension.raw_text,
+                tool_registry,
+                plugin_manager,
+                mcp_client,
+                list(getattr(runtime_config, "plugin_allow_dirs", []) or []),
+            )
+            extension.enabled = True
+            extension.tool_names = list(tool_names)
+            extension.runtime_warning = None
+        except Exception:
+            extension.enabled = False
+            extension.tool_names = []
+            extension.runtime_warning = "Runtime extension degraded"
+            failed.append(extension.name)
+    return mcp_client, failed
 
 
 async def _publish_settings_snapshot(
@@ -2181,6 +2248,7 @@ async def _publish_runtime_state(
     bus: Optional[EventBus] = None,
     mcp_client: Any = None,
     settings_service: Any = None,
+    extension_registry: Optional[ExtensionRuntimeRegistry] = None,
 ) -> None:
     """Replay public operational state owned by this main process."""
     await _publish_subsystem_health(bus)
@@ -2189,6 +2257,7 @@ async def _publish_runtime_state(
     await _publish_mcp_snapshot(bus, mcp_client)
     await _publish_runtime_telemetry(bus)
     await _publish_settings_snapshot(bus, settings_service, rationale="runtime settings projection replay")
+    await _publish_extension_snapshot(bus, extension_registry, rationale="runtime extension projection replay")
 
 
 async def _dispatch_web_command(
@@ -2196,11 +2265,12 @@ async def _dispatch_web_command(
     bus: Optional[EventBus] = None,
     mcp_client: Any = None,
     settings_service: Any = None,
+    extension_registry: Optional[ExtensionRuntimeRegistry] = None,
 ) -> bool:
     """Dispatch the runtime-state command from the live web command consumer."""
     if not isinstance(cmd, dict) or cmd.get("type") != "runtime_state_request":
         return False
-    await _publish_runtime_state(bus, mcp_client, settings_service)
+    await _publish_runtime_state(bus, mcp_client, settings_service, extension_registry)
     return True
 
 
@@ -2209,9 +2279,35 @@ async def _handle_runtime_state_request(
     bus: Optional[EventBus] = None,
     mcp_client: Any = None,
     settings_service: Any = None,
+    extension_registry: Optional[ExtensionRuntimeRegistry] = None,
 ) -> bool:
     """Handle the command-loop runtime replay branch and report whether it matched."""
-    return await _dispatch_web_command({"type": cmd_type}, bus, mcp_client, settings_service)
+    return await _dispatch_web_command(
+        {"type": cmd_type}, bus, mcp_client, settings_service, extension_registry
+    )
+
+
+def _build_extension_snapshot(extension_registry: ExtensionRuntimeRegistry) -> dict[str, Any]:
+    return {
+        "authority": "main_runtime",
+        "status": "available",
+        "extensions": extension_registry.snapshot(),
+    }
+
+
+async def _publish_extension_snapshot(
+    bus: Optional[EventBus],
+    extension_registry: Optional[ExtensionRuntimeRegistry],
+    *,
+    rationale: str = "main extension runtime projection",
+) -> None:
+    if bus is None or extension_registry is None:
+        return
+    await bus.emit(
+        "extension_snapshot",
+        _build_extension_snapshot(extension_registry),
+        meta=EventMeta(source=EventSource.BRAIN, rationale=rationale),
+    )
 
 
 def _extension_operation_result(
@@ -2220,18 +2316,61 @@ def _extension_operation_result(
     success: bool,
     tool_names: list[str],
     error: Optional[str] = None,
+    kind: Optional[str] = None,
+    name: Optional[str] = None,
+    request_fingerprint: Optional[str] = None,
 ) -> dict[str, Any]:
     result = {
         "request_id": str(payload.get("request_id", "")),
         "operation": str(payload.get("operation", "")),
-        "kind": str(payload.get("kind", "")),
-        "name": str(payload.get("name", "")),
+        "kind": str(kind if kind is not None else payload.get("kind", "")),
+        "name": str(name if name is not None else payload.get("name", "")),
         "success": success,
         "tool_names": list(tool_names),
     }
+    if request_fingerprint is not None:
+        result["request_fingerprint"] = request_fingerprint
     if error:
-        result["error"] = error[:500]
+        result["error"] = _safe_extension_error(payload, error)
     return result
+
+
+def _safe_extension_error(payload: dict[str, Any], error: object) -> str:
+    safe_error = redact_sensitive_text(str(error))
+    for sensitive_value in (payload.get("raw_text"), payload.get("source")):
+        if isinstance(sensitive_value, str) and sensitive_value:
+            safe_error = safe_error.replace(sensitive_value, "[REDACTED_EXTENSION_MATERIAL]")
+    return safe_error[:500]
+
+
+def _capture_tool_registry_state(tool_registry: Any) -> dict[str, dict[str, Any]]:
+    return {
+        name: dict(metadata)
+        for name, metadata in getattr(tool_registry, "_tools", {}).items()
+        if isinstance(metadata, dict)
+    }
+
+
+def _restore_tool_registry_state(tool_registry: Any, before: dict[str, dict[str, Any]]) -> None:
+    current = getattr(tool_registry, "_tools", {})
+    for name in list(current):
+        if name not in before or current[name] != before[name]:
+            tool_registry.unregister_tool(name)
+    current = getattr(tool_registry, "_tools", {})
+    for name, metadata in before.items():
+        if name in current:
+            continue
+        func = metadata.get("func")
+        if not callable(func):
+            raise RuntimeError(f"Cannot restore extension tool '{name}' without callable state.")
+        tool_registry.register_tool(
+            name=name,
+            description=metadata.get("description", ""),
+            schema=metadata.get("schema", {}),
+            is_interactive=bool(metadata.get("is_interactive", False)),
+            owner=metadata.get("owner", ""),
+            risk_class=metadata.get("risk_class"),
+        )(func)
 
 
 def apply_extension_operation(
@@ -2242,24 +2381,27 @@ def apply_extension_operation(
     mcp_client: Any,
     runtime_config: Any,
     tool_registry: Any = None,
+    extension_registry: Optional[ExtensionRuntimeRegistry] = None,
 ) -> tuple[dict[str, Any], Any]:
     """Apply one extension transition against main's live runtime owners."""
     if not isinstance(payload, dict):
         payload = {}
     operation = payload.get("operation")
-    kind = payload.get("kind")
     name = payload.get("name")
     allowed_operations = {"install", "enable", "disable", "uninstall"}
     allowed_kinds = {"mcp", "skill", "openapi", "plugin", "generated"}
+    fingerprint = canonical_extension_request_fingerprint(str(operation or "invalid"), payload)
     if (
         not isinstance(payload.get("request_id"), str)
         or not payload["request_id"]
         or not isinstance(operation, str)
         or operation not in allowed_operations
-        or not isinstance(kind, str)
-        or kind not in allowed_kinds
         or not isinstance(name, str)
         or not name
+        or (
+            operation == "install"
+            and (not isinstance(payload.get("kind"), str) or payload["kind"] not in allowed_kinds)
+        )
     ):
         return (
             _extension_operation_result(
@@ -2267,11 +2409,51 @@ def apply_extension_operation(
                 success=False,
                 tool_names=[],
                 error="Invalid extension operation request.",
+                request_fingerprint=fingerprint,
             ),
             mcp_client,
         )
 
-    known_tool_names = payload.get("tool_names", [])
+    entry = extension_registry.get(name) if extension_registry is not None else None
+    if operation != "install" and extension_registry is not None and entry is None:
+        return (
+            _extension_operation_result(
+                payload,
+                success=False,
+                tool_names=[],
+                error=f"Unknown extension '{name}' in main runtime.",
+                request_fingerprint=fingerprint,
+            ),
+            mcp_client,
+        )
+
+    if operation == "install" and extension_registry is not None and extension_registry.get(name) is not None:
+        return (
+            _extension_operation_result(
+                payload,
+                success=False,
+                tool_names=[],
+                error=f"Extension '{name}' is already installed in main runtime.",
+                request_fingerprint=fingerprint,
+            ),
+            mcp_client,
+        )
+
+    kind = entry.kind if entry is not None else payload.get("kind")
+    source = entry.source if entry is not None else str(payload.get("source", ""))
+    raw_text = entry.raw_text if entry is not None else str(payload.get("raw_text", ""))
+    known_tool_names = list(entry.tool_names) if entry is not None else payload.get("tool_names", [])
+    if not isinstance(kind, str) or kind not in allowed_kinds:
+        return (
+            _extension_operation_result(
+                payload,
+                success=False,
+                tool_names=[],
+                error="Invalid extension kind.",
+                request_fingerprint=fingerprint,
+            ),
+            mcp_client,
+        )
     if not isinstance(known_tool_names, list) or any(not isinstance(item, str) for item in known_tool_names):
         return (
             _extension_operation_result(
@@ -2279,6 +2461,9 @@ def apply_extension_operation(
                 success=False,
                 tool_names=[],
                 error="Invalid extension tool names.",
+                kind=kind,
+                name=name,
+                request_fingerprint=fingerprint,
             ),
             mcp_client,
         )
@@ -2286,6 +2471,17 @@ def apply_extension_operation(
     if tool_registry is None:
         from charlie.tools import registry as tool_registry
 
+    before_tool_state = _capture_tool_registry_state(tool_registry)
+    before_entry_state = (
+        (entry.enabled, list(entry.tool_names), entry.runtime_warning)
+        if entry is not None
+        else None
+    )
+    before_skill_block = getattr(brain, "_installed_skill_blocks", {}).get(name)
+    plugin_was_registered = bool(
+        plugin_manager is not None
+        and getattr(plugin_manager, "get_plugin", lambda _name: None)(name) is not None
+    )
     try:
         if operation == "install":
             from charlie.extensions.install import install_extension
@@ -2293,8 +2489,8 @@ def apply_extension_operation(
             tool_names, mcp_client = install_extension(
                 kind,
                 name,
-                str(payload.get("source", "")),
-                str(payload.get("raw_text", "")),
+                source,
+                raw_text,
                 registry=tool_registry,
                 plugin_manager=plugin_manager,
                 mcp_client=mcp_client,
@@ -2303,8 +2499,21 @@ def apply_extension_operation(
             if kind == "skill":
                 from charlie.extensions.skills import format_skill_block, parse_skill_md
 
-                manifest = parse_skill_md(str(payload.get("raw_text", "")))
+                manifest = parse_skill_md(raw_text)
                 brain.add_installed_skill_block(name, format_skill_block(manifest))
+            if extension_registry is not None:
+                extension_registry.record(
+                    RuntimeExtension(
+                        name=name,
+                        kind=kind,
+                        source=source,
+                        card=build_skill_card(name, source or kind, tool_names, raw_text or name),
+                        raw_text=raw_text,
+                        enabled=True,
+                        tool_names=list(tool_names),
+                        runtime_warning=None,
+                    )
+                )
         elif operation == "enable":
             if kind == "mcp":
                 if mcp_client is None:
@@ -2320,10 +2529,26 @@ def apply_extension_operation(
                     builtin_plugin(name, list(getattr(runtime_config, "plugin_allow_dirs", []) or [])),
                 )
             else:
-                # Skill/OpenAPI/generated adapters retain their registered
-                # tools while disabled; main still owns the lifecycle ACK and
-                # stable-tier rebuild for these transitions.
-                tool_names = list(known_tool_names)
+                from charlie.extensions.install import install_extension
+
+                tool_names, mcp_client = install_extension(
+                    kind,
+                    name,
+                    source,
+                    raw_text,
+                    registry=tool_registry,
+                    plugin_manager=plugin_manager,
+                    mcp_client=mcp_client,
+                    plugin_allow_dirs=list(getattr(runtime_config, "plugin_allow_dirs", []) or []),
+                )
+                if kind == "skill":
+                    from charlie.extensions.skills import format_skill_block, parse_skill_md
+
+                    brain.add_installed_skill_block(name, format_skill_block(parse_skill_md(raw_text)))
+            if entry is not None:
+                entry.enabled = True
+                entry.tool_names = list(tool_names)
+                entry.runtime_warning = None
         elif operation == "disable":
             if kind == "mcp":
                 if mcp_client is None or not mcp_client.disable_server(tool_registry, name):
@@ -2331,11 +2556,20 @@ def apply_extension_operation(
             elif kind == "plugin":
                 from charlie.tools import disable_plugin
 
-                if plugin_manager.get_plugin(name) is None:
-                    raise KeyError(f"Plugin '{name}' is not registered in main runtime.")
-                disable_plugin(tool_registry, plugin_manager, name)
-            # Skill/OpenAPI/generated tools remain registered by design.
-            tool_names = list(known_tool_names)
+                if entry is None or entry.enabled:
+                    if plugin_manager.get_plugin(name) is None:
+                        raise KeyError(f"Plugin '{name}' is not registered in main runtime.")
+                    disable_plugin(tool_registry, plugin_manager, name)
+            else:
+                for tool_name in known_tool_names:
+                    tool_registry.unregister_tool(tool_name)
+                if kind == "skill":
+                    brain.remove_installed_skill_block(name)
+            tool_names = []
+            if entry is not None:
+                entry.enabled = False
+                entry.tool_names = []
+                entry.runtime_warning = None
         else:  # uninstall
             if kind == "mcp":
                 if mcp_client is None or not mcp_client.remove_server(tool_registry, name):
@@ -2343,15 +2577,19 @@ def apply_extension_operation(
             elif kind == "plugin":
                 from charlie.tools import disable_plugin
 
-                if plugin_manager.get_plugin(name) is None:
-                    raise KeyError(f"Plugin '{name}' is not registered in main runtime.")
-                disable_plugin(tool_registry, plugin_manager, name)
+                if entry is None or entry.enabled:
+                    if plugin_manager.get_plugin(name) is None:
+                        raise KeyError(f"Plugin '{name}' is not registered in main runtime.")
+                    disable_plugin(tool_registry, plugin_manager, name)
             else:
-                for tool_name in known_tool_names:
-                    tool_registry.unregister_tool(tool_name)
+                if entry is not None and entry.enabled:
+                    for tool_name in known_tool_names:
+                        tool_registry.unregister_tool(tool_name)
                 if kind == "skill":
                     brain.remove_installed_skill_block(name)
             tool_names = []
+            if extension_registry is not None:
+                extension_registry.remove(name)
 
         if not isinstance(tool_names, list) or any(not isinstance(item, str) for item in tool_names):
             raise ValueError("Extension owner returned invalid tool names.")
@@ -2361,21 +2599,265 @@ def apply_extension_operation(
                 payload,
                 success=True,
                 tool_names=list(tool_names),
+                kind=kind,
+                name=name,
+                request_fingerprint=fingerprint,
             ),
             mcp_client,
         )
     except Exception as exc:
         reason = str(exc).strip() or type(exc).__name__
-        logger.warning("Main extension operation failed: %s", reason)
+        rollback_ok = True
+        try:
+            if operation in {"install", "enable"}:
+                if kind == "mcp" and mcp_client is not None:
+                    if operation == "install":
+                        mcp_client.remove_server(tool_registry, name)
+                    elif operation == "enable" and before_entry_state and not before_entry_state[0]:
+                        mcp_client.disable_server(tool_registry, name)
+                elif kind == "plugin" and plugin_manager is not None:
+                    from charlie.tools import disable_plugin
+
+                    if plugin_manager.get_plugin(name) is not None and (
+                        not plugin_was_registered
+                        or (operation == "enable" and before_entry_state and not before_entry_state[0])
+                    ):
+                        disable_plugin(tool_registry, plugin_manager, name)
+                if kind == "skill" and before_skill_block is None:
+                    brain.remove_installed_skill_block(name)
+            elif operation in {"disable", "uninstall"} and before_entry_state and before_entry_state[0]:
+                if kind == "plugin":
+                    from charlie.extensions.install import builtin_plugin
+                    from charlie.tools import enable_plugin
+
+                    enable_plugin(
+                        tool_registry,
+                        plugin_manager,
+                        builtin_plugin(name, list(getattr(runtime_config, "plugin_allow_dirs", []) or [])),
+                    )
+                else:
+                    from charlie.extensions.install import install_extension
+
+                    install_extension(
+                        kind,
+                        name,
+                        source,
+                        raw_text,
+                        registry=tool_registry,
+                        plugin_manager=plugin_manager,
+                        mcp_client=mcp_client,
+                        plugin_allow_dirs=list(getattr(runtime_config, "plugin_allow_dirs", []) or []),
+                    )
+                if kind == "skill" and before_skill_block is not None:
+                    brain.add_installed_skill_block(name, before_skill_block)
+
+            _restore_tool_registry_state(tool_registry, before_tool_state)
+            if extension_registry is not None:
+                if operation == "install":
+                    extension_registry.remove(name)
+                elif entry is not None and before_entry_state is not None:
+                    if extension_registry.get(name) is None:
+                        extension_registry.record(entry)
+                    entry.enabled, entry.tool_names, entry.runtime_warning = before_entry_state
+            if kind == "skill":
+                if before_skill_block is None:
+                    brain.remove_installed_skill_block(name)
+                else:
+                    brain.add_installed_skill_block(name, before_skill_block)
+            brain.rebuild_stable_tier()
+        except Exception:
+            rollback_ok = False
+        if not rollback_ok and extension_registry is not None:
+            current_tools = getattr(tool_registry, "_tools", {})
+            before_entry_tools = set(before_entry_state[1]) if before_entry_state else set()
+            newly_present_tools = set(current_tools) - set(before_tool_state)
+            actual_tool_names = [
+                tool_name
+                for tool_name in current_tools
+                if tool_name in before_entry_tools or tool_name in newly_present_tools
+            ]
+            if entry is not None:
+                if extension_registry.get(name) is None:
+                    extension_registry.record(entry)
+                entry.enabled = bool(actual_tool_names)
+                entry.tool_names = actual_tool_names
+                entry.runtime_warning = "Runtime extension degraded"
+            elif operation == "install" and actual_tool_names:
+                extension_registry.record(
+                    RuntimeExtension(
+                        name=name,
+                        kind=kind,
+                        source=source,
+                        card=build_skill_card(name, source or kind, actual_tool_names, raw_text or name),
+                        raw_text=raw_text,
+                        enabled=True,
+                        tool_names=actual_tool_names,
+                        runtime_warning="Runtime extension degraded",
+                    )
+                )
+            try:
+                brain.rebuild_stable_tier()
+            except Exception:
+                logger.warning("Failed to rebuild stable tier after degraded extension rollback", exc_info=True)
+        safe_reason = _safe_extension_error({"raw_text": raw_text, "source": source}, reason)
+        if not rollback_ok:
+            safe_reason = f"{safe_reason}; runtime extension state is degraded"
+        logger.warning("Main extension operation failed: %s", safe_reason)
         return (
             _extension_operation_result(
                 payload,
                 success=False,
                 tool_names=[],
-                error=reason,
+                error=safe_reason,
+                kind=kind,
+                name=name,
+                request_fingerprint=fingerprint,
             ),
             mcp_client,
         )
+
+
+def _cache_extension_result(
+    result_cache: OrderedDict[str, dict[str, Any]],
+    request_id: str,
+    payload: dict[str, Any],
+    fingerprint_cache: dict[str, str],
+    fingerprint: str,
+) -> None:
+    result_cache[request_id] = payload
+    result_cache.move_to_end(request_id)
+    fingerprint_cache[request_id] = fingerprint
+    while len(result_cache) > _EXTENSION_RESULT_CACHE_MAX:
+        evicted_id, _ = result_cache.popitem(last=False)
+        fingerprint_cache.pop(evicted_id, None)
+
+
+async def _handle_extension_operation_request(
+    payload: Any,
+    *,
+    brain: Any,
+    plugin_manager: Any,
+    mcp_client: Any,
+    runtime_config: Any,
+    tool_registry: Any,
+    extension_registry: ExtensionRuntimeRegistry,
+    event_bus: Any,
+    result_cache: OrderedDict[str, dict[str, Any]],
+    in_flight: dict[str, Any],
+    fingerprint_cache: dict[str, str],
+    operation_lock: Optional[asyncio.Lock] = None,
+) -> tuple[dict[str, Any], Any]:
+    payload = payload if isinstance(payload, dict) else {}
+    request_id = str(payload.get("request_id") or uuid.uuid4().hex)
+    payload = dict(payload)
+    payload["request_id"] = request_id
+    operation = str(payload.get("operation") or "invalid")
+    supplied_fingerprint = payload.get("request_fingerprint")
+    fingerprint = canonical_extension_request_fingerprint(operation, payload)
+    payload["request_fingerprint"] = fingerprint
+
+    async def publish(result: dict[str, Any], *, cache: bool = True) -> dict[str, Any]:
+        if cache:
+            _cache_extension_result(result_cache, request_id, result, fingerprint_cache, fingerprint)
+        await event_bus.emit(
+            "extension_operation_result",
+            result,
+            meta=EventMeta(source=EventSource.BRAIN, task_id=request_id, rationale="main extension authority result"),
+        )
+        return result
+
+    if supplied_fingerprint is not None and supplied_fingerprint != fingerprint:
+        conflict = _extension_operation_result(
+            payload,
+            success=False,
+            tool_names=[],
+            error="request_id is already bound to a different extension operation",
+            request_fingerprint=fingerprint,
+        )
+        conflict["runtime_status"] = "request_id_conflict"
+        return await publish(conflict, cache=False), mcp_client
+
+    cached = result_cache.get(request_id)
+    if cached is not None:
+        if fingerprint_cache.get(request_id) != fingerprint:
+            conflict = _extension_operation_result(
+                payload,
+                success=False,
+                tool_names=[],
+                error="request_id is already bound to a different extension operation",
+                request_fingerprint=fingerprint,
+            )
+            conflict["runtime_status"] = "request_id_conflict"
+            return await publish(conflict, cache=False), mcp_client
+        return await publish(cached), mcp_client
+
+    existing_entry = in_flight.get(request_id)
+    existing = existing_entry[0] if isinstance(existing_entry, tuple) else existing_entry
+    existing_fingerprint = (
+        existing_entry[1] if isinstance(existing_entry, tuple) and len(existing_entry) == 2 else None
+    )
+    current = asyncio.current_task()
+    if existing is not None and existing is not current and not existing.done():
+        if existing_fingerprint != fingerprint:
+            conflict = _extension_operation_result(
+                payload,
+                success=False,
+                tool_names=[],
+                error="request_id is already bound to a different extension operation",
+                request_fingerprint=fingerprint,
+            )
+            conflict["runtime_status"] = "request_id_conflict"
+            return await publish(conflict, cache=False), mcp_client
+        await asyncio.shield(existing)
+        cached = result_cache.get(request_id)
+        if cached is not None:
+            return await publish(cached), mcp_client
+        return (
+            _extension_operation_result(
+                payload, success=False, tool_names=[], error="Extension operation was cancelled"
+            ),
+            mcp_client,
+        )
+
+    if current is not None:
+        in_flight[request_id] = (current, fingerprint)
+    lock_acquired = False
+    if operation_lock is not None:
+        await operation_lock.acquire()
+        lock_acquired = True
+    try:
+        result, updated_mcp_client = apply_extension_operation(
+            payload,
+            brain=brain,
+            plugin_manager=plugin_manager,
+            mcp_client=mcp_client,
+            runtime_config=runtime_config,
+            tool_registry=tool_registry,
+            extension_registry=extension_registry,
+        )
+        result["request_fingerprint"] = fingerprint
+        await _publish_tool_snapshot(event_bus, tool_registry)
+        await _publish_mcp_snapshot(event_bus, updated_mcp_client)
+        await _publish_extension_snapshot(
+            event_bus,
+            extension_registry,
+            rationale="extension runtime state changed or operation completed",
+        )
+        await event_bus.emit(
+            "extension_operation_result",
+            result,
+            meta=EventMeta(source=EventSource.BRAIN, task_id=request_id, rationale="main extension authority result"),
+        )
+        _cache_extension_result(result_cache, request_id, result, fingerprint_cache, fingerprint)
+        return result, updated_mcp_client
+    finally:
+        entry = in_flight.get(request_id)
+        if current is not None and (
+            entry is current or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] is current)
+        ):
+            in_flight.pop(request_id, None)
+        if lock_acquired:
+            operation_lock.release()
 
 
 def _mcp_operation_result(
@@ -3372,6 +3854,10 @@ async def main() -> int:
     settings_operation_in_flight: dict[str, Any] = {}
     settings_operation_fingerprints: dict[str, str] = {}
     settings_operation_lock = asyncio.Lock()
+    extension_runtime_registry = ExtensionRuntimeRegistry()
+    extension_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    extension_operation_in_flight: dict[str, Any] = {}
+    extension_operation_fingerprints: dict[str, str] = {}
     event_bus_registry = _EventBusSubmissionRegistry()
     _main_event_bus_registry = event_bus_registry
 
@@ -4910,17 +5396,38 @@ async def main() -> int:
                 registry.unregister_tool(k)
             try:
                 mcp_client = await _restart_mcp_client(mcp_client, config)
-                if config.mcp_enabled and config.mcp_servers and mcp_client is None:
-                    _set_subsystem_health("mcp", HealthStatus.DEGRADED)
-                    return False, "mcp reload produced no client"
+                base_client_missing = bool(config.mcp_enabled and config.mcp_servers and mcp_client is None)
+                mcp_client, failed_extensions = await _reconcile_mcp_extension_runtime(
+                    extension_runtime_registry,
+                    mcp_client,
+                    registry,
+                    plugin_manager,
+                    config,
+                )
                 _set_subsystem_health(
                     "mcp",
-                    HealthStatus.RUNNING if mcp_client is not None else HealthStatus.DISABLED,
+                    HealthStatus.DEGRADED
+                    if failed_extensions or base_client_missing
+                    else HealthStatus.RUNNING
+                    if mcp_client is not None
+                    else HealthStatus.DISABLED,
                 )
-                return True, ""
+                if base_client_missing:
+                    return False, "mcp reload produced no client"
+                return (not failed_extensions), "mcp extension reapply failed" if failed_extensions else ""
             except Exception as ex:
                 logger.warning(f"Error reloading MCP client: {ex}")
                 mcp_client = None
+                try:
+                    mcp_client, _failed_extensions = await _reconcile_mcp_extension_runtime(
+                        extension_runtime_registry,
+                        None,
+                        registry,
+                        plugin_manager,
+                        config,
+                    )
+                except Exception:
+                    logger.warning("MCP extension reconciliation failed after client reload error", exc_info=True)
                 _set_subsystem_health("mcp", HealthStatus.DEGRADED)
                 return False, "mcp reload failed"
 
@@ -4940,6 +5447,16 @@ async def main() -> int:
             )
             if success:
                 plugin_manager = replacement_manager
+                for entry in extension_runtime_registry.list():
+                    if entry.kind != "plugin":
+                        continue
+                    plugin = plugin_manager.get_plugin(entry.name)
+                    if plugin is None:
+                        entry.enabled = False
+                        entry.tool_names = []
+                    else:
+                        entry.enabled = True
+                        entry.tool_names = [f"plugin_{tool['name']}" for tool in plugin.get_tools()]
             return success, reason
 
         async def _publish_settings_reload_state() -> None:
@@ -4950,10 +5467,88 @@ async def main() -> int:
 
             await _publish_tool_snapshot(event_bus, _reloaded_registry)
             await _publish_mcp_snapshot(event_bus, mcp_client)
+            await _publish_extension_snapshot(
+                event_bus,
+                extension_runtime_registry,
+                rationale="settings reload refreshed extension runtime projection",
+            )
+
+        async def _apply_extension_runtime_request(payload: dict[str, Any]) -> dict[str, Any]:
+            nonlocal mcp_client
+            from charlie.tools import registry as _extension_registry
+
+            result, mcp_client = await _handle_extension_operation_request(
+                payload,
+                brain=brain,
+                plugin_manager=plugin_manager,
+                mcp_client=mcp_client,
+                runtime_config=config,
+                tool_registry=_extension_registry,
+                extension_registry=extension_runtime_registry,
+                event_bus=event_bus,
+                result_cache=extension_operation_results,
+                in_flight=extension_operation_in_flight,
+                fingerprint_cache=extension_operation_fingerprints,
+                operation_lock=settings_operation_lock,
+            )
+            return result
+
+        def _self_extension_runtime_operation(
+            operation: str,
+            name: str,
+            command: str,
+            args: list[str],
+            env: dict[str, str],
+        ) -> dict[str, Any]:
+            raw_text = json.dumps(
+                {
+                    "mcpServers": {
+                        name: {"command": command, "args": list(args), "env": dict(env)},
+                    }
+                },
+                sort_keys=True,
+            )
+            payload = {
+                "request_id": f"self-extension-{uuid.uuid4().hex}",
+                "operation": operation,
+                "kind": "mcp",
+                "name": name,
+                "source": "self_extension",
+                "raw_text": raw_text,
+            }
+            future = _submit_event_threadsafe(_apply_extension_runtime_request(payload), loop)
+            if future is None:
+                return {
+                    "success": False,
+                    "error": "Main extension authority is shutting down or unavailable.",
+                }
+            try:
+                return future.result(timeout=90.0)
+            except Exception as exc:
+                return {"success": False, "error": f"Canonical MCP extension operation failed: {exc}"}
 
         async def consume_web_commands(event_bus, brain):
             """Read commands from the web UI and dispatch them."""
             nonlocal current_web_session_id, voice, mcp_client
+
+            async def _extension_request(payload: dict[str, Any]) -> None:
+                nonlocal mcp_client
+                from charlie.tools import registry as _extension_registry
+
+                _, mcp_client = await _handle_extension_operation_request(
+                    payload,
+                    brain=brain,
+                    plugin_manager=plugin_manager,
+                    mcp_client=mcp_client,
+                    runtime_config=config,
+                    tool_registry=_extension_registry,
+                    extension_registry=extension_runtime_registry,
+                    event_bus=event_bus,
+                    result_cache=extension_operation_results,
+                    in_flight=extension_operation_in_flight,
+                    fingerprint_cache=extension_operation_fingerprints,
+                    operation_lock=settings_operation_lock,
+                )
 
             async def _session_request(payload, operation=None, accept_callback=None):
                 request_payload = dict(payload or {})
@@ -5063,7 +5658,9 @@ async def main() -> int:
 
                         set_active_ws_count(hud_client_count)
                     elif cmd_type == "runtime_state_request":
-                        await _dispatch_web_command(cmd, event_bus, mcp_client, settings_service)
+                        await _dispatch_web_command(
+                            cmd, event_bus, mcp_client, settings_service, extension_runtime_registry
+                        )
                     elif cmd_type == "recovery_approve":
                         payload = cmd.get("payload", {})
                         proposal_id = payload.get("proposal_id")
@@ -5245,26 +5842,7 @@ async def main() -> int:
                         await event_bus.emit("ptt_cancel", {}, meta=EventMeta(source=EventSource.VOICE))
                     elif cmd_type == "extension_operation":
                         payload = cmd.get("payload", {})
-                        from charlie.tools import registry as _extension_registry
-
-                        result, mcp_client = apply_extension_operation(
-                            payload,
-                            brain=brain,
-                            plugin_manager=plugin_manager,
-                            mcp_client=mcp_client,
-                            runtime_config=config,
-                            tool_registry=_extension_registry,
-                        )
-                        if result.get("success") is True:
-                            await _publish_tool_snapshot(event_bus, _extension_registry)
-                        await event_bus.emit(
-                            "extension_operation_result",
-                            result,
-                            meta=EventMeta(
-                                source=EventSource.BRAIN,
-                                rationale="authoritative main-runtime extension operation result",
-                            ),
-                        )
+                        _submit_event_task(_extension_request(payload))
                     elif cmd_type == "mcp_operation":
                         payload = cmd.get("payload", {})
                         _, mcp_client = await _dispatch_mcp_operation(
@@ -5641,7 +6219,7 @@ async def main() -> int:
             await mcp_start_task
             # Replay after web subscriber and producer command sockets have had
             # time to connect; initial PUB events can be lost during startup.
-            await _publish_runtime_state(bus, mcp_client, settings_service)
+            await _publish_runtime_state(bus, mcp_client, settings_service, extension_runtime_registry)
             from charlie.capabilities import get_capability_index
             from charlie.code_index import CodeIndex
             from charlie.doctor import CharlieDoctor
@@ -5686,11 +6264,13 @@ async def main() -> int:
                 event_loop=asyncio.get_running_loop(),
                 mcp_client=mcp_client,
                 tool_registry=tool_registry,
+                runtime_extension_operation=_self_extension_runtime_operation,
                 doctor=doctor,
                 code_index=code_index,
                 self_knowledge=self_knowledge,
                 introspector=runtime_introspector,
             )
+            await asyncio.to_thread(self_extension_orchestrator.rehydrate_mcp_runtime)
             configure_runtime_services(
                 self_extension_orchestrator=self_extension_orchestrator,
                 runtime_introspector=runtime_introspector,

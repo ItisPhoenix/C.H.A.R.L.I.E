@@ -4,7 +4,6 @@ import pytest
 
 import charlie.web_server as web_server
 from charlie.extensions import ExtensionManager
-from charlie.plugins import PluginManager
 
 
 @pytest.fixture(autouse=True)
@@ -14,7 +13,12 @@ def _fresh_extension_state(monkeypatch):
 
     before = set(registry._tools.keys())
     monkeypatch.setattr(web_server, "_extension_manager", ExtensionManager())
-    monkeypatch.setattr(web_server, "plugin_manager", PluginManager())
+    monkeypatch.setattr(
+        web_server,
+        "_extension_snapshot",
+        {"authority": "main_runtime", "status": "available", "extensions": []},
+    )
+    monkeypatch.setattr(web_server, "_extension_snapshot_event", None)
     monkeypatch.setattr(web_server, "event_bus", _AuthoritativeEventBus())
     yield
     for name in set(registry._tools.keys()) - before:
@@ -35,7 +39,7 @@ Do the demo thing.
 class TestListExtensionsEmpty:
     async def test_empty_by_default(self):
         result = await web_server.list_extensions()
-        assert result == {"extensions": []}
+        assert result == {"extensions": [], "authority": "main_runtime"}
 
 
 @pytest.mark.asyncio
@@ -207,23 +211,81 @@ class _AuthoritativeEventBus:
             return
         payload = cmd["payload"]
         operation = payload["operation"]
-        kind = payload["kind"]
+        kind = payload.get("kind", "plugin")
+        name = payload["name"]
+        current = next(
+            (
+                extension
+                for extension in web_server._extension_snapshot["extensions"]
+                if extension["name"] == name
+            ),
+            None,
+        )
+        if operation != "install" and current is None:
+            web_server._resolve_extension_operation_result(
+                {
+                    "request_id": payload["request_id"],
+                    "operation": operation,
+                    "kind": kind,
+                    "name": name,
+                    "success": False,
+                    "tool_names": [],
+                    "error": f"Unknown extension '{name}'",
+                }
+            )
+            return
         if operation == "install" and kind == "plugin":
             tool_names = ["plugin_cal_list_events"]
         elif operation == "install" and kind == "skill":
             tool_names = ["skill_demo_skill_run"]
+        elif operation == "enable" and current:
+            tool_names = ["plugin_cal_list_events"] if current["kind"] == "plugin" else list(current["tool_names"])
         elif operation == "uninstall":
             tool_names = []
         else:
-            tool_names = list(payload.get("tool_names", []))
+            tool_names = list(current["tool_names"] if current else [])
+            if operation == "disable":
+                tool_names = []
         web_server._resolve_extension_operation_result(
             {
                 "request_id": payload["request_id"],
                 "operation": operation,
                 "kind": kind,
-                "name": payload["name"],
+                "name": name,
                 "success": True,
                 "tool_names": tool_names,
+            }
+        )
+        extensions = [
+            dict(extension)
+            for extension in web_server._extension_snapshot["extensions"]
+            if not (operation == "uninstall" and extension["name"] == name)
+        ]
+        if operation == "install":
+            extensions.append(
+                {
+                    "name": name,
+                    "kind": kind,
+                    "source": payload.get("source", ""),
+                    "enabled": True,
+                    "tool_names": list(tool_names),
+                    "warnings": [],
+                    "content_hash": "test-hash",
+                }
+            )
+        elif operation in {"enable", "disable"}:
+            for extension in extensions:
+                if extension["name"] == name:
+                    extension["enabled"] = operation == "enable"
+                    extension["tool_names"] = list(tool_names)
+        web_server._apply_extension_snapshot_event(
+            {
+                "type": "extension_snapshot",
+                "payload": {
+                    "authority": "main_runtime",
+                    "status": "available",
+                    "extensions": extensions,
+                },
             }
         )
 

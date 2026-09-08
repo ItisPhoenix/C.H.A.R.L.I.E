@@ -240,7 +240,7 @@ assert "charlie.tools" in sys.modules
 assert capability_index is server._shared_capability_index
 assert capability_index.get_operation("web_search") is not None
 assert not hasattr(server, "mcp_client")
-assert not server.plugin_manager._plugins
+assert not hasattr(server, "plugin_manager")
 snapshot = asyncio.run(server.get_capabilities())
 assert snapshot["tools"] == []
 assert snapshot["tool_authority"] == "main_runtime"

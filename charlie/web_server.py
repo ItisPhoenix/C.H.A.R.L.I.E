@@ -188,13 +188,6 @@ active_connections: Set[WebSocket] = set()
 # connected browsers.
 ws_sessions: dict[WebSocket, str] = {}
 
-# Plugin registration remains a web-local proposal mirror; executable MCP
-# ownership and all MCP runtime state stay in main and cross IPC.
-from charlie.plugins import PluginManager
-
-plugin_manager = PluginManager()
-
-
 def validate_bind_host(host: str) -> Optional[str]:
     """Return an error when the unauthenticated server would leave loopback."""
     normalized = host.strip().lower()
@@ -230,13 +223,11 @@ def validate_ws_origin(origin: Optional[str]) -> bool:
         return False
 
 
-# In-process registry of installed extensions -- see
-# charlie/extensions/__init__.py's ExtensionManager docstring for the
-# propose()/confirm() gate this drives and the no-cross-restart-persistence
-# caveat.
-from charlie.extensions import ExtensionManager, InstalledExtension  # noqa: E402
+# Proposal-only state. Installed runtime extension state belongs to main.
+from charlie.extensions import ExtensionManager, canonical_extension_request_fingerprint  # noqa: E402
 
 _extension_manager = ExtensionManager()
+_extension_pending_material: dict[str, dict[str, str]] = {}
 
 
 def _declared_tools_for(kind: str, name: str, source: str, raw_text: str) -> List[str]:
@@ -264,6 +255,11 @@ async def _stage_proposed_extension(payload: dict) -> None:
         return
     card = build_skill_card(name, source, payload.get("declared_tools", [name]), raw_text)
     pending_id = _extension_manager.propose(card)
+    _extension_pending_material[pending_id] = {
+        "kind": str(kind),
+        "source": str(source),
+        "raw_text": str(raw_text),
+    }
     await broadcast({
         "type": "extension_pending",
         "payload": {
@@ -307,6 +303,8 @@ _terminal_manager = TerminalManager()
 _audit_store: AuditStore | None = None
 _settings_snapshot: dict[str, Any] | None = None
 _settings_snapshot_event: dict[str, Any] | None = None
+_extension_snapshot: dict[str, Any] | None = None
+_extension_snapshot_event: dict[str, Any] | None = None
 
 
 def _get_audit_store() -> AuditStore:
@@ -352,10 +350,11 @@ async def lifespan(app: FastAPI):
     arrive from main over IPC.
     Shutdown: tear down EventBus."""
     # --- startup ---
-    global event_bus, plugin_manager, _audit_store, _session_projection
+    global event_bus, _audit_store, _session_projection
     global _tool_snapshot, _tool_snapshot_event, _mcp_snapshot, _mcp_snapshot_event
     global _projected_telemetry, _projected_telemetry_event
     global _settings_snapshot, _settings_snapshot_event
+    global _extension_snapshot, _extension_snapshot_event
     # This process never owns executable tool activation. Start each web
     # lifecycle without a stale projection and wait for main's replay.
     _tool_snapshot = None
@@ -366,6 +365,8 @@ async def lifespan(app: FastAPI):
     _projected_telemetry_event = None
     _settings_snapshot = None
     _settings_snapshot_event = None
+    _extension_snapshot = None
+    _extension_snapshot_event = None
 
     # EventBus resolves test-mode ports from the central pytest isolation setup;
     # production keeps its documented defaults.
@@ -570,6 +571,9 @@ async def _event_bridge():
         elif etype == "settings_snapshot":
             if not _apply_settings_snapshot_event(event):
                 logger.warning("Ignoring malformed main settings snapshot")
+        elif etype == "extension_snapshot":
+            if not _apply_extension_snapshot_event(event):
+                logger.warning("Ignoring malformed main extension snapshot")
         elif etype == "session_active":
             global _active_frontend_session
             _active_frontend_session = event.get("payload", {}).get("session_id")
@@ -1204,6 +1208,8 @@ def _initial_state_events() -> List[dict]:
         events.append(replay_event(_projected_telemetry_event, allow_unknown=True))
     if _settings_snapshot_event is not None:
         events.append(replay_event(_settings_snapshot_event, allow_unknown=True))
+    if _extension_snapshot_event is not None:
+        events.append(replay_event(_extension_snapshot_event, allow_unknown=True))
     events.extend(_pending_approvals.values())
     events.extend(_active_presentation_intents.values())
     return [replay_event(event, allow_unknown=True) for event in events]
@@ -1312,6 +1318,56 @@ def _apply_settings_snapshot_event(event: object) -> bool:
     _settings_snapshot = projection
     _settings_snapshot_event = dict(event)
     _settings_snapshot_event["payload"] = projection
+    return True
+
+
+def _apply_extension_snapshot_event(event: object) -> bool:
+    """Replace read-only extension projection only with main-owned state."""
+    if not isinstance(event, dict):
+        return False
+    payload = event.get("payload")
+    if not isinstance(payload, dict) or payload.get("authority") != "main_runtime":
+        return False
+    extensions = payload.get("extensions")
+    if not isinstance(extensions, list):
+        return False
+    safe_extensions: list[dict[str, Any]] = []
+    for extension in extensions:
+        if not isinstance(extension, dict):
+            return False
+        if not all(isinstance(extension.get(key), str) for key in ("name", "kind", "source", "content_hash")):
+            return False
+        if type(extension.get("enabled")) is not bool:
+            return False
+        tool_names = extension.get("tool_names")
+        warnings = extension.get("warnings")
+        if (
+            not isinstance(tool_names, list)
+            or any(not isinstance(name, str) for name in tool_names)
+            or not isinstance(warnings, list)
+            or any(not isinstance(warning, str) for warning in warnings)
+        ):
+            return False
+        safe_extensions.append(
+            {
+                "name": extension["name"],
+                "kind": extension["kind"],
+                "source": extension["source"],
+                "enabled": extension["enabled"],
+                "tool_names": list(tool_names),
+                "warnings": list(warnings),
+                "content_hash": extension["content_hash"],
+            }
+        )
+    projection = {
+        "authority": "main_runtime",
+        "status": "available",
+        "extensions": safe_extensions,
+    }
+    global _extension_snapshot, _extension_snapshot_event
+    _extension_snapshot = projection
+    _extension_snapshot_event = dict(event)
+    _extension_snapshot_event["payload"] = projection
     return True
 
 
@@ -2041,12 +2097,15 @@ async def _request_authoritative_mcp_operation(
 async def _request_authoritative_extension_operation(
     operation: str,
     payload: dict[str, Any],
+    *,
+    request_id: Any = None,
 ) -> dict[str, Any]:
     """Send one extension mutation to main and wait for its correlated result."""
-    request_id = uuid.uuid4().hex
+    request_id = _terminal_request_id(request_id)
     request_payload = dict(payload)
     request_payload["request_id"] = request_id
     request_payload["operation"] = operation
+    request_payload["request_fingerprint"] = canonical_extension_request_fingerprint(operation, request_payload)
 
     if event_bus is None:
         return _extension_operation_error(
@@ -2091,7 +2150,7 @@ async def _request_authoritative_extension_operation(
             "Main runtime returned an invalid extension operation result.",
         )
     result = dict(result)
-    for key in ("request_id", "operation", "kind", "name"):
+    for key in ("request_id", "operation"):
         if result.get(key) != request_payload.get(key):
             return _extension_operation_error(
                 request_id,
@@ -2099,6 +2158,22 @@ async def _request_authoritative_extension_operation(
                 "invalid_result",
                 "Main runtime returned a mismatched extension operation result.",
             )
+    if not isinstance(result.get("kind"), str) or not isinstance(result.get("name"), str):
+        return _extension_operation_error(
+            request_id,
+            operation,
+            "invalid_result",
+            "Main runtime returned invalid extension identity.",
+        )
+    if result.get("name") != request_payload.get("name") or (
+        operation == "install" and result.get("kind") != request_payload.get("kind")
+    ):
+        return _extension_operation_error(
+            request_id,
+            operation,
+            "invalid_result",
+            "Main runtime returned a mismatched extension identity.",
+        )
     if result.get("success") is not True:
         result.setdefault("runtime_status", "failed")
         result.setdefault("error", "Main runtime rejected extension operation.")
@@ -2868,20 +2943,18 @@ async def delete_mcp_server(name: str):
 
 @app.get("/api/extensions")
 async def list_extensions():
-    """List installed extensions across all four adapters."""
+    """List main-owned installed extensions."""
+    if _extension_snapshot is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unavailable",
+                "reason": "Main extension authority is unavailable.",
+            },
+        )
     return {
-        "extensions": [
-            {
-                "name": e.name,
-                "kind": e.kind,
-                "source": e.source,
-                "enabled": e.enabled,
-                "tool_names": e.tool_names,
-                "warnings": e.card.warnings,
-                "content_hash": e.card.content_hash,
-            }
-            for e in _extension_manager.list()
-        ]
+        "extensions": [dict(extension) for extension in _extension_snapshot["extensions"]],
+        "authority": "main_runtime",
     }
 
 
@@ -2907,6 +2980,11 @@ async def propose_extension(data: dict):
 
     card = build_skill_card(name, source or kind, declared_tools, raw_text or name)
     pending_id = _extension_manager.propose(card)
+    _extension_pending_material[pending_id] = {
+        "kind": str(kind),
+        "source": str(source),
+        "raw_text": str(raw_text),
+    }
     return {
         "status": "ok",
         "pending_id": pending_id,
@@ -2920,9 +2998,10 @@ async def confirm_extension(data: dict):
     """Approve a proposal, then ask main to perform the authoritative install."""
     pending_id = data.get("pending_id", "")
     approved = bool(data.get("approved", False))
-    kind = data.get("kind", "")
-    source = data.get("source", "")
-    raw_text = data.get("raw_text", "")
+    material = _extension_pending_material.pop(pending_id, None)
+    kind = material.get("kind", "") if isinstance(material, dict) else data.get("kind", "")
+    source = material.get("source", "") if isinstance(material, dict) else data.get("source", "")
+    raw_text = material.get("raw_text", "") if isinstance(material, dict) else data.get("raw_text", "")
 
     card = _extension_manager.pop_pending(pending_id)
     if card is None:
@@ -2941,6 +3020,7 @@ async def confirm_extension(data: dict):
             "source": source or card.source,
             "raw_text": raw_text,
         },
+        request_id=data.get("request_id"),
     )
     if result.get("success") is not True:
         return _extension_api_error(result)
@@ -2956,15 +3036,6 @@ async def confirm_extension(data: dict):
             )
         )
 
-    _extension_manager.record(
-        InstalledExtension(
-            name=card.name,
-            kind=kind,
-            source=source or card.source,
-            card=card,
-            tool_names=tool_names,
-        )
-    )
     return {
         "status": "ok",
         "installed": True,
@@ -2974,15 +3045,12 @@ async def confirm_extension(data: dict):
 
 
 @app.post("/api/extensions/{name}/enable")
-async def enable_extension(name: str):
-    """Ask main to re-activate an installed extension before updating the mirror."""
-    ext = _extension_manager.get(name)
-    if ext is None:
-        return {"status": "error", "message": f"Unknown extension '{name}'"}
-
+async def enable_extension(name: str, request_id: Optional[str] = None):
+    """Ask main to re-activate a canonical main-owned extension."""
     result = await _request_authoritative_extension_operation(
         "enable",
-        {"kind": ext.kind, "name": name, "source": ext.source, "tool_names": list(ext.tool_names)},
+        {"name": name},
+        request_id=request_id,
     )
     if result.get("success") is not True:
         return _extension_api_error(result)
@@ -2996,21 +3064,16 @@ async def enable_extension(name: str):
                 "Main runtime returned invalid extension tool names.",
             )
         )
-    ext.enabled = True
-    ext.tool_names = tool_names
     return {"status": "ok", "request_id": result.get("request_id"), "tool_names": tool_names}
 
 
 @app.post("/api/extensions/{name}/disable")
-async def disable_extension(name: str):
-    """Ask main to deactivate an extension before updating the mirror."""
-    ext = _extension_manager.get(name)
-    if ext is None:
-        return {"status": "error", "message": f"Unknown extension '{name}'"}
-
+async def disable_extension(name: str, request_id: Optional[str] = None):
+    """Ask main to deactivate a canonical main-owned extension."""
     result = await _request_authoritative_extension_operation(
         "disable",
-        {"kind": ext.kind, "name": name, "source": ext.source, "tool_names": list(ext.tool_names)},
+        {"name": name},
+        request_id=request_id,
     )
     if result.get("success") is not True:
         return _extension_api_error(result)
@@ -3024,21 +3087,16 @@ async def disable_extension(name: str):
                 "Main runtime returned invalid extension tool names.",
             )
         )
-    ext.enabled = False
-    ext.tool_names = tool_names
     return {"status": "ok", "request_id": result.get("request_id"), "tool_names": tool_names}
 
 
 @app.delete("/api/extensions/{name}")
-async def uninstall_extension(name: str):
-    """Ask main to remove runtime activation before deleting the web mirror."""
-    ext = _extension_manager.get(name)
-    if ext is None:
-        return {"status": "error", "message": f"Unknown extension '{name}'"}
-
+async def uninstall_extension(name: str, request_id: Optional[str] = None):
+    """Ask main to remove a canonical main-owned extension."""
     result = await _request_authoritative_extension_operation(
         "uninstall",
-        {"kind": ext.kind, "name": name, "source": ext.source, "tool_names": list(ext.tool_names)},
+        {"name": name},
+        request_id=request_id,
     )
     if result.get("success") is not True:
         return _extension_api_error(result)
@@ -3052,7 +3110,6 @@ async def uninstall_extension(name: str):
                 "Main runtime returned invalid extension tool names.",
             )
         )
-    _extension_manager.remove(name)
     return {"status": "ok", "request_id": result.get("request_id"), "tool_names": tool_names}
 
 

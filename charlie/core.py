@@ -1440,17 +1440,13 @@ class Brain:
 
     def add_installed_skill_block(self, name: str, block: str) -> None:
         """Add a runtime-installed SKILL.md's instructions to the context
-        tier and rebuild it immediately. Called from main.py when the web
-        dashboard mirrors an "extension_installed" (kind="skill") command
-        over the EventBus -- ExtensionManager itself only lives in the web
-        server's process, so this is how its instructions ever reach the
-        actual chat Brain."""
+        tier and rebuild it immediately. Called by main-owned extension
+        activation after the canonical runtime registry changes."""
         self._installed_skill_blocks[name] = block
         self.reload_context()
 
     def remove_installed_skill_block(self, name: str) -> None:
-        """Drop a previously-installed skill's context block (mirrors
-        /api/extensions/{name} DELETE) and rebuild the context tier."""
+        """Drop a previously-installed skill's context block and rebuild."""
         if self._installed_skill_blocks.pop(name, None) is not None:
             self.reload_context()
 
