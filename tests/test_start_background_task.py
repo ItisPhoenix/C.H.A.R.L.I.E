@@ -45,16 +45,20 @@ class TestHandleStartBackgroundTask:
         monkeypatch.setattr(recovery, "_event_bus", _FakeBus())
 
         captured = {}
+        callbacks = [lambda *_args, **_kwargs: None for _ in range(4)]
+        brain.on_tool_call, brain.on_tool_result = callbacks[:2]
+        brain.on_operation_result, brain.on_thinking_update = callbacks[2:]
 
         async def fake_start(config, event_bus, text, session_store=None, memory_store=None,
                               voice=None, priority=0, depends_on=None, on_result_stored=None,
-                              memory_graph=None, memory_service=None):
+                              memory_graph=None, memory_service=None, **kwargs):
             captured["text"] = text
             captured["priority"] = priority
             captured["depends_on"] = depends_on
             captured["memory_store"] = memory_store
             captured["memory_graph"] = memory_graph
             captured["memory_service"] = memory_service
+            captured.update(kwargs)
             return _FakeTask()
 
         monkeypatch.setattr(background_task, "start", fake_start)
@@ -65,6 +69,10 @@ class TestHandleStartBackgroundTask:
         assert captured["memory_store"] is sentinel_store
         assert captured["memory_graph"] is sentinel_graph
         assert captured["memory_service"] is sentinel_service
+        assert captured["on_tool_call"] is callbacks[0]
+        assert captured["on_tool_result"] is callbacks[1]
+        assert captured["on_operation_result"] is callbacks[2]
+        assert captured["on_thinking_update"] is callbacks[3]
 
     @pytest.mark.asyncio
     async def test_missing_text_returns_error_without_starting(self, monkeypatch, brain_config):
@@ -111,9 +119,10 @@ class TestHandleStartBackgroundTask:
 
         async def fake_start(config, event_bus, text, session_store=None, memory_store=None,
                               voice=None, priority=0, depends_on=None, on_result_stored=None,
-                              memory_graph=None, memory_service=None):
+                              memory_graph=None, memory_service=None, **kwargs):
             captured["priority"] = priority
             captured["depends_on"] = depends_on
+            captured.update(kwargs)
             return _FakeTask()
 
         monkeypatch.setattr(background_task, "start", fake_start)

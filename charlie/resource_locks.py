@@ -21,6 +21,7 @@ _lock = threading.Lock()
 _owners: Dict[str, str] = {}
 _active_leases: Dict[tuple[str, str], set[str]] = {}
 _waiters: Dict[str, set[asyncio.Event]] = {}
+_takeover_listeners: set[Callable[[str, tuple[str, ...]], None]] = set()
 
 
 def _validate_capability(capability: str) -> str:
@@ -66,6 +67,20 @@ def current_owner(capability: str) -> Optional[str]:
     capability = _validate_capability(capability)
     with _lock:
         return _owners.get(capability)
+
+
+def register_takeover_listener(listener: Callable[[str, tuple[str, ...]], None]) -> None:
+    """Register one process-wide callback for revoked capability ownership."""
+    if not callable(listener):
+        raise TypeError("Takeover listener must be callable")
+    with _lock:
+        _takeover_listeners.add(listener)
+
+
+def unregister_takeover_listener(listener: Callable[[str, tuple[str, ...]], None]) -> None:
+    """Remove one process-wide takeover callback, if registered."""
+    with _lock:
+        _takeover_listeners.discard(listener)
 
 
 @dataclass
@@ -192,10 +207,17 @@ class CapabilityLeaseManager:
                 if owner is not None:
                     owners.setdefault(owner, []).append(capability)
                     _active_leases.pop((capability, owner), None)
+            listeners = tuple(_takeover_listeners)
         _wake(requested)
         for owner, resources in owners.items():
-            if self._on_takeover is not None:
-                self._on_takeover(owner, tuple(resources))
+            callbacks = list(listeners)
+            if self._on_takeover is not None and self._on_takeover not in callbacks:
+                callbacks.append(self._on_takeover)
+            for callback in callbacks:
+                try:
+                    callback(owner, tuple(resources))
+                except Exception:
+                    logger.warning("Capability takeover listener failed", exc_info=True)
         return set(owners)
 
     def _try_acquire(self, capability: str, owner_id: str) -> Optional[CapabilityLease]:

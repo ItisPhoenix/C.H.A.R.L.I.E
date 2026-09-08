@@ -1699,6 +1699,10 @@ class Brain:
             "memory_service": self.memory_service,
             "priority": arguments.get("priority", 0),
             "depends_on": arguments.get("depends_on") or [],
+            "on_tool_call": self.on_tool_call,
+            "on_tool_result": self.on_tool_result,
+            "on_operation_result": self.on_operation_result,
+            "on_thinking_update": self.on_thinking_update,
             "on_result_stored": self.on_result_stored,
         }
         if session_id is not None:
@@ -2073,7 +2077,7 @@ class Brain:
             max_steps,
             deadline_s,
             _on_progress,
-            owner_id=(
+            owner_id=execution_owner_id or (
                 f"turn:{turn_id}"
                 if turn_id
                 else (f"task:{task_id}" if task_id else None)
@@ -3322,6 +3326,7 @@ class Brain:
         skip_tools: bool = False,
         task_id: Optional[str] = None,
         turn_id: Optional[str] = None,
+        execution_owner_id: Optional[str] = None,
         turn_request: Optional[TurnRequest] = None,
         intent_decision: Optional[IntentDecision] = None,
         diagnostic_trace: Optional[Any] = None,
@@ -3430,7 +3435,8 @@ class Brain:
                 )
 
         generation = self._chat_generation
-        execution_owner_id = (
+        explicit_execution_owner_id = execution_owner_id
+        execution_owner_id = execution_owner_id or (
             f"turn:{turn_id}"
             if turn_id
             else (f"task:{task_id}" if task_id else f"execution:{uuid4().hex}")
@@ -3508,7 +3514,7 @@ class Brain:
                 task_id=task_id,
                 session_id=session_id,
                 turn_id=turn_id,
-                execution_owner_id=execution_owner_id,
+                execution_owner_id=explicit_execution_owner_id,
             )
             if isinstance(outcome, ResultEnvelope):
                 _publish_direct_operation_result(
@@ -3837,6 +3843,7 @@ class Brain:
                     task_id=task_id,
                     session_id=session_id,
                     turn_id=turn_id,
+                    execution_owner_id=execution_owner_id,
                     platform=platform,
                     operation_override=fp_match.semantic_op_id,
                 )
@@ -3929,7 +3936,8 @@ class Brain:
                 if leases:
                     from charlie.resource_locks import default_lease_manager
 
-                    async with await default_lease_manager.acquire_many(leases, f"fastpath.{fp_match.intent}"):
+                    lease_owner = explicit_execution_owner_id or f"fastpath.{fp_match.intent}"
+                    async with await default_lease_manager.acquire_many(leases, lease_owner):
                         fp_res, v_res = await asyncio.wait_for(_run_fast_path(), timeout=timeout)
                 else:
                     fp_res, v_res = await asyncio.wait_for(_run_fast_path(), timeout=timeout)
@@ -5016,6 +5024,7 @@ class Brain:
         skip_tools: bool = False,
         task_id: Optional[str] = None,
         turn_id: Optional[str] = None,
+        execution_owner_id: Optional[str] = None,
         turn_request: Optional[TurnRequest] = None,
         intent_decision: Optional[IntentDecision] = None,
         diagnostic_trace: Optional[Any] = None,
@@ -5035,6 +5044,7 @@ class Brain:
             skip_tools=skip_tools,
             task_id=task_id,
             turn_id=turn_id,
+            execution_owner_id=execution_owner_id,
             turn_request=turn_request,
             intent_decision=intent_decision,
             diagnostic_trace=diagnostic_trace,

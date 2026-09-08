@@ -21,6 +21,7 @@ import dataclasses
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Literal, Optional
 
@@ -28,7 +29,7 @@ from charlie.attention import decide as _attention_decide
 from charlie.config import Config
 from charlie.core import Brain, _invoke_callback_with_identity
 from charlie.events import EventMeta, EventSource, EventType
-from charlie.resource_locks import CapabilityLease, CapabilityLeaseManager
+from charlie.resource_locks import register_takeover_listener, unregister_takeover_listener
 from charlie.results import ResultsStore
 from charlie.session_store import SessionNotFoundError
 from charlie.task_journal import (
@@ -54,19 +55,6 @@ except ImportError:  # pragma: no cover - guard mirrors charlie/desktop/__init__
     desktop_actions = None
     desktop_session = None
     _DESKTOP_AVAILABLE = False
-
-_REAL_DESKTOP_SESSION = desktop_session
-
-
-def _on_manual_takeover(owner_id: str, resources: tuple[str, ...]) -> None:
-    task = _manager.get(owner_id) if "_manager" in globals() else None
-    if task is not None:
-        if task.status not in _TERMINAL_STATUSES:
-            _request_task_cancellation(task)
-        logger.info("Manual takeover requested cancellation of task %s for %s", owner_id, resources)
-
-
-_capability_leases = CapabilityLeaseManager(on_takeover=_on_manual_takeover)
 
 logger = logging.getLogger("charlie.background_task")
 
@@ -121,7 +109,7 @@ class BackgroundTask:
     depends_on: List[str] = field(default_factory=list)
     # Read by charlie.surfaces._categorize to route "workspace" hints to a sustained-interaction surface.
     visibility_hint: str = ""
-    desktop_lease: Optional[CapabilityLease] = field(default=None, repr=False, compare=False)
+    owner_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False, compare=False)
 
     def to_event(self) -> Dict[str, Any]:
         return {
@@ -169,6 +157,9 @@ class BackgroundTask:
 
 _current_task: Optional[BackgroundTask] = None
 _active_event_bus: Optional[Any] = None
+_active_tasks_lock = threading.Lock()
+_active_tasks: Dict[str, BackgroundTask] = {}
+_takeover_listener_registered = False
 _journal = get_task_journal()
 
 
@@ -311,11 +302,54 @@ def _on_manager_status_change(task: "BackgroundTask") -> None:
         # The adapter already restored the compatibility mirror and logged the
         # rejected transition. Never emit mutable legacy state as canonical.
         return
+    if record.status in _CANONICAL_TERMINAL_STATUSES:
+        with _active_tasks_lock:
+            _active_tasks.pop(task.id, None)
     if _active_event_bus is not None:
         asyncio.create_task(_emit_task_event(_active_event_bus, record, task=task))
 
 
 _manager = TaskManager(max_parallel=1, on_status_change=_on_manager_status_change)
+
+
+def _cancel_task_from_takeover(task_id: str, resources: tuple[str, ...]) -> None:
+    task = _manager.get(task_id)
+    if task is None or task.status in _TERMINAL_STATUSES:
+        return
+    if cancel(task_id):
+        logger.info("Manual takeover requested cancellation of task %s for %s", task_id, resources)
+
+
+def _on_manual_takeover(owner_id: str, resources: tuple[str, ...]) -> None:
+    if "desktop" not in resources:
+        return
+    with _active_tasks_lock:
+        task = _active_tasks.get(owner_id)
+    if task is None:
+        return
+    loop = task.owner_loop
+    if loop is None or not loop.is_running():
+        return
+    try:
+        loop.call_soon_threadsafe(_cancel_task_from_takeover, owner_id, resources)
+    except RuntimeError:
+        logger.debug("Background takeover loop was unavailable for task %s", owner_id, exc_info=True)
+
+
+def _register_takeover_listener() -> None:
+    global _takeover_listener_registered
+    if _takeover_listener_registered:
+        return
+    register_takeover_listener(_on_manual_takeover)
+    _takeover_listener_registered = True
+
+
+def _unregister_takeover_listener() -> None:
+    global _takeover_listener_registered
+    if not _takeover_listener_registered:
+        return
+    unregister_takeover_listener(_on_manual_takeover)
+    _takeover_listener_registered = False
 
 
 def get_current_task() -> Optional[BackgroundTask]:
@@ -646,6 +680,10 @@ async def start(
     turn_id: Optional[str] = None, origin: TaskOrigin | str = TaskOrigin.BACKGROUND,
     capability_requirements: Optional[tuple[str, ...] | List[str]] = None,
     research_query: Optional[str] = None, on_research_result: Optional[Callable] = None,
+    on_tool_call: Optional[Callable] = None,
+    on_tool_result: Optional[Callable] = None,
+    on_operation_result: Optional[Callable] = None,
+    on_thinking_update: Optional[Callable] = None,
     announce: bool = True,
 ) -> BackgroundTask:
     """Plan a background task and hand it to the TaskManager queue -- no
@@ -658,6 +696,7 @@ async def start(
     global _current_task, _active_event_bus
     if not _manager.accepting:
         raise TaskManagerAdmissionClosed("Background task admission is closed")
+    _register_takeover_listener()
     _active_event_bus = event_bus
     _manager.max_parallel = config.background_max_parallel_tasks
     if session_store is not None and session_id:
@@ -680,6 +719,7 @@ async def start(
         capability_requirements=requirements,
         research_query=research_query,
         cancel_event=asyncio.Event(),
+        owner_loop=asyncio.get_running_loop(),
         priority=priority,
         depends_on=list(depends_on or []),
         visibility_hint=visibility_hint,
@@ -700,6 +740,10 @@ async def start(
         register_panic_hotkey=False,
         approval_timeout=None,
         is_background=True,
+        on_tool_call=on_tool_call,
+        on_tool_result=on_tool_result,
+        on_operation_result=on_operation_result,
+        on_thinking_update=on_thinking_update,
         on_result_stored=on_result_stored,
         on_research_result=on_research_result,
     )
@@ -715,7 +759,14 @@ async def start(
             f"Task: {text}"
         )
         plan_text = ""
-        async for chunk in task.brain.chat_stream(plan_prompt, session_id=task.session_id, skip_tools=True):
+        async for chunk in task.brain.chat_stream(
+            plan_prompt,
+            session_id=task.session_id,
+            skip_tools=True,
+            task_id=task.id,
+            turn_id=task.turn_id,
+            execution_owner_id=task.id,
+        ):
             plan_text += chunk
         task.steps = _parse_steps(plan_text) or [text]
         task.flagged_steps = _scan_gated_steps(task.steps)
@@ -731,8 +782,12 @@ async def start(
             if callable(session_checker) and not session_checker(session_id):
                 await task.brain.close()
                 raise SessionNotFoundError(f"Session '{session_id}' does not exist")
+        with _active_tasks_lock:
+            _active_tasks[task.id] = task
         _manager.submit(task, lambda: _run_loop(task, event_bus, voice))
     except TaskManagerAdmissionClosed:
+        with _active_tasks_lock:
+            _active_tasks.pop(task.id, None)
         await task.brain.close()
         raise
     if announce:
@@ -764,7 +819,12 @@ def cancel_all() -> List[str]:
 
 async def shutdown() -> None:
     """Drain manager-owned task bodies before shared runtime stores close."""
-    await _manager.shutdown()
+    try:
+        await _manager.shutdown()
+    finally:
+        _unregister_takeover_listener()
+        with _active_tasks_lock:
+            _active_tasks.clear()
 
 
 def close_admission() -> None:
@@ -813,27 +873,6 @@ async def _wait_until_clear(task: BackgroundTask, config: Config, event_bus) -> 
             record = _record_task_lifecycle(task, status=CanonicalTaskStatus.PAUSED)
             await _emit_task_event(event_bus, record, task=task)
         await asyncio.sleep(_POLL_INTERVAL_SEC)
-
-
-async def _wait_for_desktop(task: BackgroundTask) -> bool:
-    """Acquire the canonical desktop lease, retaining the old fake-session seam for tests."""
-    if "desktop" not in task.capability_requirements or not _DESKTOP_AVAILABLE:
-        return True
-    if desktop_session is not _REAL_DESKTOP_SESSION:
-        while not desktop_session.acquire_desktop(task.id):
-            if task.cancel_requested:
-                return False
-            await asyncio.sleep(_POLL_INTERVAL_SEC)
-        return True
-    while not task.cancel_requested:
-        try:
-            task.desktop_lease = await _capability_leases.acquire(
-                "desktop", task.id, timeout=_POLL_INTERVAL_SEC
-            )
-            return True
-        except asyncio.TimeoutError:
-            continue
-    return False
 
 
 async def _run_research_task(task: BackgroundTask, event_bus, voice=None) -> None:
@@ -933,24 +972,17 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
                 await _store_result(task, event_bus, "\n".join(step_outputs) or task.error or "")
                 return
 
-            if not await _wait_for_desktop(task):
-                record = _record_task_lifecycle(task, status=CanonicalTaskStatus.CANCELLED)
-                await _emit_task_event(event_bus, record, task=task)
-                await _store_result(task, event_bus, "\n".join(step_outputs))
-                return
-
-            try:
-                step_text = task.steps[task.current_step]
-                step_output = ""
-                async for chunk in task.brain.chat_stream(step_text, session_id=task.session_id):
-                    step_output += chunk
-                step_outputs.append(step_output)
-            finally:
-                if task.desktop_lease is not None:
-                    await task.desktop_lease.release()
-                    task.desktop_lease = None
-                elif _DESKTOP_AVAILABLE and desktop_session is not _REAL_DESKTOP_SESSION:
-                    desktop_session.release_desktop(task.id)
+            step_text = task.steps[task.current_step]
+            step_output = ""
+            async for chunk in task.brain.chat_stream(
+                step_text,
+                session_id=task.session_id,
+                task_id=task.id,
+                turn_id=task.turn_id,
+                execution_owner_id=task.id,
+            ):
+                step_output += chunk
+            step_outputs.append(step_output)
 
             if task.cancel_requested:
                 record = _record_task_lifecycle(task, status=CanonicalTaskStatus.CANCELLED)
@@ -979,5 +1011,7 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
         await _announce(event_bus, voice, "error", "Background task failed. Check task details.")
         await _store_result(task, event_bus, "\n".join(step_outputs) or task.error or "")
     finally:
+        with _active_tasks_lock:
+            _active_tasks.pop(task.id, None)
         if task.brain is not None:
             await task.brain.close()

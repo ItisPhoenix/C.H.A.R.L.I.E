@@ -1553,6 +1553,10 @@ async def _start_sustained_research_task(
     memory_service: Any,
     on_result_stored: Optional[Callable] = None,
     on_research_result: Optional[Callable] = None,
+    on_tool_call: Optional[Callable] = None,
+    on_tool_result: Optional[Callable] = None,
+    on_operation_result: Optional[Callable] = None,
+    on_thinking_update: Optional[Callable] = None,
 ) -> Any:
     """Start research on the existing background manager and acknowledge immediately."""
     try:
@@ -1592,6 +1596,10 @@ async def _start_sustained_research_task(
             research_query=request.input,
             on_result_stored=on_result_stored,
             on_research_result=on_research_result,
+            on_tool_call=on_tool_call,
+            on_tool_result=on_tool_result,
+            on_operation_result=on_operation_result,
+            on_thinking_update=on_thinking_update,
             announce=False,
         )
     except Exception:
@@ -4545,6 +4553,10 @@ async def main() -> int:
                     memory_service=memory_service,
                     on_result_stored=on_result_stored,
                     on_research_result=on_research_result,
+                    on_tool_call=on_tool_call,
+                    on_tool_result=on_tool_result,
+                    on_operation_result=on_operation_result,
+                    on_thinking_update=on_thinking_update,
                 )
                 return
 
@@ -5880,6 +5892,10 @@ async def main() -> int:
                                 memory_service=memory_service,
                                 voice=voice,
                                 session_id=task_session_id,
+                                on_tool_call=on_tool_call,
+                                on_tool_result=on_tool_result,
+                                on_operation_result=on_operation_result,
+                                on_thinking_update=on_thinking_update,
                             )
                         except RuntimeError as ex:
                             await event_bus.emit(
