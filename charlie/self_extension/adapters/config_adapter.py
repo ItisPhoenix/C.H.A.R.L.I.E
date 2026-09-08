@@ -23,9 +23,10 @@ class ConfigAdapter:
         settings_service: Optional[SettingsService] = None,
         config: Optional[Config] = None,
     ) -> None:
-        cfg = config or Config()
-        self._settings_service = settings_service or SettingsService(config_instance=cfg)
-        self._config = config or getattr(self._settings_service, "config", cfg)
+        if settings_service is None:
+            raise ValueError("ConfigAdapter requires main-owned SettingsService")
+        self._settings_service = settings_service
+        self._config = config or settings_service.config
 
     def capture_preimage(self, keys: List[str]) -> Dict[str, Any]:
         """Capture existing values for declared keys (secret-masked in logs)."""

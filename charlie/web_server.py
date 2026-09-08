@@ -45,7 +45,7 @@ from charlie.capabilities import build_capability_snapshot, get_capability_index
 import charlie.tools  # noqa: F401
 from charlie.events import CONTRACT_VERSION, EventValidationError, build_event, normalize_event, replay_event
 from charlie.media_runtime import canonical_media_request_fingerprint
-from charlie.settings_service import SettingsService, SettingValidationError
+from charlie.settings_service import canonical_settings_request_fingerprint
 from charlie.privacy_service import PrivacyService
 from charlie.code_index import CodeIndex
 from charlie.runtime_introspector import RuntimeIntrospector
@@ -298,10 +298,15 @@ _pending_session_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
 _pending_session_fingerprints: dict[str, str] = {}
 _completed_session_operations: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _completed_session_fingerprints: dict[str, str] = {}
+SETTINGS_OPERATION_TIMEOUT_SECONDS = 10.0
+_pending_settings_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
+_pending_settings_fingerprints: dict[str, str] = {}
 LAUNCH_ID: str = config.charlie_launch_id
 _session_projection: SessionReadProjection | None = None
 _terminal_manager = TerminalManager()
 _audit_store: AuditStore | None = None
+_settings_snapshot: dict[str, Any] | None = None
+_settings_snapshot_event: dict[str, Any] | None = None
 
 
 def _get_audit_store() -> AuditStore:
@@ -350,6 +355,7 @@ async def lifespan(app: FastAPI):
     global event_bus, plugin_manager, _audit_store, _session_projection
     global _tool_snapshot, _tool_snapshot_event, _mcp_snapshot, _mcp_snapshot_event
     global _projected_telemetry, _projected_telemetry_event
+    global _settings_snapshot, _settings_snapshot_event
     # This process never owns executable tool activation. Start each web
     # lifecycle without a stale projection and wait for main's replay.
     _tool_snapshot = None
@@ -358,6 +364,8 @@ async def lifespan(app: FastAPI):
     _mcp_snapshot_event = None
     _projected_telemetry = None
     _projected_telemetry_event = None
+    _settings_snapshot = None
+    _settings_snapshot_event = None
 
     # EventBus resolves test-mode ports from the central pytest isolation setup;
     # production keeps its documented defaults.
@@ -557,6 +565,11 @@ async def _event_bridge():
             _resolve_calendar_operation_result(event.get("payload", {}))
         elif etype == "session_operation_result":
             _resolve_session_operation_result(event.get("payload", {}))
+        elif etype == "settings_operation_result":
+            _resolve_settings_operation_result(event.get("payload", {}))
+        elif etype == "settings_snapshot":
+            if not _apply_settings_snapshot_event(event):
+                logger.warning("Ignoring malformed main settings snapshot")
         elif etype == "session_active":
             global _active_frontend_session
             _active_frontend_session = event.get("payload", {}).get("session_id")
@@ -1189,6 +1202,8 @@ def _initial_state_events() -> List[dict]:
         events.append(replay_event(_mcp_snapshot_event, allow_unknown=True))
     if _projected_telemetry_event is not None:
         events.append(replay_event(_projected_telemetry_event, allow_unknown=True))
+    if _settings_snapshot_event is not None:
+        events.append(replay_event(_settings_snapshot_event, allow_unknown=True))
     events.extend(_pending_approvals.values())
     events.extend(_active_presentation_intents.values())
     return [replay_event(event, allow_unknown=True) for event in events]
@@ -1253,6 +1268,51 @@ def _apply_approval_event(cache: dict, event: dict) -> None:
         cache[rid] = event
     else:
         cache.pop(rid, None)
+
+
+def _apply_settings_snapshot_event(event: object) -> bool:
+    """Replace read-only settings projection only with a main-owned snapshot."""
+    if not isinstance(event, dict):
+        return False
+    payload = event.get("payload")
+    if not isinstance(payload, dict) or payload.get("authority") != "main_runtime":
+        return False
+    fields = payload.get("fields")
+    if not isinstance(fields, list) or any(not isinstance(field, dict) for field in fields):
+        return False
+
+    safe_fields: list[dict[str, Any]] = []
+    for field in fields:
+        if not isinstance(field.get("key"), str) or not isinstance(field.get("field"), str):
+            return False
+        safe_field = dict(field)
+        if safe_field.get("secret") is True:
+            safe_field["value"] = None
+            safe_field["saved_value"] = None
+            safe_field["effective_value"] = None
+            safe_field["is_set"] = bool(safe_field.get("is_set"))
+        safe_fields.append(safe_field)
+
+    pending_reload = payload.get("pending_reload", {})
+    process_restart_required = payload.get("process_restart_required", [])
+    if not isinstance(pending_reload, dict) or not isinstance(process_restart_required, list):
+        return False
+    projection = {
+        "authority": "main_runtime",
+        "status": "available",
+        "fields": safe_fields,
+        "pending_reload": {
+            str(tier): [str(key) for key in keys]
+            for tier, keys in pending_reload.items()
+            if isinstance(keys, list)
+        },
+        "process_restart_required": [str(key) for key in process_restart_required],
+    }
+    global _settings_snapshot, _settings_snapshot_event
+    _settings_snapshot = projection
+    _settings_snapshot_event = dict(event)
+    _settings_snapshot_event["payload"] = projection
+    return True
 
 
 def _resolve_extension_operation_result(payload: object) -> None:
@@ -1486,6 +1546,124 @@ async def _request_authoritative_calendar_operation(
             "result": {"ok": False, "reason": "Main calendar authority returned an invalid result."},
         }
     return result
+
+
+def _resolve_settings_operation_result(payload: object) -> None:
+    """Resolve one web settings request from main's correlated result."""
+    if not isinstance(payload, dict):
+        return
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return
+    future = _pending_settings_operations.get(request_id)
+    if future is None or future.done():
+        return
+    if payload.get("request_fingerprint") != _pending_settings_fingerprints.get(request_id):
+        logger.warning("Ignoring settings result with mismatched request fingerprint: %s", request_id)
+        return
+    future.set_result(dict(payload))
+
+
+async def _request_authoritative_settings_operation(
+    operation: str,
+    updates: dict[str, Any] | None = None,
+    *,
+    request_id: Any = None,
+) -> dict[str, Any]:
+    """Forward one settings operation and await main's authoritative result."""
+    request_id = _terminal_request_id(request_id)
+    request_updates = dict(updates or {}) if operation == "update" else {}
+    fingerprint = canonical_settings_request_fingerprint(operation, request_updates)
+    request_payload = {
+        "request_id": request_id,
+        "operation": operation,
+        "updates": request_updates,
+        "request_fingerprint": fingerprint,
+    }
+    if event_bus is None:
+        return {
+            "request_id": request_id,
+            "request_fingerprint": fingerprint,
+            "operation": operation,
+            "status": "unavailable",
+            "result": {"ok": False, "reason": "Main settings authority is unavailable."},
+        }
+
+    loop = asyncio.get_running_loop()
+    existing = _pending_settings_operations.get(request_id)
+    if existing is not None and not existing.done():
+        if _pending_settings_fingerprints.get(request_id) != fingerprint:
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "request_id_conflict",
+                "result": {"ok": False, "reason": "request_id is bound to a different settings operation"},
+            }
+        return await asyncio.shield(existing)
+
+    future: asyncio.Future[dict[str, Any]] = loop.create_future()
+    _pending_settings_operations[request_id] = future
+    _pending_settings_fingerprints[request_id] = fingerprint
+    try:
+        sent = await event_bus.send_command({"type": "settings_operation", "payload": request_payload})
+        if sent is False:
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "unavailable",
+                "result": {"ok": False, "reason": "Main settings authority is unavailable."},
+            }
+        try:
+            result = await asyncio.wait_for(future, timeout=SETTINGS_OPERATION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "timeout",
+                "result": {"ok": False, "reason": "Main settings authority timed out."},
+            }
+    except Exception:
+        logger.warning("Failed to request main settings operation", exc_info=True)
+        return {
+            "request_id": request_id,
+            "request_fingerprint": fingerprint,
+            "operation": operation,
+            "status": "unavailable",
+            "result": {"ok": False, "reason": "Main settings authority is unavailable."},
+        }
+    finally:
+        _pending_settings_operations.pop(request_id, None)
+        _pending_settings_fingerprints.pop(request_id, None)
+
+    if not isinstance(result, dict) or result.get("request_id") != request_id:
+        return {
+            "request_id": request_id,
+            "request_fingerprint": fingerprint,
+            "operation": operation,
+            "status": "invalid_result",
+            "result": {"ok": False, "reason": "Main settings authority returned an invalid result."},
+        }
+    return result
+
+
+def _settings_http_response(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep legacy config API status while exposing authoritative outcome state."""
+    authority_status = result.get("status", "failed")
+    authority_result = result.get("result") if isinstance(result.get("result"), dict) else {}
+    success = authority_status == "completed" and authority_result.get("ok") is True
+    response = {
+        "status": "ok" if success else "error",
+        "authority_status": authority_status,
+        "request_id": result.get("request_id"),
+        "operation": result.get("operation"),
+        **authority_result,
+    }
+    if not success and "reason" not in response:
+        response["reason"] = "Main settings authority did not complete the operation."
+    return response
 
 
 def _cache_completed_session_operation(request_id: str, payload: dict[str, Any], fingerprint: str) -> None:
@@ -2953,62 +3131,47 @@ async def set_active_session(data: dict):
     return result
 
 
-_settings_service = SettingsService(config)
-
-
-def _update_env_file(updates: dict):
-    _settings_service._atomic_write_env(updates, source="dashboard_config_api")
-
-
 @app.get("/api/config")
 async def get_dashboard_config():
-    """Describe every .env-backed setting for the settings page.
-
-    Driven entirely by SettingsService and Config metadata.
-    Secret fields never echo their value, only whether one is set.
-    """
-    return {"fields": _settings_service.get_field_specs()}
+    """Return only the main-owned settings projection and immutable metadata."""
+    if _settings_snapshot is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unavailable",
+                "reason": "Main settings authority is unavailable.",
+            },
+        )
+    return {
+        "fields": [dict(field) for field in _settings_snapshot["fields"]],
+        "authority": "main_runtime",
+        "pending_reload": dict(_settings_snapshot["pending_reload"]),
+        "process_restart_required": list(_settings_snapshot["process_restart_required"]),
+    }
 
 
 @app.post("/api/config")
 async def update_dashboard_config(data: dict):
-    """Persist one or more .env-backed settings -- safely and atomically.
-
-    `data` is {ENV_VAR_NAME: value}; unknown keys are ignored so this can't be
-    used to inject arbitrary env vars. Validates types and atomically writes to .env.
-    """
+    """Forward settings updates to main and await durable authoritative result."""
+    if not isinstance(data, dict):
+        return JSONResponse(status_code=400, content={"status": "error", "reason": "settings object required"})
     known_keys = {spec["key"] for spec in Config.editable_field_specs()}
     updates = {k: v for k, v in data.items() if k in known_keys}
     if not updates:
         return {"status": "error", "message": "no recognized settings in request"}
-
-    try:
-        validated = _settings_service.validate_updates(updates)
-        touched = config.apply_env_updates(validated)
-        _update_env_file(validated)
-        return {"status": "ok", "touched": sorted(touched)}
-    except SettingValidationError as exc:
-        logger.warning("Setting validation error: %s", exc)
-        return {"status": "error", "message": "One or more settings have an invalid value."}
-    except Exception:
-        logger.error("Error updating config", exc_info=True)
-        return {"status": "error", "message": "One or more settings have an invalid value."}
+    result = await _request_authoritative_settings_operation(
+        "update",
+        updates,
+        request_id=data.get("request_id"),
+    )
+    return _settings_http_response(result)
 
 
 @app.post("/api/config/reload")
 async def reload_engine_config():
-    """Apply the current .env to the running voice process: on demand only.
-
-    Re-reads every editable setting from .env into the voice process's config
-    singleton and reloads whichever of the voice engine / MCP client / plugin
-    tools that process needs to pick the new values up (see main.py's
-    "system_restart" command handler). This is the only path that ever
-    touches the live engine -- POST /api/config (Save) deliberately doesn't.
-    """
-    if not event_bus:
-        return {"status": "error", "message": "voice process not connected"}
-    await event_bus.send_command({"type": "system_restart"})
-    return {"status": "ok"}
+    """Request targeted main-owned reload of pending settings tiers."""
+    result = await _request_authoritative_settings_operation("reload")
+    return _settings_http_response(result)
 
 
 @app.delete("/api/memory/facts")

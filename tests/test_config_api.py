@@ -7,6 +7,7 @@ import pytest
 
 import charlie.web_server as web_server
 from charlie.config import config
+from charlie.settings_service import SettingsService
 
 _REAL_HTTPX_ASYNC_CLIENT = httpx.AsyncClient
 
@@ -208,6 +209,8 @@ def _remove_db(db_path: str) -> None:
 
 @pytest.mark.asyncio
 async def test_get_dashboard_config():
+    service = SettingsService(config, env_path=Path(".env.test-nonexistent"))
+    web_server._apply_settings_snapshot_event({"type": "settings_snapshot", "payload": service.snapshot()})
     res = await web_server.get_dashboard_config()
     keys = {f["key"] for f in res["fields"]}
     assert {"GPU_DEVICE", "KOKORO_LANG", "WHISPER_MODEL", "MCP_SERVERS", "DESKTOP_IDLE_THRESHOLD_S"} <= keys
@@ -246,6 +249,8 @@ def test_desktop_idle_threshold_default(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_dashboard_config_masks_secrets():
+    service = SettingsService(config, env_path=Path(".env.test-nonexistent"))
+    web_server._apply_settings_snapshot_event({"type": "settings_snapshot", "payload": service.snapshot()})
     res = await web_server.get_dashboard_config()
     by_key = {f["key"]: f for f in res["fields"]}
     secret_field = by_key["LLM_API_KEY"]
@@ -256,12 +261,9 @@ async def test_get_dashboard_config_masks_secrets():
 
 @pytest.mark.asyncio
 async def test_update_dashboard_config(monkeypatch):
-    # Mock _update_env_file to avoid changing active .env during tests
-    called = []
-    def mock_update(updates):
-        called.append(updates)
-    monkeypatch.setattr(web_server, "_update_env_file", mock_update)
-    monkeypatch.setattr(web_server, "event_bus", None)
+    bus = _FakeEventBus()
+    monkeypatch.setattr(web_server, "event_bus", bus)
+    before = {key: getattr(config, key) for key in ("gpu_device", "kokoro_lang", "wake_word_enabled")}
 
     test_payload = {
         "GPU_DEVICE": "cpu",
@@ -271,17 +273,13 @@ async def test_update_dashboard_config(monkeypatch):
 
     res = await web_server.update_dashboard_config(test_payload)
     assert res["status"] == "ok"
-    assert res["touched"] == ["voice"]  # GPU_DEVICE/WAKE_WORD_ENABLED are voice-tier; KOKORO_LANG is live
-    assert config.gpu_device == "cpu"
-    assert config.kokoro_lang == "en-gb"
-    assert config.wake_word_enabled is True
-    assert len(called) == 1
-    assert called[0]["GPU_DEVICE"] == "cpu"
+    assert res["touched"] == ["voice"]
+    assert bus.sent[0]["type"] == "settings_operation"
+    assert {key: getattr(config, key) for key in before} == before
 
 
 @pytest.mark.asyncio
 async def test_update_dashboard_config_ignores_unknown_keys(monkeypatch):
-    monkeypatch.setattr(web_server, "_update_env_file", lambda updates: None)
     monkeypatch.setattr(web_server, "event_bus", None)
 
     res = await web_server.update_dashboard_config({"NOT_A_REAL_SETTING": "x"})
@@ -290,7 +288,13 @@ async def test_update_dashboard_config_ignores_unknown_keys(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_update_dashboard_config_rejects_invalid_types_without_partial_apply(monkeypatch):
-    monkeypatch.setattr(web_server, "_update_env_file", lambda updates: None)
+    bus = _FakeEventBus(
+        {
+            "status": "failed",
+            "result": {"ok": False, "reason": "Invalid value for setting 'DESKTOP_IDLE_THRESHOLD_S'"},
+        }
+    )
+    monkeypatch.setattr(web_server, "event_bus", bus)
     before = config.desktop_idle_threshold_s
 
     res = await web_server.update_dashboard_config({"DESKTOP_IDLE_THRESHOLD_S": "not-a-number", "GPU_DEVICE": "cpu"})
@@ -301,33 +305,49 @@ async def test_update_dashboard_config_rejects_invalid_types_without_partial_app
 
 
 class _FakeEventBus:
-    def __init__(self):
+    def __init__(self, response=None):
         self.sent = []
+        self.response = response or {
+            "status": "completed",
+            "result": {"ok": True, "saved": True, "applied": [], "touched": ["voice"]},
+        }
 
     async def send_command(self, cmd):
         self.sent.append(cmd)
+        payload = cmd["payload"]
+        web_server._resolve_settings_operation_result(
+            {
+                "request_id": payload["request_id"],
+                "request_fingerprint": payload["request_fingerprint"],
+                "operation": payload["operation"],
+                **self.response,
+            }
+        )
+        return True
 
 
 @pytest.mark.asyncio
 async def test_update_dashboard_config_never_pushes_to_live_engine(monkeypatch):
-    """Save (POST /api/config) must only persist -- Reload is the only path that applies live."""
+    """Save waits for main and never mutates web-local Config."""
     bus = _FakeEventBus()
-    monkeypatch.setattr(web_server, "_update_env_file", lambda updates: None)
     monkeypatch.setattr(web_server, "event_bus", bus)
+    before = config.gpu_device
 
     res = await web_server.update_dashboard_config({"GPU_DEVICE": "cpu"})
     assert res["status"] == "ok"
-    assert bus.sent == []
+    assert bus.sent[0]["type"] == "settings_operation"
+    assert config.gpu_device == before
 
 
 @pytest.mark.asyncio
-async def test_reload_engine_config_sends_system_restart(monkeypatch):
+async def test_reload_engine_config_sends_settings_operation(monkeypatch):
     bus = _FakeEventBus()
     monkeypatch.setattr(web_server, "event_bus", bus)
 
     res = await web_server.reload_engine_config()
     assert res["status"] == "ok"
-    assert bus.sent == [{"type": "system_restart"}]
+    assert bus.sent[0]["type"] == "settings_operation"
+    assert bus.sent[0]["payload"]["operation"] == "reload"
 
 
 @pytest.mark.asyncio

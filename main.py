@@ -127,6 +127,11 @@ from charlie.session_store import (
     SessionStoreError,
     canonical_session_request_fingerprint,
 )
+from charlie.settings_service import (
+    SettingValidationError,
+    SettingsService,
+    canonical_settings_request_fingerprint,
+)
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus
 from charlie.task_journal import TaskOrigin, TaskPriority, TaskStatus, get_task_journal
@@ -182,6 +187,7 @@ _TERMINAL_RESULT_CACHE_MAX = 512
 _MEDIA_RESULT_CACHE_MAX = 512
 _CALENDAR_RESULT_CACHE_MAX = 512
 _SESSION_RESULT_CACHE_MAX = 512
+_SETTINGS_RESULT_CACHE_MAX = 512
 from charlie.runtime_identity import git_build_identity, persistent_frontend_dist
 
 _SOURCE_IDENTITY, _SOURCE_DIRTY = git_build_identity(Path(__file__).resolve().parent)
@@ -366,6 +372,324 @@ def _calendar_request_id_conflict_payload(
         "request_id_conflict": True,
         "error": message,
     }
+
+
+def _cache_settings_result(
+    result_cache: OrderedDict[str, dict[str, Any]],
+    request_id: str,
+    payload: dict[str, Any],
+    fingerprint_cache: dict[str, str],
+    fingerprint: str,
+) -> None:
+    result_cache[request_id] = payload
+    result_cache.move_to_end(request_id)
+    fingerprint_cache[request_id] = fingerprint
+    while len(result_cache) > _SETTINGS_RESULT_CACHE_MAX:
+        evicted_id, _ = result_cache.popitem(last=False)
+        fingerprint_cache.pop(evicted_id, None)
+
+
+def _settings_request_id_conflict_payload(
+    request_id: str,
+    operation: Any,
+    fingerprint: str,
+) -> dict[str, Any]:
+    message = "request_id is already bound to a different settings operation"
+    return {
+        "request_id": request_id,
+        "request_fingerprint": fingerprint,
+        "operation": operation,
+        "status": "request_id_conflict",
+        "result": {"ok": False, "reason": message},
+        "request_id_conflict": True,
+        "error": message,
+    }
+
+
+def _log_received_web_command(command: Any) -> None:
+    """Log web commands without serializing settings values or secrets."""
+    if isinstance(command, dict) and command.get("type") == "settings_operation":
+        payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+        updates = payload.get("updates") if isinstance(payload.get("updates"), dict) else {}
+        logger.debug(
+            "ZMQ received settings command: operation=%s request_id=%s fingerprint=%s fields=%s",
+            payload.get("operation"),
+            payload.get("request_id"),
+            canonical_settings_request_fingerprint(str(payload.get("operation") or "invalid"), updates),
+            sorted(str(key) for key in updates),
+        )
+        return
+    logger.debug("ZMQ received command: %s", command)
+
+
+def _reload_plugin_tools_state(
+    runtime_config: Any,
+    current_manager: Any,
+    *,
+    registry: Any,
+    register_plugin_tools: Callable[[Any], Any],
+    empty_manager_factory: Callable[[], Any],
+    set_health: Callable[[str, HealthStatus], None],
+) -> tuple[bool, str, Any]:
+    """Reload plugin tools and return the manager that owns their closures."""
+    for name in [name for name in registry._tools if name.startswith("plugin_")]:
+        registry.unregister_tool(name)
+    if runtime_config.plugins_enabled:
+        try:
+            replacement_manager = register_plugin_tools(runtime_config)
+            if replacement_manager is None:
+                set_health("plugins", HealthStatus.DEGRADED)
+                return False, "plugin reload produced no manager", current_manager
+            set_health("plugins", HealthStatus.RUNNING)
+            return True, "", replacement_manager
+        except Exception:
+            logger.warning("Error registering plugins on reload", exc_info=True)
+            set_health("plugins", HealthStatus.DEGRADED)
+            return False, "plugin reload failed", current_manager
+
+    set_health("plugins", HealthStatus.DISABLED)
+    return True, "", empty_manager_factory()
+
+
+async def _publish_settings_snapshot(
+    bus: Optional[EventBus],
+    settings_service: Any,
+    *,
+    rationale: str = "main settings projection",
+) -> None:
+    if bus is None or settings_service is None:
+        return
+    await bus.emit(
+        "settings_snapshot",
+        settings_service.snapshot(),
+        meta=EventMeta(source=EventSource.BRAIN, rationale=rationale),
+    )
+
+
+async def _run_self_extension_request(
+    self_extension_orchestrator: Any,
+    request_payload: dict[str, Any],
+    request_id: str,
+    *,
+    event_bus: Any,
+) -> None:
+    """Run one self-extension request through the main-owned orchestrator."""
+    if self_extension_orchestrator is None:
+        result = {
+            "success": False,
+            "status": "failed",
+            "message": "Self-extension runtime is not initialized.",
+        }
+    else:
+        request = self_extension_orchestrator.plan_request(
+            str(request_payload.get("prompt", "")),
+            explicit_user_request=bool(request_payload.get("explicit", True)),
+            affected_settings=dict(request_payload.get("settings") or {}),
+        )
+        extension_result = await asyncio.to_thread(
+            self_extension_orchestrator.execute_transaction,
+            request,
+        )
+        result = extension_result.to_dict()
+
+    await event_bus.emit(
+        "self_extension_result",
+        {"request_id": request_id, **result},
+        meta=EventMeta(
+            source=EventSource.BRAIN,
+            rationale="authoritative self-extension transaction result",
+        ),
+    )
+
+
+def _reload_callback_outcome(outcome: Any) -> tuple[bool, str]:
+    if isinstance(outcome, tuple) and outcome:
+        return bool(outcome[0]), str(outcome[1]) if len(outcome) > 1 else ""
+    if isinstance(outcome, dict):
+        return bool(outcome.get("success", outcome.get("ok", False))), str(outcome.get("reason", ""))
+    return bool(outcome), ""
+
+
+async def _handle_settings_operation_request(
+    settings_service: Any,
+    event_bus: Any,
+    payload: Any,
+    *,
+    result_cache: Optional[OrderedDict[str, dict[str, Any]]] = None,
+    in_flight: Optional[dict[str, Any]] = None,
+    fingerprint_cache: Optional[dict[str, str]] = None,
+    reload_handlers: Optional[dict[str, Callable[[], Any]]] = None,
+    post_reload: Optional[Callable[[], Any]] = None,
+    operation_lock: Optional[asyncio.Lock] = None,
+) -> dict[str, Any] | None:
+    """Own correlated settings persistence and targeted reload requests."""
+    payload = payload if isinstance(payload, dict) else {}
+    result_cache = result_cache if result_cache is not None else OrderedDict()
+    in_flight = in_flight if in_flight is not None else {}
+    fingerprint_cache = fingerprint_cache if fingerprint_cache is not None else {}
+    reload_handlers = reload_handlers or {}
+    request_id = _normalize_terminal_request_id(payload.get("request_id"))
+    operation = payload.get("operation")
+    updates = payload.get("updates", {}) if operation == "update" else {}
+    fingerprint = canonical_settings_request_fingerprint(
+        str(operation or "invalid"), updates if isinstance(updates, dict) else {}
+    )
+
+    async def _publish(
+        result_payload: dict[str, Any],
+        *,
+        rationale: str,
+        cache: bool = True,
+    ) -> dict[str, Any]:
+        if cache:
+            _cache_settings_result(result_cache, request_id, result_payload, fingerprint_cache, fingerprint)
+        await event_bus.emit(
+            "settings_operation_result",
+            result_payload,
+            meta=EventMeta(source=EventSource.BRAIN, task_id=request_id, rationale=rationale),
+        )
+        return result_payload
+
+    supplied_fingerprint = payload.get("request_fingerprint")
+    if not isinstance(supplied_fingerprint, str) or supplied_fingerprint != fingerprint:
+        return await _publish(
+            _settings_request_id_conflict_payload(request_id, operation, fingerprint),
+            rationale="invalid settings request fingerprint",
+            cache=False,
+        )
+
+    cached = result_cache.get(request_id)
+    if cached is not None:
+        if fingerprint_cache.get(request_id) != fingerprint:
+            return await _publish(
+                _settings_request_id_conflict_payload(request_id, operation, fingerprint),
+                rationale="settings request ID conflicts with completed operation",
+                cache=False,
+            )
+        return await _publish(cached, rationale="settings result replayed from main idempotency cache")
+
+    existing_entry = in_flight.get(request_id)
+    existing = existing_entry[0] if isinstance(existing_entry, tuple) else existing_entry
+    existing_fingerprint = (
+        existing_entry[1]
+        if isinstance(existing_entry, tuple) and len(existing_entry) == 2
+        else None
+    )
+    current = asyncio.current_task()
+    if existing is not None and existing is not current and not existing.done():
+        if existing_fingerprint != fingerprint:
+            return await _publish(
+                _settings_request_id_conflict_payload(request_id, operation, fingerprint),
+                rationale="settings request ID conflicts with in-flight operation",
+                cache=False,
+            )
+        await asyncio.shield(existing)
+        cached = result_cache.get(request_id)
+        if cached is not None:
+            return await _publish(cached, rationale="settings result replayed to duplicate waiter")
+        return None
+
+    if current is not None:
+        in_flight[request_id] = (current, fingerprint)
+    lock_acquired = False
+    if operation_lock is not None:
+        await operation_lock.acquire()
+        lock_acquired = True
+
+    result_payload: dict[str, Any] = {
+        "request_id": request_id,
+        "request_fingerprint": fingerprint,
+        "operation": operation,
+        "status": "failed",
+        "result": {"ok": False, "reason": "Invalid settings operation request."},
+    }
+    try:
+        if operation == "update":
+            if not isinstance(updates, dict):
+                raise SettingValidationError("Settings updates must be an object.")
+            update_result = settings_service.apply_updates(updates)
+            result_payload.update(
+                {
+                    "status": "completed",
+                    "result": {"ok": True, **update_result},
+                }
+            )
+            await _publish_settings_snapshot(
+                event_bus,
+                settings_service,
+                rationale="settings persisted and runtime projection updated",
+            )
+        elif operation == "reload":
+            reloaded_tiers: list[str] = []
+            failed_tiers: dict[str, str] = {}
+            pending = settings_service.pending_reload_work()
+            for tier in sorted(pending):
+                if tier == "process":
+                    continue
+                expected_values = pending[tier]
+                handler = reload_handlers.get(tier)
+                if handler is None and tier == "reload":
+                    outcome = (True, "Settings consumers read Config per operation.")
+                elif handler is None:
+                    outcome = (False, f"No reload handler is registered for tier '{tier}'.")
+                else:
+                    try:
+                        outcome = handler()
+                        if inspect.isawaitable(outcome):
+                            outcome = await outcome
+                    except Exception:
+                        logger.error("Settings reload failed for tier %s", tier, exc_info=True)
+                        outcome = (False, f"{tier} reload failed.")
+                success, reason = _reload_callback_outcome(outcome)
+                settings_service.mark_reload_result(tier, success, expected_values=expected_values)
+                if success:
+                    reloaded_tiers.append(tier)
+                else:
+                    failed_tiers[tier] = reason or f"{tier} reload failed."
+
+            snapshot = settings_service.snapshot()
+            process_restart_required = snapshot["process_restart_required"]
+            full_success = not failed_tiers and not process_restart_required and not snapshot["pending_reload"]
+            result_payload.update(
+                {
+                    "status": "completed" if full_success else "partial",
+                    "result": {
+                        "ok": full_success,
+                        "reloaded_tiers": reloaded_tiers,
+                        "failed_tiers": failed_tiers,
+                        "pending_reload": snapshot["pending_reload"],
+                        "process_restart_required": process_restart_required,
+                    },
+                }
+            )
+            if post_reload is not None:
+                try:
+                    projection_refresh = post_reload()
+                    if inspect.isawaitable(projection_refresh):
+                        await projection_refresh
+                except Exception:
+                    logger.warning("Settings reload projection refresh failed", exc_info=True)
+            await _publish_settings_snapshot(
+                event_bus,
+                settings_service,
+                rationale="targeted settings reload completed",
+            )
+        else:
+            return await _publish(result_payload, rationale="invalid settings operation")
+    except SettingValidationError as exc:
+        result_payload["result"] = {"ok": False, "reason": str(exc)}
+    except Exception:
+        logger.error("Main settings operation failed", exc_info=True)
+        result_payload["result"] = {"ok": False, "reason": "Settings operation failed."}
+    finally:
+        entry = in_flight.get(request_id)
+        if current is not None and (
+            entry is current or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] is current)
+        ):
+            in_flight.pop(request_id, None)
+        if lock_acquired:
+            operation_lock.release()
+    return await _publish(result_payload, rationale="main settings authority result")
 
 
 async def _handle_terminal_command_request(
@@ -1853,24 +2177,30 @@ from charlie import telemetry as _main_telemetry
 _main_telemetry.set_telemetry_listener(_on_telemetry_updated)
 
 
-async def _publish_runtime_state(bus: Optional[EventBus] = None, mcp_client: Any = None) -> None:
+async def _publish_runtime_state(
+    bus: Optional[EventBus] = None,
+    mcp_client: Any = None,
+    settings_service: Any = None,
+) -> None:
     """Replay public operational state owned by this main process."""
     await _publish_subsystem_health(bus)
     await _publish_task_snapshot(bus)
     await _publish_tool_snapshot(bus)
     await _publish_mcp_snapshot(bus, mcp_client)
     await _publish_runtime_telemetry(bus)
+    await _publish_settings_snapshot(bus, settings_service, rationale="runtime settings projection replay")
 
 
 async def _dispatch_web_command(
     cmd: dict,
     bus: Optional[EventBus] = None,
     mcp_client: Any = None,
+    settings_service: Any = None,
 ) -> bool:
     """Dispatch the runtime-state command from the live web command consumer."""
     if not isinstance(cmd, dict) or cmd.get("type") != "runtime_state_request":
         return False
-    await _publish_runtime_state(bus, mcp_client)
+    await _publish_runtime_state(bus, mcp_client, settings_service)
     return True
 
 
@@ -1878,9 +2208,10 @@ async def _handle_runtime_state_request(
     cmd_type: str,
     bus: Optional[EventBus] = None,
     mcp_client: Any = None,
+    settings_service: Any = None,
 ) -> bool:
     """Handle the command-loop runtime replay branch and report whether it matched."""
-    return await _dispatch_web_command({"type": cmd_type}, bus, mcp_client)
+    return await _dispatch_web_command({"type": cmd_type}, bus, mcp_client, settings_service)
 
 
 def _extension_operation_result(
@@ -2984,6 +3315,7 @@ def _wire_memory_service(memory_service: MemoryService) -> None:
 async def main() -> int:
     global _main_event_bus, _main_event_bus_registry
     loop = asyncio.get_running_loop()
+    settings_service = SettingsService(config_instance=config)
     _orig_handler = loop.call_exception_handler
 
     def _guarded_handler(ctx):
@@ -3036,6 +3368,10 @@ async def main() -> int:
     session_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
     session_operation_in_flight: dict[str, Any] = {}
     session_operation_fingerprints: dict[str, str] = {}
+    settings_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    settings_operation_in_flight: dict[str, Any] = {}
+    settings_operation_fingerprints: dict[str, str] = {}
+    settings_operation_lock = asyncio.Lock()
     event_bus_registry = _EventBusSubmissionRegistry()
     _main_event_bus_registry = event_bus_registry
 
@@ -4507,7 +4843,7 @@ async def main() -> int:
             if platform == "voice":
                 brain.schedule_deferred_background_work()
 
-        async def _reload_voice_engine():
+        async def _reload_voice_engine() -> tuple[bool, str]:
             """Stop and respawn VoiceEngine so mic/VAD/ASR/TTS-model/wake-word settings take effect.
 
             These are all baked into VoiceEngine.__init__ or the ASR worker subprocess it
@@ -4519,6 +4855,9 @@ async def main() -> int:
                 voice.stop()
             except Exception as ex:
                 logger.warning(f"Error stopping voice engine on reload: {ex}")
+                _set_subsystem_health("voice", HealthStatus.DEGRADED)
+                _set_subsystem_health("voice_capture", HealthStatus.DEGRADED)
+                return False, "voice reload could not stop the current engine"
             try:
                 voice = VoiceEngine(
                     config,
@@ -4530,8 +4869,12 @@ async def main() -> int:
                 voice.start()
                 voice.set_wake_word_callback(on_wake_word)
                 logger.info("VoiceEngine reloaded.")
+                return True, ""
             except Exception as ex:
                 logger.error(f"Error reloading VoiceEngine: {ex}", exc_info=True)
+                _set_subsystem_health("voice", HealthStatus.DEGRADED)
+                _set_subsystem_health("voice_capture", HealthStatus.DEGRADED)
+                return False, "voice reload failed"
 
         async def _monitor_voice_health(event_bus: EventBus) -> None:
             """Publish capture and ASR readiness after asynchronous worker startup."""
@@ -4558,7 +4901,7 @@ async def main() -> int:
                     previous = state
                 await asyncio.sleep(0.1)
 
-        async def _reload_mcp_client():
+        async def _reload_mcp_client() -> tuple[bool, str]:
             """Stop the MCP subprocess client and restart it if still enabled."""
             nonlocal mcp_client
             from charlie.tools import registry
@@ -4567,23 +4910,46 @@ async def main() -> int:
                 registry.unregister_tool(k)
             try:
                 mcp_client = await _restart_mcp_client(mcp_client, config)
+                if config.mcp_enabled and config.mcp_servers and mcp_client is None:
+                    _set_subsystem_health("mcp", HealthStatus.DEGRADED)
+                    return False, "mcp reload produced no client"
+                _set_subsystem_health(
+                    "mcp",
+                    HealthStatus.RUNNING if mcp_client is not None else HealthStatus.DISABLED,
+                )
+                return True, ""
             except Exception as ex:
                 logger.warning(f"Error reloading MCP client: {ex}")
                 mcp_client = None
+                _set_subsystem_health("mcp", HealthStatus.DEGRADED)
+                return False, "mcp reload failed"
 
-        def _reload_plugin_tools():
+        def _reload_plugin_tools() -> tuple[bool, str]:
             """Re-register plugin tools to match the current enabled flag / allow-dirs."""
-            from charlie.tools import registry
+            nonlocal plugin_manager
+            from charlie.plugins import PluginManager
+            from charlie.tools import register_plugin_tools, registry
 
-            for k in [k for k in registry._tools if k.startswith("plugin_")]:
-                registry.unregister_tool(k)
-            if config.plugins_enabled:
-                try:
-                    from charlie.tools import register_plugin_tools
+            success, reason, replacement_manager = _reload_plugin_tools_state(
+                config,
+                plugin_manager,
+                registry=registry,
+                register_plugin_tools=register_plugin_tools,
+                empty_manager_factory=PluginManager,
+                set_health=_set_subsystem_health,
+            )
+            if success:
+                plugin_manager = replacement_manager
+            return success, reason
 
-                    register_plugin_tools(config)
-                except Exception as ex:
-                    logger.warning(f"Error registering plugins on reload: {ex}")
+        async def _publish_settings_reload_state() -> None:
+            """Refresh projections affected by targeted settings reloads."""
+            brain.rebuild_stable_tier()
+            await _publish_subsystem_health(event_bus)
+            from charlie.tools import registry as _reloaded_registry
+
+            await _publish_tool_snapshot(event_bus, _reloaded_registry)
+            await _publish_mcp_snapshot(event_bus, mcp_client)
 
         async def consume_web_commands(event_bus, brain):
             """Read commands from the web UI and dispatch them."""
@@ -4636,7 +5002,7 @@ async def main() -> int:
             while True:
                 try:
                     cmd = await event_bus.next_command()
-                    logger.debug(f"ZMQ received command: {cmd}")
+                    _log_received_web_command(cmd)
                     cmd_type = cmd.get("type")
                     if cmd_type == "session_operation":
                         await _session_request(cmd.get("payload", {}))
@@ -4697,7 +5063,7 @@ async def main() -> int:
 
                         set_active_ws_count(hud_client_count)
                     elif cmd_type == "runtime_state_request":
-                        await _dispatch_web_command(cmd, event_bus, mcp_client)
+                        await _dispatch_web_command(cmd, event_bus, mcp_client, settings_service)
                     elif cmd_type == "recovery_approve":
                         payload = cmd.get("payload", {})
                         proposal_id = payload.get("proposal_id")
@@ -4763,6 +5129,24 @@ async def main() -> int:
                                 result_cache=calendar_operation_results,
                                 in_flight=calendar_operation_in_flight,
                                 fingerprint_cache=calendar_operation_fingerprints,
+                            )
+                        )
+                    elif cmd_type == "settings_operation":
+                        _submit_event_task(
+                            _handle_settings_operation_request(
+                                settings_service,
+                                event_bus,
+                                cmd.get("payload", {}),
+                                result_cache=settings_operation_results,
+                                in_flight=settings_operation_in_flight,
+                                fingerprint_cache=settings_operation_fingerprints,
+                                reload_handlers={
+                                    "voice": _reload_voice_engine,
+                                    "mcp": _reload_mcp_client,
+                                    "plugins": _reload_plugin_tools,
+                                },
+                                post_reload=_publish_settings_reload_state,
+                                operation_lock=settings_operation_lock,
                             )
                         )
                     elif cmd_type == "stop":
@@ -4836,35 +5220,14 @@ async def main() -> int:
                     elif cmd_type == "self_extension_request":
                         payload = cmd.get("payload", {})
                         request_id = str(payload.get("request_id") or cmd.get("request_id") or uuid.uuid4().hex)
-
-                        async def _run_self_extension(request_payload: dict, req_id: str) -> None:
-                            if self_extension_orchestrator is None:
-                                result = {
-                                    "success": False,
-                                    "status": "failed",
-                                    "message": "Self-extension runtime is not initialized.",
-                                }
-                            else:
-                                request = self_extension_orchestrator.plan_request(
-                                    str(request_payload.get("prompt", "")),
-                                    explicit_user_request=bool(request_payload.get("explicit", True)),
-                                    affected_settings=dict(request_payload.get("settings") or {}),
-                                )
-                                extension_result = await asyncio.to_thread(
-                                    self_extension_orchestrator.execute_transaction,
-                                    request,
-                                )
-                                result = extension_result.to_dict()
-                            await event_bus.emit(
-                                "self_extension_result",
-                                {"request_id": req_id, **result},
-                                meta=EventMeta(
-                                    source=EventSource.BRAIN,
-                                    rationale="authoritative self-extension transaction result",
-                                ),
+                        _submit_event_task(
+                            _run_self_extension_request(
+                                self_extension_orchestrator,
+                                payload,
+                                request_id,
+                                event_bus=event_bus,
                             )
-
-                        _submit_event_task(_run_self_extension(payload, request_id))
+                        )
                     elif cmd_type == "self_extension_rollback":
                         payload = cmd.get("payload", {})
                         tx_id = str(payload.get("tx_id", ""))
@@ -4920,38 +5283,6 @@ async def main() -> int:
                                 source=EventSource.BRAIN,
                                 rationale="authoritative main-runtime memory operation result",
                             ),
-                        )
-                    elif cmd_type == "system_restart":
-                        logger.info("System restart command received. Reloading configuration and engine...")
-
-                        from dotenv import load_dotenv
-
-                        load_dotenv(override=True)
-
-                        env_values = {
-                            spec["key"]: os.getenv(spec["key"])
-                            for spec in Config.editable_field_specs()
-                            if os.getenv(spec["key"]) is not None
-                        }
-                        config.apply_env_updates(env_values)
-
-                        await _reload_mcp_client()
-                        await asyncio.to_thread(_reload_plugin_tools)
-                        await _reload_voice_engine()
-                        brain.rebuild_stable_tier()
-                        await _publish_subsystem_health(event_bus)
-                        from charlie.tools import registry as _reloaded_registry
-
-                        await _publish_tool_snapshot(event_bus, _reloaded_registry)
-                        await _publish_mcp_snapshot(event_bus, mcp_client)
-
-                        await event_bus.emit(
-                            "alert",
-                            {
-                                "severity": "success",
-                                "message": "System configuration successfully reloaded and engine restarted.",
-                            },
-                            meta=EventMeta(source=EventSource.VOICE),
                         )
                     elif cmd_type == "background_task_start":
                         payload = cmd.get("payload", {})
@@ -5310,13 +5641,18 @@ async def main() -> int:
             await mcp_start_task
             # Replay after web subscriber and producer command sockets have had
             # time to connect; initial PUB events can be lost during startup.
-            await _publish_runtime_state(bus, mcp_client)
+            await _publish_runtime_state(bus, mcp_client, settings_service)
             from charlie.capabilities import get_capability_index
             from charlie.code_index import CodeIndex
             from charlie.doctor import CharlieDoctor
             from charlie.self_extension import SelfExtensionOrchestrator
             from charlie.self_knowledge import SelfKnowledgeService
-            from charlie.settings_service import SettingsService
+
+            def _schedule_settings_snapshot(rationale: str) -> None:
+                _submit_event_threadsafe(
+                    _publish_settings_snapshot(event_bus, settings_service, rationale=rationale),
+                    loop,
+                )
 
             shared_capability_index = get_capability_index()
             runtime_introspector = _build_runtime_introspector(
@@ -5342,7 +5678,8 @@ async def main() -> int:
 
             self_extension_orchestrator = SelfExtensionOrchestrator(
                 repo_root=Path(__file__).resolve().parent,
-                settings_service=SettingsService(config_instance=config),
+                settings_service=settings_service,
+                settings_snapshot_callback=_schedule_settings_snapshot,
                 config=config,
                 capability_index=shared_capability_index,
                 event_bus=bus,

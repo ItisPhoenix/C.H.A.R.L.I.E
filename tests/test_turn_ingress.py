@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 import pytest
 
+import main
 from charlie.events import EventMeta, EventSource, build_event
 from charlie.presentation import PresentationResolver
 from charlie.turn_contracts import ResultEnvelope, TurnRequest
@@ -121,6 +122,7 @@ async def test_web_ingress_allocates_one_request_before_dispatch(monkeypatch: py
         "_allocate_turn_request": _recording_allocator(allocated),
         "_dispatch_or_queue": dispatch,
         "logger": _NullLogger(),
+        "_log_received_web_command": main._log_received_web_command,
         "asyncio": asyncio,
     }
     wrapper_source = (

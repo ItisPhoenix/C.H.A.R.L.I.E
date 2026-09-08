@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from charlie.capabilities import CapabilityIndex, get_capability_index
 from charlie.config import Config
@@ -56,10 +56,14 @@ class SelfExtensionOrchestrator:
         self_knowledge: Optional[Any] = None,
         introspector: Optional[Any] = None,
         tx_store_path: Optional[Path] = None,
+        settings_snapshot_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._repo_root = (repo_root or Path(os.getcwd())).resolve()
         self._config = config or Config()
-        self._settings_service = settings_service or SettingsService(config_instance=self._config)
+        if settings_service is None:
+            raise ValueError("SelfExtensionOrchestrator requires main-owned SettingsService")
+        self._settings_service = settings_service
+        self._settings_snapshot_callback = settings_snapshot_callback
         self._capability_index = capability_index if capability_index is not None else get_capability_index()
         self._event_bus = event_bus
         self._event_loop = event_loop
@@ -116,6 +120,14 @@ class SelfExtensionOrchestrator:
 
         # Resume any transactions left in RESTARTING state
         self._resume_restarting_transactions()
+
+    def _notify_settings_snapshot(self, rationale: str) -> None:
+        if self._settings_snapshot_callback is None:
+            return
+        try:
+            self._settings_snapshot_callback(rationale)
+        except Exception:
+            logger.warning("Settings snapshot callback failed", exc_info=True)
 
     def plan_request(
         self,
@@ -349,6 +361,7 @@ class SelfExtensionOrchestrator:
 
     def _rollback_resumed_transaction(self, tx: ExtensionTransaction, reason: str) -> None:
         tx_id = tx.transaction_id
+        settings_transaction = False
         self._emit(EventType.SELF_EXTENSION_ROLLBACK_STARTED, {"tx_id": tx_id})
         rollback_ok = True
         rollback_message = ""
@@ -358,6 +371,7 @@ class SelfExtensionOrchestrator:
                 if tx.request.classification
                 else ((tx.plan or tx.request.plan).kind if (tx.plan or tx.request.plan) else None)
             )
+            settings_transaction = kind == ExtensionKind.CONFIG
             plan = tx.plan or tx.request.plan
             if kind == ExtensionKind.MCP_TOOL and plan and plan.mcp_name:
                 rollback = self._mcp_adapter.rollback_mcp_server(plan.mcp_name)
@@ -388,6 +402,8 @@ class SelfExtensionOrchestrator:
             tx.status = TransactionStatus.ROLLED_BACK
             tx.error_message = f"rollback_failed: {rollback_message}; verification: {reason}"
             self._emit(EventType.SELF_EXTENSION_ROLLED_BACK, {"tx_id": tx_id, "reason": tx.error_message})
+        if settings_transaction:
+            self._notify_settings_snapshot("self-extension settings rollback finalized")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Post-change verification gate (Task 7)
@@ -651,11 +667,16 @@ class SelfExtensionOrchestrator:
             )
 
         # Post-change verification gate
-        gate_ok, gate_msg = self._run_verification_gate(transaction_id, affected_ext_ids=None)
+        try:
+            gate_ok, gate_msg = self._run_verification_gate(transaction_id, affected_ext_ids=None)
+        except Exception:
+            self._notify_settings_snapshot("self-extension settings transaction failed")
+            raise
         if not gate_ok:
             self._config_adapter.rollback(preimage)
             tx.status = TransactionStatus.ROLLED_BACK
             self._emit(EventType.SELF_EXTENSION_ROLLED_BACK, {"tx_id": transaction_id})
+            self._notify_settings_snapshot("self-extension settings transaction rolled back")
             return ExtensionResult(
                 success=False,
                 transaction_id=transaction_id,
@@ -666,6 +687,7 @@ class SelfExtensionOrchestrator:
         tx.status = TransactionStatus.COMPLETED
         tx.finished_at = time.time()
         self._emit(EventType.SELF_EXTENSION_COMPLETED, {"tx_id": transaction_id})
+        self._notify_settings_snapshot("self-extension settings transaction completed")
         return ExtensionResult(
             success=True,
             transaction_id=transaction_id,
@@ -898,6 +920,8 @@ class SelfExtensionOrchestrator:
                 message=f"Transaction '{transaction_id}' not found.",
             )
 
+        request_kind = getattr(getattr(tx.request, "classification", None), "kind", None)
+        settings_transaction = getattr(request_kind, "value", request_kind) == "config"
         tx.status = TransactionStatus.ROLLING_BACK
         self._emit(EventType.SELF_EXTENSION_ROLLBACK_STARTED, {"tx_id": transaction_id})
 
@@ -909,6 +933,8 @@ class SelfExtensionOrchestrator:
 
         tx.status = TransactionStatus.ROLLED_BACK
         self._emit(EventType.SELF_EXTENSION_ROLLED_BACK, {"tx_id": transaction_id})
+        if settings_transaction:
+            self._notify_settings_snapshot("self-extension settings rollback finalized")
 
         return ExtensionResult(
             success=True,

@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+import main
 from charlie.events import CONTRACT_VERSION, EventMeta, EventSource
 from charlie.extensions import ExtensionManager, InstalledExtension, build_skill_card
 
@@ -498,6 +499,7 @@ async def test_main_command_loop_calls_authoritative_mutation_seam() -> None:
     namespace = {
         "asyncio": asyncio,
         "logger": _NullLogger(),
+        "_log_received_web_command": main._log_received_web_command,
         "apply_extension_operation": apply,
         "_publish_tool_snapshot": publish_tool_snapshot,
         "EventMeta": EventMeta,

@@ -70,6 +70,8 @@ class EventType(StrEnum):
     TERMINAL_COMMAND_RESULT = "terminal_command_result"
     MEDIA_OPERATION_RESULT = "media_operation_result"
     CALENDAR_OPERATION_RESULT = "calendar_operation_result"
+    SETTINGS_OPERATION_RESULT = "settings_operation_result"
+    SETTINGS_SNAPSHOT = "settings_snapshot"
     CHAT = "chat"
     PRESENTATION_INTENT = "presentation_intent"
     PRESENTATION_UPDATE = "presentation_update"
