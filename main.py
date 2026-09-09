@@ -163,6 +163,7 @@ from charlie.watchers import (
 )
 
 logger = logging.getLogger("charlie.main")
+_WATCHER_SHUTDOWN_TIMEOUT_S = 2.0
 _NON_CANCELLABLE_FOREGROUND_TOOLS = frozenset(
     {
         "file_write",
@@ -1881,6 +1882,25 @@ class _EventBusSubmissionRegistry:
 
 
 _main_event_bus_registry: Optional[_EventBusSubmissionRegistry] = None
+
+
+def _stop_watcher_thread(
+    stop_event: Optional[threading.Event],
+    watcher_thread: Optional[threading.Thread],
+    *,
+    timeout: float = _WATCHER_SHUTDOWN_TIMEOUT_S,
+) -> bool:
+    """Signal and bounded-join one main-owned watcher thread."""
+    if stop_event is not None:
+        stop_event.set()
+    if watcher_thread is None:
+        return True
+    if watcher_thread is threading.current_thread():
+        logger.error("Watcher shutdown attempted from watcher thread")
+        return False
+    if watcher_thread.is_alive():
+        watcher_thread.join(timeout=timeout)
+    return not watcher_thread.is_alive()
 
 
 def _submit_event_task(coroutine: Any, loop: Optional[asyncio.AbstractEventLoop] = None) -> Optional[asyncio.Task]:
@@ -3847,6 +3867,9 @@ async def main() -> int:
     active_operation_task_id: Optional[str] = None
     active_operation_cancellable = True
     runtime_shutting_down = False
+    watcher_callback_lock = threading.Lock()
+    watcher_stop_event = threading.Event()
+    watcher_thread: Optional[threading.Thread] = None
     terminal_command_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
     terminal_command_in_flight: dict[str, Any] = {}
     media_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -3871,11 +3894,26 @@ async def main() -> int:
 
     def _begin_shutdown() -> None:
         nonlocal runtime_shutting_down
-        if runtime_shutting_down:
-            return
-        runtime_shutting_down = True
+        with watcher_callback_lock:
+            if runtime_shutting_down:
+                return
+            runtime_shutting_down = True
         background_task.close_admission()
         event_bus_registry.close()
+
+    def _stop_watcher() -> None:
+        nonlocal watcher_thread, exit_code
+        if watcher_thread is None:
+            watcher_stop_event.set()
+            return
+        stopped = _stop_watcher_thread(watcher_stop_event, watcher_thread)
+        if stopped:
+            watcher_thread = None
+            _set_subsystem_health("watchers", HealthStatus.STOPPED)
+            return
+        exit_code = 1
+        _set_subsystem_health("watchers", HealthStatus.DEGRADED, "Watcher shutdown timed out")
+        logger.error("Watcher thread did not stop within %.1fs", _WATCHER_SHUTDOWN_TIMEOUT_S)
 
     global background_housekeeping_tasks
     active_process_task: Optional[asyncio.Task] = None
@@ -6382,31 +6420,35 @@ async def main() -> int:
 
             def _on_watcher_signal(event: dict, level: AttentionLevel, reason: str) -> None:
                 # Re-emit through the normal alert path -- state.py/pet_window.py already react to it.
-                payload = event.get("payload") or {}
-                message = payload.get("message", reason)
-                logger.warning(f"Watcher signal: {message}")
-                try:
-                    _submit_event_threadsafe(
-                        bus.emit(
-                            event.get("type", "alert"),
-                            payload,
-                            meta=EventMeta(source=EventSource.WATCHER, rationale=reason),
-                        ),
-                        _watcher_loop,
-                    )
-                except Exception:
-                    logger.warning("Failed to emit watcher alert event", exc_info=True)
-                if level >= AttentionLevel.ATTENTION:
-                    try:
-                        voice.speak(message, "neutral")
-                    except Exception:
-                        logger.warning("Failed to speak watcher alert", exc_info=True)
+                with watcher_callback_lock:
+                    if runtime_shutting_down:
+                        logger.debug("Ignoring watcher signal during runtime shutdown")
+                        return
+                    payload = event.get("payload") or {}
+                    message = payload.get("message", reason)
+                    logger.warning(f"Watcher signal: {message}")
                     try:
                         _submit_event_threadsafe(
-                            _spawn_watcher_surface(event, message, reason, level), _watcher_loop
+                            bus.emit(
+                                event.get("type", "alert"),
+                                payload,
+                                meta=EventMeta(source=EventSource.WATCHER, rationale=reason),
+                            ),
+                            _watcher_loop,
                         )
                     except Exception:
-                        logger.warning("Failed to spawn watcher alert surface", exc_info=True)
+                        logger.warning("Failed to emit watcher alert event", exc_info=True)
+                    if level >= AttentionLevel.ATTENTION:
+                        try:
+                            voice.speak(message, "neutral")
+                        except Exception:
+                            logger.warning("Failed to speak watcher alert", exc_info=True)
+                        try:
+                            _submit_event_threadsafe(
+                                _spawn_watcher_surface(event, message, reason, level), _watcher_loop
+                            )
+                        except Exception:
+                            logger.warning("Failed to spawn watcher alert surface", exc_info=True)
 
             _watcher_registry = WatcherRegistry()
             _watcher_registry.register(
@@ -6419,7 +6461,13 @@ async def main() -> int:
                 _watcher_registry.register(path_change_watcher(config.watch_paths))
 
             try:
-                start_watcher_thread(_watcher_registry, _on_watcher_signal)
+                watcher_thread = start_watcher_thread(
+                    _watcher_registry,
+                    _on_watcher_signal,
+                    stop_event=watcher_stop_event,
+                )
+                if not watcher_thread.is_alive():
+                    raise RuntimeError("Watcher thread exited during startup")
                 _set_subsystem_health("watchers", HealthStatus.RUNNING)
                 await _publish_subsystem_health(bus)
             except Exception:
@@ -6470,6 +6518,7 @@ async def main() -> int:
                 raise
             finally:
                 _begin_shutdown()
+                _stop_watcher()
                 logger.info("main_shutdown_begin | stage=before_event_bus_close")
                 if zmq_handler is not None:
                     try:
@@ -6522,6 +6571,7 @@ async def main() -> int:
         logger.error("Charlie runtime startup/execution failed: %s", e, exc_info=True)
     finally:
         _begin_shutdown()
+        _stop_watcher()
         logger.info("main_shutdown_begin | exit_code=%s", exit_code)
         if zmq_handler is not None:
             try:
