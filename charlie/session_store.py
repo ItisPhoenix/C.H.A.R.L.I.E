@@ -4,6 +4,8 @@ import os
 import sqlite3
 import threading
 import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple, TypeVar
 
 T = TypeVar("T")
@@ -669,6 +671,84 @@ class SessionStore:
         deleted = self._mutate(_do, "delete session")
         logger.info("delete_session | session_id=%s", session_id)
         return deleted
+
+    def purge_transcripts(
+        self,
+        *,
+        older_than_days: Optional[int] = None,
+        protected_session_ids: tuple[str, ...] = (),
+    ) -> dict[str, int]:
+        """Purge transcript rows through the canonical SessionStore transaction."""
+        if older_than_days is not None and (
+            isinstance(older_than_days, bool) or not isinstance(older_than_days, int) or older_than_days < 0
+        ):
+            raise ValueError("older_than_days must be a non-negative integer")
+
+        protected = tuple(sorted({session_id for session_id in protected_session_ids if session_id}))
+
+        def _do(tx: _WriteContext) -> dict[str, int]:
+            if older_than_days is None:
+                if protected:
+                    placeholders = ",".join("?" for _ in protected)
+                    busy_rows = tx.execute(
+                        f"SELECT session_id FROM sessions WHERE session_id IN ({placeholders})",
+                        protected,
+                    ).fetchall()
+                    if busy_rows:
+                        busy_ids = ", ".join(str(row[0]) for row in busy_rows)
+                        raise SessionConflictError(
+                            f"Cannot purge active session data while session(s) are in use: {busy_ids}"
+                        )
+
+                messages_purged = int(tx.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
+                sessions_purged = int(tx.execute("SELECT COUNT(*) FROM sessions").fetchone()[0])
+                tool_events_purged = int(tx.execute("SELECT COUNT(*) FROM tool_events").fetchone()[0])
+                tx.execute("DELETE FROM sessions")
+                # Remove legacy orphan rows too; normal rows are already removed
+                # by the canonical session-delete triggers.
+                tx.execute("DELETE FROM messages")
+                tx.execute("DELETE FROM tool_events")
+                return {
+                    "messages_purged": messages_purged,
+                    "sessions_purged": sessions_purged,
+                    "tool_events_purged": tool_events_purged,
+                    "items_purged": messages_purged + sessions_purged + tool_events_purged,
+                }
+
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
+            messages_purged = int(
+                tx.execute("SELECT COUNT(*) FROM messages WHERE timestamp < ?", (cutoff,)).fetchone()[0]
+            )
+            tool_events_purged = int(
+                tx.execute("SELECT COUNT(*) FROM tool_events WHERE created_at < ?", (cutoff,)).fetchone()[0]
+            )
+            tx.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
+            tx.execute("DELETE FROM tool_events WHERE created_at < ?", (cutoff,))
+            return {
+                "messages_purged": messages_purged,
+                "sessions_purged": 0,
+                "tool_events_purged": tool_events_purged,
+                "items_purged": messages_purged + tool_events_purged,
+            }
+
+        return self._mutate(_do, "purge transcripts")
+
+    def backup_to(self, target: str | Path) -> None:
+        """Write a consistent SQLite snapshot, including committed WAL rows."""
+        target_path = Path(target)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if target_path.resolve() == Path(self.db_path).resolve():
+            raise ValueError("Backup target must differ from the live SessionStore database")
+        destination = sqlite3.connect(str(target_path))
+        try:
+            self.conn.backup(destination)
+            destination.commit()
+        except sqlite3.Error as exc:
+            raise SessionStorageError("SessionStore backup failed") from exc
+        finally:
+            destination.close()
 
     def get_session_messages(
         self, session_id: str, limit: int = 50

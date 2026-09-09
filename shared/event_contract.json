@@ -45,6 +45,7 @@
     "mcp_snapshot": {"category": "snapshot", "replay": true, "required": ["servers"]},
     "mcp_operation_result": {"category": "result", "replay": false, "required": ["request_id", "operation", "success", "server_name"]},
     "memory_operation_result": {"category": "result", "replay": false, "required": ["request_id", "operation", "success"]},
+    "privacy_operation_result": {"category": "result", "replay": false, "required": ["request_id", "request_fingerprint", "operation", "status", "result"]},
     "charlie_state": {"category": "snapshot", "replay": true, "required": []},
     "result_stored": {"category": "result", "replay": false, "required": []},
     "browser_task_started": {"category": "progress", "replay": false, "required": []},

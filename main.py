@@ -106,7 +106,7 @@ for _logger_name in ("httpcore", "httpx", "asyncio", "comtypes", "trafilatura"):
 from charlie import background_task, telemetry
 from charlie.errors import ErrorClass, classify_exception
 from charlie.config import Config, config
-from charlie.core import Brain, OperationCancelled
+from charlie.core import Brain, OperationCancelled, _await_executor_quiescence
 from charlie.extensions import (
     ExtensionRuntimeRegistry,
     RuntimeExtension,
@@ -132,6 +132,12 @@ from charlie.session_store import (
     SessionStore,
     SessionStoreError,
     canonical_session_request_fingerprint,
+)
+from charlie.privacy_service import (
+    PRIVACY_OPERATIONS,
+    PRIVACY_PURGE_CATEGORIES,
+    PrivacyService,
+    canonical_privacy_request_fingerprint,
 )
 from charlie.settings_service import (
     SettingValidationError,
@@ -196,6 +202,7 @@ _CALENDAR_RESULT_CACHE_MAX = 512
 _SESSION_RESULT_CACHE_MAX = 512
 _SETTINGS_RESULT_CACHE_MAX = 512
 _EXTENSION_RESULT_CACHE_MAX = 512
+_PRIVACY_RESULT_CACHE_MAX = 512
 from charlie.runtime_identity import git_build_identity, persistent_frontend_dist
 
 _SOURCE_IDENTITY, _SOURCE_DIRTY = git_build_identity(Path(__file__).resolve().parent)
@@ -436,6 +443,15 @@ def _log_received_web_command(command: Any) -> None:
             payload.get("kind"),
             payload.get("name"),
             canonical_extension_request_fingerprint(str(payload.get("operation") or "invalid"), payload),
+        )
+        return
+    if isinstance(command, dict) and command.get("type") == "privacy_operation":
+        payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+        logger.debug(
+            "ZMQ received privacy command: operation=%s request_id=%s fingerprint=%s",
+            payload.get("operation"),
+            payload.get("request_id"),
+            canonical_privacy_request_fingerprint(str(payload.get("operation") or "invalid"), payload),
         )
         return
     logger.debug("ZMQ received command: %s", command)
@@ -1532,6 +1548,415 @@ async def _handle_session_operation_request(
     return await _publish(result_payload)
 
 
+def _cache_privacy_result(
+    result_cache: OrderedDict[str, dict[str, Any]],
+    request_id: str,
+    payload: dict[str, Any],
+    fingerprint_cache: dict[str, str],
+    fingerprint: str,
+) -> None:
+    result_cache[request_id] = payload
+    result_cache.move_to_end(request_id)
+    fingerprint_cache[request_id] = fingerprint
+    while len(result_cache) > _PRIVACY_RESULT_CACHE_MAX:
+        evicted_id, _ = result_cache.popitem(last=False)
+        fingerprint_cache.pop(evicted_id, None)
+
+
+def _privacy_request_id_conflict_payload(
+    request_id: str,
+    operation: Any,
+    fingerprint: str,
+) -> dict[str, Any]:
+    message = "request_id is already bound to a different privacy operation"
+    return {
+        "request_id": request_id,
+        "request_fingerprint": fingerprint,
+        "operation": operation,
+        "status": "request_id_conflict",
+        "result": {"ok": False, "failure_kind": "request_id_conflict", "reason": message},
+        "request_id_conflict": True,
+        "error": message,
+    }
+
+
+def _privacy_shutdown_result(payload: Any) -> dict[str, Any]:
+    payload = payload if isinstance(payload, dict) else {}
+    operation = str(payload.get("operation") or "invalid")
+    request_id = _normalize_terminal_request_id(payload.get("request_id"))
+    fingerprint = canonical_privacy_request_fingerprint(operation, payload)
+    return {
+        "request_id": request_id,
+        "request_fingerprint": fingerprint,
+        "operation": operation,
+        "status": "shutting_down",
+        "result": {
+            "ok": False,
+            "failure_kind": "runtime_shutting_down",
+            "reason": "Main runtime is shutting down; privacy operation was not admitted.",
+        },
+    }
+
+
+async def _run_privacy_sync(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run privacy I/O through existing main submission tracking."""
+
+    async def _tracked_worker() -> Any:
+        operation = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError as cancellation:
+            await _await_executor_quiescence(operation)
+            raise cancellation
+
+    registry = _main_event_bus_registry
+    if registry is None:
+        worker = asyncio.create_task(_tracked_worker())
+    else:
+        worker = registry.submit_task(_tracked_worker(), asyncio.get_running_loop())
+        if worker is None:
+            raise RuntimeError("Main privacy worker admission is closed")
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError as cancellation:
+        await _await_executor_quiescence(worker)
+        raise cancellation
+
+
+async def _handle_privacy_operation_request(
+    service: Any,
+    event_bus: Any,
+    payload: Any,
+    *,
+    result_cache: Optional[OrderedDict[str, dict[str, Any]]] = None,
+    in_flight: Optional[dict[str, Any]] = None,
+    fingerprint_cache: Optional[dict[str, str]] = None,
+    active_turn_session_id: Optional[str] = None,
+    queued_session_ids: tuple[str, ...] = (),
+    background_session_ids: tuple[str, ...] = (),
+    browser_owner: Optional[Callable[[], Optional[str]]] = None,
+    admission_open: Optional[Callable[[], bool]] = None,
+    backup_dir: str | Path = "backups",
+    lifecycle_gate: Optional[asyncio.Lock] = None,
+    session_state: Optional[
+        Callable[[], tuple[Optional[str], tuple[str, ...], tuple[str, ...]]]
+    ] = None,
+) -> dict[str, Any]:
+    """Apply one main-owned privacy request and publish its authoritative result."""
+    payload = payload if isinstance(payload, dict) else {}
+    result_cache = result_cache if result_cache is not None else OrderedDict()
+    in_flight = in_flight if in_flight is not None else {}
+    fingerprint_cache = fingerprint_cache if fingerprint_cache is not None else {}
+    operation = str(payload.get("operation") or "invalid").strip()
+    request_id = _normalize_terminal_request_id(payload.get("request_id"))
+    fingerprint = canonical_privacy_request_fingerprint(operation, payload)
+
+    async def _publish(result_payload: dict[str, Any], *, cache: bool = True) -> dict[str, Any]:
+        if cache:
+            _cache_privacy_result(result_cache, request_id, result_payload, fingerprint_cache, fingerprint)
+        if event_bus is not None:
+            await event_bus.emit(
+                EventType.PRIVACY_OPERATION_RESULT.value,
+                result_payload,
+                meta=EventMeta(
+                    source=EventSource.RUNTIME,
+                    task_id=request_id,
+                    rationale="main privacy authority result",
+                ),
+            )
+        return result_payload
+
+    supplied_fingerprint = payload.get("request_fingerprint")
+    if not isinstance(supplied_fingerprint, str) or supplied_fingerprint != fingerprint:
+        return await _publish(
+            _privacy_request_id_conflict_payload(request_id, operation, fingerprint),
+            cache=False,
+        )
+
+    if operation not in PRIVACY_OPERATIONS:
+        return await _publish(
+            {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "unsupported",
+                "result": {"ok": False, "failure_kind": "unsupported", "reason": "Unsupported privacy operation."},
+            }
+        )
+
+    category = str(payload.get("category") or "").strip().lower()
+    older_than_days = payload.get("older_than_days")
+    if operation == "purge":
+        if category not in PRIVACY_PURGE_CATEGORIES:
+            return await _publish(
+                {
+                    "request_id": request_id,
+                    "request_fingerprint": fingerprint,
+                    "operation": operation,
+                    "status": "invalid",
+                    "result": {"ok": False, "failure_kind": "invalid_request", "reason": "Unsupported purge category."},
+                }
+            )
+        if older_than_days is not None and (
+            isinstance(older_than_days, bool)
+            or not isinstance(older_than_days, int)
+            or older_than_days < 0
+        ):
+            return await _publish(
+                {
+                    "request_id": request_id,
+                    "request_fingerprint": fingerprint,
+                    "operation": operation,
+                    "status": "invalid",
+                    "result": {
+                        "ok": False,
+                        "failure_kind": "invalid_request",
+                        "reason": "older_than_days must be a non-negative integer",
+                    },
+                }
+            )
+        if payload.get("confirmed") is not True:
+            return await _publish(
+                {
+                    "request_id": request_id,
+                    "request_fingerprint": fingerprint,
+                    "operation": operation,
+                    "status": "confirmation_required",
+                    "result": {
+                        "ok": False,
+                        "failure_kind": "confirmation_required",
+                        "reason": "Explicit confirmation is required before privacy purge.",
+                    },
+                }
+            )
+    elif operation == "backup_export":
+        passphrase = payload.get("passphrase")
+        if passphrase is not None and not isinstance(passphrase, str):
+            return await _publish(
+                {
+                    "request_id": request_id,
+                    "request_fingerprint": fingerprint,
+                    "operation": operation,
+                    "status": "invalid",
+                    "result": {"ok": False, "failure_kind": "invalid_request", "reason": "passphrase must be text"},
+                }
+            )
+    elif operation in {"audit_list", "audit_export"}:
+        default_limit = 500 if operation == "audit_export" else 100
+        limit = payload.get("limit", default_limit)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            return await _publish(
+                {
+                    "request_id": request_id,
+                    "request_fingerprint": fingerprint,
+                    "operation": operation,
+                    "status": "invalid",
+                    "result": {
+                        "ok": False,
+                        "failure_kind": "invalid_request",
+                        "reason": "limit must be between 1 and 500",
+                    },
+                }
+            )
+
+    cached = result_cache.get(request_id)
+    if cached is not None:
+        if fingerprint_cache.get(request_id) != fingerprint:
+            return await _publish(
+                _privacy_request_id_conflict_payload(request_id, operation, fingerprint),
+                cache=False,
+            )
+        replay = dict(cached)
+        replay_result = dict(replay.get("result") or {})
+        replay_result["replayed"] = True
+        replay["result"] = replay_result
+        return await _publish(replay, cache=False)
+
+    existing_entry = in_flight.get(request_id)
+    existing = existing_entry[0] if isinstance(existing_entry, tuple) else existing_entry
+    existing_fingerprint = (
+        existing_entry[1] if isinstance(existing_entry, tuple) and len(existing_entry) == 2 else None
+    )
+    current = asyncio.current_task()
+    if existing is not None and existing is not current and not existing.done():
+        if existing_fingerprint != fingerprint:
+            return await _publish(
+                _privacy_request_id_conflict_payload(request_id, operation, fingerprint),
+                cache=False,
+            )
+        await asyncio.shield(existing)
+        cached = result_cache.get(request_id)
+        replay = dict(cached) if cached is not None else _privacy_shutdown_result(payload)
+        replay_result = dict(replay.get("result") or {})
+        replay_result["replayed"] = True
+        replay["result"] = replay_result
+        return await _publish(replay, cache=False)
+
+    if admission_open is not None:
+        try:
+            admitting = bool(admission_open())
+        except Exception:
+            admitting = False
+        if not admitting:
+            return await _publish(_privacy_shutdown_result(payload))
+
+    if current is not None:
+        in_flight[request_id] = (current, fingerprint)
+
+    result_payload: dict[str, Any] = {
+        "request_id": request_id,
+        "request_fingerprint": fingerprint,
+        "operation": operation,
+        "status": "failed",
+        "result": {"ok": False, "reason": "Privacy operation was not applied."},
+    }
+    browser_guard_owner: Optional[str] = None
+    lifecycle_gate_acquired = False
+    try:
+        full_transcript_purge = operation == "purge" and category in {"transcripts", "all"} and older_than_days is None
+        if full_transcript_purge and lifecycle_gate is not None:
+            await lifecycle_gate.acquire()
+            lifecycle_gate_acquired = True
+        if session_state is not None:
+            (
+                active_turn_session_id,
+                queued_session_ids,
+                background_session_ids,
+            ) = session_state()
+        protected_session_ids = tuple(
+            sorted(
+                {
+                    session_id
+                    for session_id in (
+                        active_turn_session_id,
+                        *queued_session_ids,
+                        *background_session_ids,
+                    )
+                    if isinstance(session_id, str) and session_id
+                }
+            )
+        )
+        if full_transcript_purge:
+            if protected_session_ids:
+                result_payload.update(
+                    status="busy",
+                    result={
+                        "ok": False,
+                        "failure_kind": "session_busy",
+                        "reason": "An active, queued, or background session owns transcript state.",
+                    },
+                )
+                return await _publish(result_payload)
+
+        if operation == "purge" and category in {"browser", "all"}:
+            from charlie import resource_locks
+
+            owner = browser_owner() if browser_owner is not None else resource_locks.current_owner("browser")
+            if owner is not None:
+                result_payload.update(
+                    status="busy",
+                    result={
+                        "ok": False,
+                        "failure_kind": "resource_busy",
+                        "reason": "Browser capability is active; browser storage was not purged.",
+                    },
+                )
+                return await _publish(result_payload)
+            browser_guard_owner = f"privacy:{request_id}"
+            if not resource_locks.acquire("browser", browser_guard_owner):
+                result_payload.update(
+                    status="busy",
+                    result={
+                        "ok": False,
+                        "failure_kind": "resource_busy",
+                        "reason": "Browser capability became active; browser storage was not purged.",
+                    },
+                )
+                return await _publish(result_payload)
+
+        if service is None:
+            result_payload.update(
+                status="unavailable",
+                result={
+                    "ok": False,
+                    "failure_kind": "authority_unavailable",
+                    "reason": "Main privacy authority is unavailable; operation was not applied.",
+                },
+            )
+        elif operation == "summary":
+            summary = await _run_privacy_sync(service.get_storage_summary)
+            result_payload.update(status="completed", result={"ok": True, **summary})
+        elif operation == "purge":
+            purge_result = await _run_privacy_sync(
+                service.purge_category,
+                category,
+                older_than_days,
+                protected_session_ids=protected_session_ids,
+            )
+            if purge_result.get("status") == "ok":
+                result_payload.update(status="completed", result={"ok": True, **purge_result})
+            else:
+                result_payload.update(
+                    status="busy" if purge_result.get("status") == "busy" else "failed",
+                    result={"ok": False, **purge_result},
+                )
+        elif operation in {"audit_list", "audit_export"}:
+            entries = await _run_privacy_sync(service.list_audit, limit)
+            result_payload.update(
+                status="completed",
+                result={
+                    "ok": True,
+                    "format": "json" if operation == "audit_export" else None,
+                    "entries": entries,
+                },
+            )
+        else:
+            suffix = ".charlie" if passphrase else ".zip"
+            timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            target = Path(backup_dir) / f"charlie-{timestamp}-{uuid.uuid4().hex}{suffix}"
+            backup_result = await _run_privacy_sync(service.export_backup, target, passphrase)
+            result_payload.update(status="completed", result={"ok": True, **backup_result})
+    except SessionConflictError as exc:
+        result_payload.update(
+            status="busy",
+            result={"ok": False, "failure_kind": "session_busy", "reason": str(exc)},
+        )
+    except SessionOutcomeUnknownError as exc:
+        result_payload.update(
+            status="failed",
+            result={"ok": False, "failure_kind": "storage_outcome_unknown", "reason": str(exc)},
+        )
+    except SessionStoreError as exc:
+        result_payload.update(
+            status="failed",
+            result={"ok": False, "failure_kind": "storage", "reason": str(exc)},
+        )
+    except ValueError as exc:
+        result_payload.update(
+            status="invalid",
+            result={"ok": False, "failure_kind": "invalid_request", "reason": str(exc)},
+        )
+    except Exception as exc:
+        logger.warning("Main privacy operation failed: %s", type(exc).__name__, exc_info=True)
+        result_payload.update(
+            status="failed",
+            result={"ok": False, "failure_kind": "exception", "reason": f"{type(exc).__name__}: {exc}"},
+        )
+    finally:
+        if browser_guard_owner is not None:
+            from charlie import resource_locks
+
+            resource_locks.release("browser", browser_guard_owner)
+        if lifecycle_gate_acquired:
+            lifecycle_gate.release()
+        entry = in_flight.get(request_id)
+        if current is not None and (
+            entry is current or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] is current)
+        ):
+            in_flight.pop(request_id, None)
+    return await _publish(result_payload)
+
+
 def _is_sustained_research_request(text: str, runtime_config: Any) -> bool:
     """Classify explicit long research as a task without backgrounding every lookup."""
     if not getattr(runtime_config, "research_enabled", True):
@@ -1973,6 +2398,25 @@ async def _drain_event_bus_submissions(
     message = "EventBus submission cancellation did not reach quiescence before shutdown timeout"
     logger.error(message)
     raise RuntimeError(message)
+
+
+def _close_runtime_stores(audit_store: Any, store: Any, *, quiescent: bool) -> None:
+    """Close SQLite authorities only after main has proved worker quiescence."""
+    if not quiescent:
+        logger.error("Skipping SessionStore/AuditStore close because main worker quiescence is unverified")
+        return
+    if audit_store is not None:
+        try:
+            audit_store.close()
+            logger.info("AuditStore closed")
+        except Exception as exc:
+            logger.warning("AuditStore close error: %s", exc)
+    if store is not None:
+        try:
+            store.close()
+            logger.info("SessionStore closed")
+        except Exception as exc:
+            logger.warning("SessionStore close error: %s", exc)
 
 
 async def _summon_hud(toggle: bool = False, event_bus: Optional[Any] = None) -> None:
@@ -3838,6 +4282,7 @@ async def main() -> int:
     voice = None
     store = None
     audit_store = None
+    privacy_service = None
     memory_graph = None
     brain = None
     calendar_runtime = None
@@ -3855,6 +4300,7 @@ async def main() -> int:
     companion_ready_file: Optional[Path] = None
     companion_monitor_task: Optional[asyncio.Task] = None
     exit_code = 0
+    shutdown_quiescent = True
     # True while a chat turn's LLM/tool loop runs -- see _dispatch_or_queue.
     turn_active = False
     pending_turns: list[TurnRequest] = []
@@ -3885,6 +4331,10 @@ async def main() -> int:
     settings_operation_in_flight: dict[str, Any] = {}
     settings_operation_fingerprints: dict[str, str] = {}
     settings_operation_lock = asyncio.Lock()
+    privacy_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    privacy_operation_in_flight: dict[str, Any] = {}
+    privacy_operation_fingerprints: dict[str, str] = {}
+    session_lifecycle_gate = asyncio.Lock()
     extension_runtime_registry = ExtensionRuntimeRegistry()
     extension_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
     extension_operation_in_flight: dict[str, Any] = {}
@@ -3914,6 +4364,15 @@ async def main() -> int:
         exit_code = 1
         _set_subsystem_health("watchers", HealthStatus.DEGRADED, "Watcher shutdown timed out")
         logger.error("Watcher thread did not stop within %.1fs", _WATCHER_SHUTDOWN_TIMEOUT_S)
+
+    async def _drain_runtime_submissions() -> None:
+        nonlocal shutdown_quiescent, exit_code
+        try:
+            await _drain_event_bus_submissions(event_bus_registry, loop=loop)
+        except (RuntimeError, asyncio.CancelledError) as exc:
+            shutdown_quiescent = False
+            exit_code = 1
+            logger.error("Main runtime submission drain incomplete; dependent stores remain open: %s", exc)
 
     global background_housekeeping_tasks
     active_process_task: Optional[asyncio.Task] = None
@@ -3950,6 +4409,22 @@ async def main() -> int:
         from charlie.audit_store import AuditStore
 
         audit_store = AuditStore(config.session_db_path)
+        privacy_service = PrivacyService(
+            sessions_db_path=config.session_db_path,
+            audit_db_path=config.session_db_path,
+            browser_dir_path=config.browser_profile_path,
+            memory_db_path=config.memory_db_path,
+            memory_paths=(config.memory_db_path, config.memory_graph_db),
+            logs_dir_path=Path(LOG_FILE).parent,
+            active_log_path=LOG_FILE,
+            log_handler=file_handler,
+            session_store=store,
+            audit_store=audit_store,
+            project_root=Path(__file__).resolve().parent,
+            # Explicit allowlist: data/ contains maps and durable extension state,
+            # so it is not a disposable privacy-artifact root.
+            artifact_paths=(Path("scratchpad.db"),),
+        )
         memory_graph, memory_store, memory_service = _compose_memory_dependencies(config)
         def speaking_callback(text):
             if voice:
@@ -4543,7 +5018,6 @@ async def main() -> int:
             session_id = _voice_fallback_session_id
             if current_web_session_id not in (None, _voice_fallback_session_id, ""):
                 session_id = current_web_session_id
-            ensure_session_ready(session_id)
             request = _allocate_turn_request(text, session_id, "voice")
             trace = diagnostic_metadata.get("trace") if isinstance(diagnostic_metadata, dict) else None
             if trace is not None:
@@ -4557,7 +5031,10 @@ async def main() -> int:
             else:
                 _schedule_process(_dispatch_or_queue(request), loop)
 
-        async def _dispatch_or_queue(request: TurnRequest):
+        async def _dispatch_or_queue_impl(
+            request: TurnRequest,
+            release_lifecycle_gate: Callable[[], None],
+        ):
             """Run the turn now, or queue it if one is already running tool calls.
 
             Only ever called via _schedule_process (run_coroutine_threadsafe), so
@@ -4568,8 +5045,15 @@ async def main() -> int:
             """
             nonlocal turn_active
             nonlocal active_process_task
+            nonlocal active_turn_id, active_turn_session_id, active_task_id
             from charlie.core import get_active_voice_approval
 
+            ensure_session_ready(request.session_id)
+            for pending_index, pending_request in enumerate(pending_turns):
+                if pending_request.turn_id == request.turn_id:
+                    pending_turns.pop(pending_index)
+                    pending_turn_times.pop(request.turn_id, None)
+                    break
             trace = voice_diagnostic_traces.get(request.turn_id)
             sustained_checker = globals().get("_is_sustained_research_request")
             runtime_config = globals().get("config")
@@ -4677,6 +5161,11 @@ async def main() -> int:
                 )
             active_process_task = asyncio.current_task()
             globals()["active_process_task"] = active_process_task
+            active_turn_id = request.turn_id
+            active_turn_session_id = request.session_id
+            active_task_id = None
+            turn_active = True
+            release_lifecycle_gate()
             try:
                 await _process(request, brain, voice)
             finally:
@@ -4684,6 +5173,26 @@ async def main() -> int:
                     active_process_task = None
                 if globals().get("active_process_task") is asyncio.current_task():
                     globals()["active_process_task"] = None
+                if active_turn_id == request.turn_id:
+                    turn_active = False
+                    active_turn_id = None
+                    active_turn_session_id = None
+                    active_task_id = None
+
+        async def _dispatch_or_queue(request: TurnRequest):
+            await session_lifecycle_gate.acquire()
+            gate_released = False
+
+            def release_lifecycle_gate() -> None:
+                nonlocal gate_released
+                if not gate_released:
+                    gate_released = True
+                    session_lifecycle_gate.release()
+
+            try:
+                return await _dispatch_or_queue_impl(request, release_lifecycle_gate)
+            finally:
+                release_lifecycle_gate()
 
         def _cleanup_intent_decision(processor):
             """Release interactive route metadata after every processing outcome."""
@@ -5297,7 +5806,10 @@ async def main() -> int:
                 if callable(clear_diagnostic_context):
                     clear_diagnostic_context(None)
                 if pending_turns:
-                    next_request = pending_turns.pop(0)
+                    # Keep the handoff visible as queued until its gated
+                    # admission starts; a concurrent full transcript purge
+                    # must not observe a false idle window here.
+                    next_request = pending_turns[0]
                     logger.info(f"Dequeuing pending turn: {next_request.input}")
                     _schedule_process(_dispatch_or_queue(next_request), loop)
 
@@ -5601,6 +6113,7 @@ async def main() -> int:
                 )
 
             async def _session_request(payload, operation=None, accept_callback=None):
+                nonlocal current_web_session_id
                 request_payload = dict(payload or {})
                 if operation is not None:
                     request_payload["operation"] = operation
@@ -5644,13 +6157,42 @@ async def main() -> int:
                         set_active_session_id(_voice_fallback_session_id)
                 return result
 
+            async def _session_request_with_lifecycle_gate(payload, operation=None, accept_callback=None):
+                operation_name = operation or (payload or {}).get("operation")
+                if operation_name == "chat":
+                    return await _session_request(payload, operation=operation, accept_callback=accept_callback)
+                async with session_lifecycle_gate:
+                    return await _session_request(payload, operation=operation, accept_callback=accept_callback)
+
+            def _privacy_session_state() -> tuple[Optional[str], tuple[str, ...], tuple[str, ...]]:
+                return (
+                    active_turn_session_id,
+                    tuple(item.session_id for item in pending_turns if isinstance(item.session_id, str)),
+                    tuple(
+                        task.session_id
+                        for task in background_task.list_tasks()
+                        if task.status
+                        in {
+                            "queued",
+                            "planning",
+                            "waiting",
+                            "running",
+                            "paused",
+                            "awaiting_approval",
+                            "approval_required",
+                            "verifying",
+                        }
+                        and isinstance(task.session_id, str)
+                    ),
+                )
+
             while True:
                 try:
                     cmd = await event_bus.next_command()
                     _log_received_web_command(cmd)
                     cmd_type = cmd.get("type")
                     if cmd_type == "session_operation":
-                        await _session_request(cmd.get("payload", {}))
+                        await _session_request_with_lifecycle_gate(cmd.get("payload", {}))
                     elif cmd_type == "session_chat":
                         payload = dict(cmd.get("payload") or {})
                         async def accept_http_chat():
@@ -5693,7 +6235,7 @@ async def main() -> int:
                         )
                     elif cmd_type == "session_active":
                         payload_sid = cmd.get("payload", {}).get("session_id")
-                        await _session_request(
+                        await _session_request_with_lifecycle_gate(
                             {
                                 "session_id": cmd.get("session_id") or payload_sid,
                                 "request_id": cmd.get("request_id") or cmd.get("payload", {}).get("request_id"),
@@ -5796,6 +6338,32 @@ async def main() -> int:
                                 operation_lock=settings_operation_lock,
                             )
                         )
+                    elif cmd_type == "privacy_operation":
+                        payload = cmd.get("payload", {})
+                        from charlie import resource_locks
+
+                        privacy_coroutine = _handle_privacy_operation_request(
+                            privacy_service,
+                            event_bus,
+                            payload,
+                            result_cache=privacy_operation_results,
+                            in_flight=privacy_operation_in_flight,
+                            fingerprint_cache=privacy_operation_fingerprints,
+                            browser_owner=lambda: resource_locks.current_owner("browser"),
+                            admission_open=lambda: not runtime_shutting_down,
+                            backup_dir=Path("backups"),
+                            lifecycle_gate=session_lifecycle_gate,
+                            session_state=_privacy_session_state,
+                        )
+                        if _submit_event_task(privacy_coroutine) is None:
+                            await event_bus.emit(
+                                EventType.PRIVACY_OPERATION_RESULT.value,
+                                _privacy_shutdown_result(payload),
+                                meta=EventMeta(
+                                    source=EventSource.RUNTIME,
+                                    rationale="privacy authority admission closed",
+                                ),
+                            )
                     elif cmd_type == "stop":
                         await _apply_voice_control(
                             "stop",
@@ -5914,27 +6482,27 @@ async def main() -> int:
                         )
                     elif cmd_type == "background_task_start":
                         payload = cmd.get("payload", {})
-                        from charlie import background_task
 
                         try:
                             task_session_id = payload.get("session_id") or current_web_session_id
                             if not isinstance(task_session_id, str) or not store.session_exists(task_session_id):
                                 raise SessionNotFoundError("Background task session does not exist")
-                            await background_task.start(
-                                config,
-                                event_bus,
-                                payload.get("text", ""),
-                                session_store=store,
-                                memory_store=memory_store,
-                                memory_graph=memory_graph,
-                                memory_service=memory_service,
-                                voice=voice,
-                                session_id=task_session_id,
-                                on_tool_call=on_tool_call,
-                                on_tool_result=on_tool_result,
-                                on_operation_result=on_operation_result,
-                                on_thinking_update=on_thinking_update,
-                            )
+                            async with session_lifecycle_gate:
+                                await background_task.start(
+                                    config,
+                                    event_bus,
+                                    payload.get("text", ""),
+                                    session_store=store,
+                                    memory_store=memory_store,
+                                    memory_graph=memory_graph,
+                                    memory_service=memory_service,
+                                    voice=voice,
+                                    session_id=task_session_id,
+                                    on_tool_call=on_tool_call,
+                                    on_tool_result=on_tool_result,
+                                    on_operation_result=on_operation_result,
+                                    on_thinking_update=on_thinking_update,
+                                )
                         except RuntimeError as ex:
                             await event_bus.emit(
                                 "alert",
@@ -5943,7 +6511,6 @@ async def main() -> int:
                             )
                     elif cmd_type == "background_task_cancel":
                         payload = cmd.get("payload", {})
-                        from charlie import background_task
 
                         background_task.cancel(payload.get("task_id", ""))
                 except asyncio.CancelledError:
@@ -6552,7 +7119,7 @@ async def main() -> int:
                 ]
                 await _cancel_and_drain(tasks_to_drain, label="event_bus_tasks")
                 await background_task.shutdown()
-                await _drain_event_bus_submissions(event_bus_registry, loop=loop)
+                await _drain_runtime_submissions()
                 if calendar_runtime is not None:
                     try:
                         calendar_runtime.close()
@@ -6589,7 +7156,7 @@ async def main() -> int:
         ]
         await _cancel_and_drain(outer_tasks, label="outer_tasks")
         await background_task.shutdown()
-        await _drain_event_bus_submissions(event_bus_registry, loop=loop)
+        await _drain_runtime_submissions()
 
         try:
             from charlie.desktop import shutdown_uia_executor
@@ -6673,19 +7240,7 @@ async def main() -> int:
             except Exception as e:
                 logger.warning("Memory graph close error: %s", e)
 
-        if audit_store is not None:
-            try:
-                audit_store.close()
-                logger.info("AuditStore closed")
-            except Exception as e:
-                logger.warning("AuditStore close error: %s", e)
-
-        if store is not None:
-            try:
-                store.close()
-                logger.info("SessionStore closed")
-            except Exception as e:
-                logger.warning("SessionStore close error: %s", e)
+        _close_runtime_stores(audit_store, store, quiescent=shutdown_quiescent)
 
         _main_event_bus = None
         loop.call_exception_handler = _orig_handler
@@ -6694,7 +7249,8 @@ async def main() -> int:
         _log_port_release("127.0.0.1", 5555)
         _log_port_release("127.0.0.1", 5556)
 
-        logging.shutdown()
+        if shutdown_quiescent:
+            logging.shutdown()
 
     return exit_code
 

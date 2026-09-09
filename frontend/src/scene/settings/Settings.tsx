@@ -65,7 +65,9 @@ interface PrivacyCategoryUsage {
   name: string;
   bytes: number;
   formatted: string;
-  path?: string;
+  purgeable?: boolean;
+  path?: string | string[];
+  paths?: string[];
 }
 
 interface PrivacySummary {
@@ -674,11 +676,12 @@ export function Settings(): ReactElement {
 
   // Privacy Actions
   async function handlePurge(category: string): Promise<void> {
+    if (!window.confirm(`Permanently purge ${category} data?`)) return;
     try {
       const res = await fetch("/api/privacy/purge", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ category }),
+        body: JSON.stringify({ category, confirmed: true }),
       });
       if (res.ok) {
         await fetchPrivacySummary();
@@ -1269,7 +1272,7 @@ export function Settings(): ReactElement {
                         <div className="text-[11px] font-bold text-slate-200">{info.name}</div>
                         <div className="text-[10px] text-slate-400">{info.formatted}</div>
                       </div>
-                      {catKey !== "logs" && (
+                      {info.purgeable !== false && (
                         <button
                           type="button"
                           onClick={() => void handlePurge(catKey)}
@@ -1288,7 +1291,7 @@ export function Settings(): ReactElement {
                   onClick={() => void handlePurge("all")}
                   className="px-3 py-1 text-xs rounded bg-rose-950/80 border border-rose-400/50 text-rose-200 hover:bg-rose-900/80 transition cursor-pointer"
                 >
-                  Purge All Stored Data
+                  Purge All Purgeable Data
                 </button>
               </div>
             </section>

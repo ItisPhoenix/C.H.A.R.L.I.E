@@ -36,8 +36,6 @@ from charlie.utils import build_auth_headers
 from charlie.log_redaction import SensitiveDataFilter
 from charlie.terminal_service import TerminalManager
 from charlie.calendar_runtime import canonical_calendar_request_fingerprint
-from charlie.audit_store import AuditStore
-from charlie.backup_service import export_snapshot
 from charlie.capabilities import build_capability_snapshot, get_capability_index
 # Importing charlie.tools registers built-in callables and synchronizes their
 # semantic operations before this process captures its capability index. It
@@ -45,8 +43,8 @@ from charlie.capabilities import build_capability_snapshot, get_capability_index
 import charlie.tools  # noqa: F401
 from charlie.events import CONTRACT_VERSION, EventValidationError, build_event, normalize_event, replay_event
 from charlie.media_runtime import canonical_media_request_fingerprint
+from charlie.privacy_service import PRIVACY_PURGE_CATEGORIES, canonical_privacy_request_fingerprint
 from charlie.settings_service import canonical_settings_request_fingerprint
-from charlie.privacy_service import PrivacyService
 from charlie.code_index import CodeIndex
 from charlie.runtime_introspector import RuntimeIntrospector
 from charlie.self_knowledge import SelfKnowledgeService
@@ -60,7 +58,6 @@ from charlie.runtime_identity import git_build_identity
 _SOURCE_IDENTITY, _SOURCE_DIRTY = git_build_identity(Path(__file__).resolve().parent.parent)
 
 
-_privacy_service = PrivacyService()
 _code_index = CodeIndex()
 _shared_capability_index = get_capability_index()
 
@@ -297,21 +294,16 @@ _completed_session_fingerprints: dict[str, str] = {}
 SETTINGS_OPERATION_TIMEOUT_SECONDS = 10.0
 _pending_settings_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
 _pending_settings_fingerprints: dict[str, str] = {}
+PRIVACY_OPERATION_TIMEOUT_SECONDS = 10.0
+_pending_privacy_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
+_pending_privacy_fingerprints: dict[str, str] = {}
 LAUNCH_ID: str = config.charlie_launch_id
 _session_projection: SessionReadProjection | None = None
 _terminal_manager = TerminalManager()
-_audit_store: AuditStore | None = None
 _settings_snapshot: dict[str, Any] | None = None
 _settings_snapshot_event: dict[str, Any] | None = None
 _extension_snapshot: dict[str, Any] | None = None
 _extension_snapshot_event: dict[str, Any] | None = None
-
-
-def _get_audit_store() -> AuditStore:
-    global _audit_store
-    if _audit_store is None:
-        _audit_store = AuditStore(config.session_db_path)
-    return _audit_store
 
 
 def _get_session_projection() -> SessionReadProjection:
@@ -350,7 +342,7 @@ async def lifespan(app: FastAPI):
     arrive from main over IPC.
     Shutdown: tear down EventBus."""
     # --- startup ---
-    global event_bus, _audit_store, _session_projection
+    global event_bus, _session_projection
     global _tool_snapshot, _tool_snapshot_event, _mcp_snapshot, _mcp_snapshot_event
     global _projected_telemetry, _projected_telemetry_event
     global _settings_snapshot, _settings_snapshot_event
@@ -396,9 +388,6 @@ async def lifespan(app: FastAPI):
     if _session_projection is not None:
         _session_projection.close()
         _session_projection = None
-    if _audit_store is not None:
-        _audit_store.close()
-        _audit_store = None
     if event_bus:
         try:
             await asyncio.wait_for(
@@ -560,6 +549,11 @@ async def _event_bridge():
             _resolve_mcp_operation_result(event.get("payload", {}))
         elif etype == "memory_operation_result":
             _resolve_memory_operation_result(event.get("payload", {}))
+        elif etype == "privacy_operation_result":
+            _resolve_privacy_operation_result(event.get("payload", {}))
+            # Audit exports can contain sensitive history; correlated HTTP
+            # callers receive the result, other WebSocket clients do not.
+            return
         elif etype == "media_operation_result":
             _resolve_media_operation_result(event.get("payload", {}))
         elif etype == "calendar_operation_result":
@@ -948,13 +942,31 @@ async def media_control(data: dict):
 
 
 @app.get("/api/audit")
-async def audit_entries(limit: int = 100):
-    return {"entries": _get_audit_store().list(limit)}
+async def audit_entries(limit: int = 100, request_id: Optional[str] = None):
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+    result = await _request_authoritative_privacy_operation(
+        "audit_list",
+        {"limit": limit},
+        request_id=request_id,
+    )
+    if result.get("status") != "completed":
+        raise _privacy_http_error(result)
+    return {"entries": result["result"].get("entries", [])}
 
 
 @app.get("/api/audit/export")
-async def audit_export(limit: int = 500):
-    return {"format": "json", "entries": _get_audit_store().list(limit)}
+async def audit_export(limit: int = 500, request_id: Optional[str] = None):
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+    result = await _request_authoritative_privacy_operation(
+        "audit_export",
+        {"limit": limit},
+        request_id=request_id,
+    )
+    if result.get("status") != "completed":
+        raise _privacy_http_error(result)
+    return {"format": "json", "entries": result["result"].get("entries", [])}
 
 
 @app.get("/api/backup/status")
@@ -970,24 +982,18 @@ async def backup_status():
 
 @app.post("/api/backup/export")
 async def backup_export(data: dict | None = None):
-    from datetime import datetime, timezone
-
-    passphrase = data.get("passphrase") if isinstance(data, dict) else None
+    payload = data if isinstance(data, dict) else {}
+    passphrase = payload.get("passphrase")
     if passphrase is not None and not isinstance(passphrase, str):
         raise HTTPException(status_code=400, detail="passphrase must be text")
-    suffix = ".charlie" if passphrase else ".zip"
-    target = Path("backups") / f"charlie-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}{suffix}"
-    try:
-        manifest = export_snapshot(
-            target,
-            {
-                "sessions.sqlite3": Path(config.session_db_path),
-            },
-            passphrase=passphrase or None,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="passphrase must be at least 12 characters") from exc
-    return {"path": str(target), "manifest": manifest}
+    result = await _request_authoritative_privacy_operation(
+        "backup_export",
+        {"passphrase": passphrase},
+        request_id=payload.get("request_id"),
+    )
+    if result.get("status") != "completed":
+        raise _privacy_http_error(result)
+    return {"status": "ok", **result["result"]}
 
 
 @app.get("/api/health")
@@ -1408,6 +1414,154 @@ def _resolve_memory_operation_result(payload: object) -> None:
     if future is None or future.done():
         return
     future.set_result(dict(payload))
+
+
+def _resolve_privacy_operation_result(payload: object) -> None:
+    """Resolve one privacy request without accepting mismatched result data."""
+    if not isinstance(payload, dict):
+        return
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return
+    expected_fingerprint = _pending_privacy_fingerprints.get(request_id)
+    if expected_fingerprint is not None and payload.get("request_fingerprint") != expected_fingerprint:
+        logger.warning("Ignoring privacy result with mismatched request fingerprint: %s", request_id)
+        return
+    future = _pending_privacy_operations.get(request_id)
+    if future is None or future.done():
+        return
+    future.set_result(dict(payload))
+
+
+async def _request_authoritative_privacy_operation(
+    operation: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    request_id: Any = None,
+) -> dict[str, Any]:
+    """Forward one privacy request to main and await its correlated result."""
+    request_id = _terminal_request_id(request_id)
+    request_payload = dict(payload or {})
+    request_payload.update({"request_id": request_id, "operation": operation})
+    fingerprint = canonical_privacy_request_fingerprint(operation, request_payload)
+    request_payload["request_fingerprint"] = fingerprint
+
+    if event_bus is None:
+        return {
+            "request_id": request_id,
+            "request_fingerprint": fingerprint,
+            "operation": operation,
+            "status": "unavailable",
+            "result": {
+                "ok": False,
+                "failure_kind": "authority_unavailable",
+                "reason": "Main privacy authority is unavailable; operation was not applied.",
+            },
+        }
+
+    loop = asyncio.get_running_loop()
+    existing = _pending_privacy_operations.get(request_id)
+    if existing is not None and not existing.done():
+        if _pending_privacy_fingerprints.get(request_id) != fingerprint:
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "request_id_conflict",
+                "result": {"ok": False, "failure_kind": "request_id_conflict"},
+            }
+        return await asyncio.shield(existing)
+
+    future: asyncio.Future[dict[str, Any]] = loop.create_future()
+    _pending_privacy_operations[request_id] = future
+    _pending_privacy_fingerprints[request_id] = fingerprint
+    try:
+        try:
+            sent = await event_bus.send_command({"type": "privacy_operation", "payload": request_payload})
+        except Exception:
+            logger.warning("Failed to send privacy operation to main", exc_info=True)
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "unavailable",
+                "result": {
+                    "ok": False,
+                    "failure_kind": "authority_unavailable",
+                    "reason": "Main privacy authority is unavailable; operation was not applied.",
+                },
+            }
+        if sent is False:
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "unavailable",
+                "result": {
+                    "ok": False,
+                    "failure_kind": "authority_unavailable",
+                    "reason": "Main privacy authority is unavailable; operation was not applied.",
+                },
+            }
+        try:
+            result = await asyncio.wait_for(future, timeout=PRIVACY_OPERATION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return {
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "operation": operation,
+                "status": "timeout",
+                "result": {
+                    "ok": False,
+                    "failure_kind": "timeout",
+                    "reason": "Main privacy authority did not acknowledge operation before timeout.",
+                },
+            }
+    finally:
+        _pending_privacy_operations.pop(request_id, None)
+        _pending_privacy_fingerprints.pop(request_id, None)
+
+    if not isinstance(result, dict) or (
+        result.get("request_id") != request_id
+        or result.get("request_fingerprint") != fingerprint
+        or result.get("operation") != operation
+        or not isinstance(result.get("result"), dict)
+    ):
+        return {
+            "request_id": request_id,
+            "request_fingerprint": fingerprint,
+            "operation": operation,
+            "status": "invalid_result",
+            "result": {
+                "ok": False,
+                "failure_kind": "invalid_result",
+                "reason": "Main privacy authority returned an invalid result.",
+            },
+        }
+    return result
+
+
+def _privacy_http_error(result: dict[str, Any]) -> HTTPException:
+    status = result.get("status")
+    if status in {"busy", "confirmation_required", "request_id_conflict"}:
+        code = 409
+    elif status in {"invalid", "unsupported"}:
+        code = 400
+    elif status in {"unavailable", "timeout", "shutting_down"}:
+        code = 503
+    else:
+        code = 500
+    authority_result = result.get("result") if isinstance(result.get("result"), dict) else {}
+    return HTTPException(
+        status_code=code,
+        detail={
+            "status": "error",
+            "authority_status": status,
+            "request_id": result.get("request_id"),
+            "operation": result.get("operation"),
+            **authority_result,
+        },
+    )
 
 
 def _resolve_media_operation_result(payload: object) -> None:
@@ -2605,32 +2759,49 @@ async def get_memory_stats():
 
 @app.get("/api/privacy/summary")
 async def get_privacy_summary():
-    """Live storage usage summary across transcripts, terminal, audit, browser, memory, and logs."""
-    try:
-        return _privacy_service.get_storage_summary()
-    except Exception as e:
-        logger.error(f"Error fetching privacy summary: {e}", exc_info=True)
-        return {"total_bytes": 0, "categories": {}}
+    """Return the main runtime's live storage summary."""
+    result = await _request_authoritative_privacy_operation("summary", {})
+    if result.get("status") != "completed":
+        raise _privacy_http_error(result)
+    return result["result"]
 
 
 @app.post("/api/privacy/purge")
 async def purge_privacy_data(data: dict):
-    """Selectively purge stored privacy data by category."""
-    category = str(data.get("category", "")).strip()
+    """Request a destructive purge from the main runtime authority."""
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="privacy purge object required")
+    category = data.get("category")
+    if not isinstance(category, str):
+        raise HTTPException(status_code=400, detail="Category is required")
+    category = category.strip().lower()
     older_than_days = data.get("older_than_days")
     if older_than_days is not None:
-        try:
-            older_than_days = int(older_than_days)
-        except (ValueError, TypeError):
-            older_than_days = None
-
-    if not category:
-        raise HTTPException(status_code=400, detail="Category is required")
-
-    result = _privacy_service.purge_category(category, older_than_days=older_than_days)
-    if result.get("status") == "error":
-        raise HTTPException(status_code=400, detail=result.get("message", "Purge failed"))
-    return result
+        if (
+            isinstance(older_than_days, bool)
+            or not isinstance(older_than_days, int)
+            or older_than_days < 0
+        ):
+            raise HTTPException(status_code=400, detail="older_than_days must be a non-negative integer")
+    if category not in PRIVACY_PURGE_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Unsupported purge category")
+    result = await _request_authoritative_privacy_operation(
+        "purge",
+        {
+            "category": category,
+            "older_than_days": older_than_days,
+            "confirmed": data.get("confirmed"),
+        },
+        request_id=data.get("request_id"),
+    )
+    if result.get("status") != "completed":
+        raise _privacy_http_error(result)
+    return {
+        "status": "ok",
+        "authority_status": result.get("status"),
+        "request_id": result.get("request_id"),
+        **result["result"],
+    }
 
 
 _DEV_LOGS_PATH = Path("logs/charlie.log")

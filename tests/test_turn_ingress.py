@@ -184,7 +184,7 @@ async def test_queue_and_dequeue_preserve_the_authoritative_request(monkeypatch:
     from charlie import core
 
     monkeypatch.setattr(core, "get_active_voice_approval", lambda: None)
-    source = _function_source("_dispatch_or_queue")
+    source = _function_source("_dispatch_or_queue_impl")
     processed: list[TurnRequest] = []
     namespace = {
         "TurnRequest": TurnRequest,
@@ -192,6 +192,7 @@ async def test_queue_and_dequeue_preserve_the_authoritative_request(monkeypatch:
         "processed": processed,
         "asyncio": asyncio,
         "time": __import__("time"),
+        "ensure_session_ready": lambda _session_id: None,
     }
     wrapper_source = (
         "def _wrapper():\n"
@@ -200,6 +201,7 @@ async def test_queue_and_dequeue_preserve_the_authoritative_request(monkeypatch:
         "    pending_turn_times = {}\n"
         "    voice_diagnostic_traces = {}\n"
         "    active_turn_id = None\n"
+        "    active_turn_session_id = None\n"
         "    active_task_id = None\n"
         "    active_process_task = None\n"
         "    active_operation_name = None\n"
@@ -214,20 +216,20 @@ async def test_queue_and_dequeue_preserve_the_authoritative_request(monkeypatch:
         + "    def set_active(value):\n"
         + "        nonlocal turn_active\n"
         + "        turn_active = value\n"
-        + "    return _dispatch_or_queue, pending_turns, set_active\n"
+        + "    return _dispatch_or_queue_impl, pending_turns, set_active\n"
     )
     namespace["SimpleNamespace"] = SimpleNamespace
     exec(compile(wrapper_source, "<main._dispatch_or_queue>", "exec"), namespace)
     dispatch, pending, set_active = namespace["_wrapper"]()
     request = TurnRequest.allocate("queued request", "session-queue", "voice")
 
-    await dispatch(request)
+    await dispatch(request, lambda: None)
     assert pending == [request]
     assert processed == []
 
     set_active(False)
     dequeued = pending.pop(0)
-    await dispatch(dequeued)
+    await dispatch(dequeued, lambda: None)
     assert processed == [request]
     assert processed[0] is request
 
@@ -237,7 +239,7 @@ async def test_new_voice_turn_supersedes_cancellable_foreground_work(monkeypatch
     from charlie import core
 
     monkeypatch.setattr(core, "get_active_voice_approval", lambda: None)
-    source = _function_source("_dispatch_or_queue")
+    source = _function_source("_dispatch_or_queue_impl")
     processed: list[TurnRequest] = []
     cancelled = []
 
@@ -251,6 +253,7 @@ async def test_new_voice_turn_supersedes_cancellable_foreground_work(monkeypatch
         "processed": processed,
         "asyncio": asyncio,
         "time": __import__("time"),
+        "ensure_session_ready": lambda _session_id: None,
     }
     wrapper_source = (
         "def _wrapper():\n"
@@ -259,6 +262,7 @@ async def test_new_voice_turn_supersedes_cancellable_foreground_work(monkeypatch
         "    pending_turn_times = {}\n"
         "    voice_diagnostic_traces = {}\n"
         "    active_turn_id = 'old-turn'\n"
+        "    active_turn_session_id = 'session-queue'\n"
         "    active_task_id = 'old-task'\n"
         "    active_operation_name = None\n"
         "    active_operation_task_id = None\n"
@@ -271,7 +275,7 @@ async def test_new_voice_turn_supersedes_cancellable_foreground_work(monkeypatch
         "    async def _process(request, _brain, _voice):\n"
         "        processed.append(request)\n"
         + textwrap.indent(source, "    ")
-        + "\n    return _dispatch_or_queue, pending_turns, active_process_task\n"
+        + "\n    return _dispatch_or_queue_impl, pending_turns, active_process_task\n"
     )
     namespace["SimpleNamespace"] = SimpleNamespace
     namespace["Brain"] = Brain
@@ -279,7 +283,7 @@ async def test_new_voice_turn_supersedes_cancellable_foreground_work(monkeypatch
     dispatch, pending, old_task = namespace["_wrapper"]()
     request = TurnRequest.allocate("new voice request", "session-queue", "voice")
 
-    await dispatch(request)
+    await dispatch(request, lambda: None)
 
     assert processed == [request]
     assert pending == []
@@ -292,7 +296,7 @@ async def test_new_voice_turn_waits_for_non_cancellable_operation(monkeypatch: p
     from charlie import core
 
     monkeypatch.setattr(core, "get_active_voice_approval", lambda: None)
-    source = _function_source("_dispatch_or_queue")
+    source = _function_source("_dispatch_or_queue_impl")
     processed: list[TurnRequest] = []
 
     class Brain:
@@ -307,6 +311,7 @@ async def test_new_voice_turn_waits_for_non_cancellable_operation(monkeypatch: p
         "time": __import__("time"),
         "SimpleNamespace": SimpleNamespace,
         "Brain": Brain,
+        "ensure_session_ready": lambda _session_id: None,
     }
     wrapper_source = (
         "def _wrapper():\n"
@@ -315,6 +320,7 @@ async def test_new_voice_turn_waits_for_non_cancellable_operation(monkeypatch: p
         "    pending_turn_times = {}\n"
         "    voice_diagnostic_traces = {}\n"
         "    active_turn_id = 'old-turn'\n"
+        "    active_turn_session_id = 'session-queue'\n"
         "    active_task_id = 'old-task'\n"
         "    active_operation_name = 'file_write'\n"
         "    active_operation_task_id = 'old-task'\n"
@@ -325,13 +331,13 @@ async def test_new_voice_turn_waits_for_non_cancellable_operation(monkeypatch: p
         "    async def _process(request, _brain, _voice):\n"
         "        processed.append(request)\n"
         + textwrap.indent(source, "    ")
-        + "\n    return _dispatch_or_queue, pending_turns, active_process_task\n"
+        + "\n    return _dispatch_or_queue_impl, pending_turns, active_process_task\n"
     )
     exec(compile(wrapper_source, "<main._dispatch_or_queue>", "exec"), namespace)
     dispatch, pending, old_task = namespace["_wrapper"]()
     request = TurnRequest.allocate("latest voice request", "session-queue", "voice")
 
-    await dispatch(request)
+    await dispatch(request, lambda: None)
 
     assert processed == []
     assert pending == [request]
@@ -351,7 +357,7 @@ def test_process_accepts_only_the_existing_request_and_dequeues_it_unchanged() -
     assert "task_id=task_id" in process_source
     assert "turn_id=request.turn_id" in process_source
     assert "diagnostic_trace=trace" in process_source
-    assert "next_request = pending_turns.pop(0)" in process_source
+    assert "next_request = pending_turns[0]" in process_source
     assert "_dispatch_or_queue(next_request)" in process_source
     assert "turn_task_id" not in process_source
     assert "_allocate_turn_request(request" not in dispatch_source
