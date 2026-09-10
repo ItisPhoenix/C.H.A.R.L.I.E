@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "vitest";
-import { adaptEvent, reconnectDelayMs, resetEventDedupe } from "./bridge";
+import { adaptEvent, reconnectDelayMs, resetEventDedupe, shouldQueueCommand } from "./bridge";
 
 beforeEach(() => {
   resetEventDedupe();
@@ -17,6 +17,14 @@ describe("reconnectDelayMs", () => {
 
   test("caps at 30000ms", () => {
     expect(reconnectDelayMs(10)).toBe(30000);
+  });
+});
+
+describe("command queue safety", () => {
+  test("does not queue process-global recovery decisions while disconnected", () => {
+    expect(shouldQueueCommand("recovery_approve")).toBe(false);
+    expect(shouldQueueCommand("recovery_reject")).toBe(false);
+    expect(shouldQueueCommand("presentation_command")).toBe(true);
   });
 });
 

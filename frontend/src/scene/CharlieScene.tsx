@@ -25,6 +25,8 @@ export function CharlieScene(): ReactElement | null {
   const dismissIntent = useCharlieStore((s) => s.dismissPresentationIntent);
   const hudVisible = useCharlieStore((s) => s.hudVisible);
   const activeToolApproval = useCharlieStore((s) => s.activeToolApproval);
+  const activeSessionId = useCharlieStore((s) => s.activeSessionId);
+  const connected = useCharlieStore((s) => s.connected);
   const visualRuntime = useCharlieStore((s) => s.visualRuntime);
   const clearVisualRuntime = useCharlieStore((s) => s.clearVisualRuntime);
   const settingsIntentId = Object.values(presentationIntents).find(
@@ -48,10 +50,21 @@ export function CharlieScene(): ReactElement | null {
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const [layoutContext, setLayoutContext] = useState<ZoneContext | null>(null);
 
+  const closeSettings = useCallback(() => {
+    setSettingsModalOpen(false);
+    if (settingsIntentId) dismissIntent(settingsIntentId);
+  }, [dismissIntent, settingsIntentId]);
+  const settingsOpen = settingsModalOpen || Boolean(settingsIntentId);
+
   useEffect(() => {
-    (window as unknown as { __OPEN_SETTINGS__?: () => void; __CLOSE_SETTINGS__?: () => void }).__OPEN_SETTINGS__ = () => setSettingsModalOpen(true);
-    (window as unknown as { __OPEN_SETTINGS__?: () => void; __CLOSE_SETTINGS__?: () => void }).__CLOSE_SETTINGS__ = () => setSettingsModalOpen(false);
-  }, []);
+    const settingsApi = window as unknown as { __OPEN_SETTINGS__?: () => void; __CLOSE_SETTINGS__?: () => void };
+    settingsApi.__OPEN_SETTINGS__ = () => setSettingsModalOpen(true);
+    settingsApi.__CLOSE_SETTINGS__ = closeSettings;
+    return () => {
+      delete settingsApi.__OPEN_SETTINGS__;
+      delete settingsApi.__CLOSE_SETTINGS__;
+    };
+  }, [closeSettings]);
 
   const measureLayout = useCallback(() => {
     const scene = sceneRef.current;
@@ -121,10 +134,6 @@ export function CharlieScene(): ReactElement | null {
     }
   }, [presentationIntents, layoutContext, upsertWidget]);
 
-  useEffect(() => {
-    setSettingsModalOpen(Boolean(settingsIntentId));
-  }, [settingsIntentId]);
-
   // Keyboard shortcut listener: Focused Escape & Ctrl+Shift+D debug overlay
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -145,10 +154,8 @@ export function CharlieScene(): ReactElement | null {
       }
     };
 
-    (window as unknown as { __OPEN_SETTINGS__?: () => void }).__OPEN_SETTINGS__ = () => setSettingsModalOpen(true);
     window.addEventListener("keydown", handleKeyDown);
     return () => {
-      delete (window as unknown as { __OPEN_SETTINGS__?: () => void }).__OPEN_SETTINGS__;
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [projection.activeAttention, projection.activeWorkspace, dismissIntent, minimizeWorkspace, focusedEscapeWidgets]);
@@ -210,6 +217,8 @@ export function CharlieScene(): ReactElement | null {
         notifications={projection.activeNotifications}
         activeAttention={activeToolApproval ? null : projection.activeAttention}
         visualRuntime={visualRuntime}
+        activeSessionId={activeSessionId}
+        connected={connected}
         onDismissIntent={dismissIntent}
         onClearVisualRuntime={clearVisualRuntime}
       />
@@ -250,11 +259,8 @@ export function CharlieScene(): ReactElement | null {
 
       {/* 8. Settings Modal Overlay */}
       <SettingsModal
-        isOpen={settingsModalOpen}
-        onClose={() => {
-          setSettingsModalOpen(false);
-          if (settingsIntentId) dismissIntent(settingsIntentId);
-        }}
+        isOpen={settingsOpen}
+        onClose={closeSettings}
       />
 
       {/* 7. Developer Debug Mode Overlays */}

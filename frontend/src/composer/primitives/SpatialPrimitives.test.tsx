@@ -2,7 +2,8 @@ import { describe, expect, test } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { SpatialMapPrimitive } from "./SpatialMapPrimitive";
 import { DensityHeatmapPrimitive } from "./DensityHeatmapPrimitive";
-import { TelemetryGaugesPrimitive, formatGaugeValue } from "./TelemetryGaugesPrimitive";
+import { TelemetryGaugesPrimitive } from "./TelemetryGaugesPrimitive";
+import { formatGaugeValue } from "./telemetryFormat";
 import { ProcessTelemetryPrimitive } from "./ProcessTelemetryPrimitive";
 
 describe("Phase 9 Spatial Primitives Suite", () => {

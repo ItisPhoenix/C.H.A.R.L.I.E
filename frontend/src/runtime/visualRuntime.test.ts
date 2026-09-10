@@ -31,7 +31,7 @@ describe("visual runtime projection", () => {
       acting,
       event("tool_result", { name: "desktop_open_app", text: "Opened", success: true }, "2026-01-01T00:00:03.000Z", { session_id: "s1", turn_id: "t1", task_id: "task-1" }),
     );
-    expect(complete).toMatchObject({ phase: "success", label: "TOOL COMPLETE", detail: "Opened" });
+    expect(complete).toMatchObject({ phase: "success", label: "APPLICATION COMPLETE", detail: "Opened" });
   });
 
   test("rejects stale and mismatched completion events", () => {
@@ -60,6 +60,81 @@ describe("visual runtime projection", () => {
     expect(projected).toBe(INITIAL_VISUAL_RUNTIME);
   });
 
+  test("does not project internal thinking text or raw structured results", () => {
+    const thinking = reduceVisualRuntime(
+      INITIAL_VISUAL_RUNTIME,
+      event("thinking_update", { text: "I'll use the tool with {password: secret}" }, "2099-01-01T00:00:01.000Z"),
+    );
+    expect(thinking).toBe(INITIAL_VISUAL_RUNTIME);
+
+    const result = reduceVisualRuntime(
+      INITIAL_VISUAL_RUNTIME,
+      event("tool_result", { name: "desktop_open_app", text: "{\"password\":\"secret\"}", success: true }, "2099-01-01T00:00:02.000Z"),
+    );
+    expect(result.detail).toBeNull();
+
+    const secretResult = reduceVisualRuntime(
+      INITIAL_VISUAL_RUNTIME,
+      event("tool_result", { name: "desktop_open_app", display_text: "prefix {\"api_key\":\"SECRET\"}", success: true }, "2099-01-01T00:00:03.000Z"),
+    );
+    expect(secretResult.detail).toBeNull();
+  });
+
+  test("does not claim success when the backend result has no authoritative status", () => {
+    const result = reduceVisualRuntime(
+      INITIAL_VISUAL_RUNTIME,
+      event("tool_result", { name: "desktop_open_app", text: "Opened" }, "2099-01-01T00:00:04.000Z"),
+    );
+    expect(result).toMatchObject({ phase: "acting", label: "TOOL RESULT", detail: "Opened" });
+
+    const failed = reduceVisualRuntime(
+      INITIAL_VISUAL_RUNTIME,
+      event("tool_result", { name: "desktop_open_app", text: "Error: launch failed" }, "2099-01-01T00:00:05.000Z"),
+    );
+    expect(failed).toMatchObject({ phase: "error", label: "APPLICATION FAILED" });
+  });
+
+  test("rejects a completion for another tool in the same correlation", () => {
+    const acting = reduceVisualRuntime(
+      INITIAL_VISUAL_RUNTIME,
+      event("tool_call", { name: "browser_navigate" }, "2099-01-01T00:00:06.000Z", { session_id: "s1", turn_id: "t1", task_id: "task-1" }),
+    );
+    const stale = reduceVisualRuntime(
+      acting,
+      event("tool_result", { name: "desktop_open_app", success: true }, "2099-01-01T00:00:07.000Z", { session_id: "s1", turn_id: "t1", task_id: "task-1" }),
+    );
+    expect(stale).toBe(acting);
+  });
+
+  test("rejects a late tool result after a generic completed state", () => {
+    const completed = reduceVisualRuntime(
+      INITIAL_VISUAL_RUNTIME,
+      event("charlie_state", { state: "completed" }, "2099-01-01T00:00:12.000Z", { session_id: "s1", turn_id: "t1" }),
+    );
+    expect(reduceVisualRuntime(
+      completed,
+      event("tool_result", { name: "desktop_open_app", success: true }, "2099-01-01T00:00:13.000Z", { session_id: "s1", turn_id: "t1" }),
+    )).toBe(completed);
+  });
+
+  test("keeps recovery proposals actionable without claiming completion", () => {
+    const recovering = reduceVisualRuntime(
+      INITIAL_VISUAL_RUNTIME,
+      event("recovery_proposal", {
+        proposal_id: "proposal-1",
+        explanation: "A safe local recovery is available.",
+        proposed_command: "never show this",
+      }, "2099-01-01T00:00:03.000Z"),
+    );
+    expect(recovering).toMatchObject({
+      phase: "recovering",
+      label: "RECOVERY AVAILABLE",
+      detail: "A safe local recovery is available.",
+      recoveryProposalId: "proposal-1",
+    });
+    expect(recovering.detail).not.toContain("never show this");
+  });
+
   test("connection lifecycle clears stale activity", () => {
     const active = reduceVisualRuntime(
       INITIAL_VISUAL_RUNTIME,
@@ -69,6 +144,21 @@ describe("visual runtime projection", () => {
     expect(offline).toMatchObject({ phase: "offline", label: "OFFLINE", detail: "Runtime connection unavailable" });
     expect(offline.correlation).toEqual({ sessionId: null, turnId: null, taskId: null, requestId: null });
     expect(setVisualRuntimeConnection(offline, true).phase).toBe("idle");
+  });
+
+  test("offline and reconnect require fresh correlated activity", () => {
+    const active = reduceVisualRuntime(
+      INITIAL_VISUAL_RUNTIME,
+      event("tool_call", { name: "browser_navigate" }, "2099-01-01T00:00:08.000Z", { session_id: "s1", turn_id: "t1" }),
+    );
+    const offline = setVisualRuntimeConnection(active, false);
+    expect(offline.requiresCorrelation).toBe(true);
+    expect(reduceVisualRuntime(offline, event("tool_call", { name: "stale" }, "2099-01-01T00:00:09.000Z"))).toBe(offline);
+
+    const reconnected = setVisualRuntimeConnection(offline, true);
+    expect(reduceVisualRuntime(reconnected, event("tool_call", { name: "uncorrelated" }, "2099-01-01T00:00:10.000Z"))).toBe(reconnected);
+    expect(reduceVisualRuntime(reconnected, event("tool_call", { name: "fresh" }, "2099-01-01T00:00:11.000Z", { session_id: "s1", turn_id: "t2" })).phase).toBe("acting");
+    expect(reduceVisualRuntime(reconnected, event("charlie_state", { state: "completed" }, "2099-01-01T00:00:11.500Z"))).toBe(reconnected);
   });
 
   test("does not let unrelated completion or ambient health clear active work", () => {

@@ -9,6 +9,8 @@ beforeEach(() => {
     hudVisible: true,
     coreState: "idle",
     visualRuntime: INITIAL_VISUAL_RUNTIME,
+    activeSessionId: null,
+    activeSessionTitle: null,
     activities: [],
     presentationIntents: {},
     activeCaption: null,
@@ -294,6 +296,47 @@ test("HUD visibility follows the pet toggle event", () => {
 
     useCharlieStore.getState().clearVisualRuntime(completedAt);
     expect(useCharlieStore.getState().visualRuntime.phase).toBe("acting");
+  });
+
+  test("recovery proposals are accepted only for the active session", () => {
+    useCharlieStore.setState({
+      connected: true,
+      activeSessionId: "session-current",
+      visualRuntime: { ...INITIAL_VISUAL_RUNTIME, phase: "idle", label: "IDLE", detail: null },
+    });
+    useCharlieStore.getState().applyEvent({
+      type: "recovery_proposal",
+      session_id: "session-other",
+      payload: { proposal_id: "other", explanation: "Other session" },
+    });
+    expect(useCharlieStore.getState().visualRuntime.phase).toBe("idle");
+
+    useCharlieStore.getState().applyEvent({
+      type: "recovery_proposal",
+      session_id: "session-current",
+      payload: { proposal_id: "current", explanation: "Current session" },
+    });
+    expect(useCharlieStore.getState().visualRuntime).toMatchObject({
+      phase: "recovering",
+      recoveryProposalId: "current",
+    });
+  });
+
+  test("switching sessions clears a recovery from the previous session", () => {
+    useCharlieStore.setState({
+      connected: true,
+      activeSessionId: "session-a",
+      visualRuntime: {
+        ...INITIAL_VISUAL_RUNTIME,
+        phase: "recovering",
+        label: "RECOVERY AVAILABLE",
+        recoveryProposalId: "proposal-a",
+        correlation: { sessionId: "session-a", turnId: null, taskId: null, requestId: null },
+      },
+    });
+    useCharlieStore.getState().applyEvent({ type: "session_active", payload: { session_id: "session-b" } });
+    expect(useCharlieStore.getState().visualRuntime.phase).toBe("idle");
+    expect(useCharlieStore.getState().visualRuntime.recoveryProposalId).toBeNull();
   });
 
   test("presentation_intent upserts intent and updates active caption", () => {

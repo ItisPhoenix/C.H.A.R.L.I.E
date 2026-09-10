@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { useMapStore } from "../../map/mapStore";
 
 interface ConfigField {
@@ -202,6 +202,7 @@ export function Settings(): ReactElement {
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealth>({});
   const [modelSnapshot, setModelSnapshot] = useState<ModelSnapshot>({});
   const [modelsLoading, setModelsLoading] = useState(false);
+  const currentModelRef = useRef("");
   const [modelSearch, setModelSearch] = useState("");
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [activeCategory, setActiveCategory] = useState("All");
@@ -278,17 +279,20 @@ export function Settings(): ReactElement {
       .catch(() => setRuntimeHealth({}));
   }, []);
 
-  async function refreshModels(): Promise<void> {
+  useEffect(() => {
+    const currentField = fields.find((field) => field.key === "LLM_MODEL");
+    currentModelRef.current = currentField ? String(fieldValue(currentField, drafts) ?? "") : "";
+  }, [drafts, fields]);
+
+  const refreshModels = useCallback(async (): Promise<void> => {
     setModelsLoading(true);
     try {
       const response = await fetch("/api/models");
       if (!response.ok) throw new Error("Models unavailable");
       setModelSnapshot((await response.json()) as ModelSnapshot);
     } catch {
-      const currentField = fields.find((field) => field.key === "LLM_MODEL");
-      const currentModel = currentField ? String(fieldValue(currentField, drafts) ?? "") : "";
       setModelSnapshot({
-        active_model: currentModel,
+        active_model: currentModelRef.current,
         models: [],
         provider_discovery: {
           status: "error",
@@ -299,7 +303,7 @@ export function Settings(): ReactElement {
     } finally {
       setModelsLoading(false);
     }
-  }
+  }, []);
 
   // Fetch MCP Servers
   async function fetchMcpServers(): Promise<void> {
@@ -440,7 +444,7 @@ export function Settings(): ReactElement {
 
   useEffect(() => {
     void refreshModels();
-  }, []);
+  }, [refreshModels]);
 
   useEffect(() => {
     if (activeCategory === "Tools / MCP" || activeCategory === "All") {

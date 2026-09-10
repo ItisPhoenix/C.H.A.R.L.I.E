@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach } from "vitest";
+import { describe, expect, test, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { useCharlieStore } from "../store/charlie";
@@ -10,6 +10,7 @@ import { ContentMaskLayer } from "./ContentMaskLayer";
 import { useWorkspaceStore } from "../layout/workspaceStore";
 import { useWidgetStore } from "../layout/widgetStore";
 import { INITIAL_VISUAL_RUNTIME } from "../runtime/visualRuntime";
+import * as bridge from "../runtime/bridge";
 
 beforeEach(() => {
   localStorage.clear();
@@ -158,8 +159,94 @@ describe("CharlieScene spatial projection & layers", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText("USING BROWSER_NAVIGATE")).toBeInTheDocument();
+    expect(screen.getByText("OPENING PAGE")).toBeInTheDocument();
     expect(container.querySelector('[data-core-renderer="authoritative-charlie-ring"]')).toHaveAttribute("data-state", "acting");
+  });
+
+  test("recovery context exposes only the authoritative proposal actions", () => {
+    useCharlieStore.setState({ activeSessionId: "session-scene" });
+    useCharlieStore.getState().applyEvent({
+      type: "recovery_proposal",
+      timestamp: "2099-01-01T00:00:01.000Z",
+      session_id: "session-scene",
+      payload: {
+        proposal_id: "proposal-scene-1",
+        explanation: "A safe recovery is available.",
+        proposed_command: "hidden command",
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("RECOVERY AVAILABLE")).toBeInTheDocument();
+    expect(screen.getByText("A safe recovery is available.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve recovery" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
+    expect(screen.queryByText("hidden command")).toBeNull();
+  });
+
+  test("recovery actions send the real backend commands and proposal id", () => {
+    const sendCommand = vi.spyOn(bridge, "sendCommand").mockImplementation(() => {});
+    useCharlieStore.setState({ activeSessionId: "session-scene" });
+    useCharlieStore.getState().applyEvent({
+      type: "recovery_proposal",
+      session_id: "session-scene",
+      timestamp: "2099-01-01T00:00:01.000Z",
+      payload: { proposal_id: "proposal-actions", explanation: "Safe recovery" },
+    });
+
+    render(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve recovery" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    expect(sendCommand).toHaveBeenNthCalledWith(1, "recovery_approve", { proposal_id: "proposal-actions", session_id: "session-scene" });
+    expect(sendCommand).toHaveBeenNthCalledWith(2, "recovery_reject", { proposal_id: "proposal-actions", session_id: "session-scene" });
+    sendCommand.mockRestore();
+  });
+
+  test("recovery actions disappear after session switch or disconnect", () => {
+    useCharlieStore.setState({ activeSessionId: "session-scene" });
+    useCharlieStore.getState().applyEvent({
+      type: "recovery_proposal",
+      session_id: "session-scene",
+      timestamp: "2099-01-01T00:00:01.000Z",
+      payload: { proposal_id: "proposal-stale", explanation: "Safe recovery" },
+    });
+    const { rerender } = render(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole("button", { name: "Approve recovery" })).toBeInTheDocument();
+
+    useCharlieStore.getState().applyEvent({ type: "session_active", payload: { session_id: "session-new" } });
+    rerender(<MemoryRouter><CharlieScene /></MemoryRouter>);
+    expect(screen.queryByRole("button", { name: "Approve recovery" })).toBeNull();
+
+    useCharlieStore.setState({
+      connected: true,
+      activeSessionId: "session-scene",
+      visualRuntime: {
+        ...INITIAL_VISUAL_RUNTIME,
+        phase: "recovering",
+        label: "RECOVERY AVAILABLE",
+        recoveryProposalId: "proposal-disconnect",
+        correlation: { sessionId: "session-scene", turnId: null, taskId: null, requestId: null },
+      },
+    });
+    rerender(<MemoryRouter><CharlieScene /></MemoryRouter>);
+    expect(screen.getByRole("button", { name: "Approve recovery" })).toBeInTheDocument();
+    useCharlieStore.getState().setConnected(false);
+    rerender(<MemoryRouter><CharlieScene /></MemoryRouter>);
+    expect(screen.queryByRole("button", { name: "Approve recovery" })).toBeNull();
   });
 
   test("attention intent renders modal backdrop with high priority alert", () => {

@@ -384,6 +384,32 @@
   white-space: nowrap;
 }
 
+.charlie-runtime-context-actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.charlie-runtime-context-action {
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  padding: 2px 7px;
+  color: var(--scene-text-secondary);
+  font-family: var(--font-technical);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.charlie-runtime-context-action:hover,
+.charlie-runtime-context-action:focus-visible {
+  border-color: var(--scene-cyan);
+  color: var(--scene-text-primary);
+}
+
+.charlie-runtime-context-action--approve {
+  border-color: rgba(245, 158, 11, 0.55);
+  color: #fcd34d;
+}
+
 .charlie-runtime-context[data-runtime-phase="error"] {
   border-left-color: var(--color-status-error);
 }

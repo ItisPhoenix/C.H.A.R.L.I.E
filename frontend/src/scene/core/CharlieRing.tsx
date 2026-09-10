@@ -500,7 +500,7 @@ export function CharlieRing(): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
   const initialState = normalizeState(visualPhase === "offline" && connected ? coreState : visualPhase, connected);
   const stateRef = useRef<CoreVisualState>(initialState);
-  const lastStateRef = useRef<CoreVisualState>(stateRef.current);
+  const lastStateRef = useRef<CoreVisualState>(initialState);
   const audioLevelRef = useRef(0);
   const pulseStartedAtRef = useRef(0);
   const clickPulseStartedAtRef = useRef(0);

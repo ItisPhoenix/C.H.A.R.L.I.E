@@ -240,7 +240,14 @@ export const useCharlieStore = create<CharlieState>((set) => ({
 
   applyEvent: (event) => {
     const payload = event.payload ?? {};
-    set((s) => ({ visualRuntime: reduceVisualRuntime(s.visualRuntime, event) }));
+    set((s) => {
+      if (event.type === "recovery_proposal") {
+        const eventSessionId = event.session_id ?? (typeof payload.session_id === "string" ? payload.session_id : null);
+        if (!eventSessionId || !s.activeSessionId || eventSessionId !== s.activeSessionId) return {};
+      }
+      if (!s.connected) return {};
+      return { visualRuntime: reduceVisualRuntime(s.visualRuntime, event) };
+    });
     switch (event.type) {
       case "charlie_state":
         set({
@@ -338,9 +345,21 @@ export const useCharlieStore = create<CharlieState>((set) => ({
         set({ hudVisible: Boolean(payload.visible) });
         return;
       case "session_active":
-        set({
-          activeSessionId: typeof payload.session_id === "string" ? payload.session_id : null,
-          activeSessionTitle: typeof payload.title === "string" ? payload.title : null,
+        set((s) => {
+          const activeSessionId = typeof payload.session_id === "string" ? payload.session_id : null;
+          const runtimeSessionId = s.visualRuntime.correlation.sessionId;
+          const sessionChanged = runtimeSessionId !== null && runtimeSessionId !== activeSessionId;
+          return {
+            activeSessionId,
+            activeSessionTitle: typeof payload.title === "string" ? payload.title : null,
+            ...(sessionChanged
+              ? {
+                  visualRuntime: s.connected
+                    ? { ...INITIAL_VISUAL_RUNTIME, phase: "idle" as const, label: "IDLE", detail: null, updatedAt: new Date().toISOString() }
+                    : { ...INITIAL_VISUAL_RUNTIME, updatedAt: new Date().toISOString() },
+                }
+              : {}),
+          };
         });
         return;
       case "session_updated":

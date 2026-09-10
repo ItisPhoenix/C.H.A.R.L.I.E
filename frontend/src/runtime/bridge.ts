@@ -97,13 +97,17 @@ export function adaptEvent(raw: unknown): ValidatedWSEvent | null {
   };
 }
 
+export function shouldQueueCommand(type: string): boolean {
+  return type !== "recovery_approve" && type !== "recovery_reject";
+}
+
 export function sendCommand(type: string, payload?: Record<string, unknown>): void {
   const message = JSON.stringify({ type, payload });
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(message);
     return;
   }
-  if (pendingCommands.length < 50) pendingCommands.push(message);
+  if (shouldQueueCommand(type) && pendingCommands.length < 50) pendingCommands.push(message);
 }
 
 function handleMessage(event: MessageEvent<string>): void {

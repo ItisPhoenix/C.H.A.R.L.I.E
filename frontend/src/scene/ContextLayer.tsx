@@ -1,6 +1,7 @@
 import { useEffect, type ReactElement } from "react";
 import type { PresentationIntent } from "../store/charlie";
 import type { VisualRuntimeState } from "../runtime/visualRuntime";
+import { sendCommand } from "../runtime/bridge";
 import { useModalFocus } from "../components/useModalFocus";
 
 interface ContextLayerProps {
@@ -8,6 +9,8 @@ interface ContextLayerProps {
   notifications: PresentationIntent[];
   activeAttention: PresentationIntent | null;
   visualRuntime: VisualRuntimeState;
+  activeSessionId: string | null;
+  connected: boolean;
   onDismissIntent?: (id: string) => void;
   onClearVisualRuntime?: (expectedUpdatedAt?: string) => void;
 }
@@ -17,6 +20,8 @@ export function ContextLayer({
   notifications,
   activeAttention,
   visualRuntime,
+  activeSessionId,
+  connected,
   onDismissIntent,
   onClearVisualRuntime,
 }: ContextLayerProps): ReactElement {
@@ -61,9 +66,43 @@ export function ContextLayer({
     <div className="charlie-context-layer" role="region" aria-label="Contextual Notifications and Captions">
       {/* One dominant transient context. Approvals/errors outrank ordinary captions. */}
       {contextKind === "runtime" && (
-        <div className="charlie-runtime-context" role="status" aria-live="polite" data-runtime-phase={visualRuntime.phase}>
+        <div
+          className="charlie-runtime-context"
+          role="status"
+          aria-live={visualRuntime.phase === "error" ? "assertive" : "polite"}
+          data-runtime-phase={visualRuntime.phase}
+          data-recovery-proposal-id={visualRuntime.recoveryProposalId ?? undefined}
+        >
           <span className="charlie-runtime-context-label">{visualRuntime.label}</span>
           {visualRuntime.detail && <span className="charlie-runtime-context-detail">{visualRuntime.detail}</span>}
+          {visualRuntime.phase === "recovering" &&
+            visualRuntime.recoveryProposalId &&
+            visualRuntime.correlation.sessionId &&
+            connected &&
+            activeSessionId === visualRuntime.correlation.sessionId && (
+            <span className="charlie-runtime-context-actions">
+              <button
+                type="button"
+                className="charlie-runtime-context-action charlie-runtime-context-action--approve"
+                onClick={() => sendCommand("recovery_approve", {
+                  proposal_id: visualRuntime.recoveryProposalId,
+                  session_id: visualRuntime.correlation.sessionId,
+                })}
+              >
+                Approve recovery
+              </button>
+              <button
+                type="button"
+                className="charlie-runtime-context-action"
+                onClick={() => sendCommand("recovery_reject", {
+                  proposal_id: visualRuntime.recoveryProposalId,
+                  session_id: visualRuntime.correlation.sessionId,
+                })}
+              >
+                Reject
+              </button>
+            </span>
+          )}
         </div>
       )}
 
