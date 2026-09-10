@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.request
 from collections import deque
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 import numpy as np
@@ -43,6 +44,18 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?,;])\s+")
 _ASR_WORKER_STAGE_MESSAGE = "asr_worker_stage"
 _ASR_WORKER_STALL_THRESHOLD_S = 9.0
 _ASR_WORKER_WATCHDOG_INTERVAL_S = 0.5
+
+
+@dataclass(frozen=True)
+class VoiceShutdownResult:
+    """Truthful bounded-shutdown outcome for all VoiceEngine-owned resources."""
+
+    quiescent: bool
+    alive_threads: tuple[str, ...] = ()
+    asr_process_alive: Optional[bool] = None
+    diagnostics_worker_alive: Optional[bool] = None
+    # Accumulated diagnostics; recovered errors do not override current truth.
+    errors: tuple[str, ...] = ()
 
 
 # Ellipsis patterns
@@ -126,6 +139,8 @@ class VoiceEngine:
         self.stop_event = threading.Event()
         self.stop_tts_event = threading.Event()
         self._stopped = False
+        self._shutdown_result: Optional[VoiceShutdownResult] = None
+        self._shutdown_errors: list[str] = []
         self.tts_queue: queue.Queue = queue.Queue()
         self.playback_queue: queue.Queue = queue.Queue()
         self.tts_lock = threading.Lock()
@@ -446,13 +461,18 @@ class VoiceEngine:
         else:
             logger.warning("Continuous listening unavailable: %s", self.readiness_detail())
 
-    def stop(self):
-        """Shut down voice engine. Called from main.py finally block."""
-        if self._stopped:
-            logger.info("voice_shutdown_complete | already_stopped=true")
-            return
+    def stop(self) -> VoiceShutdownResult:
+        """Shut down voice engine and report bounded quiescence truthfully."""
+        if self._shutdown_result is not None:
+            logger.info(
+                "voice_shutdown_recheck | prior_quiescent=%s",
+                self._shutdown_result.quiescent,
+            )
+        else:
+            logger.info("voice_shutdown_begin")
         self._stopped = True
-        logger.info("voice_shutdown_begin")
+        errors: list[str] = []
+        alive_threads: list[str] = []
         self.stop_event.set()
         self.stop_tts()
         self._event_bus = None
@@ -461,22 +481,33 @@ class VoiceEngine:
         if self.audio_stream is not None:
             try:
                 self.audio_stream.close()
-            except Exception as e:
-                logger.debug(f"audio_stream close error: {e}")
-            self.audio_stream = None
+            except Exception as exc:
+                errors.append(f"audio_stream.close: {type(exc).__name__}: {exc}")
+                logger.debug("audio_stream close error", exc_info=True)
+            else:
+                self.audio_stream = None
+
         for name, thread in (
             ("voice_capture_thread", self.input_thread),
             ("tts_thread", self.tts_worker),
             ("playback_thread", self.playback_worker),
             ("asr_poller_thread", self.asr_poller_thread),
         ):
-            if thread and thread.is_alive():
-                thread.join(timeout=1.0)
+            try:
+                if thread and thread.is_alive():
+                    thread.join(timeout=1.0)
+                thread_alive = bool(thread and thread.is_alive())
+            except Exception as exc:
+                thread_alive = True
+                errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            if thread_alive:
+                alive_threads.append(name)
             logger.info(
                 "voice_shutdown_thread | name=%s | stopped=%s",
                 name,
-                not (thread and thread.is_alive()),
+                not thread_alive,
             )
+
         with self._ptt_lock:
             self._ptt_active = False
             self._ptt_stop_requested = False
@@ -486,7 +517,10 @@ class VoiceEngine:
         self._utterance_traces.clear()
         if pending_trace_count:
             logger.info("voice_shutdown_asr_traces_cleared | count=%s", pending_trace_count)
-        if self.asr_process:
+
+        asr_process_alive: Optional[bool] = None
+        process = self.asr_process
+        if process:
             drained = 0
             while True:
                 try:
@@ -500,24 +534,94 @@ class VoiceEngine:
                 logger.info("voice_shutdown_asr_queue_drained | count=%s", drained)
             try:
                 self.asr_input_queue.put(None, timeout=1.0)
-            except Exception:
+            except Exception as exc:
+                errors.append(f"asr_sentinel: {type(exc).__name__}: {exc}")
                 logger.warning("ASR worker shutdown signal could not be queued", exc_info=True)
-            logger.info("ASR worker shutdown requested | pid=%s", getattr(self.asr_process, "pid", None))
-            self.asr_process.join(timeout=1.0)
-            if self.asr_process.is_alive():
+            logger.info("ASR worker shutdown requested | pid=%s", getattr(process, "pid", None))
+            try:
+                process.join(timeout=1.0)
+                asr_process_alive = bool(process.is_alive())
+            except Exception as exc:
+                asr_process_alive = True
+                errors.append(f"asr_join: {type(exc).__name__}: {exc}")
+            if asr_process_alive:
                 logger.warning("ASR worker did not exit gracefully; terminating owned worker")
-                self.asr_process.terminate()
-                self.asr_process.join(timeout=1.0)
+                try:
+                    process.terminate()
+                except Exception as exc:
+                    errors.append(f"asr_terminate: {type(exc).__name__}: {exc}")
+                try:
+                    process.join(timeout=1.0)
+                    asr_process_alive = bool(process.is_alive())
+                except Exception as exc:
+                    asr_process_alive = True
+                    errors.append(f"asr_terminate_join: {type(exc).__name__}: {exc}")
+            if asr_process_alive:
+                killer = getattr(process, "kill", None)
+                if callable(killer):
+                    logger.warning("ASR worker did not exit after terminate; escalating to kill")
+                    try:
+                        killer()
+                    except Exception as exc:
+                        errors.append(f"asr_kill: {type(exc).__name__}: {exc}")
+                    try:
+                        process.join(timeout=1.0)
+                        asr_process_alive = bool(process.is_alive())
+                    except Exception as exc:
+                        asr_process_alive = True
+                        errors.append(f"asr_kill_join: {type(exc).__name__}: {exc}")
+            if asr_process_alive:
+                errors.append("ASR worker remained alive after bounded shutdown")
             logger.info(
                 "ASR worker exited | pid=%s | stopped=%s",
-                getattr(self.asr_process, "pid", None),
-                not self.asr_process.is_alive(),
+                getattr(process, "pid", None),
+                not asr_process_alive,
             )
-        self.voice_diagnostics.stop()
+
+        try:
+            self.voice_diagnostics.stop()
+        except Exception as exc:
+            errors.append(f"voice_diagnostics.stop: {type(exc).__name__}: {exc}")
         sampler = getattr(self.voice_diagnostics, "_resource_thread", None)
-        sampler_stopped = sampler is None or not sampler.is_alive()
-        logger.info("voice_diagnostics_sampler_stopped | stopped=%s", sampler_stopped)
-        logger.info("voice_shutdown_complete")
+        diagnostics_worker_alive: Optional[bool] = None
+        if sampler is not None:
+            try:
+                diagnostics_worker_alive = bool(sampler.is_alive())
+            except Exception as exc:
+                diagnostics_worker_alive = True
+                errors.append(f"voice_diagnostics_thread: {type(exc).__name__}: {exc}")
+            if diagnostics_worker_alive:
+                alive_threads.append("voice_diagnostics_thread")
+                errors.append("Voice diagnostics sampler remained alive after bounded shutdown")
+        logger.info(
+            "voice_diagnostics_sampler_stopped | stopped=%s",
+            not diagnostics_worker_alive if diagnostics_worker_alive is not None else True,
+        )
+
+        self._shutdown_errors.extend(errors)
+        currently_unresolved = bool(alive_threads) or asr_process_alive is True or (
+            diagnostics_worker_alive is True
+        ) or self.audio_stream is not None
+        result = VoiceShutdownResult(
+            quiescent=not currently_unresolved,
+            alive_threads=tuple(alive_threads),
+            asr_process_alive=asr_process_alive,
+            diagnostics_worker_alive=diagnostics_worker_alive,
+            errors=tuple(self._shutdown_errors),
+        )
+        self._shutdown_result = result
+        if result.quiescent:
+            logger.info("voice_shutdown_complete")
+        else:
+            logger.error(
+                "voice_shutdown_non_quiescent | alive_threads=%s | asr_process_alive=%s "
+                "| diagnostics_worker_alive=%s | errors=%s",
+                result.alive_threads,
+                result.asr_process_alive,
+                result.diagnostics_worker_alive,
+                result.errors,
+            )
+        return result
 
     def stop_tts(self):
         self.stop_tts_event.set()
