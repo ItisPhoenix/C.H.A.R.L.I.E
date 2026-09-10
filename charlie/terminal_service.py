@@ -62,6 +62,45 @@ if sys.platform == "win32":
 
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
     EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+    CREATE_SUSPENDED = 0x00000004
+    CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
+    JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x00001000
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+
+    class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
 
     kernel32.CreatePseudoConsole.argtypes = [
         COORD,
@@ -105,6 +144,30 @@ if sys.platform == "win32":
     ]
     kernel32.CreateProcessW.restype = wintypes.BOOL
 
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+    kernel32.ResumeThread.restype = wintypes.DWORD
+
+else:
+    CREATE_SUSPENDED = 0x00000004
+    CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
+    JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x00001000
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+
 _HAS_CONPTY = sys.platform == "win32"
 
 
@@ -121,7 +184,9 @@ class WindowsConPTY:
         self._hpcon = ctypes.c_void_p()
         self._h_in_w = wintypes.HANDLE()
         self._h_out_r = wintypes.HANDLE()
+        self._h_job = wintypes.HANDLE()
         self._pi = PROCESS_INFORMATION()
+        self._job_assignment_succeeded = False
         self._attr_list: Optional[ctypes.Array] = None
         self._closed = False
         self._lock = threading.Lock()
@@ -174,6 +239,24 @@ class WindowsConPTY:
             self.close()
             raise OSError(f"UpdateProcThreadAttribute failed: {ctypes.GetLastError()}")
 
+        self._h_job = kernel32.CreateJobObjectW(None, None)
+        if not self._h_job:
+            err = ctypes.GetLastError()
+            self.close()
+            raise OSError(f"CreateJobObjectW failed: {err}")
+
+        job_limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        job_limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            self._h_job,
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(job_limits),
+            ctypes.sizeof(job_limits),
+        ):
+            err = ctypes.GetLastError()
+            self.close()
+            raise OSError(f"SetInformationJobObject failed: {err}")
+
         si = STARTUPINFOEX()
         si.StartupInfo.cb = ctypes.sizeof(STARTUPINFOEX)
         si.StartupInfo.dwFlags = 0x00000100  # STARTF_USESTDHANDLES
@@ -189,7 +272,7 @@ class WindowsConPTY:
             None,
             None,
             False,
-            EXTENDED_STARTUPINFO_PRESENT,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
             None,
             self.cwd,
             ctypes.byref(si.StartupInfo),
@@ -202,6 +285,17 @@ class WindowsConPTY:
             raise OSError(f"CreateProcessW failed for PowerShell: {err}")
 
         self.pid = self._pi.dwProcessId
+
+        if not kernel32.AssignProcessToJobObject(self._h_job, self._pi.hProcess):
+            err = ctypes.GetLastError()
+            self.close()
+            raise OSError(f"AssignProcessToJobObject failed: {err}")
+        self._job_assignment_succeeded = True
+
+        if kernel32.ResumeThread(self._pi.hThread) == 0xFFFFFFFF:
+            err = ctypes.GetLastError()
+            self.close()
+            raise OSError(f"ResumeThread failed: {err}")
 
     def read(self, max_bytes: int = _READ_CHUNK_SIZE) -> bytes:
         if self._closed or not self._h_out_r:
@@ -253,7 +347,14 @@ class WindowsConPTY:
                 return
             self._closed = True
 
-            # 1. Close PseudoConsole to signal EOF to reader thread
+            # 1. Terminate the owned process tree before tearing down ConPTY.
+            if self._h_job and getattr(self._h_job, "value", self._h_job):
+                try:
+                    kernel32.TerminateJobObject(self._h_job, 0)
+                except Exception:
+                    pass
+
+            # 2. Close PseudoConsole to signal EOF to reader thread
             if self._hpcon and self._hpcon.value:
                 try:
                     kernel32.ClosePseudoConsole(self._hpcon)
@@ -261,7 +362,7 @@ class WindowsConPTY:
                     pass
                 self._hpcon = ctypes.c_void_p()
 
-            # 2. Close input handle
+            # 3. Close input handle
             if self._h_in_w and self._h_in_w.value:
                 try:
                     kernel32.CloseHandle(self._h_in_w)
@@ -269,7 +370,7 @@ class WindowsConPTY:
                     pass
                 self._h_in_w = wintypes.HANDLE()
 
-            # 3. Close output handle
+            # 4. Close output handle
             if self._h_out_r and self._h_out_r.value:
                 try:
                     kernel32.CloseHandle(self._h_out_r)
@@ -277,10 +378,11 @@ class WindowsConPTY:
                     pass
                 self._h_out_r = wintypes.HANDLE()
 
-            # 4. Terminate process and cleanup process handles
+            # 5. Wait for the job-terminated root and cleanup process handles.
             if self._pi.hProcess:
                 try:
-                    kernel32.TerminateProcess(self._pi.hProcess, 0)
+                    if not self._job_assignment_succeeded:
+                        kernel32.TerminateProcess(self._pi.hProcess, 0)
                     kernel32.WaitForSingleObject(self._pi.hProcess, 1000)
                     kernel32.CloseHandle(self._pi.hProcess)
                     kernel32.CloseHandle(self._pi.hThread)
@@ -288,14 +390,24 @@ class WindowsConPTY:
                     pass
                 self._pi.hProcess = wintypes.HANDLE()
                 self._pi.hThread = wintypes.HANDLE()
+                self._job_assignment_succeeded = False
 
-            # 5. Delete attribute list
+            # 6. Close the Job Object last; KILL_ON_JOB_CLOSE is the abrupt-owner safety boundary.
+            if self._h_job and getattr(self._h_job, "value", self._h_job):
+                try:
+                    kernel32.CloseHandle(self._h_job)
+                except Exception:
+                    pass
+                self._h_job = wintypes.HANDLE()
+
+            # 7. Delete attribute list
             if self._attr_list:
                 try:
                     kernel32.DeleteProcThreadAttributeList(self._attr_list)
                 except Exception:
                     pass
                 self._attr_list = None
+            self.pid = None
 
 
 class FallbackPTY:
