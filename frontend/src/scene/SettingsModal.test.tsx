@@ -20,6 +20,15 @@ describe("SettingsModal Component", () => {
     expect(screen.getAllByTestId("authoritative-settings")).toHaveLength(1);
   });
 
+  test("Escape closes settings without cascading to the scene", () => {
+    const onClose = vi.fn();
+    render(<SettingsModal isOpen={true} onClose={onClose} />);
+
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   test("renders one authoritative settings surface with all current categories", () => {
     render(<SettingsModal isOpen={true} onClose={() => {}} />);
 

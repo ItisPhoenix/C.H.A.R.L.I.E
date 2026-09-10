@@ -1,4 +1,5 @@
 import type { ReactElement, ReactNode } from "react";
+import { useModalFocus } from "./useModalFocus";
 
 interface ModalProps {
   children: ReactNode;
@@ -8,9 +9,10 @@ interface ModalProps {
 
 // Shared shell for interruption dialogs (recovery proposals, tool approvals). Ported from frontend@c7aa7df~1.
 export function Modal({ children, labelledBy, accent = "info" }: ModalProps): ReactElement {
+  const dialogRef = useModalFocus<HTMLDivElement>(true, () => {});
   return (
     <div className="w-full h-full flex flex-col items-center justify-center">
-      <div role="dialog" aria-modal="true" aria-labelledby={labelledBy} className={`w-full max-w-lg glass p-6 flex flex-col gap-5 role-${accent}`}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={labelledBy} tabIndex={-1} className={`w-full max-w-lg glass p-6 flex flex-col gap-5 role-${accent}`}>
         {children}
       </div>
     </div>

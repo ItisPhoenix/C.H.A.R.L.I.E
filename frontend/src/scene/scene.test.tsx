@@ -9,6 +9,7 @@ import { ContentMaskLayer } from "./ContentMaskLayer";
 
 import { useWorkspaceStore } from "../layout/workspaceStore";
 import { useWidgetStore } from "../layout/widgetStore";
+import { INITIAL_VISUAL_RUNTIME } from "../runtime/visualRuntime";
 
 beforeEach(() => {
   localStorage.clear();
@@ -16,6 +17,7 @@ beforeEach(() => {
     connected: true,
     hudVisible: true,
     coreState: "idle",
+    visualRuntime: { ...INITIAL_VISUAL_RUNTIME, phase: "idle", label: "IDLE", detail: null },
     presentationIntents: {},
     activeCaption: null,
     activeToolApproval: null,
@@ -139,6 +141,25 @@ describe("CharlieScene spatial projection & layers", () => {
     const caption = screen.getByRole("status");
     expect(caption).toBeDefined();
     expect(screen.getByText("Volume set to 50%")).toBeDefined();
+  });
+
+  test("runtime operation projects one dominant contextual state", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "tool_call",
+      session_id: "session-1",
+      turn_id: "turn-1",
+      task_id: "task-1",
+      payload: { name: "browser_navigate" },
+    });
+
+    const { container } = render(
+      <MemoryRouter>
+        <CharlieScene />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("USING BROWSER_NAVIGATE")).toBeInTheDocument();
+    expect(container.querySelector('[data-core-renderer="authoritative-charlie-ring"]')).toHaveAttribute("data-state", "acting");
   });
 
   test("attention intent renders modal backdrop with high priority alert", () => {

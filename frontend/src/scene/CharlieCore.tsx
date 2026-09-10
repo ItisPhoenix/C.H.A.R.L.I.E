@@ -1,10 +1,12 @@
 import { useState, type ReactElement, type Ref } from "react";
 import { CharlieRing } from "./core/CharlieRing";
 import type { CorePosition } from "./sceneState";
+import type { VisualRuntimePhase } from "../runtime/visualRuntime";
 
 interface CharlieCoreProps {
   position: CorePosition;
   coreState: string;
+  visualPhase?: VisualRuntimePhase;
   activeWorkspaceType?: string | null;
   customStatusLabel?: string;
   customSubtext?: string;
@@ -18,6 +20,7 @@ interface CharlieCoreProps {
 export function CharlieCore({
   position,
   coreState,
+  visualPhase,
   customStatusLabel,
   customSubtext,
   onClearScreen,
@@ -29,18 +32,24 @@ export function CharlieCore({
   const [showMenu, setShowMenu] = useState(false);
 
   const isDocked = position === "dock_bottom_right";
+  const displayState = visualPhase || coreState;
 
   // Centered mode status metadata
-  const stateLabel = customStatusLabel || coreState.toUpperCase();
-  const subtext =
-    customSubtext ||
-    (coreState === "idle"
-      ? "I'M HERE WHEN YOU NEED ME."
-      : coreState === "listening"
-        ? "AWAITING INPUT"
-        : coreState === "speaking"
-          ? ""
-          : "TASK IN PROGRESS");
+  const stateLabel = customStatusLabel || displayState.replaceAll("_", " ").toUpperCase();
+  const subtext = customSubtext || {
+    idle: "I'M HERE WHEN YOU NEED ME.",
+    listening: "AWAITING INPUT",
+    transcribing: "TRANSCRIBING",
+    thinking: "PROCESSING REQUEST",
+    acting: "TOOL IN PROGRESS",
+    speaking: "",
+    approval_wait: "WAITING FOR APPROVAL",
+    success: "COMPLETE",
+    error: "NEEDS ATTENTION",
+    recovering: "RECOVERY IN PROGRESS",
+    offline: "CONNECTION LOST",
+    degraded: "LIMITED SERVICE",
+  }[displayState as VisualRuntimePhase] || "TASK IN PROGRESS";
 
   return (
     <div
@@ -50,7 +59,7 @@ export function CharlieCore({
       onClick={() => setShowMenu((prev) => !prev)}
       role="button"
       tabIndex={0}
-      aria-label={`Charlie core in ${coreState} state. Click for menu.`}
+      aria-label={`Charlie core in ${displayState} state. Click for menu.`}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           setShowMenu((prev) => !prev);

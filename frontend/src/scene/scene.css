@@ -332,6 +332,12 @@
   pointer-events: none;
 }
 
+.charlie-scene-root .charlie-workspace-content,
+.charlie-scene-root .charlie-workspace-content .select-none,
+.charlie-scene-root .charlie-settings-modal {
+  user-select: text;
+}
+
 .charlie-caption-container {
   position: absolute;
   bottom: calc(var(--scene-safe-y) + 40px);
@@ -340,6 +346,52 @@
   max-width: min(680px, 85vw);
   text-align: center;
   pointer-events: auto;
+}
+
+.charlie-runtime-context {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--scene-safe-y) + 40px);
+  transform: translateX(-50%);
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  max-width: min(760px, 86vw);
+  padding: 7px 14px;
+  border-left: 2px solid var(--scene-cyan);
+  border-bottom: 1px solid rgba(34, 211, 238, 0.22);
+  background: rgba(3, 10, 17, 0.82);
+  color: var(--scene-text-primary);
+  font-family: var(--font-technical);
+  font-size: clamp(11px, 0.8vw, 13px);
+  line-height: 1.45;
+  pointer-events: auto;
+}
+
+.charlie-runtime-context-label {
+  color: var(--scene-cyan);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  white-space: nowrap;
+}
+
+.charlie-runtime-context-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--scene-text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.charlie-runtime-context[data-runtime-phase="error"] {
+  border-left-color: var(--color-status-error);
+}
+
+.charlie-runtime-context[data-runtime-phase="recovering"],
+.charlie-runtime-context[data-runtime-phase="approval_wait"],
+.charlie-runtime-context[data-runtime-phase="degraded"] {
+  border-left-color: var(--color-status-warning);
 }
 
 .charlie-caption-box {
@@ -470,6 +522,25 @@
 .hud-vector-drift {
   transform-origin: 500px 500px;
   animation: hud-drift-slow 120s linear infinite;
+}
+
+.hud-ring[data-state="idle"] .hud-vector-drift,
+.hud-ring[data-state="approval_wait"] .hud-vector-drift,
+.hud-ring[data-state="degraded"] .hud-vector-drift,
+.hud-ring[data-state="offline"] .hud-vector-drift {
+  animation-play-state: paused;
+}
+
+.hud-ring[data-state="acting"] .hud-vector-drift {
+  animation-duration: 24s;
+}
+
+.hud-ring[data-state="approval_wait"] {
+  filter: drop-shadow(0 0 12px rgba(245, 158, 11, 0.32));
+}
+
+.hud-ring[data-state="error"] {
+  filter: drop-shadow(0 0 10px rgba(248, 113, 113, 0.28));
 }
 
 /* Inner Center Branding */

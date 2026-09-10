@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import { useCharlieStore } from "./charlie";
+import { INITIAL_VISUAL_RUNTIME } from "../runtime/visualRuntime";
 import { useWorkspaceStore } from "../layout/workspaceStore";
 
 beforeEach(() => {
@@ -7,6 +8,7 @@ beforeEach(() => {
     connected: false,
     hudVisible: true,
     coreState: "idle",
+    visualRuntime: INITIAL_VISUAL_RUNTIME,
     activities: [],
     presentationIntents: {},
     activeCaption: null,
@@ -270,6 +272,28 @@ test("HUD visibility follows the pet toggle event", () => {
       uptimeSeconds: null,
       batteryPercent: null,
     });
+  });
+
+  test("an old visual-runtime expiry cannot clear newer activity", () => {
+    useCharlieStore.getState().setConnected(true);
+    useCharlieStore.getState().applyEvent({
+      type: "tool_result",
+      timestamp: "2099-01-01T00:00:01.000Z",
+      session_id: "s1",
+      turn_id: "t1",
+      payload: { name: "browser", success: true, text: "Done" },
+    });
+    const completedAt = useCharlieStore.getState().visualRuntime.updatedAt;
+    useCharlieStore.getState().applyEvent({
+      type: "tool_call",
+      timestamp: "2099-01-01T00:00:02.000Z",
+      session_id: "s1",
+      turn_id: "t2",
+      payload: { name: "terminal" },
+    });
+
+    useCharlieStore.getState().clearVisualRuntime(completedAt);
+    expect(useCharlieStore.getState().visualRuntime.phase).toBe("acting");
   });
 
   test("presentation_intent upserts intent and updates active caption", () => {

@@ -261,7 +261,8 @@ describe("Settings Component", () => {
     const saveCall = fetchMock.mock.calls.find(
       ([url, init]) => url === "/api/config" && (init as RequestInit | undefined)?.method === "POST",
     );
-    expect(JSON.parse(String((saveCall?.[1] as RequestInit).body))).toEqual({ LLM_MODEL: "gemini-2.5-flash" });
+    expect(saveCall).toBeDefined();
+    expect(JSON.parse(String((saveCall?.[1] as RequestInit | undefined)?.body))).toEqual({ LLM_MODEL: "gemini-2.5-flash" });
   });
 
   test("shows loading and provider errors while preserving current model, then refreshes", async () => {
@@ -341,7 +342,7 @@ describe("Settings Component", () => {
       ([url, init]) => url === "/api/config" && (init as RequestInit | undefined)?.method === "POST",
     );
     expect(saveCall).toBeDefined();
-    expect(JSON.parse(String((saveCall?.[1] as RequestInit).body))).toEqual({ LLM_URL: "https://example.invalid/api" });
+    expect(JSON.parse(String((saveCall?.[1] as RequestInit | undefined)?.body))).toEqual({ LLM_URL: "https://example.invalid/api" });
 
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/api/config" && init?.method === "POST") return Promise.resolve({ ok: false });

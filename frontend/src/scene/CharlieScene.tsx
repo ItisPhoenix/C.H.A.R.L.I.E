@@ -25,6 +25,8 @@ export function CharlieScene(): ReactElement | null {
   const dismissIntent = useCharlieStore((s) => s.dismissPresentationIntent);
   const hudVisible = useCharlieStore((s) => s.hudVisible);
   const activeToolApproval = useCharlieStore((s) => s.activeToolApproval);
+  const visualRuntime = useCharlieStore((s) => s.visualRuntime);
+  const clearVisualRuntime = useCharlieStore((s) => s.clearVisualRuntime);
   const settingsIntentId = Object.values(presentationIntents).find(
     (intent) => intent.kind === "overlay" && intent.overlayType === "settings",
   )?.id;
@@ -174,7 +176,8 @@ export function CharlieScene(): ReactElement | null {
       className="charlie-scene-root"
       data-scene-mode={projection.sceneMode}
       data-core-position={projection.corePosition}
-      data-core-state={projection.coreState}
+      data-core-state={projection.visualRuntime.phase}
+      data-authoritative-core-state={projection.coreState}
     >
       {/* 1. Environment Layer (Opaque dark base, technical grid, radial light, vignette, grain, framing) */}
       <EnvironmentLayer
@@ -206,7 +209,9 @@ export function CharlieScene(): ReactElement | null {
         captionText={projection.activeCaption}
         notifications={projection.activeNotifications}
         activeAttention={activeToolApproval ? null : projection.activeAttention}
+        visualRuntime={visualRuntime}
         onDismissIntent={dismissIntent}
+        onClearVisualRuntime={clearVisualRuntime}
       />
 
       {/* Tool approval is the authoritative live approval surface. The matching
@@ -229,6 +234,7 @@ export function CharlieScene(): ReactElement | null {
         rootRef={coreRef}
         position={projection.corePosition}
         coreState={projection.coreState}
+        visualPhase={projection.visualRuntime.phase}
         activeWorkspaceType={projection.activeWorkspace?.type}
         onClearScreen={handleClearScreen}
         onOpenConversation={() => sendCommand("presentation_command", { action: "open_conversation" })}

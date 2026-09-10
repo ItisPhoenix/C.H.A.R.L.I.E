@@ -2,13 +2,28 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { useCharlieStore } from "../store/charlie";
 import { CharlieCore } from "./CharlieCore";
+import { INITIAL_VISUAL_RUNTIME } from "../runtime/visualRuntime";
 
 beforeEach(() => {
-  useCharlieStore.setState({ connected: true, coreState: "idle", audioLevel: 0 });
+  useCharlieStore.setState({
+    connected: true,
+    coreState: "idle",
+    audioLevel: 0,
+    visualRuntime: { ...INITIAL_VISUAL_RUNTIME, phase: "idle", label: "IDLE", detail: null },
+  });
 });
 
 function renderCore(position: "center" | "dock_bottom_right", coreState = "idle") {
-  useCharlieStore.setState({ coreState });
+  const phase = coreState === "working" ? "acting" : coreState;
+  useCharlieStore.setState({
+    coreState,
+    visualRuntime: {
+      ...INITIAL_VISUAL_RUNTIME,
+      phase: phase as typeof INITIAL_VISUAL_RUNTIME.phase,
+      label: phase.toUpperCase(),
+      detail: null,
+    },
+  });
   return render(<CharlieCore position={position} coreState={coreState} />);
 }
 

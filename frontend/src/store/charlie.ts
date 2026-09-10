@@ -1,5 +1,11 @@
 import { create } from "zustand";
 import type { WSEvent } from "../runtime/bridge";
+import {
+  INITIAL_VISUAL_RUNTIME,
+  reduceVisualRuntime,
+  setVisualRuntimeConnection,
+  type VisualRuntimeState,
+} from "../runtime/visualRuntime";
 import { useWorkspaceStore } from "../layout/workspaceStore";
 import { useWidgetStore } from "../layout/widgetStore";
 
@@ -119,6 +125,7 @@ export interface AudioState {
 interface CharlieState {
   connected: boolean;
   coreState: string;
+  visualRuntime: VisualRuntimeState;
   activities: string[];
   presentationIntents: Record<string, PresentationIntent>;
   activeCaption: string | null;
@@ -139,6 +146,7 @@ interface CharlieState {
   activeSessionId: string | null;
   activeSessionTitle: string | null;
   setConnected: (connected: boolean) => void;
+  clearVisualRuntime: (expectedUpdatedAt?: string) => void;
   setActiveToolApproval: (req: ToolApprovalRequest | null) => void;
   seedMcpStatus: (servers: Record<string, boolean>) => void;
   addUserMessage: (text: string, requestId?: string) => string;
@@ -152,6 +160,7 @@ interface CharlieState {
 export const useCharlieStore = create<CharlieState>((set) => ({
   connected: false,
   coreState: "idle",
+  visualRuntime: INITIAL_VISUAL_RUNTIME,
   activities: [],
   presentationIntents: {},
   activeCaption: null,
@@ -172,7 +181,18 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   activeSessionId: null,
   activeSessionTitle: null,
 
-  setConnected: (connected) => set({ connected }),
+  setConnected: (connected) => set((s) => ({
+    connected,
+    visualRuntime: setVisualRuntimeConnection(s.visualRuntime, connected),
+  })),
+  clearVisualRuntime: (expectedUpdatedAt) => set((s) => {
+    if (expectedUpdatedAt && s.visualRuntime.updatedAt !== expectedUpdatedAt) return {};
+    return {
+      visualRuntime: s.connected
+        ? { ...INITIAL_VISUAL_RUNTIME, phase: "idle", label: "IDLE", detail: null, updatedAt: new Date().toISOString() }
+        : { ...INITIAL_VISUAL_RUNTIME, updatedAt: new Date().toISOString() },
+    };
+  }),
   dismissAlert: () => set({ activeAlert: null }),
   dismissPresentationIntent: (id: string) => {
     useWorkspaceStore.getState().closeWorkspace(id);
@@ -180,7 +200,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
     set((s) => {
       if (!(id in s.presentationIntents)) return {};
       const { [id]: _removed, ...rest } = s.presentationIntents;
-      return { presentationIntents: rest };
+      return { presentationIntents: rest, activeCaption: latestCaption(rest) };
     });
   },
   setActiveToolApproval: (activeToolApproval) =>
@@ -220,6 +240,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
 
   applyEvent: (event) => {
     const payload = event.payload ?? {};
+    set((s) => ({ visualRuntime: reduceVisualRuntime(s.visualRuntime, event) }));
     switch (event.type) {
       case "charlie_state":
         set({
@@ -538,8 +559,16 @@ function applyPresentationIntentDismiss(
   set((s) => {
     if (!(id in s.presentationIntents)) return {};
     const { [id]: _removed, ...rest } = s.presentationIntents;
-    return { presentationIntents: rest };
+    return { presentationIntents: rest, activeCaption: latestCaption(rest) };
   });
+}
+
+function latestCaption(intents: Record<string, PresentationIntent>): string | null {
+  const captions = Object.values(intents)
+    .filter((intent) => intent.kind === "caption")
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const latest = captions.at(-1);
+  return latest?.captionText || latest?.summary || null;
 }
 
 // Debug store handles are intentionally absent from production bundles.

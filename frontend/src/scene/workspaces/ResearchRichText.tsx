@@ -10,7 +10,7 @@ function normalizeLines(value: string): string[] {
 }
 
 function inlineText(value: string): ReactElement[] {
-  const tokens = value.split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^\)]+\))/g).filter(Boolean);
+  const tokens = value.split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g).filter(Boolean);
   return tokens.map((token, index) => {
     if (token.startsWith("**") && token.endsWith("**")) {
       return <strong key={index} className="text-cyan-100 font-semibold">{token.slice(2, -2)}</strong>;
@@ -18,7 +18,7 @@ function inlineText(value: string): ReactElement[] {
     if (token.startsWith("`") && token.endsWith("`")) {
       return <code key={index} className="text-cyan-200 bg-cyan-950/50 px-1 rounded">{token.slice(1, -1)}</code>;
     }
-    const link = token.match(/^\[([^\]]+)\]\(([^\)]+)\)$/);
+    const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
     if (link) {
       return <span key={index} className="text-cyan-300">{link[1]}</span>;
     }

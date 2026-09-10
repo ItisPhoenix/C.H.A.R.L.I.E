@@ -1,4 +1,5 @@
 import type { ReactElement } from "react";
+import { useModalFocus } from "../components/useModalFocus";
 import { useWorkspaceStore } from "./workspaceStore";
 import { sendCommand } from "../runtime/bridge";
 
@@ -10,25 +11,30 @@ interface RecentWorkspacesModalProps {
 export function RecentWorkspacesModal({ isOpen, onClose }: RecentWorkspacesModalProps): ReactElement | null {
   const recent = useWorkspaceStore((s) => s.recentWorkspaces);
   const restoreWorkspace = useWorkspaceStore((s) => s.restoreWorkspace);
+  const dialogRef = useModalFocus<HTMLDivElement>(isOpen, onClose);
 
   if (!isOpen) return null;
 
   return (
     <div
-      className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center z-50 p-4 select-none"
-      role="dialog"
-      aria-label="Recent Workspaces"
+      className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center z-50 p-4"
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
         className="w-full max-w-md p-5 rounded-2xl bg-slate-950/95 border border-cyan-500/30 shadow-2xl text-left"
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="recent-workspaces-title"
+        tabIndex={-1}
       >
         <div className="flex items-center justify-between border-b border-cyan-500/20 pb-3 mb-4">
-          <h3 className="text-sm font-bold text-cyan-200 tracking-wider">RECENT WORKSPACES</h3>
+          <h3 id="recent-workspaces-title" className="text-sm font-bold text-cyan-200 tracking-wider">RECENT WORKSPACES</h3>
           <button
             type="button"
             onClick={onClose}
+            aria-label="Close recent workspaces"
             className="text-xs text-slate-400 hover:text-cyan-200 cursor-pointer"
           >
             ✕
@@ -42,9 +48,10 @@ export function RecentWorkspacesModal({ isOpen, onClose }: RecentWorkspacesModal
         ) : (
           <div className="flex flex-col gap-2 max-h-80 overflow-y-auto pr-1">
             {recent.map((entry) => (
-              <div
+              <button
+                type="button"
                 key={entry.id}
-                className="p-3 rounded-xl bg-cyan-950/20 border border-cyan-500/15 hover:border-cyan-500/40 hover:bg-cyan-950/40 transition cursor-pointer flex items-center justify-between gap-3"
+                className="w-full p-3 rounded-xl bg-cyan-950/20 border border-cyan-500/15 hover:border-cyan-500/40 hover:bg-cyan-950/40 transition cursor-pointer flex items-center justify-between gap-3 text-left"
                 onClick={() => {
                   if (entry.taskId) {
                     sendCommand("presentation_command", { action: "focus_task", task_id: entry.taskId });
@@ -65,13 +72,10 @@ export function RecentWorkspacesModal({ isOpen, onClose }: RecentWorkspacesModal
                   </div>
                   <p className="text-[11px] text-slate-400 line-clamp-1">{entry.summary}</p>
                 </div>
-                <button
-                  type="button"
-                  className="px-2.5 py-1 text-[11px] font-semibold rounded bg-cyan-900/40 text-cyan-300 hover:bg-cyan-800/60 border border-cyan-500/20 shrink-0"
-                >
+                <span className="px-2.5 py-1 text-[11px] font-semibold rounded bg-cyan-900/40 text-cyan-300 border border-cyan-500/20 shrink-0">
                   Restore
-                </button>
-              </div>
+                </span>
+              </button>
             ))}
           </div>
         )}

@@ -1,10 +1,15 @@
 import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, test } from "vitest";
 import { useCharlieStore } from "../../store/charlie";
+import { INITIAL_VISUAL_RUNTIME } from "../../runtime/visualRuntime";
 import { CharlieRing } from "./CharlieRing";
 
 beforeEach(() => {
-  useCharlieStore.setState({ connected: false, coreState: "idle" });
+  useCharlieStore.setState({
+    connected: false,
+    coreState: "idle",
+    visualRuntime: INITIAL_VISUAL_RUNTIME,
+  });
 });
 
 describe("CharlieRing", () => {

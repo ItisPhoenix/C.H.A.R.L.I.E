@@ -5,12 +5,18 @@ import { OuterHudSystem } from "./OuterHudSystem";
 type CoreVisualState =
   | "idle"
   | "listening"
+  | "transcribing"
   | "thinking"
+  | "acting"
   | "working"
   | "speaking"
+  | "approval_wait"
   | "waiting"
   | "attention"
+  | "success"
   | "completed"
+  | "recovering"
+  | "degraded"
   | "error"
   | "offline";
 
@@ -53,6 +59,15 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
     deep: "#020a16",
     glow: "rgba(0, 240, 255, 0.75)",
   },
+  transcribing: {
+    energy: 0.92,
+    motion: 0.42,
+    accent: "#38bdf8",
+    electric: "#67e8f9",
+    hot: "#ffffff",
+    deep: "#020b18",
+    glow: "rgba(56, 189, 248, 0.62)",
+  },
   thinking: {
     energy: 0.92,
     motion: 0.55,
@@ -61,6 +76,15 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
     hot: "#ffffff",
     deep: "#020e20",
     glow: "rgba(2, 132, 199, 0.7)",
+  },
+  acting: {
+    energy: 1.0,
+    motion: 0.88,
+    accent: "#06b6d4",
+    electric: "#22d3ee",
+    hot: "#ffffff",
+    deep: "#021226",
+    glow: "rgba(6, 182, 212, 0.78)",
   },
   working: {
     energy: 1.0,
@@ -79,6 +103,15 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
     hot: "#ffffff",
     deep: "#011216",
     glow: "rgba(45, 212, 191, 0.7)",
+  },
+  approval_wait: {
+    energy: 0.7,
+    motion: 0.04,
+    accent: "#f59e0b",
+    electric: "#fbbf24",
+    hot: "#fef3c7",
+    deep: "#180c02",
+    glow: "rgba(245, 158, 11, 0.5)",
   },
   waiting: {
     energy: 0.75,
@@ -107,6 +140,24 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
     deep: "#01160e",
     glow: "rgba(16, 185, 129, 0.8)",
   },
+  success: {
+    energy: 1.0,
+    motion: 0.18,
+    accent: "#10b981",
+    electric: "#34d399",
+    hot: "#ecfdf5",
+    deep: "#01160e",
+    glow: "rgba(16, 185, 129, 0.72)",
+  },
+  recovering: {
+    energy: 0.82,
+    motion: 0.22,
+    accent: "#f59e0b",
+    electric: "#fbbf24",
+    hot: "#fef3c7",
+    deep: "#120b02",
+    glow: "rgba(245, 158, 11, 0.56)",
+  },
   error: {
     energy: 0.9,
     motion: 0.25,
@@ -115,6 +166,15 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
     hot: "#fef2f2",
     deep: "#1a0404",
     glow: "rgba(248, 113, 113, 0.7)",
+  },
+  degraded: {
+    energy: 0.58,
+    motion: 0.06,
+    accent: "#f59e0b",
+    electric: "#94a3b8",
+    hot: "#fef3c7",
+    deep: "#0f0c08",
+    glow: "rgba(245, 158, 11, 0.34)",
   },
   offline: {
     energy: 0.5,
@@ -129,7 +189,10 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
 
 function normalizeState(rawState: string, connected: boolean): CoreVisualState {
   if (!connected) return "offline";
-  if (rawState === "executing") return "working";
+  if (rawState === "executing" || rawState === "working") return "acting";
+  if (rawState === "completed") return "success";
+  if (rawState === "waiting") return "approval_wait";
+  if (rawState === "attention") return "error";
   if (rawState in PROFILES) return rawState as CoreVisualState;
   return "idle";
 }
@@ -261,10 +324,12 @@ function drawLuminousRing(
   time: number,
   profile: CoreProfile,
   pulse: number,
-  audioLevel: number
+  audioLevel: number,
+  currentState: CoreVisualState,
 ): void {
   const baseRadius = unit * 0.285;
-  const breath = 1 + Math.sin(time * 0.002) * 0.004 + pulse * 0.03 + audioLevel * 0.02;
+  const audioReactive = ["listening", "transcribing", "speaking"].includes(currentState) ? audioLevel : 0;
+  const breath = 1 + Math.sin(time * 0.002) * 0.004 + pulse * 0.03 + audioReactive * 0.02;
   const r = baseRadius * breath;
   const rot = time * 0.0006 * (1 + profile.motion);
 
@@ -364,13 +429,16 @@ function drawLuminousRing(
   // G. Dynamic Directional Traveling Wave Segment
   const traceAngle = (time * 0.0016 * (1 + profile.motion * 0.5)) % TWO_PI;
   const traceLen = Math.PI * 0.28;
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.95)";
-  ctx.lineWidth = Math.max(2.0, unit * 0.009);
-  ctx.shadowColor = "#ffffff";
-  ctx.shadowBlur = 10;
-  ctx.beginPath();
-  ctx.arc(centerX, centerY, r + unit * 0.004, traceAngle, traceAngle + traceLen);
-  ctx.stroke();
+  const hasTravelingSignal = !["idle", "approval_wait", "offline", "degraded", "error"].includes(currentState);
+  if (hasTravelingSignal) {
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.95)";
+    ctx.lineWidth = Math.max(2.0, unit * 0.009);
+    ctx.shadowColor = "#ffffff";
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, r + unit * 0.004, traceAngle, traceAngle + traceLen);
+    ctx.stroke();
+  }
 
   // H. Completion / Click Pulse Wave
   if (pulse > 0) {
@@ -405,7 +473,7 @@ function drawFrame(
   const elapsed = reduceMotion ? 0 : time;
 
   const statePulse =
-    currentState === "completed"
+    currentState === "success"
       ? Math.max(0, Math.min(1, (time - pulseStartedAt) / 800))
       : 0;
   const clickPulse = Math.max(0, Math.min(1, (time - clickPulseStartedAt) / 500));
@@ -420,29 +488,31 @@ function drawFrame(
   drawParticleSphere(ctx, centerX, centerY, unit * 0.23, elapsed, profile, SPHERE_POINTS, reduceMotion);
 
   // 3. Exact multi-layer luminous electric cyan torus ring with hot crescent
-  drawLuminousRing(ctx, centerX, centerY, unit, elapsed, profile, pulse, audioLevel);
+  drawLuminousRing(ctx, centerX, centerY, unit, elapsed, profile, pulse, audioLevel, currentState);
 }
 
 export function CharlieRing(): ReactElement {
   const coreState = useCharlieStore((state) => state.coreState);
+  const visualPhase = useCharlieStore((state) => state.visualRuntime.phase);
   const connected = useCharlieStore((state) => state.connected);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const stateRef = useRef<CoreVisualState>(normalizeState(coreState, connected));
+  const initialState = normalizeState(visualPhase === "offline" && connected ? coreState : visualPhase, connected);
+  const stateRef = useRef<CoreVisualState>(initialState);
   const lastStateRef = useRef<CoreVisualState>(stateRef.current);
   const audioLevelRef = useRef(0);
   const pulseStartedAtRef = useRef(0);
   const clickPulseStartedAtRef = useRef(0);
   const reduceMotionRef = useRef(false);
 
-  const state = normalizeState(coreState, connected);
+  const state = normalizeState(visualPhase === "offline" && connected ? coreState : visualPhase, connected);
 
   useEffect(() => {
     const previousState = lastStateRef.current;
     stateRef.current = state;
     lastStateRef.current = state;
-    if (state !== previousState && state === "completed") {
+    if (state !== previousState && state === "success") {
       pulseStartedAtRef.current = performance.now();
     }
   }, [state]);
@@ -535,7 +605,6 @@ export function CharlieRing(): ReactElement {
       className="hud-ring"
       data-core-renderer="authoritative-charlie-ring"
       data-state={state}
-      data-audio-level={useCharlieStore.getState().audioLevel}
       role="img"
       aria-label={`Charlie ${label}`}
       onClick={handleClick}

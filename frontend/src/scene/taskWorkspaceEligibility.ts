@@ -7,9 +7,9 @@ import type { RuntimeTask } from "../store/charlie";
  */
 export function hasTaskWorkspaceSubstance(task: RuntimeTask): boolean {
   if (task.totalSteps > 0) return true;
-  if (Boolean(task.currentAction?.trim())) return true;
-  if (Boolean(task.waitingReason?.trim())) return true;
-  if (Boolean(task.approvalReference?.trim())) return true;
+  if (task.currentAction?.trim()) return true;
+  if (task.waitingReason?.trim()) return true;
+  if (task.approvalReference?.trim()) return true;
   return (task.capabilityRequirements?.length ?? 0) > 0;
 }
 

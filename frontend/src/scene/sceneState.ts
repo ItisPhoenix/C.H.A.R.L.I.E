@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useCharlieStore, type PresentationIntent } from "../store/charlie";
+import type { VisualRuntimeState } from "../runtime/visualRuntime";
 import { useWorkspaceStore, type WorkspaceInstance } from "../layout/workspaceStore";
 import { useWidgetStore, type WidgetInstance } from "../layout/widgetStore";
 
@@ -15,12 +16,15 @@ export interface SceneProjection {
   activeNotifications: PresentationIntent[];
   activeCaption: string | null;
   coreState: string;
+  visualRuntime: VisualRuntimeState;
 }
 
 export function useSceneProjection(): SceneProjection {
   const presentationIntents = useCharlieStore((s) => s.presentationIntents);
   const activeCaption = useCharlieStore((s) => s.activeCaption);
   const coreState = useCharlieStore((s) => s.coreState);
+  const visualRuntime = useCharlieStore((s) => s.visualRuntime);
+  const connected = useCharlieStore((s) => s.connected);
 
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
@@ -85,6 +89,10 @@ export function useSceneProjection(): SceneProjection {
       sceneMode = "active";
     }
 
+    const projectedVisualRuntime = visualRuntime.phase === "offline" && connected
+      ? { ...visualRuntime, phase: "idle" as const, label: "IDLE", detail: null }
+      : visualRuntime;
+
     return {
       sceneMode,
       corePosition,
@@ -94,11 +102,14 @@ export function useSceneProjection(): SceneProjection {
       activeNotifications,
       activeCaption,
       coreState,
+      visualRuntime: projectedVisualRuntime,
     };
   }, [
     presentationIntents,
     activeCaption,
     coreState,
+    visualRuntime,
+    connected,
     workspaces,
     activeWorkspaceId,
     widgets,

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactElement } from "react";
+import { useState, type ReactElement } from "react";
 import { useCharlieStore } from "../store/charlie";
 import { sendCommand } from "../runtime/bridge";
 import { Modal, ModalField, ModalActions } from "./Modal";
@@ -7,10 +7,6 @@ import { Modal, ModalField, ModalActions } from "./Modal";
 export function ToolApprovalDialog(): ReactElement | null {
   const activeToolApproval = useCharlieStore((s) => s.activeToolApproval);
   const [respondingFor, setRespondingFor] = useState<string | null>(null);
-
-  useEffect(() => {
-    setRespondingFor(null);
-  }, [activeToolApproval?.request_id]);
 
   if (!activeToolApproval) return null;
 
