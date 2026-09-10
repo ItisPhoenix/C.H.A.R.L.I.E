@@ -718,14 +718,33 @@ class SessionStore:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).strftime(
                 "%Y-%m-%dT%H:%M:%S.%fZ"
             )
+            protected_clause = ""
+            protected_parameters: tuple[str, ...] = ()
+            if protected:
+                placeholders = ",".join("?" for _ in protected)
+                protected_clause = f" AND (session_id IS NULL OR session_id NOT IN ({placeholders}))"
+                protected_parameters = protected
+            cutoff_parameters = (cutoff, *protected_parameters)
             messages_purged = int(
-                tx.execute("SELECT COUNT(*) FROM messages WHERE timestamp < ?", (cutoff,)).fetchone()[0]
+                tx.execute(
+                    f"SELECT COUNT(*) FROM messages WHERE timestamp < ?{protected_clause}",
+                    cutoff_parameters,
+                ).fetchone()[0]
             )
             tool_events_purged = int(
-                tx.execute("SELECT COUNT(*) FROM tool_events WHERE created_at < ?", (cutoff,)).fetchone()[0]
+                tx.execute(
+                    f"SELECT COUNT(*) FROM tool_events WHERE created_at < ?{protected_clause}",
+                    cutoff_parameters,
+                ).fetchone()[0]
             )
-            tx.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
-            tx.execute("DELETE FROM tool_events WHERE created_at < ?", (cutoff,))
+            tx.execute(
+                f"DELETE FROM messages WHERE timestamp < ?{protected_clause}",
+                cutoff_parameters,
+            )
+            tx.execute(
+                f"DELETE FROM tool_events WHERE created_at < ?{protected_clause}",
+                cutoff_parameters,
+            )
             return {
                 "messages_purged": messages_purged,
                 "sessions_purged": 0,

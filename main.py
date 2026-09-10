@@ -1813,8 +1813,9 @@ async def _handle_privacy_operation_request(
     browser_guard_owner: Optional[str] = None
     lifecycle_gate_acquired = False
     try:
-        full_transcript_purge = operation == "purge" and category in {"transcripts", "all"} and older_than_days is None
-        if full_transcript_purge and lifecycle_gate is not None:
+        transcript_purge = operation == "purge" and category in {"transcripts", "all"}
+        full_transcript_purge = transcript_purge and older_than_days is None
+        if transcript_purge and lifecycle_gate is not None:
             await lifecycle_gate.acquire()
             lifecycle_gate_acquired = True
         if session_state is not None:

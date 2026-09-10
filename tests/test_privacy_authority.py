@@ -220,33 +220,42 @@ async def test_full_transcript_purge_rejects_busy_sessions(tmp_path, kwargs):
         store.close()
 
 
-def test_age_transcript_purge_preserves_metadata_and_fts(tmp_path):
+def test_age_transcript_purge_preserves_protected_data_metadata_and_fts(tmp_path):
     service, store, audit = _composed_service(tmp_path)
     try:
-        store.create_session("old", "Keep metadata", source="web", launch_id="launch")
-        store.append("user", "retireme transcript", session_id="old")
-        store.append_tool_event("old", "call", "old_tool", "retireme event")
+        store.create_session("busy", "Busy metadata", source="web", launch_id="launch")
+        store.append("user", "busypreserve transcript", session_id="busy")
+        store.append_tool_event("busy", "call", "busy_tool", "busypreserve event")
+        store.create_session("idle", "Idle metadata", source="web", launch_id="launch")
+        store.append("user", "idledelete transcript", session_id="idle")
+        store.append_tool_event("idle", "call", "idle_tool", "idledelete event")
         store.create_session("new", "New metadata", source="web", launch_id="launch")
-        store.append("user", "keepme transcript", session_id="new")
-        store.conn.execute(
-            "UPDATE messages SET timestamp = ? WHERE session_id = ?",
-            ("2000-01-01T00:00:00.000000Z", "old"),
-        )
-        store.conn.execute(
-            "UPDATE tool_events SET created_at = ? WHERE session_id = ?",
-            ("2000-01-01T00:00:00.000000Z", "old"),
-        )
+        store.append("user", "recentpreserve transcript", session_id="new")
+        store.append_tool_event("new", "call", "new_tool", "recentpreserve event")
+        for table, column in (("messages", "timestamp"), ("tool_events", "created_at")):
+            store.conn.execute(
+                f"UPDATE {table} SET {column} = ? WHERE session_id IN (?, ?)",
+                ("2000-01-01T00:00:00.000000Z", "busy", "idle"),
+            )
         store.conn.commit()
 
-        result = service.purge_category("transcripts", older_than_days=1)
+        result = service.purge_category("transcripts", older_than_days=1, protected_session_ids=("busy",))
 
         assert result["status"] == "ok"
-        assert store.session_exists("old")
-        assert store.get_session_record("old")["title"] == "Keep metadata"
-        assert store.get_session_messages("old") == []
-        assert store.get_tool_events("old") == []
-        assert store.get_session_messages("new") == [("user", "keepme transcript")]
-        assert not store.search("retireme")
+        assert result["messages_purged"] == 1
+        assert result["tool_events_purged"] == 1
+        for session_id, title in (("busy", "Busy metadata"), ("idle", "Idle metadata"), ("new", "New metadata")):
+            assert store.session_exists(session_id)
+            assert store.get_session_record(session_id)["title"] == title
+        assert store.get_session_messages("busy") == [("user", "busypreserve transcript")]
+        assert store.get_tool_events("busy") == [("call", "busy_tool", "busypreserve event")]
+        assert store.get_session_messages("idle") == []
+        assert store.get_tool_events("idle") == []
+        assert store.get_session_messages("new") == [("user", "recentpreserve transcript")]
+        assert store.get_tool_events("new") == [("call", "new_tool", "recentpreserve event")]
+        assert store.search("busypreserve")
+        assert store.search("recentpreserve")
+        assert not store.search("idledelete")
     finally:
         audit.close()
         store.close()
@@ -522,7 +531,11 @@ async def test_duplicate_privacy_mutation_executes_once_and_conflict_is_rejected
 
 
 @pytest.mark.asyncio
-async def test_full_transcript_purge_holds_lifecycle_gate_against_new_admission():
+@pytest.mark.parametrize(
+    ("category", "older_than_days"),
+    [("transcripts", None), ("transcripts", 1), ("all", 1)],
+)
+async def test_transcript_purge_holds_lifecycle_gate_against_new_admission(category, older_than_days):
     from main import _handle_privacy_operation_request
 
     class SlowService:
@@ -535,7 +548,7 @@ async def test_full_transcript_purge_holds_lifecycle_gate_against_new_admission(
             self.protected_session_ids = tuple(protected_session_ids)
             self.started.set()
             assert self.release.wait(2)
-            return {"status": "ok", "category": "transcripts", "freed_bytes": 0, "items_purged": 0}
+            return {"status": "ok", "category": _category, "freed_bytes": 0, "items_purged": 0}
 
     service = SlowService()
     lifecycle_gate = asyncio.Lock()
@@ -544,7 +557,13 @@ async def test_full_transcript_purge_holds_lifecycle_gate_against_new_admission(
         _handle_privacy_operation_request(
             service,
             _EventBus(),
-            _payload("purge", "lifecycle-race", category="transcripts", confirmed=True),
+            _payload(
+                "purge",
+                f"lifecycle-race-{category}-{older_than_days}",
+                category=category,
+                older_than_days=older_than_days,
+                confirmed=True,
+            ),
             result_cache=OrderedDict(),
             in_flight={},
             fingerprint_cache={},
