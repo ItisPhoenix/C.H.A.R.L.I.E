@@ -667,6 +667,37 @@ async def websocket_endpoint(ws: WebSocket):
                     # Security: Frontend MUST NOT submit authoritative runtime or approval events.
                     logger.warning("Rejected unauthorized runtime event from client WebSocket: %s", msg_type)
                     continue
+                elif msg_type == "chat":
+                    raw_payload = msg.get("payload")
+                    if not isinstance(raw_payload, dict):
+                        logger.warning("Rejected malformed WebSocket chat payload")
+                        continue
+                    payload = dict(raw_payload)
+                    session_id = payload.get("session_id") or msg.get("session_id") or _primary_session_id()
+                    text = payload.get("text") if "text" in payload else msg.get("text")
+                    if not isinstance(session_id, str) or not session_id.strip():
+                        logger.warning("Rejected WebSocket chat without a session ID")
+                        continue
+                    text = str(text or "").strip()
+                    if not text:
+                        logger.warning("Rejected empty WebSocket chat")
+                        continue
+                    payload.update(
+                        {
+                            "operation": "chat",
+                            "session_id": session_id.strip(),
+                            "text": text,
+                            "request_id": _terminal_request_id(
+                                payload.get("request_id") or msg.get("request_id")
+                            ),
+                        }
+                    )
+                    payload["request_fingerprint"] = canonical_session_request_fingerprint("chat", payload)
+                    if event_bus:
+                        canonical_message = dict(msg)
+                        canonical_message["payload"] = payload
+                        await event_bus.send_command(canonical_message)
+                        logger.debug("WS forwarded canonical chat command: %s", canonical_message)
                 elif event_bus:
                     # Forward legitimate client request/action commands to EventBus
                     await event_bus.send_command(msg)

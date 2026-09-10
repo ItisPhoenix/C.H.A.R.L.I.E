@@ -1512,7 +1512,23 @@ async def _handle_session_operation_request(
                         accepted_data = accept_callback()
                         if inspect.isawaitable(accepted_data):
                             accepted_data = await accepted_data
-                        result_payload["result"].update(dict(accepted_data or {}))
+                        if isinstance(accepted_data, dict) and accepted_data.get("accepted") is False:
+                            status = accepted_data.get("status")
+                            if status not in {"unavailable", "shutting_down"}:
+                                status = "unavailable"
+                            result_payload.update(
+                                status=status,
+                                result=dict(
+                                    accepted_data.get("result")
+                                    or {
+                                        "ok": False,
+                                        "failure_kind": "runtime_unavailable",
+                                        "reason": "Main foreground turn admission is unavailable.",
+                                    }
+                                ),
+                            )
+                        else:
+                            result_payload["result"].update(dict(accepted_data or {}))
         else:
             result_payload.update(
                 status="unsupported",
@@ -6187,6 +6203,29 @@ async def main() -> int:
                     ),
                 )
 
+            def _submit_web_turn(request: TurnRequest) -> dict[str, Any]:
+                try:
+                    submission = _submit_event_task(_dispatch_or_queue(request))
+                except RuntimeError:
+                    logger.warning("Web foreground turn submission failed", exc_info=True)
+                    submission = None
+                if submission is not None:
+                    return {"turn_id": request.turn_id}
+                shutting_down = bool(runtime_shutting_down)
+                return {
+                    "accepted": False,
+                    "status": "shutting_down" if shutting_down else "unavailable",
+                    "result": {
+                        "ok": False,
+                        "failure_kind": "runtime_shutting_down" if shutting_down else "runtime_unavailable",
+                        "reason": (
+                            "Main runtime is shutting down; foreground turn was not admitted."
+                            if shutting_down
+                            else "Main foreground turn authority is unavailable; turn was not admitted."
+                        ),
+                    },
+                }
+
             while True:
                 try:
                     cmd = await event_bus.next_command()
@@ -6202,8 +6241,7 @@ async def main() -> int:
                                 str(payload.get("session_id") or ""),
                                 "web",
                             )
-                            await _dispatch_or_queue(request)
-                            return {"turn_id": request.turn_id}
+                            return _submit_web_turn(request)
 
                         result = await _session_request(
                             payload,
@@ -6217,17 +6255,20 @@ async def main() -> int:
                         chat_payload.setdefault("text", cmd.get("text") or chat_payload.get("text", ""))
                         async def accept_ws_chat():
                             nonlocal current_web_session_id
-                            current_web_session_id = chat_payload.get("session_id") or _voice_fallback_session_id
+                            candidate_session_id = chat_payload.get("session_id") or _voice_fallback_session_id
+                            request = _allocate_turn_request(
+                                chat_payload.get("text", ""),
+                                candidate_session_id,
+                                "web",
+                            )
+                            submission = _submit_web_turn(request)
+                            if submission.get("accepted") is False:
+                                return submission
+                            current_web_session_id = candidate_session_id
                             from charlie.recovery import set_active_session_id
 
                             set_active_session_id(current_web_session_id)
-                            request = _allocate_turn_request(
-                                chat_payload.get("text", ""),
-                                current_web_session_id,
-                                "web",
-                            )
-                            await _dispatch_or_queue(request)
-                            return {"turn_id": request.turn_id}
+                            return submission
 
                         await _session_request(
                             chat_payload,

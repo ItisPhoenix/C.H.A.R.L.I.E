@@ -105,8 +105,17 @@ async def test_web_ingress_allocates_one_request_before_dispatch(monkeypatch: py
     allocated: list[TurnRequest] = []
     dispatched: list[TurnRequest] = []
 
-    async def dispatch(request: TurnRequest) -> None:
+    def dispatch(request: TurnRequest):
         dispatched.append(request)
+
+        async def submitted_turn():
+            return None
+
+        return submitted_turn()
+
+    def submit(coro):
+        coro.close()
+        return object()
 
     class CommandBus:
         async def next_command(self):
@@ -121,6 +130,7 @@ async def test_web_ingress_allocates_one_request_before_dispatch(monkeypatch: py
     namespace = {
         "_allocate_turn_request": _recording_allocator(allocated),
         "_dispatch_or_queue": dispatch,
+        "_submit_event_task": submit,
         "logger": _NullLogger(),
         "_log_received_web_command": main._log_received_web_command,
         "asyncio": asyncio,
@@ -146,6 +156,99 @@ async def test_web_ingress_allocates_one_request_before_dispatch(monkeypatch: py
     assert allocated[0].channel == "web"
     assert allocated[0].session_id == "web-session"
     assert allocated[0].input == "web request"
+
+
+def test_web_ingress_submits_turns_to_tracked_work_without_awaiting_completion() -> None:
+    source = _function_source("consume_web_commands")
+
+    assert "submission = _submit_event_task(_dispatch_or_queue(request))" in source
+    assert "await _dispatch_or_queue(request)" not in source
+    assert source.count("return _submit_web_turn(request)") == 1
+    assert "submission = _submit_web_turn(request)" in source
+    assert "return submission" in source
+
+
+@pytest.mark.asyncio
+async def test_two_rapid_web_turns_use_existing_serialized_dispatch_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    from charlie import core
+
+    monkeypatch.setattr(core, "get_active_voice_approval", lambda: None)
+    source = _function_source("_dispatch_or_queue_impl")
+    processed: list[TurnRequest] = []
+    max_running = [0]
+    running = [0]
+    first_started = asyncio.Event()
+    release = asyncio.Event()
+    scheduled: list[asyncio.Task] = []
+
+    namespace = {
+        "TurnRequest": TurnRequest,
+        "logger": _NullLogger(),
+        "processed": processed,
+        "max_running": max_running,
+        "running": running,
+        "first_started": first_started,
+        "release": release,
+        "scheduled": scheduled,
+        "asyncio": asyncio,
+        "time": __import__("time"),
+        "ensure_session_ready": lambda _session_id: None,
+        "SimpleNamespace": SimpleNamespace,
+    }
+    wrapper_source = (
+        "def _wrapper():\n"
+        "    turn_active = False\n"
+        "    pending_turns = []\n"
+        "    pending_turn_times = {}\n"
+        "    voice_diagnostic_traces = {}\n"
+        "    active_turn_id = None\n"
+        "    active_turn_session_id = None\n"
+        "    active_task_id = None\n"
+        "    active_process_task = None\n"
+        "    active_operation_name = None\n"
+        "    active_operation_task_id = None\n"
+        "    active_operation_cancellable = True\n"
+        "    brain = SimpleNamespace(cancel_chat=lambda: None)\n"
+        "    voice = SimpleNamespace(set_diagnostic_context=lambda _trace: None)\n"
+        "    loop = None\n"
+        "    async def _process(request, _brain, _voice):\n"
+        "        running[0] += 1\n"
+        "        max_running[0] = max(max_running[0], running[0])\n"
+        "        processed.append(request)\n"
+        "        first_started.set()\n"
+        "        await release.wait()\n"
+        "        running[0] -= 1\n"
+        "    def _schedule_process(coro, _loop):\n"
+        "        scheduled.append(asyncio.create_task(coro))\n"
+        + textwrap.indent(source, "    ")
+        + "\n"
+        + "    async def _dispatch_or_queue(request):\n"
+        + "        await _dispatch_or_queue_impl(request, lambda: None)\n"
+        + "    return _dispatch_or_queue, pending_turns, scheduled\n"
+    )
+    exec(compile(wrapper_source, "<main._dispatch_or_queue>", "exec"), namespace)
+    dispatch, pending, scheduled = namespace["_wrapper"]()
+    first = TurnRequest.allocate("first web request", "web-session", "web")
+    second = TurnRequest.allocate("second web request", "web-session", "web")
+
+    first_task = asyncio.create_task(dispatch(first))
+    await first_started.wait()
+    second_task = asyncio.create_task(dispatch(second))
+    await asyncio.sleep(0)
+
+    assert processed == [first]
+    assert pending == [second]
+    assert max_running == [1]
+
+    release.set()
+    await first_task
+    assert pending == [second]
+    pending.pop(0)
+    await dispatch(second)
+    await second_task
+    assert processed == [first, second]
+    assert max_running == [1]
+    assert scheduled == []
 
 
 @pytest.mark.asyncio

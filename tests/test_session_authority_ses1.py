@@ -1,11 +1,13 @@
 import asyncio
 import inspect
+import json
 import sqlite3
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from starlette.websockets import WebSocketDisconnect
 
 from charlie.session_read_projection import SessionReadProjection
 from charlie.session_store import (
@@ -15,6 +17,7 @@ from charlie.session_store import (
     canonical_session_request_fingerprint,
 )
 from charlie.tasks import ManagedTask, TaskManager, TaskManagerAdmissionClosed
+from charlie.turn_contracts import TurnRequest
 
 
 class _EventBus:
@@ -75,10 +78,168 @@ async def test_chat_admission_replay_does_not_accept_second_execution(tmp_path):
     caches = {"result_cache": OrderedDict(), "in_flight": {}, "fingerprint_cache": {}}
     payload = {"operation": "chat", "request_id": "chat-1", "session_id": "s1", "text": "hello"}
     payload["request_fingerprint"] = canonical_session_request_fingerprint("chat", payload)
-    first = await _handle_session_operation_request(store, bus, payload, launch_id="launch-1", **caches)
-    retry = await _handle_session_operation_request(store, bus, payload, launch_id="launch-1", **caches)
+    accepted = []
+
+    def accept_callback():
+        request = TurnRequest.allocate(payload["text"], payload["session_id"], "web")
+        accepted.append(request)
+        return {"turn_id": request.turn_id}
+
+    first = await _handle_session_operation_request(
+        store,
+        bus,
+        payload,
+        launch_id="launch-1",
+        accept_callback=accept_callback,
+        **caches,
+    )
+    retry = await _handle_session_operation_request(
+        store,
+        bus,
+        payload,
+        launch_id="launch-1",
+        accept_callback=accept_callback,
+        **caches,
+    )
     assert first["status"] == "accepted"
     assert retry["result"]["replayed"] is True
+    assert retry["result"]["turn_id"] == first["result"]["turn_id"]
+    assert len(accepted) == 1
+    conflict_payload = {**payload, "text": "different"}
+    conflict_payload["request_fingerprint"] = canonical_session_request_fingerprint("chat", conflict_payload)
+    conflict = await _handle_session_operation_request(
+        store,
+        bus,
+        conflict_payload,
+        launch_id="launch-1",
+        accept_callback=accept_callback,
+        **caches,
+    )
+    assert conflict["status"] == "request_id_conflict"
+    assert len(accepted) == 1
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_chat_admission_submits_once(tmp_path):
+    from main import _handle_session_operation_request
+
+    store = SessionStore(str(tmp_path / "chat-concurrent-idempotency.db"))
+    store.create_session("s1", "Chat", source="web", launch_id="launch-1")
+    bus = _EventBus()
+    caches = {"result_cache": OrderedDict(), "in_flight": {}, "fingerprint_cache": {}}
+    payload = {"operation": "chat", "request_id": "chat-concurrent", "session_id": "s1", "text": "hello"}
+    payload["request_fingerprint"] = canonical_session_request_fingerprint("chat", payload)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    accepted = []
+
+    async def accept_callback():
+        request = TurnRequest.allocate(payload["text"], payload["session_id"], "web")
+        accepted.append(request)
+        started.set()
+        await release.wait()
+        return {"turn_id": request.turn_id}
+
+    kwargs = {
+        "store": store,
+        "event_bus": bus,
+        "payload": payload,
+        "launch_id": "launch-1",
+        "accept_callback": accept_callback,
+        **caches,
+    }
+    first_task = asyncio.create_task(_handle_session_operation_request(**kwargs))
+    await started.wait()
+    second_task = asyncio.create_task(_handle_session_operation_request(**kwargs))
+    await asyncio.sleep(0)
+    assert len(accepted) == 1
+    release.set()
+    first, second = await asyncio.gather(first_task, second_task)
+
+    assert first["status"] == "accepted"
+    assert second["status"] == "accepted"
+    assert second["result"]["replayed"] is True
+    assert second["result"]["turn_id"] == first["result"]["turn_id"]
+    assert len(accepted) == 1
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_production_shape_websocket_chat_is_canonicalized_before_main_authority(tmp_path, monkeypatch):
+    import charlie.web_server as web_server
+    from main import _handle_session_operation_request
+
+    class ChatWebSocket:
+        def __init__(self, message):
+            self.headers = {"origin": "http://localhost"}
+            self._messages = [json.dumps(message)]
+            self.sent = []
+
+        async def accept(self):
+            return None
+
+        async def send_text(self, message):
+            self.sent.append(json.loads(message))
+
+        async def receive_text(self):
+            if self._messages:
+                return self._messages.pop(0)
+            raise WebSocketDisconnect(code=1000)
+
+    class IngressBus(_EventBus):
+        def __init__(self):
+            super().__init__()
+            self.commands = []
+
+        async def send_command(self, command):
+            self.commands.append(command)
+            return True
+
+    bus = IngressBus()
+    socket = ChatWebSocket(
+        {
+            "type": "chat",
+            "payload": {"text": "hello", "session_id": "s1", "request_id": "ws-chat-1"},
+        }
+    )
+    monkeypatch.setattr(web_server, "event_bus", bus)
+    monkeypatch.setattr(web_server, "_initial_state_events", lambda: [])
+    monkeypatch.setattr(web_server, "active_connections", set())
+    monkeypatch.setattr(web_server, "ws_sessions", {})
+
+    await web_server.websocket_endpoint(socket)
+
+    chat_commands = [command for command in bus.commands if command.get("type") == "chat"]
+    assert len(chat_commands) == 1
+    payload = chat_commands[0]["payload"]
+    assert payload["operation"] == "chat"
+    assert payload["request_id"] == "ws-chat-1"
+    assert payload["request_fingerprint"] == canonical_session_request_fingerprint("chat", payload)
+
+    store = SessionStore(str(tmp_path / "websocket-chat-authority.db"))
+    store.create_session("s1", "Chat", source="web", launch_id="launch-1")
+    accepted = []
+
+    def accept_callback():
+        request = TurnRequest.allocate(payload["text"], payload["session_id"], "web")
+        accepted.append(request)
+        return {"turn_id": request.turn_id}
+
+    result = await _handle_session_operation_request(
+        store,
+        bus,
+        payload,
+        result_cache=OrderedDict(),
+        in_flight={},
+        fingerprint_cache={},
+        accept_callback=accept_callback,
+        launch_id="launch-1",
+    )
+
+    assert result["status"] == "accepted"
+    assert result["result"]["turn_id"] == accepted[0].turn_id
+    assert accepted[0].channel == "web"
     store.close()
 
 
