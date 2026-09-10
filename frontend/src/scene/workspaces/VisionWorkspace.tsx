@@ -9,15 +9,45 @@ export interface VisionBoundingBox {
   color?: string;
 }
 
+function parseBoundingBoxes(raw: unknown): VisionBoundingBox[] {
+  if (!Array.isArray(raw)) return [];
+
+  return raw.flatMap((entry, index) => {
+    if (!entry || typeof entry !== "object") return [];
+    const value = entry as Record<string, unknown>;
+    const rawBox = value.box;
+    if (!Array.isArray(rawBox) || rawBox.length !== 4) return [];
+
+    const box = rawBox.map(Number);
+    if (box.some((coordinate) => !Number.isFinite(coordinate) || coordinate < 0 || coordinate > 100)) return [];
+    const [ymin, xmin, ymax, xmax] = box;
+    if (ymax < ymin || xmax < xmin) return [];
+
+    return [{
+      id: String(value.id || `observation-${index}`),
+      label: String(value.label || "GROUNDED REGION"),
+      confidence: typeof value.confidence === "number" ? value.confidence : 0,
+      box: [ymin, xmin, ymax, xmax],
+      ...(typeof value.color === "string" ? { color: value.color } : {}),
+    }];
+  });
+}
+
 export function VisionWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
   const content = workspace.contentState || {};
   const title = String(content.title || workspace.title || "VISION GROUNDING WORKSPACE").replace(/^WORKSPACE\s*\/\/\s*/i, "");
   const imageUrl = String(content.image_url || content.snapshot_url || "");
-  const boxes: VisionBoundingBox[] = (content.bounding_boxes as VisionBoundingBox[]) || [
-    { id: "b1", label: "DESKTOP WINDOW [Editor]", confidence: 0.96, box: [15, 10, 80, 55], color: "#22d3ee" },
-    { id: "b2", label: "BUTTON [Submit]", confidence: 0.92, box: [75, 60, 85, 75], color: "#38bdf8" },
-    { id: "b3", label: "TERMINAL PROMPT", confidence: 0.89, box: [20, 60, 68, 92], color: "#34d399" },
-  ];
+  const boxes = parseBoundingBoxes(content.bounding_boxes);
+  const status = String(content.status || content.state || "").toLowerCase();
+  const isPending = content.loading === true || ["loading", "pending", "processing", "starting"].includes(status);
+  const isUnavailable = content.available === false || ["unavailable", "offline", "error", "failed"].includes(status);
+  const emptyMessage = isPending
+    ? "WAITING FOR AUTHORITATIVE VISION OBSERVATION"
+    : isUnavailable
+      ? "VISION OBSERVATION UNAVAILABLE"
+      : imageUrl
+        ? "NO GROUNDED OBJECTS REPORTED"
+        : "NO AUTHORITATIVE VISION FRAME AVAILABLE";
 
   return (
     <div className="w-full h-full flex flex-col justify-between font-mono select-none text-left p-2 overflow-y-auto space-y-4">
@@ -44,20 +74,13 @@ export function VisionWorkspace({ workspace }: { workspace: WorkspaceInstance })
           {imageUrl ? (
             <img src={imageUrl} alt="Perception Frame" className="w-full h-full object-contain" />
           ) : (
-            <div className="w-full h-full flex items-center justify-center bg-slate-950/80 relative">
-              {/* Technical crosshair viewfinder grid */}
-              <div className="absolute inset-0 bg-radial from-cyan-950/20 to-transparent" />
-              <svg className="w-full h-full opacity-30" viewBox="0 0 400 225">
-                <circle cx="200" cy="112.5" r="40" fill="none" stroke="#22d3ee" strokeWidth="1" strokeDasharray="3 3" />
-                <line x1="180" y1="112.5" x2="220" y2="112.5" stroke="#22d3ee" strokeWidth="1" />
-                <line x1="200" y1="92.5" x2="200" y2="132.5" stroke="#22d3ee" strokeWidth="1" />
-              </svg>
-              <span className="text-xs font-mono text-cyan-400/80 z-10">[LOCAL VISION SENSOR STREAM ACTIVE]</span>
+            <div className="w-full h-full flex items-center justify-center bg-slate-950/80 p-6 text-center" role="status">
+              <span className="text-xs font-mono text-cyan-400/80">[{emptyMessage}]</span>
             </div>
           )}
 
           {/* Bounding Boxes */}
-          {boxes.map((b) => {
+          {imageUrl && boxes.map((b) => {
             const [ymin, xmin, ymax, xmax] = b.box;
             const top = `${ymin}%`;
             const left = `${xmin}%`;
@@ -97,12 +120,12 @@ export function VisionWorkspace({ workspace }: { workspace: WorkspaceInstance })
               DETECTION RESULTS
             </div>
             <div className="text-[10px] text-cyan-400/60 uppercase">
-              {boxes.length} OBJECTS GROUNDED
+              {boxes.length > 0 ? `${boxes.length} OBJECTS GROUNDED` : "NO GROUNDED OBJECTS"}
             </div>
           </div>
 
           <div className="space-y-2">
-            {boxes.map((b) => (
+            {boxes.length > 0 ? boxes.map((b) => (
               <div
                 key={b.id}
                 className="p-3 rounded-xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md flex items-center justify-between gap-3 text-left hover:border-cyan-400/40 transition"
@@ -119,7 +142,7 @@ export function VisionWorkspace({ workspace }: { workspace: WorkspaceInstance })
                   {(b.confidence * 100).toFixed(0)}%
                 </span>
               </div>
-            ))}
+            )) : <div className="p-3 border border-cyan-500/15 text-[11px] text-slate-500 italic" role="status">{emptyMessage}</div>}
           </div>
         </div>
       </div>

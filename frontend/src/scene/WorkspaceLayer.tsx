@@ -8,12 +8,14 @@ import { SystemWorkspace } from "./workspaces/SystemWorkspace";
 import { TasksWorkspace } from "./workspaces/TasksWorkspace";
 import { VisionWorkspace } from "./workspaces/VisionWorkspace";
 import { DocumentWorkspace } from "./workspaces/DocumentWorkspace";
-import { TerminalWorkspace } from "./workspaces/TerminalWorkspace";
 import { ConversationWorkspace } from "./workspaces/ConversationWorkspace";
 
 // Lazy-load MapWorkspace to avoid eagerly loading MapLibre/Deck.gl on idle Charlie
 const MapWorkspace = lazy(() =>
   import("./workspaces/MapWorkspace").then((m) => ({ default: m.MapWorkspace }))
+);
+const TerminalWorkspace = lazy(() =>
+  import("./workspaces/TerminalWorkspace").then((m) => ({ default: m.TerminalWorkspace }))
 );
 
 interface WorkspaceLayerProps {
@@ -106,7 +108,17 @@ export function WorkspaceLayer({ activeWorkspace: propWorkspace, onDismiss, layo
       case "file":
         return <DocumentWorkspace workspace={active} />;
       case "terminal":
-        return <TerminalWorkspace workspace={active} />;
+        return (
+          <Suspense
+            fallback={
+              <div className="w-full h-full flex items-center justify-center bg-[#020710] font-mono text-cyan-400 text-xs">
+                INITIALIZING TERMINAL HOST...
+              </div>
+            }
+          >
+            <TerminalWorkspace workspace={active} />
+          </Suspense>
+        );
       case "conversation":
       case "chat":
         return <ConversationWorkspace workspace={active} />;

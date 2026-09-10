@@ -20,7 +20,7 @@ declare global {
   }
 }
 
-if (typeof window !== 'undefined') {
+if (typeof window !== 'undefined' && (import.meta.env.DEV || import.meta.env.MODE === 'test')) {
   (window as unknown as { __CHARLIE_STORES__: unknown }).__CHARLIE_STORES__ = {
     charlie: useCharlieStore,
     workspace: useWorkspaceStore,

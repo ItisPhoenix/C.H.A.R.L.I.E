@@ -4,12 +4,17 @@ import type { WorkspaceInstance } from "../../layout/workspaceStore";
 export function DocumentWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
   const content = workspace.contentState || {};
   const title = String(content.title || workspace.title || "DOCUMENT VIEWER").replace(/^WORKSPACE\s*\/\/\s*/i, "");
-  const textContent = String(
-    content.text ||
-    content.markdown ||
-    workspace.summary ||
-    "# Analysis Report\n\nExecutive summary of recent findings and structural breakdown of the operational environment.\n\n## Key Highlights\n- Systematic analysis complete.\n- 0 critical regressions identified.\n- Verification protocols established."
-  );
+  const textContent = [content.text, content.markdown]
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0) || "";
+  const summary = workspace.summary.trim();
+  const status = String(content.status || content.state || "").toLowerCase();
+  const message = content.loading === true || ["loading", "pending", "processing"].includes(status)
+    ? "LOADING AUTHORITATIVE DOCUMENT..."
+    : content.available === false || ["unavailable", "offline", "error", "failed"].includes(status)
+      ? "DOCUMENT DATA UNAVAILABLE."
+      : summary
+        ? "NO DOCUMENT BODY AVAILABLE."
+        : "NO DOCUMENT SELECTED.";
 
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -40,7 +45,12 @@ export function DocumentWorkspace({ workspace }: { workspace: WorkspaceInstance 
       </div>
 
       {/* Main Document Body */}
-      <div className="p-6 rounded-xl border border-cyan-500/20 bg-slate-950/80 backdrop-blur-md overflow-y-auto max-h-[600px] text-slate-200 font-sans text-sm leading-relaxed space-y-4">
+      {!textContent ? (
+        <div className="p-6 border border-cyan-500/20 bg-slate-950/80 text-slate-400 font-sans text-sm leading-relaxed" role="status">
+          <div className="text-xs font-mono uppercase tracking-wider text-cyan-400/80">{message}</div>
+          {summary && <p className="mt-3 text-slate-300">{summary}</p>}
+        </div>
+      ) : <div className="p-6 rounded-xl border border-cyan-500/20 bg-slate-950/80 backdrop-blur-md overflow-y-auto max-h-[600px] text-slate-200 font-sans text-sm leading-relaxed space-y-4">
         {textContent.split("\n\n").map((para, idx) => {
           if (para.startsWith("# ")) {
             return (
@@ -67,7 +77,7 @@ export function DocumentWorkspace({ workspace }: { workspace: WorkspaceInstance 
           }
           return <p key={idx} className="text-slate-300">{para}</p>;
         })}
-      </div>
+      </div>}
     </div>
   );
 }

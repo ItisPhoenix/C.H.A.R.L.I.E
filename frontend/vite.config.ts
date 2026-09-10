@@ -94,6 +94,23 @@ function buildIdentityPlugin(): Plugin {
       root = config.root
       outDir = resolve(config.root, config.build.outDir)
     },
+    transformIndexHtml(html, context) {
+      if (!context.server) return html
+
+      // Dev has no production bundle fingerprint. Make that limitation explicit
+      // while keeping the same runtime shape as the production manifest.
+      const identity = gitIdentity(resolve(root, '..'))
+      const devManifest = JSON.stringify({
+        build_id: 'dev',
+        input_fingerprint: null,
+        git_sha: identity.git_sha,
+        dirty: identity.dirty,
+        built_at: 'dev',
+      })
+      return html
+        .replaceAll(BUILD_MARKER, devManifest)
+        .replaceAll('__CHARLIE_BUILD_ID__', 'dev')
+    },
     closeBundle() {
       const identity = gitIdentity(resolve(root, '..'))
       const build_id = bundleFingerprint(outDir)

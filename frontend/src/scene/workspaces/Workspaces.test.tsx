@@ -118,12 +118,71 @@ describe("Phase 9 Workspaces Suite", () => {
     render(<VisionWorkspace workspace={{ ...mockWorkspace, type: "vision" }} />);
     expect(screen.getByText("LOCAL VISION PERCEPTION")).toBeDefined();
     expect(screen.getByText("DETECTION RESULTS")).toBeDefined();
+    expect(screen.getByText("NO AUTHORITATIVE VISION FRAME AVAILABLE")).toBeDefined();
+    expect(screen.queryByText("BUTTON [Submit]")).toBeNull();
+  });
+
+  test("VisionWorkspace renders only supplied grounding payload", () => {
+    render(<VisionWorkspace workspace={{
+      ...mockWorkspace,
+      type: "vision",
+      contentState: {
+        image_url: "/observations/frame.png",
+        bounding_boxes: [{ id: "real-1", label: "REAL CONTROL", confidence: 0.8, box: [10, 20, 30, 40] }],
+      },
+    }} />);
+
+    expect(screen.getByText("REAL CONTROL")).toBeDefined();
+    expect(screen.queryByText("DESKTOP WINDOW [Editor]")).toBeNull();
+  });
+
+  test("VisionWorkspace ignores malformed grounding entries", () => {
+    render(<VisionWorkspace workspace={{
+      ...mockWorkspace,
+      type: "vision",
+      contentState: {
+        bounding_boxes: [
+          { id: "bad", label: "MALFORMED", box: [0, 1, 2] },
+          { id: "valid", label: "VALID REGION", confidence: 0.5, box: [10, 20, 30, 40] },
+        ],
+      },
+    }} />);
+
+    expect(screen.getByText("VALID REGION")).toBeDefined();
+    expect(screen.queryByText("MALFORMED")).toBeNull();
   });
 
   test("DocumentWorkspace renders report outline and body text", () => {
     render(<DocumentWorkspace workspace={{ ...mockWorkspace, type: "document" }} />);
     expect(screen.getByText("DOCUMENTATION & REPORT WORKSPACE")).toBeDefined();
     expect(screen.getByText("Test summary description")).toBeDefined();
+    expect(screen.queryByText("0 critical regressions identified.")).toBeNull();
+  });
+
+  test("DocumentWorkspace renders supplied document and honest empty state", () => {
+    const { rerender } = render(<DocumentWorkspace workspace={{ ...mockWorkspace, type: "document", summary: "" }} />);
+    expect(screen.getByText("NO DOCUMENT SELECTED.")).toBeDefined();
+    expect(screen.queryByText("Analysis Report")).toBeNull();
+
+    rerender(<DocumentWorkspace workspace={{
+      ...mockWorkspace,
+      type: "document",
+      summary: "",
+      contentState: { markdown: "# Real Report\n\nAuthoritative body." },
+    }} />);
+    expect(screen.getByText("Real Report")).toBeDefined();
+    expect(screen.getByText("Authoritative body.")).toBeDefined();
+  });
+
+  test("DocumentWorkspace treats malformed document content as unavailable", () => {
+    render(<DocumentWorkspace workspace={{
+      ...mockWorkspace,
+      type: "document",
+      summary: "",
+      contentState: { markdown: { body: "not a document string" } },
+    }} />);
+
+    expect(screen.getByText("NO DOCUMENT SELECTED.")).toBeDefined();
   });
 
   test("TerminalWorkspace renders terminal header and command runner", () => {

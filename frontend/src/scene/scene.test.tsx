@@ -316,7 +316,7 @@ describe("CharlieScene spatial projection & layers", () => {
     expect(mask?.classList.contains("charlie-mask-fade-edges")).toBe(true);
   });
 
-  test("WorkspaceLayer renders active workspace and handles dismiss", () => {
+  test("WorkspaceLayer renders active workspace and handles dismiss", async () => {
     let dismissedId = "";
     const mockWs = {
       id: "ws-direct-1",
@@ -340,7 +340,7 @@ describe("CharlieScene spatial projection & layers", () => {
     );
 
     expect(screen.getByRole("region", { name: "Primary Workspace Direct Workspace Test" })).toBeDefined();
-    expect(screen.getByText("CHARLIE HOST TERMINAL // CONPTY")).toBeDefined();
+    expect(await screen.findByText("CHARLIE HOST TERMINAL // CONPTY")).toBeDefined();
     expect(screen.queryByText("Direct Workspace Test")).toBeNull();
     expect(container.querySelector(".charlie-panel")).toBeNull();
     const closeBtn = screen.getByRole("button", { name: /close/i });

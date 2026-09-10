@@ -1,24 +1,6 @@
 /* CharlieScene Spatial Canvas Design Tokens & Environment Styles */
 
 :root {
-  --scene-bg-deep: #03070b;
-  --scene-bg-base: #060e17;
-  --scene-bg-surface: #0a1824;
-  --scene-bg-glow: rgba(34, 211, 238, 0.08);
-
-  --scene-cyan: #22d3ee;
-  --scene-cyan-dim: rgba(34, 211, 238, 0.18);
-  --scene-cyan-glow: rgba(34, 211, 238, 0.35);
-  
-  --scene-text-primary: #eaf6ff;
-  --scene-text-secondary: #9fc4d6;
-  --scene-text-muted: #527385;
-
-  --scene-grid-minor: rgba(34, 211, 238, 0.03);
-  --scene-grid-major: rgba(34, 211, 238, 0.07);
-  --scene-frame-line: rgba(34, 211, 238, 0.22);
-  --scene-frame-tick: rgba(34, 211, 238, 0.45);
-
   --scene-safe-x: clamp(16px, 3.5vw, 48px);
   --scene-safe-y: clamp(16px, 3.5vh, 48px);
 
@@ -26,8 +8,7 @@
   --core-docked-size: 240px;
   --workspace-core-safe: clamp(190px, 16vw, 250px);
 
-  --ease-spatial: cubic-bezier(0.16, 1, 0.3, 1);
-  --duration-fast: 150ms;
+  --ease-spatial: var(--ease-out-expo);
   --duration-spatial: 420ms;
 }
 
@@ -39,7 +20,7 @@
   height: 100vh;
   background-color: var(--scene-bg-deep);
   color: var(--scene-text-primary);
-  font-family: Geist, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-ui);
   overflow: hidden;
   user-select: none;
   z-index: 10;
@@ -125,7 +106,7 @@
   top: -4px;
   left: 50%;
   transform: translateX(-50%);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--font-technical);
   font-size: 10px;
   letter-spacing: 0.15em;
   color: var(--scene-text-muted);
@@ -176,7 +157,7 @@
   border: 1px solid rgba(34,211,238,.18);
   background: rgba(2,7,14,.55);
   color: rgba(159,196,214,.75);
-  font: 11px/1 "JetBrains Mono", monospace;
+  font: 11px/1 var(--font-technical);
   cursor: pointer;
 }
 .charlie-control:hover { color: var(--scene-cyan); border-color: rgba(34,211,238,.55); }
@@ -196,11 +177,11 @@
   justify-content: center;
   gap: 8px;
   color: var(--scene-text-muted);
-  font: 12px/1.5 Geist, system-ui, sans-serif;
+  font: 12px/1.5 var(--font-ui);
 }
 .charlie-empty-kicker {
   color: var(--scene-cyan-dim);
-  font: 10px/1 "JetBrains Mono", monospace;
+  font: 10px/1 var(--font-technical);
   letter-spacing: .16em;
   text-transform: uppercase;
 }
