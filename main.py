@@ -4368,6 +4368,50 @@ async def main() -> int:
         background_task.close_admission()
         event_bus_registry.close()
 
+    def _stop_voice(*, final: bool) -> None:
+        nonlocal voice, shutdown_quiescent, exit_code
+        if voice is None:
+            return
+
+        def _set_optional_voice_health(name: str, status: HealthStatus, detail: str) -> None:
+            try:
+                _set_subsystem_health(name, status, detail)
+            except ValueError:
+                logger.debug("Voice health projection does not expose subsystem %s", name)
+
+        try:
+            result = voice.stop()
+            if result is None:
+                voice = None
+                return
+            if bool(getattr(result, "quiescent", False)):
+                _set_subsystem_health("voice", HealthStatus.STOPPED, "Stopped")
+                _set_optional_voice_health("voice_capture", HealthStatus.STOPPED, "Stopped")
+                _set_optional_voice_health("asr", HealthStatus.STOPPED, "Stopped")
+                voice = None
+                return
+
+            _set_subsystem_health("voice", HealthStatus.DEGRADED, "Voice shutdown incomplete")
+            _set_optional_voice_health("voice_capture", HealthStatus.DEGRADED, "Voice shutdown incomplete")
+            if final:
+                shutdown_quiescent = False
+                exit_code = 1
+            logger.error(
+                "main_voice_shutdown_incomplete | final=%s | alive_threads=%s "
+                "| asr_process_alive=%s | diagnostics_worker_alive=%s | errors=%s",
+                final,
+                getattr(result, "alive_threads", ()),
+                getattr(result, "asr_process_alive", None),
+                getattr(result, "diagnostics_worker_alive", None),
+                getattr(result, "errors", ()),
+            )
+        except Exception:
+            _set_subsystem_health("voice", HealthStatus.DEGRADED, "Voice shutdown failed")
+            if final:
+                shutdown_quiescent = False
+                exit_code = 1
+            logger.error("Voice subsystem shutdown failed", exc_info=True)
+
     def _stop_watcher() -> None:
         nonlocal watcher_thread, exit_code
         if watcher_thread is None:
@@ -7142,12 +7186,7 @@ async def main() -> int:
                     except Exception:
                         pass
 
-                if voice is not None:
-                    try:
-                        voice.stop()
-                    except Exception as e:
-                        logger.warning("Voice subsystem stop error: %s", e)
-                    voice = None
+                _stop_voice(final=False)
 
                 housekeeping_to_drain = _cancel_housekeeping()
                 active_process_for_shutdown = active_process_task or globals().get("active_process_task")
@@ -7215,12 +7254,7 @@ async def main() -> int:
         except Exception as e:
             logger.warning("Media executor shutdown error: %s", e)
 
-        if voice is not None:
-            try:
-                voice.stop()
-            except Exception as e:
-                logger.warning("Voice subsystem stop error: %s", e)
-            voice = None
+        _stop_voice(final=True)
 
         if telegram_bot is not None:
             try:
