@@ -383,10 +383,212 @@ class TestVoiceEngineInit:
         pending = Mock()
         engine._event_emit_futures.add(pending)
 
-        engine.stop()
-        engine.stop()
+        first = engine.stop()
+        second = engine.stop()
 
         pending.cancel.assert_called_once_with()
+        assert first is not second
+        assert first.quiescent is True
+        assert second.quiescent is True
+
+    def test_stop_checks_thread_liveness_after_bounded_join(self, caplog):
+        engine = self._make_engine()
+
+        class StuckThread:
+            def __init__(self):
+                self.is_alive_calls = 0
+                self.join_timeouts = []
+
+            def is_alive(self):
+                self.is_alive_calls += 1
+                return self.alive
+
+            def join(self, timeout):
+                self.join_timeouts.append(timeout)
+
+        stuck = StuckThread()
+        stuck.alive = True
+        engine.input_thread = stuck
+        engine.voice_diagnostics = Mock()
+        engine.voice_diagnostics._resource_thread = None
+
+        with caplog.at_level("ERROR", logger="charlie.voice"):
+            result = engine.stop()
+
+        assert result.quiescent is False
+        assert result.alive_threads == ("voice_capture_thread",)
+        assert stuck.join_timeouts == [1.0]
+        assert stuck.is_alive_calls >= 2
+        assert "voice_shutdown_complete" not in caplog.text
+
+        stuck.alive = False
+        second = engine.stop()
+
+        assert second.quiescent is True
+        assert second.alive_threads == ()
+        assert stuck.is_alive_calls >= 3
+
+    def test_stop_retains_recovered_asr_error_without_false_non_quiescence(self):
+        engine = self._make_engine()
+
+        class FailingInputQueue:
+            @staticmethod
+            def get_nowait():
+                raise queue.Empty
+
+            @staticmethod
+            def put(*_args, **_kwargs):
+                raise RuntimeError("sentinel delivery failed")
+
+        class Process:
+            pid = 44
+
+            def __init__(self):
+                self.alive = True
+
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return self.alive
+
+            def terminate(self):
+                self.alive = False
+
+            def kill(self):
+                self.alive = False
+
+        engine.asr_input_queue = FailingInputQueue()
+        engine.asr_process = Process()
+        engine.voice_diagnostics = Mock()
+        engine.voice_diagnostics._resource_thread = None
+
+        result = engine.stop()
+
+        assert result.quiescent is True
+        assert result.asr_process_alive is False
+        assert any("asr_sentinel" in error for error in result.errors)
+
+    def test_stop_retains_audio_stream_after_failed_close_for_retry(self):
+        engine = self._make_engine()
+
+        class AudioStream:
+            def __init__(self):
+                self.close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise RuntimeError("audio close failed")
+
+        stream = AudioStream()
+        engine.audio_stream = stream
+        engine.voice_diagnostics = Mock()
+        engine.voice_diagnostics._resource_thread = None
+
+        first = engine.stop()
+        assert first.quiescent is False
+        assert engine.audio_stream is stream
+
+        second = engine.stop()
+        assert second.quiescent is True
+        assert engine.audio_stream is None
+        assert stream.close_calls == 2
+
+    def test_stop_uses_cooperative_asr_sentinel_before_terminate(self):
+        engine = self._make_engine()
+        engine.asr_input_queue = queue.Queue()
+
+        class CooperativeProcess:
+            pid = 42
+
+            def __init__(self):
+                self.join_calls = []
+                self.terminate_calls = 0
+                self.kill_calls = 0
+                self._alive = True
+
+            def join(self, timeout):
+                self.join_calls.append(timeout)
+                self._alive = False
+
+            def is_alive(self):
+                return self._alive
+
+            def terminate(self):
+                self.terminate_calls += 1
+
+            def kill(self):
+                self.kill_calls += 1
+
+        process = CooperativeProcess()
+        engine.asr_process = process
+        engine.voice_diagnostics = Mock()
+        engine.voice_diagnostics._resource_thread = None
+
+        result = engine.stop()
+
+        assert result.quiescent is True
+        assert result.asr_process_alive is False
+        assert process.join_calls == [1.0]
+        assert process.terminate_calls == 0
+        assert process.kill_calls == 0
+
+    def test_stop_escalates_asr_when_terminate_does_not_quiesce(self):
+        engine = self._make_engine()
+        engine.asr_input_queue = queue.Queue()
+
+        class EscalatingProcess:
+            pid = 43
+
+            def __init__(self):
+                self.join_calls = []
+                self.terminate_calls = 0
+                self.kill_calls = 0
+                self._alive_checks = iter((True, True, False))
+
+            def join(self, timeout):
+                self.join_calls.append(timeout)
+
+            def is_alive(self):
+                return next(self._alive_checks, False)
+
+            def terminate(self):
+                self.terminate_calls += 1
+
+            def kill(self):
+                self.kill_calls += 1
+
+        process = EscalatingProcess()
+        engine.asr_process = process
+        engine.voice_diagnostics = Mock()
+        engine.voice_diagnostics._resource_thread = None
+
+        result = engine.stop()
+
+        assert result.quiescent is True
+        assert result.asr_process_alive is False
+        assert process.join_calls == [1.0, 1.0, 1.0]
+        assert process.terminate_calls == 1
+        assert process.kill_calls == 1
+
+    def test_stop_reports_diagnostics_worker_overrun(self, caplog):
+        engine = self._make_engine()
+
+        class StuckSampler:
+            def is_alive(self):
+                return True
+
+        engine.voice_diagnostics = Mock()
+        engine.voice_diagnostics._resource_thread = StuckSampler()
+
+        with caplog.at_level("ERROR", logger="charlie.voice"):
+            result = engine.stop()
+
+        assert result.quiescent is False
+        assert result.diagnostics_worker_alive is True
+        assert "voice_diagnostics_thread" in result.alive_threads
+        assert "voice_shutdown_complete" not in caplog.text
 
     def test_rms_static_method(self):
         samples = np.zeros(100, dtype=np.float32)

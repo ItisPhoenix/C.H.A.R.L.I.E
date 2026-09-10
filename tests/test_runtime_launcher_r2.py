@@ -22,6 +22,7 @@ import pytest
 import main
 import run
 from charlie.subsystem_health import HealthRegistry
+from charlie.voice import VoiceShutdownResult
 
 
 class _FakeStore:
@@ -48,6 +49,21 @@ class _FakeBrain:
         return True
 
 
+def test_main_consumes_non_quiescent_voice_shutdown_truth() -> None:
+    source = Path("main.py").read_text(encoding="utf-8")
+    helper = source.split("    def _stop_voice", 1)[1].split("    def _stop_watcher", 1)[0]
+
+    assert "def _stop_voice(*, final: bool)" in source
+    assert "shutdown_quiescent = False" in source
+    assert "main_voice_shutdown_incomplete" in source
+    assert "exit_code = 1" in source
+    assert "_stop_voice(final=False)" in source
+    assert "_stop_voice(final=True)" in source
+    assert "HealthStatus.STOPPED" in helper
+    assert "voice = None" in helper
+    assert "shutdown_quiescent = True" not in helper
+
+
 class _FakeEventBus:
     async def __aenter__(self):
         return self
@@ -67,12 +83,16 @@ class _FakeEventBus:
 
 
 class _FakeVoice:
-    def __init__(self):
+    def __init__(self, stop_results=None):
         self.stop_count = 0
         self.is_ready = False
+        self._stop_results = list(stop_results or ())
 
     def stop(self):
         self.stop_count += 1
+        if self._stop_results:
+            return self._stop_results.pop(0)
+        return None
 
     def set_event_bus(self, bus):
         pass
@@ -169,7 +189,13 @@ async def test_main_does_not_call_os_exit_on_clean_shutdown(monkeypatch):
     monkeypatch.setattr(main.config, "mcp_enabled", False)
     monkeypatch.setattr(main.config, "pet_enabled", False)
     monkeypatch.setattr(main, "_start_web_subprocess", lambda *a, **kw: _FakeProcess(8000))
-    monkeypatch.setattr(main, "_start_voice_or_degrade", lambda *a, **kw: _FakeVoice())
+    fake_voice = _FakeVoice(
+        [
+            VoiceShutdownResult(quiescent=False, alive_threads=("voice_capture_thread",)),
+            VoiceShutdownResult(quiescent=True),
+        ]
+    )
+    monkeypatch.setattr(main, "_start_voice_or_degrade", lambda *a, **kw: fake_voice)
     monkeypatch.setattr(main, "EventBus", lambda *a, **kw: _FakeEventBus())
 
     orig_gather = main.asyncio.gather
@@ -191,6 +217,8 @@ async def test_main_does_not_call_os_exit_on_clean_shutdown(monkeypatch):
 
     exit_code = await main.main()
     assert exit_code == 0
+    assert fake_voice.stop_count == 2
+    assert main._runtime_health.snapshot()["voice"]["status"] == "stopped"
 
 
 # ---------------------------------------------------------------------------
