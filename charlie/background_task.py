@@ -835,6 +835,11 @@ def close_admission() -> None:
     _manager.close_admission()
 
 
+def is_admission_open() -> bool:
+    """Read main-owned background-task admission state without mutating it."""
+    return _manager.accepting
+
+
 def find_task(query: Optional[str] = None) -> Optional[BackgroundTask]:
     """Find the newest active task whose id or title contains every query token."""
     normalized = " ".join((query or "").casefold().split())

@@ -74,7 +74,7 @@ def test_web_server_replays_current_subsystem_health() -> None:
 
 
 @pytest.mark.asyncio
-async def test_services_status_reports_only_current_runtime_subsystems() -> None:
+async def test_services_status_reports_only_current_runtime_subsystems(monkeypatch) -> None:
     from charlie import web_server
 
     old = web_server._subsystem_health
@@ -82,6 +82,7 @@ async def test_services_status_reports_only_current_runtime_subsystems() -> None
         "voice": {"status": "degraded", "detail": "Unavailable"},
         "mcp": {"status": "disabled", "detail": "Disabled"},
     }
+    monkeypatch.setattr(web_server, "_runtime_truth", None)
     try:
         result = await web_server.get_services_status()
     finally:

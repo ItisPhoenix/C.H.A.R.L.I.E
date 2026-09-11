@@ -78,7 +78,13 @@ class _IpcHealthProjection:
     """Read-only RuntimeIntrospector source backed by IPC health events."""
 
     def snapshot(self) -> dict:
+        truth = self.runtime_snapshot()
+        if isinstance(truth, dict) and isinstance(truth.get("subsystems"), dict):
+            return _legacy_subsystem_projection(truth["subsystems"])
         return dict(_subsystem_health)
+
+    def runtime_snapshot(self) -> dict:
+        return dict(_runtime_truth) if isinstance(_runtime_truth, dict) else {}
 
 
 class _IpcMemoryProjection:
@@ -349,7 +355,7 @@ async def lifespan(app: FastAPI):
     # --- startup ---
     global event_bus, _session_projection
     global _tool_snapshot, _tool_snapshot_event, _mcp_snapshot, _mcp_snapshot_event
-    global _projected_telemetry, _projected_telemetry_event
+    global _projected_telemetry, _projected_telemetry_event, _runtime_truth
     global _settings_snapshot, _settings_snapshot_event
     global _extension_snapshot, _extension_snapshot_event
     # This process never owns executable tool activation. Start each web
@@ -360,6 +366,7 @@ async def lifespan(app: FastAPI):
     _mcp_snapshot_event = None
     _projected_telemetry = None
     _projected_telemetry_event = None
+    _runtime_truth = None
     _settings_snapshot = None
     _settings_snapshot_event = None
     _extension_snapshot = None
@@ -539,6 +546,9 @@ async def _event_bridge():
         elif etype == "subsystem_health":
             global _subsystem_health
             _subsystem_health = event.get("payload", {})
+        elif etype == "runtime_truth":
+            if not _apply_runtime_truth_event(event):
+                logger.warning("Ignoring stale or malformed main runtime-truth snapshot")
         elif etype == "audio_state":
             global _audio_state
             _audio_state = event.get("payload", {})
@@ -824,6 +834,7 @@ async def status():
         "frontend_dist": str(_FRONTEND_DIST),
         "desktop_control_enabled": config.desktop_control_enabled,
         "os_host": f"{_platform.system()} {_platform.machine()}",
+        "runtime_truth": dict(_runtime_truth) if _runtime_truth is not None else None,
     }
 
 
@@ -1032,6 +1043,25 @@ async def backup_export(data: dict | None = None):
     return {"status": "ok", **result["result"]}
 
 
+def _runtime_subsystem_projection() -> dict:
+    if isinstance(_runtime_truth, dict) and isinstance(_runtime_truth.get("subsystems"), dict):
+        return _legacy_subsystem_projection(_runtime_truth["subsystems"])
+    return dict(_subsystem_health)
+
+
+def _legacy_subsystem_projection(subsystems: object) -> dict:
+    if not isinstance(subsystems, dict):
+        return {}
+    return {
+        name: {
+            "status": value.get("status", "unknown"),
+            "detail": value.get("detail", "Unknown"),
+        }
+        for name, value in subsystems.items()
+        if isinstance(value, dict)
+    }
+
+
 @app.get("/api/health")
 async def health():
     log_path = "logs/charlie.log"
@@ -1053,7 +1083,8 @@ async def health():
         "log_file_size_bytes": log_stat.st_size if log_stat else 0,
         "log_file_age_seconds": (time.time() - log_stat.st_mtime) if log_stat else None,
         "uptime_seconds": int(time.time() - _START_TIME),
-        "subsystems": _subsystem_health,
+        "subsystems": _runtime_subsystem_projection(),
+        "runtime_truth": dict(_runtime_truth) if _runtime_truth is not None else None,
     }
 
 
@@ -1190,6 +1221,7 @@ async def session_chat(session_id: str, data: dict):
 # ---------------------------------------------------------------------------
 _system_status: dict = {}
 _subsystem_health: dict = {}
+_runtime_truth: dict | None = None
 _charlie_state: dict = {"state": "idle", "activities": []}
 _background_tasks: dict = {}
 _tool_snapshot: dict[str, Any] | None = None
@@ -1243,6 +1275,8 @@ def _initial_state_events() -> List[dict]:
         build_event("mic_state", _mic_state),
         build_event("hud_visibility", {"visible": _hud_visible}),
     ]
+    if _runtime_truth is not None:
+        events.append(build_event("runtime_truth", _runtime_truth))
     if _tool_snapshot_event is not None:
         events.append(replay_event(_tool_snapshot_event, allow_unknown=True))
     if _mcp_snapshot_event is not None:
@@ -2694,6 +2728,43 @@ def _project_runtime_telemetry_payload(payload: Any) -> dict[str, Any] | None:
     }
 
 
+def _apply_runtime_truth_event(event: object) -> bool:
+    """Accept only the newest main-owned runtime-truth snapshot for this launch."""
+    global _runtime_truth
+    if not isinstance(event, dict):
+        return False
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("schema_version") != 1 or payload.get("authority") != "main_runtime":
+        return False
+    launch_id = payload.get("launch_id")
+    revision = payload.get("revision")
+    status = payload.get("status")
+    subsystems = payload.get("subsystems")
+    if not isinstance(launch_id, str) or type(revision) is not int or revision < 0:
+        return False
+    if status not in {"running", "degraded", "unavailable", "shutting_down", "stopped"}:
+        return False
+    if not isinstance(subsystems, dict):
+        return False
+    if LAUNCH_ID and launch_id != LAUNCH_ID:
+        return False
+
+    current = _runtime_truth
+    if isinstance(current, dict):
+        current_launch_id = current.get("launch_id")
+        current_revision = current.get("revision")
+        if current_launch_id == launch_id and type(current_revision) is int and revision <= current_revision:
+            return False
+
+    _runtime_truth = {
+        **payload,
+        "subsystems": {name: dict(value) if isinstance(value, dict) else value for name, value in subsystems.items()},
+    }
+    return True
+
+
 def _apply_runtime_telemetry_event(event: dict) -> bool:
     """Atomically replace the web's IPC-derived runtime telemetry projection."""
     if (
@@ -2903,7 +2974,8 @@ async def get_developer_diagnostics():
         "uptime_seconds": round(time.time() - _START_TIME, 2),
         "active_threads": threading.active_count(),
         "active_ws_connections": len(active_connections),
-        "subsystems": dict(_subsystem_health),
+        "subsystems": _runtime_subsystem_projection(),
+        "runtime_truth": dict(_runtime_truth) if _runtime_truth is not None else None,
     }
 
     return {
@@ -3053,7 +3125,8 @@ async def get_capabilities():
     else:
         snapshot["tool_status"] = "available"
         snapshot["tools"] = [dict(tool) for tool in _tool_snapshot["tools"]]
-    snapshot["runtime"] = dict(_subsystem_health)
+    snapshot["runtime"] = _runtime_subsystem_projection()
+    snapshot["runtime_truth"] = dict(_runtime_truth) if _runtime_truth is not None else None
     return snapshot
 
 
@@ -3630,7 +3703,7 @@ async def get_local_models():
 async def get_services_status():
     """Return the current runtime health snapshot without inventing services."""
     services = []
-    for name, raw in sorted(_subsystem_health.items()):
+    for name, raw in sorted(_runtime_subsystem_projection().items()):
         if not isinstance(raw, dict):
             continue
         services.append(

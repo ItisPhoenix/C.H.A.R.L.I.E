@@ -86,17 +86,19 @@ async def test_runtime_state_replay_publishes_health_and_canonical_task_snapshot
 
     assert [event[0] for event in bus.events] == [
         "subsystem_health",
+        "runtime_truth",
         "task_snapshot",
         "tool_snapshot",
         "mcp_snapshot",
         "runtime_telemetry",
     ]
     assert bus.events[0][1] == health.snapshot()
-    assert bus.events[1][1]["tasks"][0]["id"] == "task-r1"
-    assert bus.events[1][1]["tasks"][0]["status"] == "running"
-    assert bus.events[1][2].source is EventSource.TASK
-    assert bus.events[2][1]["authority"] == "main_runtime"
-    assert bus.events[3][1] == {"authority": "main_runtime", "enabled": False, "servers": []}
+    assert bus.events[1][1] == health.runtime_snapshot()
+    assert bus.events[2][1]["tasks"][0]["id"] == "task-r1"
+    assert bus.events[2][1]["tasks"][0]["status"] == "running"
+    assert bus.events[2][2].source is EventSource.TASK
+    assert bus.events[3][1]["authority"] == "main_runtime"
+    assert bus.events[4][1] == {"authority": "main_runtime", "enabled": False, "servers": []}
 
 
 @pytest.mark.asyncio
@@ -116,12 +118,13 @@ async def test_runtime_state_request_dispatch_publishes_health_and_task_snapshot
     assert handled is True
     assert [event[0] for event in bus.events] == [
         "subsystem_health",
+        "runtime_truth",
         "task_snapshot",
         "tool_snapshot",
         "mcp_snapshot",
         "runtime_telemetry",
     ]
-    assert bus.events[1][1]["tasks"][0]["id"] == "task-dispatch"
+    assert bus.events[2][1]["tasks"][0]["id"] == "task-dispatch"
 
 
 @pytest.mark.asyncio
@@ -143,12 +146,13 @@ async def test_runtime_state_request_uses_actual_command_consumer_dispatch_seam(
     assert handled is True
     assert [event[0] for event in bus.events] == [
         "subsystem_health",
+        "runtime_truth",
         "task_snapshot",
         "tool_snapshot",
         "mcp_snapshot",
         "runtime_telemetry",
     ]
-    assert bus.events[1][1]["tasks"][0]["id"] == "task-command-seam"
+    assert bus.events[2][1]["tasks"][0]["id"] == "task-command-seam"
 
 
 def test_task_snapshot_rehydrates_projection_after_web_reconnect():
@@ -476,6 +480,7 @@ async def test_self_introspection_uses_web_projection_and_reports_lease_authorit
     health_projection = {"web": {"status": "running", "detail": "Projected"}}
     monkeypatch.setattr(web_server, "_background_tasks", projection)
     monkeypatch.setattr(web_server, "_subsystem_health", health_projection)
+    monkeypatch.setattr(web_server, "_runtime_truth", None)
 
     def local_journal_must_not_be_read(*args, **kwargs):
         raise AssertionError("web introspection must not read local task journal")
