@@ -290,6 +290,9 @@ def _public_event_from_record(record: TaskRecord) -> Dict[str, Any]:
         "progress": record.progress,
         "current_action": current_action,
         "capability_requirements": list(record.capability_requirements),
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+        "completed_at": record.completed_at,
     }
 
 

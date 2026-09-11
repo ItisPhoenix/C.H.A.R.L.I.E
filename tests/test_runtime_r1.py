@@ -10,8 +10,14 @@ from charlie.subsystem_health import HealthRegistry, HealthStatus
 from charlie.task_journal import TaskJournal, TaskStatus
 
 
-def _task(task_id: str, status: str = "running", *, title: str = "Task") -> dict:
-    return {
+def _task(
+    task_id: str,
+    status: str = "running",
+    *,
+    title: str = "Task",
+    completed_at: str | None = None,
+) -> dict:
+    task = {
         "id": task_id,
         "title": title,
         "status": status,
@@ -24,6 +30,9 @@ def _task(task_id: str, status: str = "running", *, title: str = "Task") -> dict
         "current_action": "Inspect state",
         "capability_requirements": ["browser"],
     }
+    if completed_at is not None:
+        task["completed_at"] = completed_at
+    return task
 
 
 def _snapshot_event(tasks: list[dict]) -> dict:
@@ -436,6 +445,27 @@ def test_task_snapshot_accepts_only_canonical_statuses_and_legacy_aliases():
 
     assert cache["done"]["status"] == "completed"
     assert cache["approval"]["status"] == "approval_required"
+
+
+def test_web_task_projection_bounds_terminal_history_without_evicting_active(monkeypatch):
+    from charlie import web_server
+
+    monkeypatch.setattr(web_server, "TASK_HISTORY_MAX_TERMINAL", 2)
+    cache = {}
+    web_server._apply_task_snapshot_event(
+        cache,
+        _snapshot_event(
+            [
+                _task("old", "completed", completed_at="2026-01-01T00:00:01.000000Z"),
+                _task("middle", "failed", completed_at="2026-01-01T00:00:02.000000Z"),
+                _task("new", "cancelled", completed_at="2026-01-01T00:00:03.000000Z"),
+                _task("active", "running"),
+            ]
+        ),
+    )
+
+    assert set(cache) == {"middle", "new", "active"}
+    assert cache["active"]["status"] == "running"
 
 
 @pytest.mark.asyncio
