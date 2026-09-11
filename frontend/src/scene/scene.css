@@ -4,7 +4,7 @@
   --scene-safe-x: clamp(16px, 3.5vw, 48px);
   --scene-safe-y: clamp(16px, 3.5vh, 48px);
 
-  --core-center-size: clamp(300px, 27vw, 430px);
+  --core-center-size: clamp(360px, 32vw, 520px);
   --core-docked-size: 240px;
   --workspace-core-safe: clamp(190px, 16vw, 250px);
 
@@ -58,6 +58,7 @@
   background-size: 24px 24px, 24px 24px, 120px 120px, 120px 120px;
   mask-image: radial-gradient(ellipse at center, rgba(0,0,0,0.85) 20%, rgba(0,0,0,0) 75%);
   -webkit-mask-image: radial-gradient(ellipse at center, rgba(0,0,0,0.85) 20%, rgba(0,0,0,0) 75%);
+  opacity: .38;
 }
 
 .charlie-env-vignette {
@@ -76,10 +77,18 @@
 .charlie-env-noise {
   position: absolute;
   inset: 0;
-  opacity: 0.035;
+  opacity: 0.02;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
   background-repeat: repeat;
   pointer-events: none;
+}
+
+/* Shared reference-language discipline: ordinary surfaces stay quiet; the core owns glow. */
+.charlie-scene-root .glass {
+  border-radius: 3px;
+  background: rgba(3, 11, 19, .82);
+  box-shadow: none;
+  backdrop-filter: none;
 }
 
 /* Restrained perimeter framing */
@@ -557,6 +566,11 @@
   animation-play-state: paused;
 }
 
+.hud-ring[data-state="idle"] .hud-vector-structure,
+.hud-ring[data-state="idle"] .hud-vector-ticks {
+  opacity: .68;
+}
+
 .hud-ring[data-state="acting"] .hud-vector-drift {
   animation-duration: 24s;
 }
@@ -761,6 +775,7 @@
 @media (max-width: 1099px) {
   :root {
     --core-docked-size: 156px;
+    --core-center-size: clamp(320px, 45vw, 360px);
   }
 }
 
@@ -769,5 +784,70 @@
   .charlie-scene-root * {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+  }
+}
+
+/* PASS 5C-A: identity-first scene proportions. */
+:root {
+  --core-center-size: clamp(400px, 39vw, 640px);
+  --core-docked-size: 176px;
+  --workspace-core-safe: clamp(156px, 14vw, 220px);
+}
+
+.charlie-core-center .charlie-core-brand-center {
+  font-size: clamp(18px, 1.5vw, 26px);
+  letter-spacing: .24em;
+}
+
+.charlie-core-center[data-core-display-state="idle"] .charlie-core-state-subtext,
+.charlie-core-center[data-core-display-state="idle"] .charlie-core-indicator-dots {
+  display: none;
+}
+
+.charlie-core-center[data-core-display-state="idle"] .charlie-core-status-bar {
+  top: calc(100% - 4px);
+}
+
+.hud-ring[data-state="idle"] .hud-vector-structure {
+  opacity: .82;
+}
+
+.hud-ring[data-state="idle"] .hud-vector-ticks {
+  opacity: .62;
+}
+
+.charlie-scene-root[data-approval-active="true"] .charlie-core-center {
+  left: 21%;
+}
+
+.charlie-scene-root[data-approval-active="true"] .charlie-core-state-label {
+  color: #fbbf24;
+  text-shadow: 0 0 10px rgba(245, 158, 11, .28);
+}
+
+@media (max-width: 1439px) {
+  :root {
+    --core-docked-size: 158px;
+  }
+}
+
+@media (max-width: 900px) {
+  :root {
+    --core-center-size: clamp(360px, 52vw, 420px);
+    --core-docked-size: 132px;
+    --workspace-core-safe: 148px;
+  }
+
+  .charlie-scene-root[data-approval-active="true"] .charlie-core-center {
+    top: 17%;
+    left: 50%;
+    width: 220px;
+    height: 220px;
+  }
+}
+
+@media (max-width: 560px) {
+  :root {
+    --core-center-size: 360px;
   }
 }

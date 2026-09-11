@@ -2,6 +2,7 @@ import { useEffect, useRef, type ReactElement } from "react";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
 import { MapEngine, useMapStore } from "../../map";
 import type { MapCommand, MapFeature, MapRoute } from "../../map/types";
+import "../../map/MapWorkspace.css";
 
 export function MapWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
   const contentStr = JSON.stringify(workspace.contentState || {});
@@ -76,7 +77,7 @@ export function MapWorkspace({ workspace }: { workspace: WorkspaceInstance }): R
   }, [contentStr, dispatchCommand, setLayerEnabled, setSelectedFeature, setRoute]);
 
   return (
-    <div className="w-full h-full relative">
+    <div className="charlie-map-workspace w-full h-full relative">
       <MapEngine />
     </div>
   );

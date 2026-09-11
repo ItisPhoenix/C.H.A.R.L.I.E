@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { useMapStore } from "../../map/mapStore";
+import "./Settings.css";
 
 interface ConfigField {
   key: string;

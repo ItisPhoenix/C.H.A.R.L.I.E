@@ -187,6 +187,7 @@ export function CharlieScene(): ReactElement | null {
       data-core-position={projection.corePosition}
       data-core-state={projection.visualRuntime.phase}
       data-authoritative-core-state={projection.coreState}
+      data-approval-active={activeToolApproval ? "true" : "false"}
     >
       {/* 1. Environment Layer (Opaque dark base, technical grid, radial light, vignette, grain, framing) */}
       <EnvironmentLayer
@@ -231,10 +232,13 @@ export function CharlieScene(): ReactElement | null {
           presentation intent is suppressed above so one request cannot render
           two competing dialogs. */}
       {activeToolApproval ? (
-        <div
-          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-          data-testid="tool-approval-overlay"
-        >
+        <div className="charlie-approval-state" data-testid="tool-approval-overlay">
+          <div className="charlie-approval-identity" aria-hidden="true">
+            <span className="charlie-approval-identity-kicker">CHARLIE / EXECUTION PAUSED</span>
+            <strong>OPERATOR<br />DECISION</strong>
+            <span className="charlie-approval-identity-rule" />
+            <p>Charlie has stopped before acting.</p>
+          </div>
           <ToolApprovalDialog />
         </div>
       ) : null}

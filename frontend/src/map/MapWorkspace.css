@@ -1,0 +1,17 @@
+.charlie-map-workspace {
+  border: 1px solid rgba(34, 211, 238, .18);
+  background: rgba(2, 8, 15, .35);
+  overflow: hidden;
+}
+
+.charlie-map-workspace::before {
+  content: "SPATIAL INTELLIGENCE";
+  position: absolute;
+  z-index: 2;
+  top: 10px;
+  left: 14px;
+  color: rgba(166, 222, 240, .76);
+  font: 10px/1 "JetBrains Mono", monospace;
+  letter-spacing: .2em;
+  pointer-events: none;
+}

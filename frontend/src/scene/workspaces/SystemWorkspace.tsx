@@ -4,6 +4,7 @@ import { useCharlieStore } from "../../store/charlie";
 import { SpatialMapPrimitive, type SpatialMapData } from "../../composer/primitives/SpatialMapPrimitive";
 import { TelemetryGaugesPrimitive, type TelemetryGaugesData } from "../../composer/primitives/TelemetryGaugesPrimitive";
 import { ProcessTelemetryPrimitive, type ProcessTelemetryData } from "../../composer/primitives/ProcessTelemetryPrimitive";
+import "./SystemWorkspace.css";
 
 export interface SystemLogEntry { timestamp: string; level: "INFO" | "WARN" | "ERROR" | "DEBUG"; message: string; }
 export interface ActiveOperationItem { id: string; title: string; subtitle: string; progress: number; status: "RUNNING" | "QUEUED" | "COMPLETED" | "FAILED"; }
@@ -24,6 +25,8 @@ export function SystemWorkspace({ workspace }: { workspace: WorkspaceInstance })
   const topology = (content.topology || content.network_map) as SpatialMapData | undefined;
   const operations = Array.isArray(content.operations) ? content.operations as ActiveOperationItem[] : [];
   const logs = Array.isArray(content.logs) ? content.logs as SystemLogEntry[] : [];
+  const processes = Array.isArray(content.processes) ? content.processes as ProcessTelemetryData : null;
+  const vitals = content.vitals && typeof content.vitals === "object" ? content.vitals as TelemetryGaugesData : null;
   const status = useCharlieStore((state) => state.systemStatus);
   const statusUpdatedAt = useCharlieStore((state) => state.systemStatusUpdatedAt);
   const health = useCharlieStore((state) => state.subsystemHealth);
@@ -40,8 +43,13 @@ export function SystemWorkspace({ workspace }: { workspace: WorkspaceInstance })
   return (
     <div className="charlie-spatial-composition system-composition">
       <header className="spatial-heading system-heading">
-        <div className="spatial-kicker">SYSTEM / TASKS WORKSPACE</div>
-        <div className="spatial-subtitle">OVERVIEW</div>
+        <div className="system-heading-line">
+          <div className="spatial-kicker">SYSTEM / RUNTIME TOPOLOGY</div>
+          <div className="system-runtime-state" data-runtime-health={statusFreshness.toLowerCase()}>
+            {statusFreshness === "FRESH" ? "RUNTIME ONLINE" : `RUNTIME ${statusFreshness}`}
+          </div>
+        </div>
+        <div className="spatial-subtitle">THE MACHINE / AUTHORITATIVE STATE</div>
       </header>
 
       <section className="system-live-telemetry absolute left-[2%] right-[2%] top-[7%] z-10" aria-label="Live system telemetry">
@@ -76,8 +84,12 @@ export function SystemWorkspace({ workspace }: { workspace: WorkspaceInstance })
           </div>
         )) : <div className="spatial-empty">NO ACTIVE OPERATIONS REPORTED</div>}
       </section>
-      <section className="system-processes"><ProcessTelemetryPrimitive data={content.processes as ProcessTelemetryData} /></section>
-      <section className="system-vitals"><TelemetryGaugesPrimitive data={content.vitals as TelemetryGaugesData} /></section>
+      {(processes || vitals) && (
+        <div className="system-host-signals" aria-label="Observed host signals">
+          {processes && <section className="system-processes"><ProcessTelemetryPrimitive data={processes} /></section>}
+          {vitals && <section className="system-vitals"><TelemetryGaugesPrimitive data={vitals} /></section>}
+        </div>
+      )}
       <section className="system-feed">
         <div className="spatial-kicker">ACTIVITY FEED</div>
         {logs.length ? logs.slice(0, 10).map((log, i) => (

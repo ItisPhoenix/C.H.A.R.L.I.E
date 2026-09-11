@@ -7,6 +7,7 @@ import { TimelinePrimitive, type TimelineItem } from "../../composer/primitives/
 import { ChartPrimitive } from "../../composer/primitives/ChartPrimitive";
 import { normalizeResearchWorkspacePayload, type ResearchFinding } from "../../presentation/workspacePayloads";
 import { ResearchRichText } from "./ResearchRichText";
+import "./ResearchWorkspace.css";
 
 export interface FindingItem extends Partial<ResearchFinding> {
   iconType?: string;
@@ -48,7 +49,7 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
         <div className="spatial-kicker">RESEARCH WORKSPACE</div>
         <h1>{title}</h1>
         {payload.query && <p className="spatial-subtitle">{payload.query}</p>}
-        <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-cyan-300 mt-2" data-testid="research-runtime-status">
+        <div className="research-status-strip" data-testid="research-runtime-status">
           <span>STATUS: {status}</span>
           {confidenceSupplied && <span>CONFIDENCE: {Math.round(payload.confidence * 100)}%</span>}
           {stopReason && <span>STOP: {stopReason}</span>}

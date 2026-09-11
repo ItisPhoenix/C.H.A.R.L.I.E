@@ -34,13 +34,14 @@ describe("ToolApprovalDialog", () => {
 
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(screen.getByText("The command needs approval.")).toBeInTheDocument();
-    expect(screen.getByText(/command: python --version/)).toBeInTheDocument();
+    expect(screen.queryByText(/command: python --version/)).toBeNull();
+    expect(screen.getByText(/Hidden tool arguments and secrets are not rendered/i)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Approve & Run" }));
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
 
     expect(sendCommand).toHaveBeenCalledWith("tool_approve", { request_id: "approval-1" });
     expect(useCharlieStore.getState().activeToolApproval?.request_id).toBe("approval-1");
-    expect(screen.getByRole("button", { name: "Approve & Run" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
 
     useCharlieStore.getState().applyEvent({ type: "tool_approval_resolved", payload: { request_id: "approval-1" } });
     expect(useCharlieStore.getState().activeToolApproval).toBeNull();
@@ -58,11 +59,11 @@ describe("ToolApprovalDialog", () => {
     });
 
     render(<ToolApprovalDialog />);
-    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
 
     expect(sendCommand).toHaveBeenCalledWith("tool_reject", { request_id: "approval-2" });
     expect(useCharlieStore.getState().activeToolApproval?.request_id).toBe("approval-2");
-    expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reject" })).toBeDisabled();
   });
 
   test("rapid approval clicks send one command", () => {
@@ -77,7 +78,7 @@ describe("ToolApprovalDialog", () => {
     });
 
     render(<ToolApprovalDialog />);
-    const approve = screen.getByRole("button", { name: "Approve & Run" });
+    const approve = screen.getByRole("button", { name: "Approve" });
     fireEvent.click(approve);
     fireEvent.click(approve);
 

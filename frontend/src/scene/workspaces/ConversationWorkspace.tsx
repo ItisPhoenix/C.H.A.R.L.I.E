@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, type ReactElement } from "react";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
 import { useCharlieStore, type ChatMessage } from "../../store/charlie";
 import { sendCommand } from "../../runtime/bridge";
+import "./ConversationWorkspace.css";
 
 interface SessionSummary {
   id: string;
@@ -188,9 +189,9 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
   };
 
   return (
-    <div className="w-full h-full flex flex-col justify-between font-mono text-left p-2 overflow-hidden space-y-3 pr-[calc(var(--core-docked-size)+12px)]">
+    <div className="conversation-workspace w-full h-full flex flex-col justify-between font-mono text-left p-2 overflow-hidden space-y-3 pr-[calc(var(--core-docked-size)+12px)]">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-cyan-500/20 pb-2 px-1">
+      <div className="conversation-workspace__header flex items-center justify-between pb-2 px-1">
         <div className="flex items-center gap-3">
           <div
             className={`w-2.5 h-2.5 rounded-full ${
@@ -236,7 +237,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
       </div>
 
       {sessionListOpen && (
-        <div className="max-h-40 overflow-y-auto border border-cyan-500/25 bg-slate-950/90 p-2 space-y-1" role="listbox" aria-label="Session history">
+        <div className="conversation-workspace__history max-h-40 overflow-y-auto p-2 space-y-1" role="listbox" aria-label="Session history">
           {sessions.length === 0 ? (
             <p className="text-[10px] text-slate-500">No session history is available.</p>
           ) : sessions.map((session) => (
@@ -256,7 +257,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
       )}
 
       {/* Message Stream */}
-      <div className="flex-1 overflow-y-auto min-h-0 space-y-3 pr-1">
+      <div className="conversation-workspace__stream flex-1 overflow-y-auto min-h-0 space-y-3 pr-1">
         {timeline.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-slate-500 italic">
             No conversation messages yet. Send a prompt to start dialogue.
@@ -264,12 +265,13 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
         ) : (
           timeline.map((msg, idx) => {
             const isUser = msg.role === "user";
+            const isCurrent = msg.pending || idx === timeline.length - 1;
             return (
               <div
                 key={msg.id || idx}
-                className={`flex flex-col space-y-1 ${
-                  isUser ? "items-end" : "items-start"
-                }`}
+                className={`conversation-workspace__turn flex flex-col space-y-1 ${
+                  isUser ? "conversation-workspace__turn--user items-end" : "conversation-workspace__turn--charlie items-start"
+                } ${isCurrent ? "conversation-workspace__turn--current" : ""}`}
               >
                 <div className="flex items-center gap-1.5 text-[9px] text-cyan-400/70 uppercase">
                   <span>{isUser ? "OPERATOR" : "CHARLIE"}</span>
@@ -279,10 +281,10 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
                   )}
                 </div>
                 <div
-                  className={`max-w-[72ch] p-3 rounded-xl text-xs leading-relaxed font-sans whitespace-pre-wrap break-words select-text ${
+                    className={`conversation-workspace__message max-w-[72ch] p-3 text-xs leading-relaxed font-sans whitespace-pre-wrap break-words select-text ${
                     isUser
-                      ? "bg-cyan-950/70 border border-cyan-400/40 text-cyan-100 shadow-sm shadow-cyan-500/10"
-                      : "bg-slate-900/80 border border-cyan-500/20 text-slate-200"
+                      ? "conversation-workspace__message--user text-cyan-100"
+                      : "text-slate-200"
                   }`}
                 >
                   {msg.text}
@@ -300,7 +302,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
 
         {/* Live Subsystem Activities / Tools Progress */}
         {activities.length > 0 && (
-          <div className="p-2.5 rounded-lg bg-slate-900/60 border border-cyan-500/15 text-[11px] text-cyan-300/80 space-y-1">
+          <div className="conversation-workspace__activity p-2.5 rounded-lg bg-slate-900/60 border border-cyan-500/15 text-[11px] text-cyan-300/80 space-y-1">
             <div className="text-[9px] text-cyan-400 font-bold uppercase tracking-wider flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
               Active System Actions
@@ -315,7 +317,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
 
         {/* Pending Tool Approval Card */}
         {activeToolApproval && (
-          <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 text-xs space-y-2.5">
+          <div className="conversation-workspace__approval p-3.5 text-amber-200 text-xs space-y-2.5">
             <div className="flex items-center gap-2 font-bold text-amber-400 uppercase text-[11px]">
               <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
               Approval Required: {activeToolApproval.tool_name}
@@ -331,7 +333,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
       </div>
 
       {/* Input bar */}
-      <div className="p-2 rounded-xl border border-cyan-500/25 bg-slate-950/90 flex items-end gap-3">
+      <div className="conversation-workspace__composer p-2 rounded-xl border border-cyan-500/25 bg-slate-950/90 flex items-end gap-3">
         <textarea
           ref={textareaRef}
           rows={2}

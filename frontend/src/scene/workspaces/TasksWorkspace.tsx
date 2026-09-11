@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
 import { useCharlieStore } from "../../store/charlie";
 import { isTaskWorkspaceEligible } from "../taskWorkspaceEligibility";
+import "./TasksWorkspace.css";
 
 const ACTIVE_TASK_STATUSES = new Set([
   "queued", "planning", "waiting", "running", "paused", "approval_required", "verifying",
@@ -61,9 +62,9 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
   };
 
   return (
-    <div className="w-full h-full flex flex-col justify-start font-mono select-none text-left p-2 overflow-y-auto space-y-6">
+    <div className="tasks-workspace w-full h-full flex flex-col justify-start font-mono select-none text-left p-2 overflow-y-auto space-y-6">
       {/* 1. Header */}
-      <div className="flex items-start justify-between border-b border-cyan-500/20 pb-4">
+      <div className="tasks-workspace__header flex items-start justify-between border-b border-cyan-500/20 pb-4">
         <div>
           <div className="text-[10px] text-cyan-400 font-bold tracking-widest uppercase mb-1 flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
@@ -80,24 +81,24 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
         </div>
 
         {/* Task Status Badge */}
-        <div className={`px-3 py-1.5 rounded-full border text-xs font-bold uppercase tracking-wider ${statusColor(currentTask.status)}`}>
+        <div className={`tasks-status-badge px-3 py-1.5 border text-xs font-bold uppercase tracking-wider ${statusColor(currentTask.status)}`}>
           {currentTask.status}
         </div>
       </div>
 
       {(currentTask.errorSummary || resultReference) && (
-        <div className="border-l border-cyan-400/50 px-3 py-2 text-xs space-y-1" role={currentTask.errorSummary ? "alert" : "status"}>
+        <div className="tasks-status-strip text-xs space-y-1" role={currentTask.errorSummary ? "alert" : "status"}>
           {currentTask.errorSummary && <div className="text-rose-300">FAILURE: {currentTask.errorSummary}</div>}
           {resultReference && <div className="text-cyan-200 break-all">RESULT: {resultReference}</div>}
         </div>
       )}
 
       {/* 2. Main Grid: Current Task Execution Details (Left/Center) & Background Tasks Queue (Right) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+      <div className="tasks-workspace__layout grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Execution Journal & Steps */}
-        <div className="lg:col-span-8 flex flex-col gap-5">
+        <div className="tasks-workspace__journal lg:col-span-8 flex flex-col gap-5">
           {/* Progress Bar Header */}
-          {hasProgress && <div className="p-4 rounded-xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md space-y-3">
+          {hasProgress && <div className="tasks-panel p-4 border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md space-y-3">
             <div className="flex justify-between items-center text-xs">
               <span className="text-cyan-400 font-bold uppercase">
                 Progress: Step {currentTask.currentStep} of {currentTask.totalSteps}
@@ -119,7 +120,7 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
           </div>}
 
           {/* Step-by-Step Task Journal */}
-          {hasExecutionDetails && <div className="p-4 rounded-xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md space-y-3">
+          {hasExecutionDetails && <div className="tasks-panel p-4 border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md space-y-3">
             <div className="text-xs font-semibold text-cyan-200 uppercase tracking-wider">
               EXECUTION PLAN & STATUS
             </div>
@@ -186,7 +187,7 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
         </div>
 
         {/* Secondary / Concurrent Tasks List */}
-        <div className="lg:col-span-4 flex flex-col gap-4">
+        <div className="tasks-workspace__background lg:col-span-4 flex flex-col gap-4">
           <div className="text-left">
             <div className="text-xs font-semibold text-cyan-200 tracking-wider uppercase">
               CONCURRENT TASKS
@@ -205,7 +206,7 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
               taskList.map((t) => (
                 <div
                   key={t.id}
-                  className={`p-3 rounded-xl border transition flex flex-col gap-1.5 text-left ${
+                  className={`tasks-task-row p-3 rounded-xl border transition flex flex-col gap-1.5 text-left ${
                     t.id === currentTask.id
                       ? "bg-cyan-950/40 border-cyan-400/50"
                       : "bg-slate-950/60 border-cyan-500/15 hover:border-cyan-500/30"

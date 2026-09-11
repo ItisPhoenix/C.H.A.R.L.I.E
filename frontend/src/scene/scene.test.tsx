@@ -315,9 +315,8 @@ describe("CharlieScene spatial projection & layers", () => {
     expect(screen.getByTestId("tool-approval-overlay")).toBeInTheDocument();
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
     expect(screen.queryByRole("alertdialog")).toBeNull();
-    expect(screen.getAllByRole("button", { name: "Approve & Run" })).toHaveLength(1);
-    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Decline" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Approve" })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
   });
 
   test("generic attention with request metadata stays non-actionable", () => {

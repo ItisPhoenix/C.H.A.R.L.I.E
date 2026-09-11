@@ -1,0 +1,87 @@
+.tasks-workspace .tasks-status-strip {
+  border-left: 2px solid rgba(34, 211, 238, .42);
+  padding: 8px 12px;
+  background: rgba(2, 8, 15, .45);
+}
+
+.tasks-workspace .tasks-status-strip[role="alert"] {
+  border-left-color: rgba(248, 113, 113, .72);
+}
+
+.tasks-workspace .tasks-panel {
+  border-radius: 2px;
+  background: rgba(2, 8, 15, .42);
+  box-shadow: none;
+}
+
+.tasks-workspace {
+  gap: 20px;
+  padding: 12px clamp(8px, 2vw, 28px) 30px;
+  font-size: 13px;
+}
+
+.tasks-workspace__header h1 {
+  font-size: clamp(24px, 2.4vw, 42px);
+  letter-spacing: .1em;
+  line-height: 1.15;
+}
+
+.tasks-status-badge {
+  border-radius: 2px !important;
+  min-width: 116px;
+  text-align: center;
+}
+
+.tasks-workspace__layout {
+  gap: clamp(20px, 3vw, 48px);
+}
+
+.tasks-workspace__journal {
+  min-width: 0;
+}
+
+.tasks-workspace__background {
+  min-width: 0;
+  border-left: 1px solid rgba(34, 211, 238, .16);
+  padding-left: clamp(14px, 2vw, 28px);
+}
+
+.tasks-task-row {
+  border-radius: 2px !important;
+  border-left: 2px solid rgba(34, 211, 238, .24);
+  background: rgba(2, 8, 15, .48);
+  padding: 14px 16px;
+}
+
+.tasks-task-row:has(.text-emerald-400) {
+  border-left-color: rgba(52, 211, 153, .78);
+}
+
+.tasks-task-row:has(.text-red-400) {
+  border-left-color: rgba(248, 113, 113, .78);
+}
+
+.tasks-task-row:has(.text-cyan-300) {
+  border-left-color: rgba(34, 211, 238, .72);
+}
+
+.tasks-workspace .tasks-panel {
+  padding: 18px 20px;
+}
+
+.tasks-workspace .tasks-panel .text-xs {
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .tasks-workspace {
+    padding-left: 4px;
+    padding-right: 4px;
+  }
+
+  .tasks-workspace__background {
+    border-left: 0;
+    border-top: 1px solid rgba(34, 211, 238, .16);
+    padding: 16px 0 0;
+  }
+}

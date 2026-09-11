@@ -1,0 +1,402 @@
+/* PASS 5C-A: settings is an open Charlie control surface, not an admin grid. */
+.charlie-settings-overlay {
+  align-items: stretch !important;
+  justify-content: stretch !important;
+  padding: 0 !important;
+  background: rgba(1, 4, 8, .78) !important;
+  backdrop-filter: blur(3px) !important;
+}
+
+.charlie-settings-shell {
+  width: 100vw;
+  max-width: none;
+  min-height: 100vh;
+  max-height: none;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background:
+    linear-gradient(110deg, rgba(4, 17, 27, .96), rgba(1, 7, 14, .98) 58%, rgba(1, 4, 9, .99));
+  box-shadow: none !important;
+}
+
+.charlie-settings-header {
+  flex: 0 0 auto;
+  min-height: 92px;
+  padding: 20px clamp(22px, 4vw, 64px) 17px !important;
+  border-bottom: 1px solid rgba(34, 211, 238, .24) !important;
+  background: rgba(2, 10, 17, .55) !important;
+}
+
+.charlie-settings-header > div:first-child {
+  min-width: 0;
+  align-items: flex-start;
+}
+
+.charlie-settings-signal {
+  flex: 0 0 auto;
+  margin-top: 9px;
+  box-shadow: 0 0 14px rgba(34, 211, 238, .64);
+}
+
+.charlie-settings-title-block {
+  min-width: 0;
+}
+
+.charlie-settings-kicker {
+  margin-bottom: 7px;
+  color: #57cce9;
+  font: 10px/1.2 var(--font-technical);
+  letter-spacing: .24em;
+  text-transform: uppercase;
+}
+
+.charlie-settings-header h2 {
+  margin: 0;
+  color: #effaff;
+  font: 500 clamp(18px, 2vw, 30px)/1.08 var(--font-ui);
+  letter-spacing: .1em;
+}
+
+.charlie-settings-header > button {
+  flex: 0 0 auto;
+  border-radius: 0 !important;
+  padding: 8px 12px !important;
+  color: #a5c7d3 !important;
+  font: 10px/1 var(--font-technical);
+  letter-spacing: .12em;
+}
+
+.charlie-settings-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: clamp(22px, 4vw, 58px) clamp(22px, 5vw, 80px) 34px !important;
+  overflow-y: auto;
+  background:
+    linear-gradient(90deg, rgba(34, 211, 238, .032) 1px, transparent 1px),
+    linear-gradient(rgba(34, 211, 238, .022) 1px, transparent 1px);
+  background-size: 72px 72px;
+}
+
+.settings-workspace {
+  --settings-line: rgba(34, 211, 238, .18);
+  --settings-surface: transparent;
+  min-height: 100%;
+  color: var(--scene-text-primary);
+}
+
+.settings-workspace .settings-intro {
+  flex: 0 0 auto;
+  min-height: 66px;
+  margin-bottom: 22px !important;
+  padding: 0 0 17px !important;
+  border-bottom: 1px solid rgba(34, 211, 238, .22) !important;
+}
+
+.settings-workspace .settings-intro h3 {
+  margin: 0;
+  color: #eaf8ff;
+  font: 500 clamp(18px, 2vw, 28px)/1.1 var(--font-ui);
+  letter-spacing: .12em;
+}
+
+.settings-workspace .settings-intro p {
+  margin-top: 8px;
+  color: #8faeba;
+  font: 13px/1.45 var(--font-ui);
+}
+
+.settings-workspace .settings-intro > div:last-child {
+  align-self: flex-end;
+}
+
+.settings-workspace .settings-intro button {
+  border-radius: 0 !important;
+  padding: 8px 11px !important;
+  font-size: 10px;
+  letter-spacing: .08em;
+}
+
+.settings-workspace > .flex-1 {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-height: 0;
+  height: auto !important;
+  flex: 0 0 auto !important;
+  overflow: visible !important;
+}
+
+/* Category navigation is contextual to Settings, not a permanent app rail. */
+.settings-workspace > .flex-1 > :first-child {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: row !important;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  width: 100%;
+  padding: 0 0 15px !important;
+  border: 0 !important;
+  border-bottom: 1px solid var(--settings-line) !important;
+  overflow: visible;
+}
+
+.settings-workspace > .flex-1 > :first-child > div:first-child {
+  flex: 0 0 100%;
+  width: auto;
+  margin: 0 0 3px;
+  padding: 0 !important;
+  color: #56c9ef !important;
+  font-size: 9px;
+  letter-spacing: .24em;
+}
+
+.settings-workspace > .flex-1 > :first-child button {
+  flex: 0 0 auto;
+  border: 0 !important;
+  border-bottom: 1px solid transparent !important;
+  border-radius: 0 !important;
+  padding: 7px 9px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: #7898a9 !important;
+  font: 11px/1.2 var(--font-technical);
+  letter-spacing: .03em;
+}
+
+.settings-workspace > .flex-1 > :first-child button:hover,
+.settings-workspace > .flex-1 > :first-child button:focus-visible {
+  color: #d6f6ff !important;
+  border-bottom-color: rgba(34, 211, 238, .5) !important;
+}
+
+.settings-workspace > .flex-1 > :first-child button[class*="bg-cyan-950/90"] {
+  border-bottom-color: #48c8f0 !important;
+  background: rgba(11, 65, 83, .42) !important;
+  color: #e1f8ff !important;
+}
+
+.settings-workspace > .flex-1 > :first-child button[class*="bg-cyan-950/90"] > span:last-child {
+  width: 5px;
+  height: 5px;
+  margin-left: 7px;
+  border-radius: 50%;
+  background: #5ddaff;
+  box-shadow: 0 0 8px rgba(93, 218, 255, .7);
+}
+
+/* Main category content: two quiet columns, no card wall. */
+.settings-workspace > .flex-1 > :last-child {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(260px, .65fr);
+  align-content: start;
+  align-items: start;
+  gap: 0 42px;
+  min-height: 0;
+  height: auto !important;
+  flex: 0 0 auto !important;
+  padding: 0 8px 24px 0 !important;
+  overflow: visible !important;
+}
+
+.settings-workspace > .flex-1 > :last-child > * {
+  min-width: 0;
+  margin: 0 !important;
+}
+
+.settings-workspace .settings-group {
+  min-width: 0;
+  min-height: auto !important;
+  padding: 17px 0 !important;
+  border: 0 !important;
+  border-top: 1px solid var(--settings-line) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.settings-workspace .settings-group h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin: 0 0 16px !important;
+  padding: 0 0 5px !important;
+  border-bottom: 0 !important;
+  color: #65d7f1 !important;
+  font: 600 12px/1.35 var(--font-technical);
+  letter-spacing: .16em;
+}
+
+.settings-workspace .settings-group h3 > span:first-child {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 0;
+  background: #54d8ee;
+  box-shadow: 0 0 7px rgba(84, 216, 238, .55);
+}
+
+.settings-workspace .settings-field {
+  display: grid !important;
+  grid-template-columns: minmax(150px, 1fr) minmax(170px, 320px);
+  align-items: center;
+  gap: 24px;
+  min-height: 48px;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(34, 211, 238, .08);
+  color: #bdd2da !important;
+  font: 13px/1.35 var(--font-ui);
+}
+
+.settings-workspace .settings-field > span {
+  max-width: none !important;
+}
+
+.settings-workspace .settings-field strong {
+  color: #e3f4fa !important;
+  font: 12px/1.3 var(--font-technical);
+}
+
+.settings-workspace .settings-field small {
+  color: #c49d4b !important;
+  font-size: 10px;
+}
+
+.settings-workspace .settings-field input:not([type="checkbox"]),
+.settings-workspace .settings-field select,
+.settings-workspace .settings-field textarea {
+  width: 100% !important;
+  max-width: 320px;
+  min-height: 34px;
+  border: 1px solid rgba(34, 211, 238, .26) !important;
+  border-radius: 0 !important;
+  background: rgba(4, 18, 29, .8) !important;
+  color: #d9f6ff !important;
+  font: 12px var(--font-technical);
+}
+
+.settings-workspace .settings-field input[type="checkbox"] {
+  justify-self: end;
+  width: 18px;
+  height: 18px;
+}
+
+.settings-workspace .settings-field input:focus-visible,
+.settings-workspace .settings-field select:focus-visible,
+.settings-workspace .settings-field textarea:focus-visible {
+  outline: 1px solid #61d9f1;
+  outline-offset: 2px;
+}
+
+.settings-workspace .settings-group > div[class*="border-t"],
+.settings-workspace .settings-group > div[class*="border-b"] {
+  border-color: rgba(34, 211, 238, .12) !important;
+}
+
+.settings-workspace .settings-group div[class*="bg-slate-900"]:not(input):not(select):not(textarea),
+.settings-workspace .settings-group p[class*="bg-slate-900"] {
+  border-radius: 0 !important;
+  background: rgba(3, 15, 25, .55) !important;
+  box-shadow: none !important;
+}
+
+.settings-workspace .settings-group div[class*="rounded-lg"],
+.settings-workspace .settings-group div[class*="rounded-xl"] {
+  border-radius: 0 !important;
+}
+
+.settings-workspace .settings-actions {
+  flex: 0 0 auto;
+  margin-top: 20px !important;
+  padding-top: 14px !important;
+  border-top: 1px solid rgba(34, 211, 238, .22) !important;
+}
+
+.settings-workspace .settings-actions button {
+  border-radius: 0 !important;
+  padding: 9px 13px !important;
+  font: 10px/1 var(--font-technical);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 900px) {
+  .charlie-settings-header {
+    min-height: 78px;
+    padding: 16px 18px 13px !important;
+  }
+
+  .charlie-settings-header h2 {
+    font-size: 16px;
+  }
+
+  .charlie-settings-modal-body {
+    padding: 22px 18px 30px !important;
+  }
+
+  .settings-workspace .settings-intro {
+    align-items: flex-start;
+    min-height: 0;
+  }
+
+  .settings-workspace .settings-intro > div:last-child {
+    flex: 0 0 100%;
+    align-self: flex-start;
+  }
+
+  .settings-workspace > .flex-1 {
+    gap: 16px;
+    overflow: visible;
+  }
+
+  .settings-workspace > .flex-1 > :first-child {
+    gap: 5px 6px;
+    padding-bottom: 13px !important;
+  }
+
+  .settings-workspace > .flex-1 > :first-child button {
+    padding: 8px 8px !important;
+    font-size: 10px;
+  }
+
+  .settings-workspace > .flex-1 > :last-child {
+    grid-template-columns: minmax(0, 1fr);
+    overflow: visible;
+    padding-right: 0 !important;
+  }
+
+  .settings-workspace .settings-field {
+    grid-template-columns: minmax(140px, 1fr) minmax(150px, 1fr);
+    gap: 16px;
+  }
+}
+
+@media (max-width: 560px) {
+  .charlie-settings-header > div:first-child {
+    gap: 9px;
+  }
+
+  .charlie-settings-kicker {
+    font-size: 8px;
+  }
+
+  .charlie-settings-header h2 {
+    font-size: 13px;
+    letter-spacing: .07em;
+  }
+
+  .charlie-settings-header > button {
+    padding: 7px 8px !important;
+  }
+
+  .settings-workspace .settings-field {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+  }
+
+  .settings-workspace .settings-field input:not([type="checkbox"]),
+  .settings-workspace .settings-field select,
+  .settings-workspace .settings-field textarea {
+    max-width: none;
+  }
+}

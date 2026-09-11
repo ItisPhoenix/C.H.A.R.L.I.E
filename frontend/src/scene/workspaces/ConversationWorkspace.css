@@ -1,0 +1,103 @@
+.conversation-workspace {
+  color: var(--scene-text-primary);
+  gap: 16px;
+  font-size: 13px;
+}
+
+.conversation-workspace__header {
+  border-bottom: 1px solid rgba(34, 211, 238, .18);
+  min-height: 38px;
+  color: #dff8ff;
+}
+
+.conversation-workspace__stream {
+  width: min(100%, 980px);
+  margin: 0 auto;
+  padding: 8px clamp(12px, 3vw, 52px) 18px;
+}
+
+.conversation-workspace__turn {
+  max-width: 86ch;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.conversation-workspace__turn:not(.conversation-workspace__turn--current) {
+  opacity: .62;
+}
+
+.conversation-workspace__turn--charlie {
+  align-items: flex-start;
+}
+
+.conversation-workspace__turn--user {
+  align-items: flex-end;
+}
+
+.conversation-workspace__history {
+  border: 1px solid rgba(34, 211, 238, .22);
+  background: rgba(2, 8, 15, .78);
+}
+
+.conversation-workspace__message {
+  border-radius: 2px;
+  border-left: 2px solid rgba(34, 211, 238, .26);
+  background: rgba(5, 16, 27, .56);
+  max-width: 78ch;
+  padding: 16px 20px;
+  color: #d9edf5;
+  font-size: 14px;
+  line-height: 1.72;
+}
+
+.conversation-workspace__message--user {
+  border-left-color: rgba(34, 211, 238, .72);
+  background: rgba(4, 28, 42, .62);
+  max-width: 64ch;
+  color: #c7f3ff;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.conversation-workspace__turn--current .conversation-workspace__message {
+  border-top: 1px solid rgba(34, 211, 238, .18);
+  border-bottom: 1px solid rgba(34, 211, 238, .1);
+}
+
+.conversation-workspace__activity {
+  border-radius: 2px;
+  border-left: 2px solid rgba(34, 211, 238, .48);
+  background: rgba(3, 17, 27, .5);
+}
+
+.conversation-workspace__composer {
+  width: min(100%, 980px);
+  margin: 0 auto;
+  border-radius: 2px;
+  background: rgba(2, 8, 15, .84);
+  padding: 12px 14px;
+}
+
+.conversation-workspace__composer textarea {
+  min-height: 44px;
+  font-size: 14px;
+}
+
+.conversation-workspace__approval {
+  border-radius: 2px;
+  border-left: 2px solid rgba(245, 158, 11, .72);
+  background: rgba(35, 22, 4, .38);
+}
+
+@media (max-width: 900px) {
+  .conversation-workspace__stream,
+  .conversation-workspace__composer {
+    width: 100%;
+    padding-left: 4px;
+    padding-right: 4px;
+  }
+
+  .conversation-workspace__message {
+    max-width: 78vw;
+    font-size: 13px;
+  }
+}

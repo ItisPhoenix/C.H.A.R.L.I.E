@@ -1,0 +1,320 @@
+/* PASS 5C-A: topology is the machine; telemetry supports it. */
+.system-composition {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr);
+  grid-template-rows: auto auto minmax(330px, 1fr) auto;
+  grid-template-areas:
+    "heading heading"
+    "live live"
+    "topology operations"
+    "host feed";
+  gap: 22px 32px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 2% 30px;
+  color: var(--scene-text-primary);
+  font: 13px/1.45 var(--font-technical);
+}
+
+.system-composition .system-heading,
+.system-composition .system-live-telemetry,
+.system-composition .system-topology,
+.system-composition .system-operations,
+.system-composition .system-host-signals,
+.system-composition .system-feed {
+  position: static !important;
+  inset: auto !important;
+  width: auto !important;
+  height: auto !important;
+  margin: 0;
+}
+
+.system-composition .system-heading {
+  grid-area: heading;
+  padding-bottom: 2px;
+}
+
+.system-heading-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.system-composition .system-heading .spatial-kicker {
+  color: #63d4f4;
+  font-size: clamp(16px, 1.7vw, 25px);
+  letter-spacing: .26em;
+}
+
+.system-composition .system-heading .spatial-subtitle {
+  margin-top: 10px;
+  color: #7898a9;
+}
+
+.system-runtime-state {
+  color: #65ddb0;
+  font-size: 10px;
+  letter-spacing: .18em;
+  white-space: nowrap;
+}
+
+.system-runtime-state[data-runtime-health="stale"] {
+  color: #f4bf58;
+}
+
+.system-runtime-state[data-runtime-health="unavailable"] {
+  color: #738795;
+}
+
+.system-composition .system-live-telemetry {
+  grid-area: live;
+  border-block: 1px solid rgba(58, 171, 211, .22);
+  padding: 9px 0 7px;
+}
+
+.system-composition .system-live-telemetry > .grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 26px;
+  margin-top: 9px;
+  padding: 10px 0;
+  border: 0;
+}
+
+.system-composition .system-live-telemetry strong {
+  display: block;
+  margin-top: 5px;
+  color: #e8f8ff;
+  font: 20px/1.1 var(--font-technical);
+  font-weight: 400;
+}
+
+.system-composition .system-live-telemetry .spatial-subtitle {
+  display: block;
+}
+
+.system-composition .system-live-telemetry > div:last-child {
+  gap: 16px;
+  color: #95b1bc;
+  font-size: 10px;
+}
+
+.system-composition .system-topology {
+  grid-area: topology;
+  display: flex;
+  flex-direction: column;
+  min-height: 330px;
+  padding: 14px 20px 12px;
+  border-top: 1px solid rgba(58, 171, 211, .3);
+  border-left: 1px solid rgba(58, 171, 211, .16);
+  background: linear-gradient(120deg, rgba(4, 20, 31, .16), transparent 64%);
+}
+
+.system-composition .system-topology > :last-child {
+  flex: 1;
+  width: 100%;
+  height: auto !important;
+  min-height: 0;
+  margin-top: 8px;
+}
+
+.system-composition .system-topology [class*="rounded-2xl"],
+.system-composition .system-topology [class*="rounded-xl"] {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: rgba(2, 9, 18, .28) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+.system-composition .system-operations {
+  grid-area: operations;
+  min-width: 0;
+  padding: 0 0 0 20px;
+  border-left: 1px solid rgba(58, 171, 211, .18);
+}
+
+.system-composition .operation-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 42px;
+  align-items: center;
+  gap: 12px;
+  min-height: 65px;
+  border-bottom: 1px solid rgba(58, 171, 211, .13);
+}
+
+.system-composition .operation-row strong,
+.system-composition .operation-row span {
+  display: block;
+}
+
+.system-composition .operation-row strong {
+  color: #d8eff8;
+  font-size: 12px;
+  letter-spacing: .1em;
+}
+
+.system-composition .operation-row span {
+  margin-top: 5px;
+  color: #6e8d9d;
+  font: 11px var(--font-ui);
+}
+
+.system-composition .operation-row em {
+  color: #50cbed;
+  font-size: 9px;
+  font-style: normal;
+  letter-spacing: .12em;
+}
+
+.system-composition .operation-ring {
+  display: grid;
+  place-items: center;
+  width: 33px;
+  height: 33px;
+  border: 1px solid #35b9e6;
+  border-radius: 50%;
+  color: #c8f5ff;
+  font-size: 9px;
+}
+
+.system-composition .system-host-signals {
+  grid-area: host;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(220px, .85fr);
+  align-items: start;
+  gap: 24px;
+  min-width: 0;
+  padding-top: 3px;
+}
+
+.system-composition .system-processes,
+.system-composition .system-vitals {
+  min-width: 0;
+}
+
+.system-composition .system-processes [class*="rounded-xl"],
+.system-composition .system-processes [class*="rounded-lg"] {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  backdrop-filter: none !important;
+}
+
+.system-composition .system-processes table {
+  width: 100%;
+  font-size: 11px;
+}
+
+.system-composition .system-vitals > div > div:last-child {
+  border-bottom-color: rgba(58, 171, 211, .18);
+}
+
+.system-composition .system-feed {
+  grid-area: feed;
+  min-width: 0;
+  border-top: 1px solid rgba(58, 171, 211, .24);
+  padding-top: 10px;
+}
+
+.system-composition .log-row {
+  display: grid;
+  grid-template-columns: 66px 48px minmax(0, 1fr);
+  gap: 7px;
+  padding: 5px 0;
+  color: #9bb2bd;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.system-composition .log-row time {
+  color: #567381;
+}
+
+.system-composition .log-info {
+  color: #58c9e9;
+}
+
+.system-composition .log-warn {
+  color: #e7b15b;
+}
+
+.system-composition .log-error {
+  color: #ec6d74;
+}
+
+.system-composition .spatial-empty {
+  min-height: 100px;
+  color: #557582;
+  font-size: 9px;
+  letter-spacing: .14em;
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .system-composition {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(300px, auto) auto auto auto;
+    grid-template-areas:
+      "heading"
+      "live"
+      "topology"
+      "operations"
+      "host"
+      "feed";
+    gap: 20px;
+    height: auto;
+    min-height: 100%;
+    overflow-y: visible;
+    padding: 16px 4% 48px;
+  }
+
+  .system-heading-line {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .system-composition .system-live-telemetry > .grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .system-composition .system-topology {
+    min-height: 300px;
+    padding-inline: 10px;
+  }
+
+  .system-composition .system-operations {
+    padding-left: 0;
+    border-left: 0;
+    border-top: 1px solid rgba(58, 171, 211, .2);
+    padding-top: 10px;
+  }
+
+  .system-composition .system-host-signals {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 22px;
+  }
+}
+
+@media (min-width: 561px) and (max-width: 900px) {
+  .system-heading-line {
+    align-items: baseline;
+    flex-direction: row;
+  }
+}
+
+@media (max-width: 560px) {
+  .system-composition .system-live-telemetry > .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .system-composition .operation-row {
+    min-height: 58px;
+  }
+}

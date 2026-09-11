@@ -56,6 +56,7 @@ export function CharlieCore({
       ref={rootRef}
       className={`charlie-core-wrapper ${isDocked ? "charlie-core-docked" : "charlie-core-center"}`}
       data-testid="charlie-core"
+      data-core-display-state={displayState}
       onClick={() => setShowMenu((prev) => !prev)}
       role="button"
       tabIndex={0}
