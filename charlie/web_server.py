@@ -45,6 +45,10 @@ from charlie.events import CONTRACT_VERSION, EventValidationError, build_event, 
 from charlie.media_runtime import canonical_media_request_fingerprint
 from charlie.privacy_service import PRIVACY_PURGE_CATEGORIES, canonical_privacy_request_fingerprint
 from charlie.settings_service import canonical_settings_request_fingerprint
+from charlie.task_journal import (
+    canonical_terminal_task_order_key,
+    resolve_task_history_max_terminal,
+)
 from charlie.code_index import CodeIndex
 from charlie.runtime_introspector import RuntimeIntrospector
 from charlie.self_knowledge import SelfKnowledgeService
@@ -52,6 +56,7 @@ from charlie.doctor import CharlieDoctor
 
 logger = logging.getLogger("charlie.web_server")
 logger.addFilter(SensitiveDataFilter())
+TASK_HISTORY_MAX_TERMINAL = resolve_task_history_max_terminal()
 
 from charlie.runtime_identity import git_build_identity
 
@@ -1228,6 +1233,7 @@ async def get_active_session():
 
 def _initial_state_events() -> List[dict]:
     """Return cached events needed by a newly connected client."""
+    _prune_task_projection(_background_tasks)
     events = [
         build_event("charlie_state", _charlie_state),
         build_event("system_status", _system_status),
@@ -1254,6 +1260,7 @@ def _initial_state_events() -> List[dict]:
 
 def _projected_task_list() -> list[dict]:
     """Return copies of the read-only task projection for API consumers."""
+    _prune_task_projection(_background_tasks)
     return [dict(task) for task in _background_tasks.values()]
 
 
@@ -1275,6 +1282,29 @@ _PROJECTED_TASK_STATUS_ALIASES = {
     "done": "completed",
     "awaiting_approval": "approval_required",
 }
+_PROJECTED_TASK_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _prune_task_projection(cache: dict) -> None:
+    terminal_tasks = [
+        (task_id, task)
+        for task_id, task in cache.items()
+        if isinstance(task, dict) and task.get("status") in _PROJECTED_TASK_TERMINAL_STATUSES
+    ]
+    overflow = len(terminal_tasks) - TASK_HISTORY_MAX_TERMINAL
+    if overflow <= 0:
+        return
+    oldest = sorted(
+        terminal_tasks,
+        key=lambda item: canonical_terminal_task_order_key(
+            item[1].get("completed_at"),
+            item[1].get("updated_at"),
+            item[1].get("created_at"),
+            item[0],
+        ),
+    )[:overflow]
+    for task_id, _ in oldest:
+        cache.pop(task_id, None)
 
 
 def _apply_presentation_event(cache: dict, event: dict) -> None:
@@ -2386,6 +2416,7 @@ def _apply_background_task_event(cache: dict, event: dict) -> None:
     }:
         return
     cache[task_id] = safe
+    _prune_task_projection(cache)
 
 
 def _project_background_task_event(event: object) -> Optional[tuple[str, dict]]:
@@ -2429,6 +2460,7 @@ def _project_background_task_event(event: object) -> Optional[tuple[str, dict]]:
     for key in (
         "origin", "lane", "priority", "session_id", "turn_id", "parent_task_id", "progress",
         "current_action", "waiting_reason", "result_reference", "approval_reference",
+        "created_at", "updated_at", "completed_at",
         "capability_requirements",
     ):
         if key in payload:
@@ -2458,6 +2490,7 @@ def _apply_task_snapshot_event(cache: dict, event: dict) -> None:
         task_id, safe = projected
         replacement[task_id] = safe
 
+    _prune_task_projection(replacement)
     cache.clear()
     cache.update(replacement)
 

@@ -8,6 +8,7 @@ V1 states to new callers.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from dataclasses import dataclass, field, replace
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from charlie.utils import make_id, utc_now_iso
+
+logger = logging.getLogger("charlie.task_journal")
 
 
 class TaskStatus(StrEnum):
@@ -52,6 +55,28 @@ _LEGACY_STATUS_ALIASES = {
     "awaiting_approval": TaskStatus.APPROVAL_REQUIRED,
 }
 _TERMINAL_STATUSES = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED})
+DEFAULT_TASK_HISTORY_MAX_TERMINAL = 1000
+
+
+def resolve_task_history_max_terminal(value: Optional[int] = None) -> int:
+    if value is None:
+        value = DEFAULT_TASK_HISTORY_MAX_TERMINAL
+    value = int(value)
+    if value < 0:
+        raise ValueError("TASK_HISTORY_MAX_TERMINAL must be non-negative")
+    return value
+
+
+def canonical_terminal_task_order_key(
+    completed_at: object,
+    updated_at: object,
+    created_at: object,
+    task_id: object,
+) -> tuple[str, str]:
+    timestamp = completed_at or updated_at or created_at or ""
+    return str(timestamp), str(task_id)
+
+
 _ALLOWED_TRANSITIONS = {
     TaskStatus.QUEUED: frozenset({
         TaskStatus.PLANNING, TaskStatus.WAITING, TaskStatus.RUNNING,
@@ -197,12 +222,19 @@ class TaskJournal:
         self,
         state_path: str | Path | None = None,
         on_change: Optional[Callable[[TaskRecord], None]] = None,
+        *,
+        max_terminal_records: Optional[int] = None,
     ) -> None:
         self._state_path = Path(state_path) if state_path is not None else None
         self._on_change = on_change
+        self._max_terminal_records = resolve_task_history_max_terminal(max_terminal_records)
         self._lock = threading.RLock()
         self._records: dict[str, TaskRecord] = {}
         self._load()
+
+    @property
+    def max_terminal_records(self) -> int:
+        return self._max_terminal_records
 
     def create_task(
         self,
@@ -236,6 +268,7 @@ class TaskJournal:
             if task.id in self._records:
                 raise ValueError(f"Task already exists: {task.id}")
             self._records[task.id] = task
+            self._prune_terminal_records()
             self._persist()
             self._notify(task)
             return replace(task)
@@ -288,6 +321,7 @@ class TaskJournal:
                 task.result_reference = result_reference
             if approval_reference is not None:
                 task.approval_reference = approval_reference
+            self._prune_terminal_records()
             self._persist()
             self._notify(task)
             return replace(task)
@@ -363,18 +397,57 @@ class TaskJournal:
         if self._on_change is not None:
             self._on_change(replace(task))
 
+    @staticmethod
+    def _terminal_order_key(task: TaskRecord) -> tuple[str, str]:
+        return canonical_terminal_task_order_key(
+            task.completed_at,
+            task.updated_at,
+            task.created_at,
+            task.id,
+        )
+
+    def _prune_terminal_records(self) -> bool:
+        terminal_records = [
+            record for record in self._records.values() if record.status in _TERMINAL_STATUSES
+        ]
+        overflow = len(terminal_records) - self._max_terminal_records
+        if overflow <= 0:
+            return False
+        for record in sorted(terminal_records, key=self._terminal_order_key)[:overflow]:
+            self._records.pop(record.id, None)
+        return True
+
     def _load(self) -> None:
         if self._state_path is None or not self._state_path.exists():
             return
         try:
             raw = json.loads(self._state_path.read_text(encoding="utf-8"))
             records = raw.get("tasks", []) if isinstance(raw, dict) else raw
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            logger.warning("Failed to load task journal", exc_info=True)
+            self._records = {}
+            return
+
+        loaded_records: dict[str, TaskRecord] = {}
+        try:
             for payload in records:
                 task = TaskRecord.from_dict(payload)
                 if task.id:
-                    self._records[task.id] = task
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    loaded_records[task.id] = task
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.warning("Failed to parse task journal records", exc_info=True)
             self._records = {}
+            return
+
+        self._records = loaded_records
+        if self._prune_terminal_records():
+            try:
+                self._persist()
+            except Exception:
+                logger.warning(
+                    "Failed to persist normalized task journal; retaining loaded records",
+                    exc_info=True,
+                )
 
     def _persist(self) -> None:
         if self._state_path is None:

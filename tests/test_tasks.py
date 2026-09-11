@@ -219,3 +219,103 @@ def test_list_returns_all_submitted_tasks():
     mgr.submit(_entry("b"), lambda: None)
     ids = {t.id for t in mgr.list()}
     assert ids == {"a", "b"}
+
+
+def test_terminal_task_and_run_function_retention_are_bounded_together():
+    mgr = TaskManager(max_parallel=0, max_terminal_records=2)
+    mgr.submit(_entry("active"), lambda: None)
+
+    for index in range(4):
+        task_id = f"terminal-{index}"
+        mgr.submit(_entry(task_id), lambda: None)
+        assert mgr.cancel(task_id) is True
+
+    assert {task.id for task in mgr.list()} == {"active", "terminal-2", "terminal-3"}
+    assert set(mgr._run_fns) == {"active", "terminal-2", "terminal-3"}
+    assert not mgr._task_handles
+
+
+def test_queued_cancellation_prunes_terminal_history_immediately():
+    mgr = TaskManager(max_parallel=0, max_terminal_records=0)
+    mgr.submit(_entry("queued"), lambda: None)
+
+    assert mgr.cancel("queued") is True
+    assert mgr.get("queued") is None
+    assert "queued" not in mgr._run_fns
+
+
+def test_blocked_dependent_cancellation_prunes_without_mutating_iteration():
+    mgr = TaskManager(max_parallel=0, max_terminal_records=0)
+    mgr.submit(_entry("failed-dependency"), lambda: None)
+    assert mgr.cancel("failed-dependency") is True
+
+    mgr.submit(_entry("blocked", depends_on=["failed-dependency"]), lambda: None)
+
+    assert mgr.get("failed-dependency") is None
+    assert mgr.get("blocked") is None
+
+
+@pytest.mark.asyncio
+async def test_active_execution_handle_survives_terminal_pruning():
+    mgr = TaskManager(max_parallel=1, max_terminal_records=1)
+    release = asyncio.Event()
+
+    async def run_active():
+        await release.wait()
+
+    mgr.submit(_entry("active"), run_active)
+    await asyncio.sleep(0.01)
+    assert mgr.get("active").status == "running"
+    assert "active" in mgr._task_handles
+
+    mgr.submit(_entry("queued-terminal"), lambda: None)
+    assert mgr.cancel("queued-terminal") is True
+    assert mgr.get("active") is not None
+    assert "active" in mgr._task_handles
+
+    release.set()
+    await mgr.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_terminal_dependency_is_pinned_until_dependent_finishes():
+    mgr = TaskManager(max_parallel=1, max_terminal_records=0)
+    dependency_release = asyncio.Event()
+    dependent_release = asyncio.Event()
+
+    async def run_dependency():
+        await dependency_release.wait()
+
+    async def run_dependent():
+        await dependent_release.wait()
+
+    mgr.submit(_entry("dependency"), run_dependency)
+    mgr.submit(_entry("dependent", depends_on=["dependency"]), run_dependent)
+    await asyncio.sleep(0.01)
+    assert mgr.get("dependency").status == "running"
+    assert mgr.get("dependent").status == "queued"
+
+    dependency_release.set()
+    await asyncio.sleep(0.02)
+    assert mgr.get("dependency").status == "done"
+    assert mgr.get("dependent").status == "running"
+
+    dependent_release.set()
+    await asyncio.sleep(0.02)
+    await mgr.shutdown()
+    assert mgr.get("dependency") is None
+    assert mgr.get("dependent") is None
+
+
+@pytest.mark.asyncio
+async def test_direct_terminal_status_is_ordered_once():
+    mgr = TaskManager(max_parallel=1, max_terminal_records=2)
+
+    async def run_direct():
+        mgr.get("direct").status = "done"
+
+    mgr.submit(_entry("direct"), run_direct)
+    await asyncio.sleep(0.02)
+    first_sequence = mgr._terminal_order["direct"]
+    await asyncio.sleep(0.02)
+    assert mgr._terminal_order["direct"] == first_sequence
