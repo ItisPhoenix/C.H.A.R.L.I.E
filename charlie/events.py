@@ -45,6 +45,7 @@ class EventType(StrEnum):
     SESSION_OPERATION_RESULT = "session_operation_result"
     SYSTEM_STATUS = "system_status"
     SUBSYSTEM_HEALTH = "subsystem_health"
+    RUNTIME_TRUTH = "runtime_truth"
     ALERT = "alert"
     LOG = "log"
     DESKTOP_FRAME = "desktop_frame"

@@ -145,7 +145,7 @@ from charlie.settings_service import (
     canonical_settings_request_fingerprint,
 )
 from charlie.state import StateMachine
-from charlie.subsystem_health import HealthRegistry, HealthStatus
+from charlie.subsystem_health import HealthRegistry, HealthStatus, RuntimeStatus
 from charlie.task_journal import TaskOrigin, TaskPriority, TaskStatus, get_task_journal
 from charlie.turn_contracts import IntentDecision, ResultEnvelope, ResultStatus, TurnRequest
 from charlie.presentation import (
@@ -2167,8 +2167,69 @@ _runtime_health = HealthRegistry(
         "voice_capture",
         "asr",
         "watchers",
-    )
+        "background_tasks",
+        "terminal",
+        "browser",
+    ),
+    launch_id=_LAUNCH_ID,
 )
+
+
+def _configure_runtime_health(runtime_config: Any) -> None:
+    """Configure main-owned policy without turning static availability into readiness."""
+    try:
+        from charlie.browser import BROWSER_AVAILABLE
+
+        browser_static_available: Optional[bool] = bool(BROWSER_AVAILABLE)
+    except Exception:
+        browser_static_available = None
+
+    policies = {
+        "brain": (True, True, True, "main.brain"),
+        "llm": (True, True, bool(getattr(runtime_config, "llm_url", "")), "main.brain"),
+        "memory": (True, False, True, "main.memory"),
+        "plugins": (bool(getattr(runtime_config, "plugins_enabled", False)), False, True, "main.plugins"),
+        "mcp": (bool(getattr(runtime_config, "mcp_enabled", False)), False, True, "main.mcp"),
+        "web": (True, True, True, "main.web_process"),
+        "companion": (bool(getattr(runtime_config, "pet_enabled", False)), False, None, "main.companion_process"),
+        "telegram": (bool(getattr(runtime_config, "telegram_enabled", False)), False, None, "main.telegram"),
+        "voice": (True, False, None, "main.voice"),
+        "voice_capture": (True, False, None, "main.voice"),
+        "asr": (True, False, None, "main.voice"),
+        "watchers": (True, False, True, "main.watchers"),
+        "background_tasks": (True, True, True, "main.background_tasks"),
+        "terminal": (True, False, None, "web.terminal_manager"),
+        "browser": (
+            bool(getattr(runtime_config, "browser_enabled", False)),
+            False,
+            browser_static_available,
+            "browser.controller",
+        ),
+    }
+    for name, (enabled, required, static_available, authority) in policies.items():
+        try:
+            _runtime_health.configure_subsystem(
+                name,
+                enabled=enabled,
+                required=required,
+                static_available=static_available,
+                evidence_authority=authority,
+            )
+        except ValueError:
+            # Tests and partial startup fixtures may intentionally use smaller registries.
+            logger.debug("Runtime health registry does not expose subsystem %s", name)
+
+
+def _set_subsystem_health_if_known(
+    name: str,
+    status: HealthStatus,
+    public_detail: Optional[str] = None,
+) -> None:
+    """Project optional lifecycle truth without breaking reduced test registries."""
+    try:
+        _set_subsystem_health(name, status, public_detail)
+    except ValueError:
+        logger.debug("Runtime health registry does not expose subsystem %s", name)
 
 
 def _build_runtime_introspector(
@@ -2493,11 +2554,20 @@ async def _open_conversation_workspace(event_bus: Optional[Any] = None) -> None:
 
 
 async def _publish_subsystem_health(bus: Optional[EventBus] = None) -> None:
-    """Publish current public health snapshot when the IPC producer exists."""
+    """Publish legacy subsystem projection plus canonical runtime truth."""
     if bus is None:
         return
     event = _runtime_health.event()
     await bus.emit(event["type"], event["payload"], meta=EventMeta(source=EventSource.VOICE))
+    await _publish_runtime_truth(bus)
+
+
+async def _publish_runtime_truth(bus: Optional[EventBus] = None) -> None:
+    """Publish main-owned revisioned aggregate health for read-only consumers."""
+    if bus is None:
+        return
+    event = _runtime_health.runtime_event()
+    await bus.emit(event["type"], event["payload"], meta=EventMeta(source=EventSource.RUNTIME))
 
 
 async def _publish_task_snapshot(bus: Optional[EventBus] = None) -> None:
@@ -4287,6 +4357,9 @@ async def main() -> int:
     global _main_event_bus, _main_event_bus_registry
     loop = asyncio.get_running_loop()
     settings_service = SettingsService(config_instance=config)
+    _configure_runtime_health(config)
+    if background_task.is_admission_open():
+        _set_subsystem_health_if_known("background_tasks", HealthStatus.RUNNING, "Admission open")
     _orig_handler = loop.call_exception_handler
 
     def _guarded_handler(ctx):
@@ -4365,8 +4438,16 @@ async def main() -> int:
             if runtime_shutting_down:
                 return
             runtime_shutting_down = True
+        _runtime_health.set_runtime_lifecycle(RuntimeStatus.SHUTTING_DOWN)
+        _set_subsystem_health_if_known("background_tasks", HealthStatus.SHUTTING_DOWN, "Admission closing")
         background_task.close_admission()
         event_bus_registry.close()
+        bus = _main_event_bus
+        if bus is not None:
+            try:
+                _submit_event_task(_publish_subsystem_health(bus), loop)
+            except RuntimeError:
+                logger.debug("Unable to publish runtime shutdown health", exc_info=True)
 
     def _stop_voice(*, final: bool) -> None:
         nonlocal voice, shutdown_quiescent, exit_code
@@ -4393,6 +4474,7 @@ async def main() -> int:
 
             _set_subsystem_health("voice", HealthStatus.DEGRADED, "Voice shutdown incomplete")
             _set_optional_voice_health("voice_capture", HealthStatus.DEGRADED, "Voice shutdown incomplete")
+            _set_optional_voice_health("asr", HealthStatus.DEGRADED, "Voice shutdown incomplete")
             if final:
                 shutdown_quiescent = False
                 exit_code = 1
@@ -4416,6 +4498,7 @@ async def main() -> int:
         nonlocal watcher_thread, exit_code
         if watcher_thread is None:
             watcher_stop_event.set()
+            _set_subsystem_health_if_known("watchers", HealthStatus.STOPPED, "Stopped")
             return
         stopped = _stop_watcher_thread(watcher_stop_event, watcher_thread)
         if stopped:
@@ -7199,7 +7282,12 @@ async def main() -> int:
                     mcp_start_task,
                 ]
                 await _cancel_and_drain(tasks_to_drain, label="event_bus_tasks")
-                await background_task.shutdown()
+                try:
+                    await background_task.shutdown()
+                    _set_subsystem_health_if_known("background_tasks", HealthStatus.STOPPED, "Stopped")
+                except Exception:
+                    _set_subsystem_health_if_known("background_tasks", HealthStatus.DEGRADED, "Shutdown incomplete")
+                    raise
                 await _drain_runtime_submissions()
                 if calendar_runtime is not None:
                     try:
@@ -7236,7 +7324,12 @@ async def main() -> int:
             *tuple(background_housekeeping_tasks),
         ]
         await _cancel_and_drain(outer_tasks, label="outer_tasks")
-        await background_task.shutdown()
+        try:
+            await background_task.shutdown()
+            _set_subsystem_health_if_known("background_tasks", HealthStatus.STOPPED, "Stopped")
+        except Exception:
+            _set_subsystem_health_if_known("background_tasks", HealthStatus.DEGRADED, "Shutdown incomplete")
+            exit_code = 1
         await _drain_runtime_submissions()
 
         try:
@@ -7284,16 +7377,20 @@ async def main() -> int:
             web_pid = getattr(web_proc, "pid", None)
             try:
                 _terminate_subsystem_process(web_proc)
+                _set_subsystem_health_if_known("web", HealthStatus.STOPPED, "Stopped")
                 logger.info("web child exited | pid=%s | exit_code=%s", web_pid, web_proc.poll())
             except Exception as e:
+                _set_subsystem_health_if_known("web", HealthStatus.DEGRADED, "Shutdown incomplete")
                 logger.warning("Web process termination error: %s", e)
 
         if pet_proc is not None:
             pet_pid = getattr(pet_proc, "pid", None)
             try:
                 _terminate_subsystem_process(pet_proc)
+                _set_subsystem_health_if_known("companion", HealthStatus.STOPPED, "Stopped")
                 logger.info("companion child exited | pid=%s | exit_code=%s", pet_pid, pet_proc.poll())
             except Exception as e:
+                _set_subsystem_health_if_known("companion", HealthStatus.DEGRADED, "Shutdown incomplete")
                 logger.warning("Companion process termination error: %s", e)
 
         if companion_ready_file is not None:
@@ -7305,8 +7402,12 @@ async def main() -> int:
         if brain is not None:
             try:
                 await brain.close()
+                _set_subsystem_health_if_known("brain", HealthStatus.STOPPED, "Stopped")
+                _set_subsystem_health_if_known("llm", HealthStatus.STOPPED, "Stopped")
                 logger.info("Brain closed")
             except Exception as e:
+                _set_subsystem_health_if_known("brain", HealthStatus.DEGRADED, "Shutdown incomplete")
+                _set_subsystem_health_if_known("llm", HealthStatus.DEGRADED, "Shutdown incomplete")
                 logger.warning("Brain close error: %s", e)
 
         if memory_graph is not None and hasattr(memory_graph, "close"):
@@ -7325,8 +7426,11 @@ async def main() -> int:
         _log_port_release("127.0.0.1", 5555)
         _log_port_release("127.0.0.1", 5556)
 
-        if shutdown_quiescent:
+        if shutdown_quiescent and exit_code == 0:
+            _runtime_health.set_runtime_lifecycle(RuntimeStatus.STOPPED)
             logging.shutdown()
+        else:
+            _runtime_health.mark_shutdown_failed()
 
     return exit_code
 

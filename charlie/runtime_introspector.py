@@ -280,12 +280,36 @@ class RuntimeIntrospector:
         }
 
     def get_health_info(self) -> Dict[str, Any]:
-        """Query HealthRegistry for subsystem statuses."""
+        """Return subsystem entries from the canonical runtime-truth snapshot."""
         health_reg = self._get_health_registry()
         if health_reg is None:
             return {}
 
-        return health_reg.snapshot()
+        runtime_truth = self.get_runtime_truth()
+        if isinstance(runtime_truth.get("subsystems"), dict):
+            return {
+                name: {
+                    "status": value.get("status", "unknown"),
+                    "detail": value.get("detail", "Unknown"),
+                }
+                for name, value in runtime_truth["subsystems"].items()
+                if isinstance(value, dict)
+            }
+
+        # Compatibility fallback for reduced test doubles and pre-runtime-truth readers.
+        snapshot = getattr(health_reg, "snapshot", None)
+        return dict(snapshot()) if callable(snapshot) else {}
+
+    def get_runtime_truth(self) -> Dict[str, Any]:
+        """Read main-owned aggregate truth without recomputing it locally."""
+        health_reg = self._get_health_registry()
+        if health_reg is None:
+            return {}
+        runtime_snapshot = getattr(health_reg, "runtime_snapshot", None)
+        if callable(runtime_snapshot):
+            result = runtime_snapshot()
+            return dict(result) if isinstance(result, dict) else {}
+        return {}
 
     def get_mcp_info(self) -> Dict[str, Any]:
         """Query MCPClient for configured servers and tool roster."""
@@ -611,6 +635,7 @@ class RuntimeIntrospector:
             "tasks": self.get_tasks_info(),
             "leases": self.get_leases_info(),
             "subsystem_health": self.get_health_info(),
+            "runtime_truth": self.get_runtime_truth(),
             "mcp": self.get_mcp_info(),
             "memory": self.get_memory_info(),
             "subsystems": self.get_subsystem_info(),

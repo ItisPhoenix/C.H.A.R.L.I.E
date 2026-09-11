@@ -30,6 +30,7 @@
     "session_operation_result": {"category": "result", "replay": false, "required": ["request_id", "request_fingerprint", "operation", "status", "result"]},
     "system_status": {"category": "snapshot", "replay": true, "required": []},
     "subsystem_health": {"category": "snapshot", "replay": true, "required": []},
+    "runtime_truth": {"category": "snapshot", "replay": true, "required": ["authority", "launch_id", "revision", "status", "subsystems"]},
     "alert": {"category": "transient", "replay": false, "required": []},
     "log": {"category": "transient", "replay": false, "required": []},
     "desktop_frame": {"category": "transient", "replay": false, "required": []},
