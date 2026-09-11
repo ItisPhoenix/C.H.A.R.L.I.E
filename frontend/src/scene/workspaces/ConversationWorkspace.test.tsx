@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { ConversationWorkspace } from "./ConversationWorkspace";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
 import { useCharlieStore } from "../../store/charlie";
@@ -68,7 +68,7 @@ describe("ConversationWorkspace Component", () => {
 
     expect(screen.getByText(/Approval Required: run_shell_command/i)).toBeDefined();
     expect(screen.getByText("Execute directory listing")).toBeDefined();
-    expect(screen.getByText("Respond using the approval dialog.")).toBeDefined();
+    expect(screen.getByText("Detailed approval information is available in the canonical approval dialog.")).toBeDefined();
     expect(screen.queryByText("Approve Action")).toBeNull();
     expect(screen.queryByText("Reject")).toBeNull();
   });
@@ -166,6 +166,39 @@ describe("ConversationWorkspace Component", () => {
     });
 
     expect(await screen.findByText("session_abc_789")).toBeDefined();
+    global.fetch = originalFetch;
+  });
+
+  test("shows authoritative session history and switches through the active-session API", async () => {
+    const originalFetch = global.fetch;
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    global.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url === "/api/session/active" && !init) {
+        return { ok: true, json: async () => ({ active_session: "session-current" }) } as Response;
+      }
+      if (url === "/api/sessions") {
+        return {
+          ok: true,
+          json: async () => ({ sessions: [
+            { id: "session-current", title: "Current", updated_at: "2026-09-11T00:00:00Z" },
+            { id: "session-older", title: "Older", updated_at: "2026-09-10T00:00:00Z" },
+          ] }),
+        } as Response;
+      }
+      if (url === "/api/session/active" && init?.method === "POST") {
+        return { ok: true, json: async () => ({ status: "completed", result: { active_session_id: "session-older" } }) } as Response;
+      }
+      return { ok: true, json: async () => ({ messages: [] }) } as Response;
+    };
+
+    render(<ConversationWorkspace workspace={mockWorkspace} />);
+    fireEvent.click(await screen.findByRole("button", { name: /SESSION HISTORY/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /Older/ }));
+
+    await waitFor(() => expect(useCharlieStore.getState().activeSessionId).toBe("session-older"));
+    expect(calls.some((call) => call.url === "/api/session/active" && call.init?.method === "POST")).toBe(true);
     global.fetch = originalFetch;
   });
 

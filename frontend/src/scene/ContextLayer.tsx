@@ -1,5 +1,5 @@
 import { useEffect, type ReactElement } from "react";
-import type { PresentationIntent } from "../store/charlie";
+import type { AlertInfo, PresentationIntent } from "../store/charlie";
 import type { VisualRuntimeState } from "../runtime/visualRuntime";
 import { sendCommand } from "../runtime/bridge";
 import { useModalFocus } from "../components/useModalFocus";
@@ -8,10 +8,12 @@ interface ContextLayerProps {
   captionText: string | null;
   notifications: PresentationIntent[];
   activeAttention: PresentationIntent | null;
+  activeAlert: AlertInfo | null;
   visualRuntime: VisualRuntimeState;
   activeSessionId: string | null;
   connected: boolean;
   onDismissIntent?: (id: string) => void;
+  onDismissAlert?: () => void;
   onClearVisualRuntime?: (expectedUpdatedAt?: string) => void;
 }
 
@@ -19,10 +21,12 @@ export function ContextLayer({
   captionText,
   notifications,
   activeAttention,
+  activeAlert,
   visualRuntime,
   activeSessionId,
   connected,
   onDismissIntent,
+  onDismissAlert,
   onClearVisualRuntime,
 }: ContextLayerProps): ReactElement {
   const attentionRef = useModalFocus<HTMLDivElement>(Boolean(activeAttention), () => {
@@ -52,8 +56,11 @@ export function ContextLayer({
     "offline",
   ].includes(visualRuntime.phase);
   const primaryNotification = [...notifications].sort((left, right) => right.priority - left.priority)[0] ?? null;
+  const alertDominant = Boolean(activeAlert) && ["idle", "success", "degraded"].includes(visualRuntime.phase);
   const contextKind = activeAttention
     ? "attention"
+    : alertDominant
+      ? "alert"
     : runtimeDominant
       ? "runtime"
       : captionText
@@ -102,6 +109,16 @@ export function ContextLayer({
                 Reject
               </button>
             </span>
+          )}
+        </div>
+      )}
+
+      {contextKind === "alert" && activeAlert && (
+        <div className="charlie-runtime-context" role="alert" aria-live="assertive" data-runtime-phase="alert">
+          <span className="charlie-runtime-context-label">{activeAlert.severity.toUpperCase()}</span>
+          <span className="charlie-runtime-context-detail">{activeAlert.message}</span>
+          {onDismissAlert && (
+            <button type="button" aria-label="Dismiss alert" className="charlie-runtime-context-action" onClick={onDismissAlert}>✕</button>
           )}
         </div>
       )}

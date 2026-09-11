@@ -216,7 +216,7 @@ describe("Phase 9 Workspaces Suite", () => {
       },
     });
     render(<TasksWorkspace workspace={{ ...mockWorkspace, type: "tasks" }} />);
-    expect(screen.getByRole("status")).toHaveTextContent("No active tasks reported.");
+    expect(screen.getByText("RESULT: RESULT AVAILABLE")).toBeDefined();
     expect(screen.queryByText(/session:voice_secret/)).toBeNull();
     expect(screen.queryByText(/STEP 0 OF 5/i)).toBeNull();
   });

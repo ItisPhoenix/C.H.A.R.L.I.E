@@ -777,7 +777,7 @@ export function Settings(): ReactElement {
                 key={cat}
                 type="button"
                 onClick={() => setActiveCategory(cat)}
-                className={`px-2.5 py-1.5 text-xs text-left rounded-lg transition cursor-pointer flex items-center justify-between ${
+                className={`px-2.5 py-1.5 text-xs text-left rounded-sm transition cursor-pointer flex items-center justify-between ${
                   activeCategory === cat
                     ? "bg-cyan-950/90 border border-cyan-400/50 text-cyan-200 shadow-sm shadow-cyan-500/20"
                     : "text-slate-400 hover:text-cyan-200 hover:bg-cyan-950/30"
@@ -796,7 +796,7 @@ export function Settings(): ReactElement {
           {Object.keys(visibleGroups).length > 0 ? (
             Object.entries(visibleGroups).map(([group, groupFields]) => (
               <section
-                className="settings-group p-3.5 rounded-xl border border-cyan-500/15 bg-slate-950/60"
+                className="settings-group p-3 rounded-sm border border-cyan-500/15 bg-slate-950/45"
                 key={group}
               >
                 <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider mb-2.5 border-b border-cyan-500/10 pb-1 flex items-center gap-2">

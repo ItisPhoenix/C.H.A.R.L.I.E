@@ -25,6 +25,8 @@ export function CharlieScene(): ReactElement | null {
   const dismissIntent = useCharlieStore((s) => s.dismissPresentationIntent);
   const hudVisible = useCharlieStore((s) => s.hudVisible);
   const activeToolApproval = useCharlieStore((s) => s.activeToolApproval);
+  const activeAlert = useCharlieStore((s) => s.activeAlert);
+  const dismissAlert = useCharlieStore((s) => s.dismissAlert);
   const activeSessionId = useCharlieStore((s) => s.activeSessionId);
   const connected = useCharlieStore((s) => s.connected);
   const visualRuntime = useCharlieStore((s) => s.visualRuntime);
@@ -216,10 +218,12 @@ export function CharlieScene(): ReactElement | null {
         captionText={projection.activeCaption}
         notifications={projection.activeNotifications}
         activeAttention={activeToolApproval ? null : projection.activeAttention}
+        activeAlert={activeAlert}
         visualRuntime={visualRuntime}
         activeSessionId={activeSessionId}
         connected={connected}
         onDismissIntent={dismissIntent}
+        onDismissAlert={dismissAlert}
         onClearVisualRuntime={clearVisualRuntime}
       />
 

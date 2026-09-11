@@ -28,6 +28,9 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
   const title = String(payload.title || workspace.title || "RESEARCH & SYNTHESIS").replace(/^WORKSPACE\s*\/\/\s*/i, "");
   const objective = compactResearchText(String(content.objective || payload.query || "No research objective reported."), 260);
   const findings = payload.findings as (ResearchFinding & FindingItem)[];
+  const status = typeof content.status === "string" && content.status.trim() ? content.status.toUpperCase() : "UNAVAILABLE";
+  const confidenceSupplied = Object.prototype.hasOwnProperty.call(content, "confidence") && typeof payload.confidence === "number";
+  const stopReason = typeof content.stop_reason === "string" && content.stop_reason.trim() ? content.stop_reason.trim() : null;
   const map = (content.radar || content.spatial_map || content.map_data || content.map) as SpatialMapData | undefined;
   const heatmap = (content.heatmap || content.heatmap_data || content.density) as DensityHeatmapData | undefined;
   const chart = (content.chart || content.chart_data || content.activity_history) as Record<string, unknown> | undefined;
@@ -45,6 +48,11 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
         <div className="spatial-kicker">RESEARCH WORKSPACE</div>
         <h1>{title}</h1>
         {payload.query && <p className="spatial-subtitle">{payload.query}</p>}
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-cyan-300 mt-2" data-testid="research-runtime-status">
+          <span>STATUS: {status}</span>
+          {confidenceSupplied && <span>CONFIDENCE: {Math.round(payload.confidence * 100)}%</span>}
+          {stopReason && <span>STOP: {stopReason}</span>}
+        </div>
         <div className="spatial-objective">
           <span>RESEARCH OBJECTIVE</span>
           <ResearchRichText text={objective} />

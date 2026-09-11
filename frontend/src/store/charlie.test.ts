@@ -14,6 +14,8 @@ beforeEach(() => {
     activities: [],
     presentationIntents: {},
     activeCaption: null,
+    systemStatusUpdatedAt: null,
+    subsystemHealthUpdatedAt: null,
     pendingToolApprovals: {},
     activeToolApproval: null,
     systemStatus: null,

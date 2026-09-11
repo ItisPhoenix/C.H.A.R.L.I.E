@@ -81,6 +81,7 @@ export interface RuntimeTask {
   currentAction?: string;
   waitingReason?: string;
   resultReference?: string;
+  errorSummary?: string;
   approvalReference?: string;
   capabilityRequirements?: string[];
 }
@@ -132,8 +133,10 @@ interface CharlieState {
   pendingToolApprovals: Record<string, ToolApprovalRequest>;
   activeToolApproval: ToolApprovalRequest | null;
   systemStatus: SystemStatus | null;
+  systemStatusUpdatedAt: string | null;
   netHistory: number[];
   subsystemHealth: Record<string, SubsystemHealth>;
+  subsystemHealthUpdatedAt: string | null;
   tasks: Record<string, RuntimeTask>;
   mcpStatus: Record<string, McpServerStatus>;
   chatMessages: ChatMessage[];
@@ -167,8 +170,10 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   pendingToolApprovals: {},
   activeToolApproval: null,
   systemStatus: null,
+  systemStatusUpdatedAt: null,
   netHistory: [],
   subsystemHealth: {},
+  subsystemHealthUpdatedAt: null,
   tasks: {},
   mcpStatus: {},
   chatMessages: [],
@@ -280,22 +285,28 @@ export const useCharlieStore = create<CharlieState>((set) => ({
         return;
       case "system_status": {
         const netKbps = numberOrNull(payload.net_kbps);
-        set((s) => ({
-          systemStatus: {
-            cpu: numberOrNull(payload.cpu),
-            ram: numberOrNull(payload.ram),
-            gpu: numberOrNull(payload.gpu),
-            disk: numberOrNull(payload.disk_percent),
-            netKbps,
-            uptimeSeconds: numberOrNull(payload.uptime_seconds),
-            batteryPercent: numberOrNull(payload.battery_percent),
-          },
-          netHistory: netKbps === null ? s.netHistory : [...s.netHistory.slice(-23), netKbps],
-        }));
+        set((s) => {
+          if (isOlderTimestamp(event.timestamp, s.systemStatusUpdatedAt)) return {};
+          return {
+            systemStatus: {
+              cpu: numberOrNull(payload.cpu),
+              ram: numberOrNull(payload.ram),
+              gpu: numberOrNull(payload.gpu),
+              disk: numberOrNull(payload.disk_percent),
+              netKbps,
+              uptimeSeconds: numberOrNull(payload.uptime_seconds),
+              batteryPercent: numberOrNull(payload.battery_percent),
+            },
+            systemStatusUpdatedAt: event.timestamp ?? new Date().toISOString(),
+            netHistory: netKbps === null ? s.netHistory : [...s.netHistory.slice(-23), netKbps],
+          };
+        });
         return;
       }
       case "subsystem_health":
-        set({ subsystemHealth: subsystemHealthFromPayload(payload) });
+        set((s) => isOlderTimestamp(event.timestamp, s.subsystemHealthUpdatedAt)
+          ? {}
+          : { subsystemHealth: subsystemHealthFromPayload(payload), subsystemHealthUpdatedAt: event.timestamp ?? new Date().toISOString() });
         return;
       case "task_snapshot":
         set({ tasks: taskMapFromPayload(payload.tasks) });
@@ -347,13 +358,17 @@ export const useCharlieStore = create<CharlieState>((set) => ({
       case "session_active":
         set((s) => {
           const activeSessionId = typeof payload.session_id === "string" ? payload.session_id : null;
-          const runtimeSessionId = s.visualRuntime.correlation.sessionId;
-          const sessionChanged = runtimeSessionId !== null && runtimeSessionId !== activeSessionId;
+          const sessionChanged = s.activeSessionId !== activeSessionId;
           return {
             activeSessionId,
             activeSessionTitle: typeof payload.title === "string" ? payload.title : null,
             ...(sessionChanged
               ? {
+                  chatMessages: [],
+                  activeCaption: null,
+                  activeAlert: null,
+                  activeToolApproval: null,
+                  pendingToolApprovals: {},
                   visualRuntime: s.connected
                     ? { ...INITIAL_VISUAL_RUNTIME, phase: "idle" as const, label: "IDLE", detail: null, updatedAt: new Date().toISOString() }
                     : { ...INITIAL_VISUAL_RUNTIME, updatedAt: new Date().toISOString() },
@@ -366,7 +381,18 @@ export const useCharlieStore = create<CharlieState>((set) => ({
         if (typeof payload.session_id === "string") {
           set((s) => {
             if (s.activeSessionId !== payload.session_id) return {};
-            if (payload.deleted) return { activeSessionId: null, activeSessionTitle: null };
+            if (payload.deleted) return {
+              activeSessionId: null,
+              activeSessionTitle: null,
+              chatMessages: [],
+              activeCaption: null,
+              activeAlert: null,
+              activeToolApproval: null,
+              pendingToolApprovals: {},
+              visualRuntime: s.connected
+                ? { ...INITIAL_VISUAL_RUNTIME, phase: "idle" as const, label: "IDLE", detail: null, updatedAt: new Date().toISOString() }
+                : { ...INITIAL_VISUAL_RUNTIME, updatedAt: new Date().toISOString() },
+            };
             return typeof payload.title === "string" ? { activeSessionTitle: payload.title } : {};
           });
         }
@@ -460,6 +486,19 @@ function numberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function isOlderTimestamp(incoming: string | undefined, current: string | null): boolean {
+  if (!incoming || !current) return false;
+  const incomingTime = Date.parse(incoming);
+  const currentTime = Date.parse(current);
+  return Number.isFinite(incomingTime) && Number.isFinite(currentTime) && incomingTime < currentTime;
+}
+
+function safeTaskError(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  if (/(api[-_ ]?key|token|password|secret)\s*[:=]/i.test(value)) return null;
+  return value.trim().slice(0, 500);
+}
+
 function taskFromPayload(rawTask: unknown): RuntimeTask | null {
   if (!rawTask || typeof rawTask !== "object") return null;
   const task = rawTask as Record<string, unknown>;
@@ -483,6 +522,8 @@ function taskFromPayload(rawTask: unknown): RuntimeTask | null {
   if (typeof task.current_action === "string") runtimeTask.currentAction = task.current_action;
   if (typeof task.waiting_reason === "string") runtimeTask.waitingReason = task.waiting_reason;
   if (typeof task.result_reference === "string") runtimeTask.resultReference = task.result_reference;
+  const errorSummary = safeTaskError(task.error_summary ?? task.error);
+  if (errorSummary) runtimeTask.errorSummary = errorSummary;
   if (typeof task.approval_reference === "string") runtimeTask.approvalReference = task.approval_reference;
   if (Array.isArray(task.capability_requirements)) {
     runtimeTask.capabilityRequirements = task.capability_requirements.filter((value): value is string => typeof value === "string");

@@ -316,9 +316,9 @@ export function reduceVisualRuntime(previous: VisualRuntimeState, event: VisualR
           : previous;
       }
       if (["error", "critical"].includes(severity)) return nextState(previous, event, "error", "ERROR", detail, { expiresMs: 5000 });
-      return detail && ambientUpdateAllowed(previous)
-        ? nextState(previous, event, "success", "NOTICE", detail, { expiresMs: 2200 })
-        : previous;
+      // Informational alerts are projected by the alert/notification surface;
+      // do not duplicate them as a synthetic runtime success state.
+      return previous;
     }
     case "recovery_proposal":
       return nextState(

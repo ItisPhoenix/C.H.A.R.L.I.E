@@ -18,7 +18,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps): ReactEle
     >
       <div
         ref={dialogRef}
-        className="charlie-settings-modal w-full max-w-4xl min-h-[520px] max-h-[85vh] bg-slate-950/95 border border-cyan-400/50 rounded-2xl shadow-2xl shadow-cyan-500/10 flex flex-col overflow-hidden font-mono pointer-events-auto"
+        className="charlie-settings-modal w-full max-w-4xl min-h-[520px] max-h-[85vh] bg-slate-950/98 border border-cyan-400/35 rounded-lg shadow-xl shadow-cyan-500/5 flex flex-col overflow-hidden font-mono pointer-events-auto"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"

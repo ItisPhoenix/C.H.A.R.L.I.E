@@ -249,6 +249,17 @@ describe("CharlieScene spatial projection & layers", () => {
     expect(screen.queryByRole("button", { name: "Approve recovery" })).toBeNull();
   });
 
+  test("renders backend alerts as one dismissible transient context", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "alert",
+      payload: { severity: "info", message: "Reminder: standup" },
+    });
+    render(<MemoryRouter><CharlieScene /></MemoryRouter>);
+    expect(screen.getByText("Reminder: standup")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss alert" }));
+    expect(screen.queryByText("Reminder: standup")).toBeNull();
+  });
+
   test("attention intent renders modal backdrop with high priority alert", () => {
     useCharlieStore.getState().applyEvent({
       type: "presentation_intent",

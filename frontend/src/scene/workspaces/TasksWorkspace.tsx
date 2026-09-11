@@ -7,7 +7,7 @@ const ACTIVE_TASK_STATUSES = new Set([
   "queued", "planning", "waiting", "running", "paused", "approval_required", "verifying",
 ]);
 const isWorkspaceTask = (task: Parameters<typeof isTaskWorkspaceEligible>[0]) =>
-  isTaskWorkspaceEligible(task, ACTIVE_TASK_STATUSES) || task.totalSteps > 0;
+  isTaskWorkspaceEligible(task, ACTIVE_TASK_STATUSES) || task.totalSteps > 0 || ["completed", "failed", "cancelled"].includes(task.status);
 
 export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
   const tasks = useCharlieStore((s) => s.tasks);
@@ -39,6 +39,11 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
       currentTask.waitingReason
   );
   const hasProgress = currentTask.totalSteps > 0 || typeof currentTask.progress === "number";
+  const resultReference = currentTask.resultReference && !/(secret|token|password|key)/i.test(currentTask.resultReference)
+    ? currentTask.resultReference
+    : currentTask.resultReference
+      ? "RESULT AVAILABLE"
+      : null;
 
   const statusColor = (st: string) => {
     switch (st) {
@@ -79,6 +84,13 @@ export function TasksWorkspace({ workspace }: { workspace: WorkspaceInstance }):
           {currentTask.status}
         </div>
       </div>
+
+      {(currentTask.errorSummary || resultReference) && (
+        <div className="border-l border-cyan-400/50 px-3 py-2 text-xs space-y-1" role={currentTask.errorSummary ? "alert" : "status"}>
+          {currentTask.errorSummary && <div className="text-rose-300">FAILURE: {currentTask.errorSummary}</div>}
+          {resultReference && <div className="text-cyan-200 break-all">RESULT: {resultReference}</div>}
+        </div>
+      )}
 
       {/* 2. Main Grid: Current Task Execution Details (Left/Center) & Background Tasks Queue (Right) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">

@@ -3,6 +3,18 @@ import type { WorkspaceInstance } from "../../layout/workspaceStore";
 import { useCharlieStore, type ChatMessage } from "../../store/charlie";
 import { sendCommand } from "../../runtime/bridge";
 
+interface SessionSummary {
+  id: string;
+  title: string;
+  updated_at?: string;
+}
+
+function sessionTime(value?: string): string {
+  if (!value) return "TIME UNAVAILABLE";
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : "TIME UNAVAILABLE";
+}
+
 export function ConversationWorkspace({ workspace: _workspace }: { workspace?: WorkspaceInstance }): ReactElement {
   const chatMessages = useCharlieStore((s) => s.chatMessages);
   const timeline = Array.isArray(chatMessages) ? chatMessages : [];
@@ -12,10 +24,14 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
   const activities = useCharlieStore((s) => s.activities);
   const projectedSessionId = useCharlieStore((s) => s.activeSessionId);
   const activeSessionTitle = useCharlieStore((s) => s.activeSessionTitle);
+  const visualRuntime = useCharlieStore((s) => s.visualRuntime);
 
   const isThinking = coreState === "thinking" || coreState === "working";
   const [inputVal, setInputVal] = useState("");
   const [sending, setSending] = useState(false);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionListOpen, setSessionListOpen] = useState(false);
+  const [sessionSwitching, setSessionSwitching] = useState(false);
   const endRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -40,6 +56,22 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
     };
   }, []);
 
+  useEffect(() => {
+    let isMounted = true;
+    void fetch("/api/sessions")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!isMounted || !data || !Array.isArray(data.sessions)) return;
+        setSessions(data.sessions.filter((session: SessionSummary) => typeof session?.id === "string"));
+      })
+      .catch(() => {
+        if (isMounted) setSessions([]);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [projectedSessionId]);
+
   // Hydrate session messages on mount or canonical session change
   useEffect(() => {
     if (!projectedSessionId) return;
@@ -51,15 +83,20 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
       .then((data) => {
         if (!isMounted || !data || !Array.isArray(data.messages)) return;
         const mapped: ChatMessage[] = data.messages.map(
-          (m: { role: string; content: string }, i: number) => ({
-            id: `hist-${i}-${Date.now()}`,
+          (m: { id?: string; message_id?: string; role: string; content: string }, i: number) => ({
+            id: m.id || m.message_id || `hist-${i}-${m.role}-${m.content.slice(0, 24)}`,
             role: m.role === "user" ? "user" : "charlie",
             text: m.content,
             pending: false,
           })
         );
         if (mapped.length > 0) {
-          useCharlieStore.getState().setChatMessages(mapped);
+          const live = useCharlieStore.getState().chatMessages;
+          const known = new Set(mapped.map((message) => `${message.role}:${message.text}`));
+          useCharlieStore.getState().setChatMessages([
+            ...live,
+            ...mapped.filter((message) => !known.has(`${message.role}:${message.text}`)),
+          ]);
         }
       })
       .catch(() => {
@@ -70,6 +107,29 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
       isMounted = false;
     };
   }, [projectedSessionId]);
+
+  const switchSession = async (session: SessionSummary): Promise<void> => {
+    if (!session.id || session.id === projectedSessionId || sessionSwitching) return;
+    setSessionSwitching(true);
+    try {
+      const response = await fetch("/api/session/active", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: session.id }),
+      });
+      const result = await response.json().catch(() => ({}));
+      const activeId = result?.result?.active_session_id;
+      if (!response.ok || result?.status !== "completed" || activeId !== session.id) return;
+      useCharlieStore.getState().setChatMessages([]);
+      useCharlieStore.getState().applyEvent({
+        type: "session_active",
+        payload: { session_id: session.id, title: session.title },
+      });
+      setSessionListOpen(false);
+    } finally {
+      setSessionSwitching(false);
+    }
+  };
 
   useEffect(() => {
     if (typeof endRef.current?.scrollIntoView === "function") {
@@ -128,7 +188,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
   };
 
   return (
-    <div className="w-full h-full flex flex-col justify-between font-mono select-none text-left p-2 overflow-hidden space-y-3 pr-[calc(var(--core-docked-size)+12px)]">
+    <div className="w-full h-full flex flex-col justify-between font-mono text-left p-2 overflow-hidden space-y-3 pr-[calc(var(--core-docked-size)+12px)]">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-cyan-500/20 pb-2 px-1">
         <div className="flex items-center gap-3">
@@ -146,6 +206,15 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
           </span>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="px-2 py-1 text-[10px] font-mono border border-cyan-500/30 text-cyan-300 hover:border-cyan-300 disabled:opacity-50"
+            aria-expanded={sessionListOpen}
+            onClick={() => setSessionListOpen((open) => !open)}
+            disabled={sessionSwitching}
+          >
+            SESSION HISTORY {sessions.length ? `[${sessions.length}]` : ""}
+          </button>
           {isThinking && (
             <button
               type="button"
@@ -165,6 +234,26 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
           </div>
         </div>
       </div>
+
+      {sessionListOpen && (
+        <div className="max-h-40 overflow-y-auto border border-cyan-500/25 bg-slate-950/90 p-2 space-y-1" role="listbox" aria-label="Session history">
+          {sessions.length === 0 ? (
+            <p className="text-[10px] text-slate-500">No session history is available.</p>
+          ) : sessions.map((session) => (
+            <button
+              type="button"
+              role="option"
+              aria-selected={session.id === projectedSessionId}
+              key={session.id}
+              className="w-full flex items-center justify-between gap-3 px-2 py-1.5 text-left text-[10px] text-slate-300 hover:bg-cyan-950/50"
+              onClick={() => void switchSession(session)}
+            >
+              <span className="truncate">{session.title || "UNTITLED SESSION"}</span>
+              <span className="shrink-0 text-slate-500">{sessionTime(session.updated_at)}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Message Stream */}
       <div className="flex-1 overflow-y-auto min-h-0 space-y-3 pr-1">
@@ -190,7 +279,7 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
                   )}
                 </div>
                 <div
-                  className={`p-3 rounded-xl text-xs leading-relaxed font-sans whitespace-pre-wrap ${
+                  className={`max-w-[72ch] p-3 rounded-xl text-xs leading-relaxed font-sans whitespace-pre-wrap break-words select-text ${
                     isUser
                       ? "bg-cyan-950/70 border border-cyan-400/40 text-cyan-100 shadow-sm shadow-cyan-500/10"
                       : "bg-slate-900/80 border border-cyan-500/20 text-slate-200"
@@ -201,6 +290,12 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
               </div>
             );
           })
+        )}
+
+        {visualRuntime.phase === "transcribing" && visualRuntime.transcript && (
+          <div className="border-l border-cyan-400/50 px-2 text-[10px] text-cyan-200" role="status">
+            TRANSCRIPT: {visualRuntime.transcript}
+          </div>
         )}
 
         {/* Live Subsystem Activities / Tools Progress */}
@@ -226,13 +321,8 @@ export function ConversationWorkspace({ workspace: _workspace }: { workspace?: W
               Approval Required: {activeToolApproval.tool_name}
             </div>
             <p className="text-[11px] text-slate-300 font-sans">{activeToolApproval.reason}</p>
-            {activeToolApproval.arguments && (
-              <pre className="p-2 rounded bg-black/60 text-[10px] text-slate-300 overflow-x-auto font-mono">
-                {JSON.stringify(activeToolApproval.arguments, null, 2)}
-              </pre>
-            )}
             <p className="text-[10px] text-amber-300/80" role="status">
-              Respond using the approval dialog.
+              Detailed approval information is available in the canonical approval dialog.
             </p>
           </div>
         )}
