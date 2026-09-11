@@ -99,3 +99,118 @@ def test_task_journal_normalizes_legacy_statuses_and_persists(tmp_path) -> None:
     restored = TaskJournal(state_path=path)
     assert {task.title for task in restored.list()} == {"Old task", "New task"}
     assert all(task.status in set(TaskStatus) for task in restored.list())
+
+
+def test_task_journal_prunes_oldest_terminal_records_after_transition(monkeypatch) -> None:
+    counter = iter(range(100))
+    monkeypatch.setattr(
+        "charlie.task_journal.utc_now_iso",
+        lambda: f"2026-01-01T00:00:00.{next(counter):06d}Z",
+    )
+    journal = TaskJournal(max_terminal_records=2)
+
+    for index in range(3):
+        task = journal.create_task(f"Task {index}", task_id=f"task-{index}")
+        journal.transition(task.id, TaskStatus.PLANNING)
+        journal.transition(task.id, TaskStatus.RUNNING)
+        journal.transition(task.id, TaskStatus.VERIFYING)
+        journal.complete(task.id)
+
+    assert {task.id for task in journal.list()} == {"task-1", "task-2"}
+    assert len([task for task in journal.list() if task.status in {
+        TaskStatus.COMPLETED,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+    }]) == 2
+
+
+def test_task_journal_prunes_on_load_and_persists_converged_state(tmp_path) -> None:
+    path = tmp_path / "task-journal.json"
+    path.write_text(
+        json.dumps(
+            {
+                "tasks": [
+                    {
+                        "id": "old",
+                        "title": "Old",
+                        "status": "completed",
+                        "created_at": "2026-01-01T00:00:00.000000Z",
+                        "updated_at": "2026-01-01T00:00:01.000000Z",
+                        "completed_at": "2026-01-01T00:00:01.000000Z",
+                    },
+                    {
+                        "id": "newer",
+                        "title": "Newer",
+                        "status": "failed",
+                        "created_at": "2026-01-01T00:00:02.000000Z",
+                        "updated_at": "2026-01-01T00:00:03.000000Z",
+                        "completed_at": "2026-01-01T00:00:03.000000Z",
+                    },
+                    {
+                        "id": "newest",
+                        "title": "Newest",
+                        "status": "cancelled",
+                        "created_at": "2026-01-01T00:00:04.000000Z",
+                        "updated_at": "2026-01-01T00:00:05.000000Z",
+                        "completed_at": "2026-01-01T00:00:05.000000Z",
+                    },
+                    {
+                        "id": "active",
+                        "title": "Active",
+                        "status": "running",
+                        "created_at": "2026-01-01T00:00:06.000000Z",
+                        "updated_at": "2026-01-01T00:00:06.000000Z",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    journal = TaskJournal(state_path=path, max_terminal_records=2)
+    assert {task.id for task in journal.list()} == {"newer", "newest", "active"}
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert {task["id"] for task in persisted["tasks"]} == {"newer", "newest", "active"}
+    restored = TaskJournal(state_path=path, max_terminal_records=2)
+    assert {task.id for task in restored.list()} == {"newer", "newest", "active"}
+
+
+def test_task_journal_rejects_negative_history_bound() -> None:
+    with pytest.raises(ValueError):
+        TaskJournal(max_terminal_records=-1)
+
+    assert TaskJournal(max_terminal_records=0).max_terminal_records == 0
+
+
+def test_load_prune_persistence_failure_keeps_pruned_records(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "task-journal.json"
+    path.write_text(
+        json.dumps(
+            {
+                "tasks": [
+                    {
+                        "id": "old",
+                        "title": "Old",
+                        "status": "completed",
+                        "completed_at": "2026-01-01T00:00:01.000000Z",
+                    },
+                    {
+                        "id": "new",
+                        "title": "New",
+                        "status": "completed",
+                        "completed_at": "2026-01-01T00:00:02.000000Z",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_persist(_journal):
+        raise OSError("normalization write failed")
+
+    monkeypatch.setattr(TaskJournal, "_persist", fail_persist)
+    journal = TaskJournal(state_path=path, max_terminal_records=1)
+
+    assert [task.id for task in journal.list()] == ["new"]
