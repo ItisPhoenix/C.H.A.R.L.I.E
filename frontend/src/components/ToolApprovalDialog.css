@@ -251,6 +251,79 @@
   }
 }
 
+@media (min-width: 561px) and (max-width: 900px) {
+  .charlie-approval-state {
+    grid-template-rows: 145px auto;
+    padding-top: 14px;
+  }
+
+  .charlie-scene-root[data-approval-active="true"] .charlie-core-center {
+    top: 12%;
+    width: 130px;
+    height: 130px;
+  }
+
+  .charlie-approval-field {
+    padding: 18px 20px;
+  }
+
+  .charlie-approval-panel {
+    padding-bottom: 14px;
+  }
+
+  .charlie-approval-kicker {
+    margin-bottom: 9px;
+  }
+
+  .charlie-approval-header h3 {
+    font-size: clamp(26px, 4.5vw, 38px);
+  }
+
+  .charlie-approval-lede {
+    margin-top: 11px;
+    font-size: 14px;
+  }
+
+  .charlie-approval-facts {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0 22px;
+    padding: 12px 0 2px;
+  }
+
+  .charlie-approval-facts > div {
+    min-height: 58px;
+    padding: 7px 0 8px;
+  }
+
+  .charlie-approval-facts > div:first-child {
+    grid-column: 1 / -1;
+    min-height: 70px;
+  }
+
+  .charlie-approval-facts > div > div {
+    margin-top: 5px;
+    font-size: 12px;
+  }
+
+  .charlie-approval-action {
+    font-size: 24px;
+  }
+
+  .charlie-approval-safety {
+    margin-top: 6px;
+    padding: 7px 10px;
+    font-size: 11px;
+  }
+
+  .charlie-approval-actions {
+    padding-top: 10px;
+  }
+
+  .charlie-approval-actions button {
+    padding-block: 10px !important;
+  }
+}
+
 @media (max-width: 560px) {
   .charlie-approval-state {
     grid-template-rows: 188px auto;
