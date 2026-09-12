@@ -22,6 +22,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.middleware.cors import CORSMiddleware
@@ -231,6 +232,32 @@ def validate_ws_origin(origin: Optional[str]) -> bool:
         return False
 
 
+def _is_loopback_peer(request: Request) -> bool:
+    peer_host = request.client.host if request.client is not None else None
+    return peer_host in {"127.0.0.1", "::1"}
+
+
+def _is_same_origin(request: Request, origin: str) -> bool:
+    try:
+        parsed = urlparse(origin)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return False
+        if parsed.username or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            return False
+        request_scheme = request.url.scheme.lower()
+        request_host = (request.url.hostname or "").lower()
+        request_port = request.url.port or (443 if request_scheme == "https" else 80)
+        origin_host = (parsed.hostname or "").lower()
+        origin_port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        return (
+            parsed.scheme.lower() == request_scheme
+            and origin_host == request_host
+            and origin_port == request_port
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 # Proposal-only state. Installed runtime extension state belongs to main.
 from charlie.extensions import ExtensionManager, canonical_extension_request_fingerprint  # noqa: E402
 
@@ -309,6 +336,8 @@ PRIVACY_OPERATION_TIMEOUT_SECONDS = 10.0
 _pending_privacy_operations: dict[str, asyncio.Future[dict[str, Any]]] = {}
 _pending_privacy_fingerprints: dict[str, str] = {}
 LAUNCH_ID: str = config.charlie_launch_id
+_runtime_shutdown_lock = asyncio.Lock()
+_runtime_shutdown_admitted = False
 _session_projection: SessionReadProjection | None = None
 _terminal_manager = TerminalManager()
 _settings_snapshot: dict[str, Any] | None = None
@@ -358,6 +387,7 @@ async def lifespan(app: FastAPI):
     global _projected_telemetry, _projected_telemetry_event, _runtime_truth
     global _settings_snapshot, _settings_snapshot_event
     global _extension_snapshot, _extension_snapshot_event
+    global _runtime_shutdown_admitted, _runtime_shutdown_lock
     # This process never owns executable tool activation. Start each web
     # lifecycle without a stale projection and wait for main's replay.
     _tool_snapshot = None
@@ -371,6 +401,8 @@ async def lifespan(app: FastAPI):
     _settings_snapshot_event = None
     _extension_snapshot = None
     _extension_snapshot_event = None
+    _runtime_shutdown_admitted = False
+    _runtime_shutdown_lock = asyncio.Lock()
 
     # EventBus resolves test-mode ports from the central pytest isolation setup;
     # production keeps its documented defaults.
@@ -836,6 +868,64 @@ async def status():
         "os_host": f"{_platform.system()} {_platform.machine()}",
         "runtime_truth": dict(_runtime_truth) if _runtime_truth is not None else None,
     }
+
+
+@app.post("/api/runtime/shutdown")
+async def runtime_shutdown(request: Request):
+    """Admit one local shutdown request into the main runtime authority."""
+    global _runtime_shutdown_admitted
+
+    if not _is_loopback_peer(request):
+        raise HTTPException(status_code=403, detail="runtime shutdown is local-only")
+
+    origin = request.headers.get("origin")
+    if origin is not None and not _is_same_origin(request, origin):
+        raise HTTPException(status_code=403, detail="foreign origins cannot request runtime shutdown")
+
+    if request.headers.get("x-charlie-launch-id") != LAUNCH_ID:
+        raise HTTPException(status_code=409, detail="active Charlie launch identity is required")
+
+    async with _runtime_shutdown_lock:
+        if _runtime_shutdown_admitted:
+            return JSONResponse(
+                status_code=202,
+                content={"accepted": True, "already_requested": True, "launch_id": LAUNCH_ID},
+            )
+        if event_bus is None:
+            return JSONResponse(
+                status_code=503,
+                content={"accepted": False, "reason": "main runtime IPC is unavailable"},
+            )
+
+        request_id = uuid.uuid4().hex
+        command = {
+            "type": "runtime_shutdown",
+            "request_id": request_id,
+            "payload": {
+                "launch_id": LAUNCH_ID,
+                "request_id": request_id,
+                "source": "local_runtime_control",
+            },
+        }
+        try:
+            sent = await event_bus.send_command(command)
+        except Exception:
+            logger.warning("Failed to send runtime shutdown request to main", exc_info=True)
+            return JSONResponse(
+                status_code=503,
+                content={"accepted": False, "reason": "main runtime IPC is unavailable"},
+            )
+        if sent is not True:
+            return JSONResponse(
+                status_code=503,
+                content={"accepted": False, "reason": "main runtime IPC admission was unavailable"},
+            )
+        _runtime_shutdown_admitted = True
+
+    return JSONResponse(
+        status_code=202,
+        content={"accepted": True, "launch_id": LAUNCH_ID, "request_id": request_id},
+    )
 
 
 @app.post("/api/terminal/sessions")

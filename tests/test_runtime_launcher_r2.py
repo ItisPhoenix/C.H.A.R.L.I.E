@@ -6,6 +6,7 @@ Verifies the 22 required launcher, shutdown, lifecycle, and process ownership co
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shlex
 import shutil
@@ -18,7 +19,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
 
+import charlie.web_server as web_server
 import main
 import run
 from charlie.subsystem_health import HealthRegistry
@@ -82,6 +86,18 @@ class _FakeEventBus:
         return {}
 
 
+class _MainCommandBus(_FakeEventBus):
+    def __init__(self, commands):
+        self.commands = list(commands)
+        self.consumed = 0
+
+    async def next_command(self):
+        if self.commands:
+            self.consumed += 1
+            return self.commands.pop(0)
+        raise KeyboardInterrupt()
+
+
 class _FakeVoice:
     def __init__(self, stop_results=None):
         self.stop_count = 0
@@ -127,6 +143,127 @@ class _FakeProcess:
 
     def wait(self, timeout=None):
         return self._poll_result
+
+
+class _ShutdownCommandBus:
+    def __init__(self, result=True):
+        self.result = result
+        self.commands = []
+
+    async def send_command(self, command):
+        self.commands.append(command)
+        if isinstance(self.result, BaseException):
+            raise self.result
+        return self.result
+
+
+def _shutdown_request(*, peer="127.0.0.1", launch_id=None, origin=None):
+    headers = []
+    if launch_id is not None:
+        headers.append((b"x-charlie-launch-id", launch_id.encode("ascii")))
+    if origin is not None:
+        headers.append((b"origin", origin.encode("ascii")))
+    return Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/runtime/shutdown",
+            "raw_path": b"/api/runtime/shutdown",
+            "query_string": b"",
+            "headers": headers,
+            "client": (peer, 51234),
+            "server": ("127.0.0.1", 8000),
+        }
+    )
+
+
+@pytest.fixture
+def shutdown_web_state(monkeypatch):
+    bus = _ShutdownCommandBus()
+    monkeypatch.setattr(web_server, "event_bus", bus)
+    monkeypatch.setattr(web_server, "LAUNCH_ID", "launch-current")
+    monkeypatch.setattr(web_server, "_runtime_shutdown_admitted", False)
+    monkeypatch.setattr(web_server, "_runtime_shutdown_lock", asyncio.Lock())
+    return bus
+
+
+@pytest.mark.asyncio
+async def test_runtime_shutdown_rejects_non_loopback_without_command(shutdown_web_state):
+    with pytest.raises(HTTPException) as caught:
+        await web_server.runtime_shutdown(
+            _shutdown_request(peer="192.0.2.10", launch_id="launch-current")
+        )
+    assert caught.value.status_code == 403
+    assert shutdown_web_state.commands == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_shutdown_rejects_foreign_origin_without_command(shutdown_web_state):
+    with pytest.raises(HTTPException) as caught:
+        await web_server.runtime_shutdown(
+            _shutdown_request(
+                launch_id="launch-current",
+                origin="http://evil.example",
+            )
+        )
+    assert caught.value.status_code == 403
+    assert shutdown_web_state.commands == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("launch_id", [None, "launch-stale"])
+async def test_runtime_shutdown_rejects_missing_or_stale_launch_id(shutdown_web_state, launch_id):
+    with pytest.raises(HTTPException) as caught:
+        await web_server.runtime_shutdown(_shutdown_request(launch_id=launch_id))
+    assert caught.value.status_code == 409
+    assert shutdown_web_state.commands == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_shutdown_admits_current_loopback_request_without_waiting_for_teardown(shutdown_web_state):
+    response = await web_server.runtime_shutdown(
+        _shutdown_request(
+            launch_id="launch-current",
+            origin="http://127.0.0.1:8000",
+        )
+    )
+    payload = json.loads(response.body)
+    assert response.status_code == 202
+    assert payload["accepted"] is True
+    assert payload["launch_id"] == "launch-current"
+    assert len(shutdown_web_state.commands) == 1
+    assert shutdown_web_state.commands[0]["type"] == "runtime_shutdown"
+    assert shutdown_web_state.commands[0]["payload"]["launch_id"] == "launch-current"
+    assert shutdown_web_state.commands[0]["payload"]["source"] == "local_runtime_control"
+
+
+@pytest.mark.asyncio
+async def test_runtime_shutdown_duplicate_is_idempotent(shutdown_web_state):
+    request = _shutdown_request(launch_id="launch-current")
+    first = await web_server.runtime_shutdown(request)
+    second = await web_server.runtime_shutdown(request)
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert json.loads(second.body)["already_requested"] is True
+    assert len(shutdown_web_state.commands) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", [False, RuntimeError("ipc down")])
+async def test_runtime_shutdown_ipc_failure_cannot_return_success(monkeypatch, result):
+    bus = _ShutdownCommandBus(result=result)
+    monkeypatch.setattr(web_server, "event_bus", bus)
+    monkeypatch.setattr(web_server, "LAUNCH_ID", "launch-current")
+    monkeypatch.setattr(web_server, "_runtime_shutdown_admitted", False)
+    monkeypatch.setattr(web_server, "_runtime_shutdown_lock", asyncio.Lock())
+
+    response = await web_server.runtime_shutdown(_shutdown_request(launch_id="launch-current"))
+
+    assert response.status_code == 503
+    assert json.loads(response.body)["accepted"] is False
+    assert web_server._runtime_shutdown_admitted is False
 
 
 def _all_subsystems():
@@ -585,6 +722,82 @@ async def test_ctrl_c_does_not_bypass_cleanup(monkeypatch, caplog):
     exit_code = await main.main()
     assert exit_code == 0
     assert "main_shutdown_begin | exit_code=0" in caplog.text
+    assert store.close_count == 1
+
+
+def _patch_main_for_runtime_shutdown(monkeypatch, bus, store):
+    monkeypatch.setattr(main, "_runtime_health", HealthRegistry(_all_subsystems()))
+    monkeypatch.setattr(main, "SessionStore", lambda path: store)
+
+    import charlie.audit_store as audit_store_module
+
+    monkeypatch.setattr(audit_store_module, "AuditStore", lambda path: _FakeStore())
+    monkeypatch.setattr(main, "_compose_memory_dependencies", lambda cfg: (_FakeStore("graph"), None, object()))
+    monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: _FakeBrain())
+    monkeypatch.setattr(main, "_wire_memory_service", lambda service: None)
+
+    import charlie.plugins as plugins_module
+    import charlie.tools as tools_module
+
+    monkeypatch.setattr(tools_module, "register_plugin_tools", lambda cfg: None)
+    monkeypatch.setattr(plugins_module, "PluginManager", lambda: object())
+    monkeypatch.setattr(main.config, "mcp_enabled", False)
+    monkeypatch.setattr(main.config, "pet_enabled", False)
+    monkeypatch.setattr(main, "_start_web_subprocess", lambda *a, **kw: _FakeProcess(8000))
+    monkeypatch.setattr(main, "_start_voice_or_degrade", lambda *a, **kw: _FakeVoice())
+    monkeypatch.setattr(main, "EventBus", lambda *a, **kw: bus)
+    monkeypatch.setattr(main, "_log_port_release", lambda *a: None)
+
+
+@pytest.mark.asyncio
+async def test_runtime_shutdown_command_enters_canonical_cleanup(monkeypatch, caplog):
+    store = _FakeStore("session")
+    bus = _MainCommandBus(
+        [
+            {
+                "type": "runtime_shutdown",
+                "payload": {"launch_id": main._LAUNCH_ID, "request_id": "shutdown-1"},
+            },
+            {
+                "type": "runtime_shutdown",
+                "payload": {"launch_id": main._LAUNCH_ID, "request_id": "shutdown-2"},
+            },
+        ]
+    )
+    _patch_main_for_runtime_shutdown(monkeypatch, bus, store)
+
+    exit_code = await main.main()
+
+    assert exit_code == 0
+    assert bus.consumed == 1
+    assert "Runtime shutdown request accepted" in caplog.text
+    assert "main_shutdown_begin | exit_code=0" in caplog.text
+    assert store.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_runtime_shutdown_command_is_ignored(monkeypatch, caplog):
+    store = _FakeStore("session")
+    bus = _MainCommandBus(
+        [
+            {
+                "type": "runtime_shutdown",
+                "payload": {"launch_id": "stale-launch", "request_id": "shutdown-stale"},
+            },
+            {
+                "type": "runtime_shutdown",
+                "payload": {"launch_id": main._LAUNCH_ID, "request_id": "shutdown-current"},
+            },
+        ]
+    )
+    _patch_main_for_runtime_shutdown(monkeypatch, bus, store)
+
+    exit_code = await main.main()
+
+    assert exit_code == 0
+    assert bus.consumed == 2
+    assert "Ignoring stale runtime shutdown request" in caplog.text
+    assert "Runtime shutdown request accepted" in caplog.text
     assert store.close_count == 1
 
 

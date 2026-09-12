@@ -6236,6 +6236,7 @@ async def main() -> int:
         async def consume_web_commands(event_bus, brain):
             """Read commands from the web UI and dispatch them."""
             nonlocal current_web_session_id, voice, mcp_client
+            shutdown_requested = False
 
             async def _extension_request(payload: dict[str, Any]) -> None:
                 nonlocal mcp_client
@@ -6422,6 +6423,24 @@ async def main() -> int:
                         await _dispatch_web_command(
                             cmd, event_bus, mcp_client, settings_service, extension_runtime_registry
                         )
+                    elif cmd_type == "runtime_shutdown":
+                        payload = cmd.get("payload") if isinstance(cmd.get("payload"), dict) else {}
+                        if payload.get("launch_id") != _LAUNCH_ID:
+                            logger.warning(
+                                "Ignoring stale runtime shutdown request | request_id=%s | launch_id=%s",
+                                payload.get("request_id") or cmd.get("request_id"),
+                                payload.get("launch_id"),
+                            )
+                            continue
+                        if runtime_shutting_down:
+                            continue
+                        logger.info(
+                            "Runtime shutdown request accepted | request_id=%s | launch_id=%s",
+                            payload.get("request_id") or cmd.get("request_id"),
+                            _LAUNCH_ID,
+                        )
+                        shutdown_requested = True
+                        raise asyncio.CancelledError()
                     elif cmd_type == "recovery_approve":
                         payload = cmd.get("payload", {})
                         proposal_id = payload.get("proposal_id")
@@ -6683,6 +6702,8 @@ async def main() -> int:
 
                         background_task.cancel(payload.get("task_id", ""))
                 except asyncio.CancelledError:
+                    if shutdown_requested:
+                        raise
                     break
                 except Exception as e:
                     logger.error(f"Error handling web command: {e}", exc_info=True)
