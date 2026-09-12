@@ -10,6 +10,14 @@ import {
 import { INITIAL_VISUAL_RUNTIME, type VisualRuntimePhase } from "../runtime/visualRuntime";
 import { useWorkspaceStore } from "../layout/workspaceStore";
 import { CharlieScene } from "../scene/CharlieScene";
+import {
+  SpatialCanvas,
+  type SpatialProofContext,
+  type SpatialProofFinding,
+  type SpatialProofScene,
+} from "../scene/spatial/SpatialCanvas";
+import type { SpatialMapData } from "../composer/primitives/SpatialMapTypes";
+import type { VisionProofBox } from "../scene/spatial/VisionProofSurface";
 
 export type VisualLabScenario =
   | "idle"
@@ -33,7 +41,12 @@ export type VisualLabScenario =
   | "tasks-rich"
   | "settings"
   | "offline"
-  | "degraded";
+  | "degraded"
+  | "spatial-idle"
+  | "spatial-research"
+  | "spatial-research-selected"
+  | "spatial-vision"
+  | "spatial-vision-selected";
 
 const workspaceFor: Partial<Record<VisualLabScenario, string>> = {
   conversation: "conversation",
@@ -303,6 +316,14 @@ const RESEARCH_CONTENT: Record<string, unknown> = {
   },
 };
 
+const SPATIAL_RESEARCH_MAP = RESEARCH_CONTENT.radar as SpatialMapData;
+const SPATIAL_RESEARCH_FINDINGS = RESEARCH_CONTENT.findings as SpatialProofFinding[];
+const SPATIAL_VISION_BOXES: VisionProofBox[] = [
+  { id: "vision-console", label: "CONTROL CONSOLE", confidence: 0.94, box: [22, 10, 54, 34], color: "#22d3ee" },
+  { id: "vision-signal", label: "SIGNAL ARRAY", confidence: 0.89, box: [17, 38, 58, 69], color: "#38bdf8" },
+  { id: "vision-terminal", label: "TERMINAL SURFACE", confidence: 0.86, box: [42, 70, 78, 93], color: "#fbbf24" },
+];
+
 const BRIEFING_CONTENT: Record<string, unknown> = {
   schema: "charlie.briefing_workspace",
   version: 1,
@@ -540,10 +561,23 @@ function healthFor(scenario: VisualLabScenario): Record<string, SubsystemHealth>
   return {};
 }
 
+function spatialProofFor(scenario: VisualLabScenario): {
+  scene: SpatialProofScene;
+  context: SpatialProofContext;
+} | null {
+  if (scenario === "spatial-idle") return { scene: "idle", context: "base" };
+  if (scenario === "spatial-research") return { scene: "research", context: "base" };
+  if (scenario === "spatial-research-selected") return { scene: "research", context: "selected" };
+  if (scenario === "spatial-vision") return { scene: "vision", context: "base" };
+  if (scenario === "spatial-vision-selected") return { scene: "vision", context: "selected" };
+  return null;
+}
+
 export function VisualLabHarness({ scenario }: { scenario: VisualLabScenario }): ReactElement {
   useEffect(() => {
     const restoreVisualSettingsFixtures = installVisualSettingsFixtures(scenario);
     const runtime = runtimeFor(scenario);
+    const spatialProof = spatialProofFor(scenario);
     const workspaceType = workspaceFor[scenario];
     const content = workspaceContentFor(scenario);
     const tasks = taskFixturesFor(scenario);
@@ -569,10 +603,20 @@ export function VisualLabHarness({ scenario }: { scenario: VisualLabScenario }):
     } : {};
     useWorkspaceStore.setState({ workspaces: {}, activeWorkspaceId: null, recentWorkspaces: [] });
     useCharlieStore.setState({
-      connected: scenario !== "offline",
-      coreState: ["acting", "conversation-rich", "research-rich", "briefing-rich", "system-rich", "tasks-rich"].includes(scenario) ? "working" : scenario,
-      visualRuntime: { ...INITIAL_VISUAL_RUNTIME, ...runtime, updatedAt: new Date().toISOString() },
-      presentationIntents: workspaceType ? ({
+      connected: spatialProof ? true : scenario !== "offline",
+      coreState: spatialProof
+        ? spatialProof.scene === "idle" ? "idle" : "working"
+        : ["acting", "conversation-rich", "research-rich", "briefing-rich", "system-rich", "tasks-rich"].includes(scenario) ? "working" : scenario,
+      visualRuntime: spatialProof
+        ? {
+            ...INITIAL_VISUAL_RUNTIME,
+            phase: spatialProof.scene === "idle" ? "idle" : "acting",
+            label: spatialProof.scene === "idle" ? "IDLE" : spatialProof.scene === "research" ? "RESEARCHING" : "VISION ACTIVE",
+            detail: "TEST/MOCK spatial proof",
+            updatedAt: new Date().toISOString(),
+          }
+        : { ...INITIAL_VISUAL_RUNTIME, ...runtime, updatedAt: new Date().toISOString() },
+      presentationIntents: spatialProof ? {} : workspaceType ? ({
         [`visual-lab-${workspaceType}`]: {
           id: `visual-lab-${workspaceType}`,
           kind: "workspace",
@@ -628,7 +672,15 @@ export function VisualLabHarness({ scenario }: { scenario: VisualLabScenario }):
       data-visual-lab-settings-fixture={scenario === "settings" ? "contract-valid" : undefined}
     >
       <div className="sr-only">TEST/MOCK VISUAL LAB — not runtime acceptance</div>
-      <CharlieScene />
+      {spatialProofFor(scenario) ? (
+        <SpatialCanvas
+          initialScene={spatialProofFor(scenario)!.scene}
+          initialContext={spatialProofFor(scenario)!.context}
+          researchMap={SPATIAL_RESEARCH_MAP}
+          researchFindings={SPATIAL_RESEARCH_FINDINGS}
+          visionBoxes={SPATIAL_VISION_BOXES}
+        />
+      ) : <CharlieScene />}
     </div>
   );
 }

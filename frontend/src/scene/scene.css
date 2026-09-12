@@ -789,14 +789,19 @@
 
 /* PASS 5C-A: identity-first scene proportions. */
 :root {
-  --core-center-size: clamp(400px, 39vw, 640px);
-  --core-docked-size: 176px;
-  --workspace-core-safe: clamp(156px, 14vw, 220px);
+  --core-center-size: clamp(148px, 20vh, 230px);
+  --core-docked-size: 146px;
+  --workspace-core-safe: clamp(132px, 12vw, 190px);
 }
 
 .charlie-core-center .charlie-core-brand-center {
-  font-size: clamp(18px, 1.5vw, 26px);
-  letter-spacing: .24em;
+  font-size: clamp(12px, 1.5vw, 26px);
+  letter-spacing: .18em;
+}
+
+.charlie-core-docked .charlie-core-brand-center {
+  font-size: clamp(10px, 1vw, 14px);
+  letter-spacing: .12em;
 }
 
 .charlie-core-center[data-core-display-state="idle"] .charlie-core-state-subtext,
@@ -827,15 +832,15 @@
 
 @media (max-width: 1439px) {
   :root {
-    --core-docked-size: 158px;
+    --core-docked-size: 132px;
   }
 }
 
 @media (max-width: 900px) {
   :root {
-    --core-center-size: clamp(360px, 52vw, 420px);
-    --core-docked-size: 132px;
-    --workspace-core-safe: 148px;
+    --core-center-size: clamp(124px, 20vh, 174px);
+    --core-docked-size: 112px;
+    --workspace-core-safe: 126px;
   }
 
   .charlie-scene-root[data-approval-active="true"] .charlie-core-center {
@@ -848,7 +853,7 @@
 
 @media (max-width: 560px) {
   :root {
-    --core-center-size: 360px;
+    --core-center-size: 124px;
   }
 }
 
@@ -886,4 +891,28 @@
   transform-origin: right center;
   opacity: .72;
   pointer-events: none;
+}
+
+/* Ring redesign: geometry carries identity; bloom remains a state signal. */
+.hud-ring[data-core-scale="centered"] .hud-vector-drift {
+  animation-duration: 96s;
+}
+
+.hud-ring[data-core-scale="docked"] .hud-vector-drift {
+  animation-duration: 72s;
+}
+
+.hud-ring[data-state="idle"] .hud-core-canvas {
+  filter: none;
+  opacity: .96;
+}
+
+.charlie-core-docked::before {
+  inset: -8px;
+  background: radial-gradient(circle at center, rgba(0, 220, 240, .08) 0%, rgba(0, 180, 255, .025) 52%, transparent 74%);
+}
+
+.charlie-core-brand-center {
+  color: #d8f8ff;
+  text-shadow: 0 0 5px rgba(80, 203, 237, .5), 0 0 12px rgba(34, 211, 238, .18);
 }

@@ -30,7 +30,7 @@ describe("CharlieRing", () => {
     const { container } = render(<CharlieRing />);
 
     expect(container.querySelector(".hud-outer-svg")).toBeInTheDocument();
-    expect(container.querySelectorAll(".hud-vector-ticks circle").length).toBeGreaterThan(0);
+    expect(container.querySelectorAll(".hud-vector-ticks line").length).toBeGreaterThan(0);
   });
 
   test("maintains absolute containment structure with hud-ring, canvas, and svg", () => {
@@ -45,5 +45,13 @@ describe("CharlieRing", () => {
     expect(svg).toBeInTheDocument();
     expect(ring?.contains(canvas)).toBe(true);
     expect(ring?.contains(svg)).toBe(true);
+  });
+
+  test("exposes centered and docked presentation scales through the same renderer", () => {
+    const { rerender } = render(<CharlieRing />);
+    expect(screen.getByRole("img")).toHaveAttribute("data-core-scale", "centered");
+
+    rerender(<CharlieRing compact />);
+    expect(screen.getByRole("img")).toHaveAttribute("data-core-scale", "docked");
   });
 });
