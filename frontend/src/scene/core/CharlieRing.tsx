@@ -42,13 +42,13 @@ const TWO_PI = Math.PI * 2;
 
 const PROFILES: Record<CoreVisualState, CoreProfile> = {
   idle: {
-    energy: 0.85,
-    motion: 0.15,
-    accent: "#00c8f8",
-    electric: "#00f0ff",
-    hot: "#ffffff",
+    energy: 0.56,
+    motion: 0.08,
+    accent: "#087f98",
+    electric: "#2ba7b9",
+    hot: "#c5e4e9",
     deep: "#01040a",
-    glow: "rgba(0, 220, 255, 0.55)",
+    glow: "rgba(0, 150, 175, 0.18)",
   },
   listening: {
     energy: 0.98,
@@ -329,6 +329,7 @@ function drawLuminousRing(
 ): void {
   const baseRadius = unit * 0.285;
   const audioReactive = ["listening", "transcribing", "speaking"].includes(currentState) ? audioLevel : 0;
+  const isIdle = currentState === "idle";
   const breath = 1 + Math.sin(time * 0.002) * 0.004 + pulse * 0.03 + audioReactive * 0.02;
   const r = baseRadius * breath;
   const rot = time * 0.0006 * (1 + profile.motion);
@@ -345,9 +346,9 @@ function drawLuminousRing(
     r + unit * 0.12
   );
   outerHalo.addColorStop(0, "rgba(0, 240, 255, 0)");
-  outerHalo.addColorStop(0.25, profile.glow);
-  outerHalo.addColorStop(0.55, "rgba(0, 140, 255, 0.25)");
-  outerHalo.addColorStop(0.85, "rgba(0, 100, 220, 0.08)");
+  outerHalo.addColorStop(0.25, isIdle ? colorWithAlpha(profile.electric, 0.16) : profile.glow);
+  outerHalo.addColorStop(0.55, isIdle ? colorWithAlpha(profile.accent, 0.08) : "rgba(0, 140, 255, 0.25)");
+  outerHalo.addColorStop(0.85, isIdle ? colorWithAlpha(profile.accent, 0.03) : "rgba(0, 100, 220, 0.08)");
   outerHalo.addColorStop(1, "rgba(0, 0, 0, 0)");
 
   ctx.fillStyle = outerHalo;
@@ -371,60 +372,60 @@ function drawLuminousRing(
     const startAngle = rot * f.speed + f.start * Math.PI;
     const arcLength = Math.PI * f.len;
 
-    ctx.strokeStyle = colorWithAlpha(f.color, f.alpha);
+    ctx.strokeStyle = colorWithAlpha(f.color, f.alpha * (isIdle ? 0.42 : 1));
     ctx.lineWidth = f.width;
     ctx.shadowColor = "#00f0ff";
-    ctx.shadowBlur = unit * 0.015;
+    ctx.shadowBlur = isIdle ? unit * 0.004 : unit * 0.015;
     ctx.beginPath();
     ctx.arc(centerX, centerY, fr, startAngle, startAngle + arcLength);
     ctx.stroke();
   }
 
   // C. Main Vivid Electric-Cyan Torus Body (Vibrant saturated cyan-blue)
-  ctx.strokeStyle = profile.accent;
-  ctx.lineWidth = Math.max(4.0, unit * 0.02);
+  ctx.strokeStyle = isIdle ? colorWithAlpha(profile.accent, 0.82) : profile.accent;
+  ctx.lineWidth = Math.max(isIdle ? 2.2 : 4.0, unit * (isIdle ? 0.009 : 0.02));
   ctx.shadowColor = profile.electric;
-  ctx.shadowBlur = unit * 0.035;
+  ctx.shadowBlur = isIdle ? unit * 0.008 : unit * 0.035;
   ctx.beginPath();
   ctx.arc(centerX, centerY, r, 0, TWO_PI);
   ctx.stroke();
 
   // D. Secondary Electric Blue Glow Layer on Torus
-  ctx.strokeStyle = "rgba(0, 180, 240, 0.75)";
-  ctx.lineWidth = Math.max(6.0, unit * 0.03);
+  ctx.strokeStyle = isIdle ? colorWithAlpha(profile.electric, 0.42) : "rgba(0, 180, 240, 0.75)";
+  ctx.lineWidth = Math.max(isIdle ? 1.4 : 6.0, unit * (isIdle ? 0.004 : 0.03));
   ctx.shadowColor = "#00d4ff";
-  ctx.shadowBlur = unit * 0.025;
+  ctx.shadowBlur = isIdle ? unit * 0.006 : unit * 0.025;
   ctx.beginPath();
   ctx.arc(centerX, centerY, r, 0, TWO_PI);
   ctx.stroke();
 
   // E. Inner Sharp Cyan Rim (catchlight)
-  ctx.strokeStyle = "rgba(180, 240, 255, 0.9)";
+  ctx.strokeStyle = isIdle ? "rgba(180, 240, 255, 0.58)" : "rgba(180, 240, 255, 0.9)";
   ctx.lineWidth = 1.2;
   ctx.shadowColor = "#00f0ff";
-  ctx.shadowBlur = 6;
+  ctx.shadowBlur = isIdle ? 2 : 6;
   ctx.beginPath();
   ctx.arc(centerX, centerY, r - unit * 0.008, 0, TWO_PI);
   ctx.stroke();
 
-  // F. Brilliant Top/Upper-Left Hot-White Energy Crescent Highlight
-  // Crescent from ~10 o'clock to ~1:30
-  ctx.strokeStyle = "rgba(0, 240, 255, 0.95)";
-  ctx.lineWidth = Math.max(3.0, unit * 0.014);
-  ctx.shadowColor = "#00f0ff";
-  ctx.shadowBlur = unit * 0.02;
-  ctx.beginPath();
-  ctx.arc(centerX, centerY, r, -Math.PI * 0.85, -Math.PI * 0.05);
-  ctx.stroke();
+  // F. Active states may use a bright directional crescent; idle stays instrument-like.
+  if (!isIdle) {
+    ctx.strokeStyle = "rgba(0, 240, 255, 0.95)";
+    ctx.lineWidth = Math.max(3.0, unit * 0.014);
+    ctx.shadowColor = "#00f0ff";
+    ctx.shadowBlur = unit * 0.02;
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, r, -Math.PI * 0.85, -Math.PI * 0.05);
+    ctx.stroke();
 
-  // Hot White Core of Crescent
-  ctx.strokeStyle = "#ffffff";
-  ctx.lineWidth = Math.max(2.0, unit * 0.009);
-  ctx.shadowColor = "#ffffff";
-  ctx.shadowBlur = unit * 0.015;
-  ctx.beginPath();
-  ctx.arc(centerX, centerY, r, -Math.PI * 0.75, -Math.PI * 0.15);
-  ctx.stroke();
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = Math.max(2.0, unit * 0.009);
+    ctx.shadowColor = "#ffffff";
+    ctx.shadowBlur = unit * 0.015;
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, r, -Math.PI * 0.75, -Math.PI * 0.15);
+    ctx.stroke();
+  }
 
   // G. Dynamic Directional Traveling Wave Segment
   const traceAngle = (time * 0.0016 * (1 + profile.motion * 0.5)) % TWO_PI;

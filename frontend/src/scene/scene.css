@@ -851,3 +851,39 @@
     --core-center-size: 360px;
   }
 }
+
+/* Engineered idle signal, restrained bloom. */
+.hud-ring[data-state="idle"] .hud-core-canvas {
+  filter: saturate(.58) brightness(.72) contrast(1.05);
+  opacity: .9;
+}
+
+.hud-ring[data-state="idle"] .hud-vector-structure {
+  opacity: .9;
+}
+
+.hud-ring[data-state="idle"] .hud-vector-ticks {
+  opacity: .72;
+}
+
+.hud-ring[data-state="idle"] .hud-vector-nodes {
+  opacity: .52;
+}
+
+.hud-ring[data-state="idle"] .hud-vector-technical {
+  opacity: .86;
+}
+
+.charlie-core-system::after {
+  content: "";
+  position: absolute;
+  right: calc(100% - 6px);
+  top: 50%;
+  width: clamp(96px, 10vw, 190px);
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(34, 211, 238, .12) 28%, rgba(34, 211, 238, .7));
+  transform: translateY(-50%) rotate(-10deg);
+  transform-origin: right center;
+  opacity: .72;
+  pointer-events: none;
+}

@@ -65,6 +65,15 @@ export function OuterHudSystem(): ReactElement {
         <circle cx={CENTER} cy={CENTER} r="455" fill="none" stroke="rgba(0, 240, 255, 0.12)" strokeWidth="0.8" />
       </g>
 
+      {/* Instrument geometry: segmented arcs and calibration marks carry idle identity. */}
+      <g className="hud-vector-structure hud-vector-technical" fill="none" strokeLinecap="round">
+        <circle cx={CENTER} cy={CENTER} r="332" stroke="rgba(0, 240, 255, 0.24)" strokeWidth="1" strokeDasharray="52 16 12 28" />
+        <circle cx={CENTER} cy={CENTER} r="348" stroke="rgba(56, 189, 248, 0.18)" strokeWidth="0.8" strokeDasharray="96 28 18 40" strokeDashoffset="18" />
+        <circle cx={CENTER} cy={CENTER} r="470" stroke="rgba(0, 240, 255, 0.16)" strokeWidth="0.8" strokeDasharray="18 52 4 82" strokeDashoffset="31" />
+        <path d="M 500 48 V 84 M 500 916 V 952 M 48 500 H 84 M 916 500 H 952" stroke="rgba(191, 244, 255, 0.48)" strokeWidth="1.2" />
+        <path d="M 742 112 L 760 130 M 258 888 L 240 870" stroke="rgba(34, 211, 238, 0.44)" strokeWidth="1" />
+      </g>
+
       {/* 2. Sweeping Curved Energy Wisps / Trails */}
       <g className="hud-vector-secondary hud-vector-drift">
         {/* Upper-Right Sweeping Arc from 1 o'clock */}

@@ -50,6 +50,131 @@ const workspaceFor: Partial<Record<VisualLabScenario, string>> = {
 
 const TEST_MOCK_SESSION = "visual-lab-session";
 
+type VisualConfigFieldFixture = {
+  key: string;
+  field: string;
+  label: string;
+  group: string;
+  type: "str" | "int" | "float" | "bool";
+  secret: false;
+  restart: string | null;
+  value: string | number | boolean;
+  is_set: null;
+};
+
+const VISUAL_SETTINGS_CONFIG_FIXTURE: { fields: VisualConfigFieldFixture[] } = {
+  fields: [
+    {
+      key: "LLM_URL",
+      field: "llm_url",
+      label: "LLM Endpoint",
+      group: "LLM",
+      type: "str",
+      secret: false,
+      restart: null,
+      value: "https://example.test/charlie/mock-gateway/v1",
+      is_set: null,
+    },
+    {
+      key: "LLM_MODEL",
+      field: "llm_model",
+      label: "LLM Model",
+      group: "LLM",
+      type: "str",
+      secret: false,
+      restart: null,
+      value: "test/mock-charlie-operator",
+      is_set: null,
+    },
+    {
+      key: "CONTEXT_WINDOW",
+      field: "context_window",
+      label: "Context Window",
+      group: "LLM",
+      type: "int",
+      secret: false,
+      restart: null,
+      value: 32768,
+      is_set: null,
+    },
+    {
+      key: "LLM_TEMPERATURE",
+      field: "llm_temperature",
+      label: "Response Temperature",
+      group: "LLM",
+      type: "float",
+      secret: false,
+      restart: null,
+      value: 0.2,
+      is_set: null,
+    },
+    {
+      key: "VISION_ENABLED",
+      field: "vision_enabled",
+      label: "Vision Enabled",
+      group: "Vision",
+      type: "bool",
+      secret: false,
+      restart: "process",
+      value: true,
+      is_set: null,
+    },
+    {
+      key: "VISION_MODEL",
+      field: "vision_model",
+      label: "Vision Model",
+      group: "Vision",
+      type: "str",
+      secret: false,
+      restart: "process",
+      value: "test/mock-vision-grounding",
+      is_set: null,
+    },
+  ],
+};
+
+const VISUAL_SETTINGS_MODELS_FIXTURE = {
+  active_model: "test/mock-charlie-operator",
+  models: ["test/mock-charlie-operator", "test/mock-charlie-fast"],
+  has_api_key: false,
+  provider_discovery: {
+    status: "available" as const,
+    count: 2,
+    error: null,
+  },
+};
+
+function jsonFixtureResponse(payload: unknown): Response {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function installVisualSettingsFixtures(scenario: VisualLabScenario): () => void {
+  if (scenario !== "settings") return () => {};
+
+  const runtimeFetch = window.fetch.bind(window);
+  window.fetch = async (input, init) => {
+    const request = typeof Request !== "undefined" && input instanceof Request ? input : null;
+    const url = request ? request.url : input.toString();
+    const method = (init?.method || request?.method || "GET").toUpperCase();
+    const pathname = new URL(url, window.location.origin).pathname;
+
+    if (method === "GET" && pathname === "/api/config") {
+      return jsonFixtureResponse(VISUAL_SETTINGS_CONFIG_FIXTURE);
+    }
+    if (method === "GET" && pathname === "/api/models") {
+      return jsonFixtureResponse(VISUAL_SETTINGS_MODELS_FIXTURE);
+    }
+    return runtimeFetch(input, init);
+  };
+
+  return () => {
+    window.fetch = runtimeFetch;
+  };
+}
+
 const RESEARCH_SOURCES = [
   {
     id: "source-grid-1",
@@ -126,6 +251,25 @@ const RESEARCH_CONTENT: Record<string, unknown> = {
     mode: "radar",
     title: "EVIDENCE SIGNAL FIELD",
     subtitle: "SOURCE-BOUND OBSERVATIONS",
+    nodes: [
+      { id: "evidence-core", label: "GRID RESILIENCE", sublabel: "SYNTHESIS / 87%", x: 50, y: 51, type: "hub", status: "active", color: "#22d3ee" },
+      { id: "finding-recovery", label: "RECOVERY", sublabel: "FINDING / 91%", x: 26, y: 27, type: "finding", status: "active", color: "#38bdf8" },
+      { id: "finding-risk", label: "RISK", sublabel: "FINDING / 84%", x: 74, y: 27, type: "finding", status: "warning", color: "#fbbf24" },
+      { id: "source-storage", label: "STORAGE", sublabel: "SOURCE / 92%", x: 12, y: 73, type: "source", status: "active", color: "#38bdf8" },
+      { id: "source-demand", label: "DEMAND", sublabel: "SOURCE / 84%", x: 34, y: 88, type: "source", status: "active", color: "#22d3ee" },
+      { id: "source-cooling", label: "COOLING", sublabel: "SOURCE / 79%", x: 66, y: 88, type: "source", status: "active", color: "#22d3ee" },
+      { id: "source-transformer", label: "TRANSFORMER", sublabel: "SOURCE / 76%", x: 88, y: 73, type: "source", status: "warning", color: "#fbbf24" },
+      { id: "signal-duration", label: "DURATION", sublabel: "SIGNAL / 75%", x: 50, y: 14, type: "signal", status: "idle", color: "#818cf8" },
+    ],
+    edges: [
+      { from: "source-storage", to: "finding-recovery", type: "route", active: true, label: "supports" },
+      { from: "source-demand", to: "finding-recovery", type: "route", active: true, label: "supports" },
+      { from: "finding-recovery", to: "evidence-core", type: "route", active: true, label: "confirms" },
+      { from: "source-transformer", to: "finding-risk", type: "route", active: true, label: "supports" },
+      { from: "source-cooling", to: "evidence-core", type: "link", active: true, label: "informs" },
+      { from: "signal-duration", to: "evidence-core", type: "link", active: true, label: "weights" },
+      { from: "evidence-core", to: "finding-risk", type: "link", active: true, label: "concentrates" },
+    ],
     objects: [
       { id: "signal-1", label: "NORTH", type: "hub", status: "active", angle: 18, distance: 0.72 },
       { id: "signal-2", label: "EAST", type: "signal", status: "warning", angle: 92, distance: 0.58 },
@@ -217,19 +361,25 @@ const SYSTEM_CONTENT: Record<string, unknown> = {
     title: "LOCAL RUNTIME TOPOLOGY",
     subtitle: "AUTHORITATIVE SUBSYSTEM LINKS",
     nodes: [
-      { id: "brain", label: "BRAIN", sublabel: "READY", x: 50, y: 20, status: "active", color: "#22d3ee" },
-      { id: "voice", label: "VOICE", sublabel: "ONLINE", x: 23, y: 47, status: "active", color: "#38bdf8" },
-      { id: "browser", label: "BROWSER", sublabel: "READY", x: 77, y: 47, status: "active", color: "#22d3ee" },
-      { id: "memory", label: "MEMORY", sublabel: "SYNC", x: 34, y: 78, status: "active", color: "#818cf8" },
-      { id: "event-bus", label: "EVENT BUS", sublabel: "LIVE", x: 66, y: 78, status: "active", color: "#22d3ee" },
+      { id: "brain", label: "BRAIN", sublabel: "READY", type: "hub", x: 50, y: 13, status: "active", color: "#22d3ee" },
+      { id: "voice", label: "VOICE", sublabel: "ONLINE", type: "service", x: 16, y: 42, status: "active", color: "#38bdf8" },
+      { id: "browser", label: "BROWSER", sublabel: "READY", type: "service", x: 84, y: 42, status: "active", color: "#22d3ee" },
+      { id: "event-bus", label: "EVENT BUS", sublabel: "LIVE", type: "hub", x: 50, y: 46, status: "active", color: "#22d3ee" },
+      { id: "task-journal", label: "TASK JOURNAL", sublabel: "ACTIVE", type: "service", x: 50, y: 67, status: "active", color: "#38bdf8" },
+      { id: "memory", label: "MEMORY", sublabel: "SYNC", type: "service", x: 17, y: 82, status: "active", color: "#818cf8" },
+      { id: "research", label: "RESEARCH", sublabel: "SYNTHESIS", type: "service", x: 50, y: 88, status: "active", color: "#22d3ee" },
+      { id: "desktop", label: "DESKTOP", sublabel: "READY", type: "service", x: 83, y: 82, status: "active", color: "#38bdf8" },
     ],
     edges: [
-      { from: "brain", to: "voice", type: "route", active: true },
-      { from: "brain", to: "browser", type: "route", active: true },
-      { from: "brain", to: "memory", type: "link", active: true },
-      { from: "brain", to: "event-bus", type: "route", active: true },
+      { from: "brain", to: "event-bus", type: "route", active: true, label: "dispatch" },
+      { from: "brain", to: "voice", type: "route", active: true, label: "listen" },
+      { from: "brain", to: "browser", type: "route", active: true, label: "verify" },
+      { from: "event-bus", to: "task-journal", type: "route", active: true, label: "record" },
+      { from: "event-bus", to: "research", type: "route", active: true, label: "project" },
+      { from: "task-journal", to: "memory", type: "link", active: true, label: "retain" },
+      { from: "research", to: "memory", type: "link", active: true, label: "recall" },
+      { from: "browser", to: "desktop", type: "route", active: true, label: "act" },
       { from: "voice", to: "memory", type: "dotted", active: false },
-      { from: "browser", to: "event-bus", type: "link", active: true },
     ],
   },
   operations: [
@@ -392,6 +542,7 @@ function healthFor(scenario: VisualLabScenario): Record<string, SubsystemHealth>
 
 export function VisualLabHarness({ scenario }: { scenario: VisualLabScenario }): ReactElement {
   useEffect(() => {
+    const restoreVisualSettingsFixtures = installVisualSettingsFixtures(scenario);
     const runtime = runtimeFor(scenario);
     const workspaceType = workspaceFor[scenario];
     const content = workspaceContentFor(scenario);
@@ -466,10 +617,16 @@ export function VisualLabHarness({ scenario }: { scenario: VisualLabScenario }):
       audioLevel: scenario === "listening" || scenario === "speaking" ? 0.68 : 0,
       activeAlert: null,
     });
+
+    return restoreVisualSettingsFixtures;
   }, [scenario]);
 
   return (
-    <div data-visual-lab="TEST/MOCK" data-visual-lab-scenario={scenario}>
+    <div
+      data-visual-lab="TEST/MOCK"
+      data-visual-lab-scenario={scenario}
+      data-visual-lab-settings-fixture={scenario === "settings" ? "contract-valid" : undefined}
+    >
       <div className="sr-only">TEST/MOCK VISUAL LAB — not runtime acceptance</div>
       <CharlieScene />
     </div>

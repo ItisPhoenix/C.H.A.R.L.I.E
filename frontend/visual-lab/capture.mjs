@@ -1,7 +1,10 @@
-import { chromium } from "playwright";
+import { createRequire } from "node:module";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+const require = createRequire(import.meta.url);
+const { chromium } = require(process.env.VISUAL_LAB_PLAYWRIGHT_PATH || "playwright");
 
 const captureMode = process.env.VISUAL_LAB_PASS || "5b";
 const outputDir = resolve(

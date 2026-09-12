@@ -185,12 +185,12 @@ export function SpatialMapFallback({ data }: { data?: SpatialMapData }): ReactEl
                     x2={x2}
                     y2={y2}
                     stroke={edge.active !== false ? "#00f0ff" : "rgba(34, 211, 238, 0.25)"}
-                    strokeWidth={edge.type === "route" ? "2.5" : "1.2"}
+                    strokeWidth={edge.type === "route" ? "3.2" : "1.6"}
                     strokeDasharray={edge.type === "dotted" ? "4 4" : undefined}
-                    strokeOpacity={edge.active !== false ? "0.8" : "0.3"}
+                    strokeOpacity={edge.active !== false ? "0.88" : "0.26"}
                   />
                   {edge.type === "route" && (
-                    <circle cx={(x1 + x2) / 2} cy={(y1 + y2) / 2} r="3" fill="#00f0ff" className="animate-ping" />
+                    <circle cx={(x1 + x2) / 2} cy={(y1 + y2) / 2} r="3.5" fill="#00f0ff" className="animate-ping" />
                   )}
                 </g>
               );
@@ -203,17 +203,20 @@ export function SpatialMapFallback({ data }: { data?: SpatialMapData }): ReactEl
               const cx = (node.x / 100) * 1000;
               const cy = (node.y / 100) * 500;
               const color = node.color || (node.status === "warning" ? "#fbbf24" : node.status === "error" ? "#f43f5e" : "#00f0ff");
+              const isHub = ["hub", "primary", "core"].includes(node.type || "");
+              const nodeRadius = isHub ? 8.5 : ["finding", "source", "evidence"].includes(node.type || "") ? 6 : 4.5;
 
               return (
-                <g key={node.id} className="cursor-pointer group">
-                  <circle cx={cx} cy={cy} r="10" fill={color} fillOpacity="0.15" className="animate-pulse" />
-                  <circle cx={cx} cy={cy} r="4.5" fill={color} stroke="#020710" strokeWidth="1.5" />
+                <g key={node.id} className="cursor-pointer group" data-node-type={node.type || "node"} data-node-status={node.status || "active"}>
+                  <circle cx={cx} cy={cy} r={nodeRadius * (isHub ? 2.6 : 2.1)} fill={color} fillOpacity={isHub ? "0.18" : "0.12"} className={isHub ? "animate-pulse" : undefined} />
+                  {isHub && <circle cx={cx} cy={cy} r={nodeRadius + 7} fill="none" stroke={color} strokeOpacity="0.42" strokeWidth="1" strokeDasharray="3 5" />}
+                  <circle cx={cx} cy={cy} r={nodeRadius} fill={color} stroke="#020710" strokeWidth={isHub ? "2" : "1.5"} />
                   <text
                     x={cx}
-                    y={cy - 10}
+                    y={cy - nodeRadius - (isHub ? 8 : 6)}
                     textAnchor="middle"
                     fill="#e2e8f0"
-                    fontSize="10"
+                    fontSize={isHub ? "12" : "10"}
                     fontWeight="bold"
                     fontFamily="monospace"
                     className="drop-shadow-md"
@@ -223,10 +226,10 @@ export function SpatialMapFallback({ data }: { data?: SpatialMapData }): ReactEl
                   {node.sublabel && (
                     <text
                       x={cx}
-                      y={cy + 16}
+                      y={cy + nodeRadius + (isHub ? 14 : 12)}
                       textAnchor="middle"
                       fill="#94a3b8"
-                      fontSize="8"
+                      fontSize={isHub ? "9" : "8"}
                       fontFamily="monospace"
                     >
                       {node.sublabel}

@@ -1,7 +1,10 @@
-import { chromium } from "playwright";
+import { createRequire } from "node:module";
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+const require = createRequire(import.meta.url);
+const { chromium } = require(process.env.VISUAL_LAB_PLAYWRIGHT_PATH || "playwright");
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const root = resolve(scriptDir, "..", "..");

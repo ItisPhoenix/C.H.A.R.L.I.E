@@ -32,6 +32,22 @@ describe("TEST/MOCK visual lab", () => {
     expect(await screen.findByText("EVIDENCE & SOURCES")).toBeInTheDocument();
   });
 
+  test("provides populated contract-shaped Settings fixtures only in Visual Lab", async () => {
+    const { container } = render(
+      <MemoryRouter>
+        <VisualLabHarness scenario="settings" />
+      </MemoryRouter>,
+    );
+
+    expect(container.querySelector('[data-visual-lab-settings-fixture="contract-valid"]')).toBeInTheDocument();
+    expect(await screen.findByRole("textbox", { name: "LLM Endpoint" })).toHaveValue("https://example.test/charlie/mock-gateway/v1");
+    expect(screen.getByRole("combobox", { name: "LLM Model" })).toHaveValue("test/mock-charlie-operator");
+    expect(screen.getByRole("spinbutton", { name: "Context Window" })).toHaveValue(32768);
+    expect(screen.getByRole("checkbox", { name: "Vision Enabled" })).toBeChecked();
+    expect(await screen.findByText("2 provider models available.")).toBeInTheDocument();
+    expect(screen.getByTestId("authoritative-settings")).toHaveAttribute("data-active-category", "Models");
+  });
+
   test("provides concurrent task fixtures without entering production runtime", async () => {
     render(
       <MemoryRouter>

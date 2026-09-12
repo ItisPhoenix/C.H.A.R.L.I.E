@@ -52,26 +52,32 @@ export function SystemWorkspace({ workspace }: { workspace: WorkspaceInstance })
         <div className="spatial-subtitle">THE MACHINE / AUTHORITATIVE STATE</div>
       </header>
 
-      <section className="system-live-telemetry absolute left-[2%] right-[2%] top-[7%] z-10" aria-label="Live system telemetry">
-        <div className="spatial-kicker">LIVE TELEMETRY <span data-testid="system-telemetry-freshness">[{statusFreshness}]</span></div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 border-y border-cyan-500/15 py-3 mt-2">
-          <div><span className="spatial-subtitle">CPU</span><strong>{metric(status?.cpu, "%")}</strong></div>
-          <div><span className="spatial-subtitle">RAM</span><strong>{metric(status?.ram, "%")}</strong></div>
-          <div><span className="spatial-subtitle">NETWORK</span><strong>{metric(status?.netKbps, " KB/S")}</strong></div>
-          <div><span className="spatial-subtitle">DISK</span><strong>{metric(status?.disk, "%")}</strong></div>
-        </div>
-        <div className="flex flex-wrap gap-3 text-[10px] text-slate-400 mt-2">
-          <span>HEALTH [{healthFreshness}]</span>
-          {Object.entries(health).length === 0 ? <span>NO SUBSYSTEM SNAPSHOT</span> : Object.entries(health).map(([name, item]) => (
-            <span key={name} className={item.status === "degraded" ? "text-amber-300" : item.status === "error" ? "text-rose-300" : "text-cyan-200"}>
-              {name.toUpperCase()}: {item.status.toUpperCase()}
-            </span>
-          ))}
-        </div>
-      </section>
-
       <section className="system-topology">
-        <div className="spatial-kicker">NETWORK OVERVIEW</div>
+        <div className="system-topology-heading">
+          <div>
+            <div className="spatial-kicker">RUNTIME TOPOLOGY</div>
+            <div className="system-topology-subtitle">AUTHORITATIVE SUBSYSTEM LINKS</div>
+          </div>
+          <div className="system-topology-meta">
+            <div className="system-topology-health" aria-label={`Subsystem health [${healthFreshness}]`}>
+              <span>HEALTH [{healthFreshness}]</span>
+              {Object.entries(health).length === 0 ? <span>NO SUBSYSTEM SNAPSHOT</span> : Object.entries(health).map(([name, item]) => (
+                <span key={name} data-health-status={item.status} className={item.status === "degraded" ? "system-health-degraded" : item.status === "error" ? "system-health-error" : "system-health-quiet"}>
+                  {name.toUpperCase()}: {item.status.toUpperCase()}
+                </span>
+              ))}
+            </div>
+            <section className="system-live-telemetry" aria-label="Live system telemetry">
+              <div className="spatial-kicker">LIVE VALUES <span data-testid="system-telemetry-freshness">[{statusFreshness}]</span></div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div><span className="spatial-subtitle">CPU</span><strong>{metric(status?.cpu, "%")}</strong></div>
+                <div><span className="spatial-subtitle">RAM</span><strong>{metric(status?.ram, "%")}</strong></div>
+                <div><span className="spatial-subtitle">NETWORK</span><strong>{metric(status?.netKbps, " KB/S")}</strong></div>
+                <div><span className="spatial-subtitle">DISK</span><strong>{metric(status?.disk, "%")}</strong></div>
+              </div>
+            </section>
+          </div>
+        </div>
         {topology ? <SpatialMapPrimitive data={{ mode: "topology", ...topology }} /> : <div className="spatial-empty">NO AUTHORITATIVE TOPOLOGY REPORTED</div>}
       </section>
       <section className="system-operations">
