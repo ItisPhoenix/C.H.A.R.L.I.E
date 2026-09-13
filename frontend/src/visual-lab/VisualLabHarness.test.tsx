@@ -136,4 +136,17 @@ describe("TEST/MOCK visual lab", () => {
     expect((await screen.findAllByText("DATA CONTRACT MISSING / NOT WIRED")).length).toBeGreaterThan(0);
     expect(container.querySelector(".ref-selected-callout")).toBeNull();
   });
+
+  test("does not infer temperature or fan telemetry from unrelated fields", async () => {
+    const { container } = render(
+      <MemoryRouter>
+        <VisualLabHarness scenario="ref-online" />
+      </MemoryRouter>,
+    );
+
+    expect([...container.querySelectorAll(".ref-online-system dd")].map((node) => node.textContent)).toEqual([
+      "UNAVAILABLE",
+      "UNAVAILABLE",
+    ]);
+  });
 });

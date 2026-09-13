@@ -241,15 +241,15 @@
 .ref-core--center {
   top: 50%;
   left: 50%;
-  width: min(500px, 35vw, 48vh);
+  width: min(660px, 45vw, 62vh);
   min-width: 260px;
-  transform: translate(-50%, -53%);
+  transform: translate(-50%, -51.2%);
 }
 
 .ref-core--dock {
-  right: 4.1%;
-  bottom: 4.2%;
-  width: min(360px, 22vw, 38vh);
+  right: 5%;
+  bottom: 11.5%;
+  width: min(430px, 24vw, 45vh);
   min-width: 184px;
 }
 
@@ -262,7 +262,7 @@
 .ref-core__orb .hud-ring {
   width: 100%;
   height: 100%;
-  filter: brightness(1.5) saturate(1.34);
+  filter: brightness(1.16) saturate(1.1);
 }
 
 .ref-core__wordmark {
@@ -273,17 +273,17 @@
   place-items: center;
   color: #e8f8fc;
   font-family: var(--font-technical), monospace;
-  font-size: clamp(13px, 1.1vw, 21px);
-  letter-spacing: .23em;
-  padding-left: .23em;
+  font-size: clamp(14px, 1.35vw, 26px);
+  letter-spacing: .2em;
+  padding-left: .2em;
   text-shadow: 0 0 7px rgba(143, 234, 255, .34);
   white-space: nowrap;
 }
 
 .ref-core--dock .ref-core__wordmark {
-  font-size: clamp(10px, .78vw, 15px);
-  letter-spacing: .16em;
-  padding-left: .16em;
+  font-size: clamp(10px, .9vw, 17px);
+  letter-spacing: .14em;
+  padding-left: .14em;
 }
 
 .ref-core__status {
@@ -298,7 +298,7 @@
 
 .ref-core__label {
   color: var(--ref-cyan-bright);
-  font-size: clamp(10px, .72vw, 14px);
+  font-size: clamp(11px, .95vw, 18px);
   letter-spacing: .52em;
   padding-left: .52em;
   text-transform: uppercase;
@@ -307,7 +307,7 @@
 
 .ref-core__subtext {
   color: var(--ref-muted);
-  font-size: clamp(7px, .48vw, 10px);
+  font-size: clamp(8px, .62vw, 12px);
   letter-spacing: .3em;
   padding-left: .3em;
   text-transform: uppercase;
@@ -315,13 +315,13 @@
 
 .ref-core__dots {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   margin-top: 3px;
 }
 
 .ref-core__dots i {
-  width: 4px;
-  height: 4px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: rgba(77, 159, 183, .42);
 }
@@ -331,13 +331,29 @@
   box-shadow: 0 0 8px var(--ref-cyan);
 }
 
-.ref-core--amber .ref-core__label,
-.ref-core--amber .ref-core__wordmark {
+.ref-core--amber .ref-core__label {
   color: #ffd15b;
 }
 
 .ref-core--amber .ref-core__orb .hud-ring {
   filter: brightness(1.28) saturate(1.22);
+}
+
+.ref-core--dock .ref-core__label {
+  font-size: clamp(10px, .82vw, 16px);
+}
+
+.ref-core--dock .ref-core__subtext {
+  font-size: clamp(7px, .5vw, 10px);
+}
+
+.ref-core--dock .ref-core__dots {
+  gap: 7px;
+}
+
+.ref-core--dock .ref-core__dots i {
+  width: 4px;
+  height: 4px;
 }
 
 .ref-core--fault .ref-core__label {
@@ -420,7 +436,7 @@
 }
 
 .ref-idle .ref-core--center {
-  transform: translate(-50%, -54%);
+  transform: translate(-50%, -51.2%);
 }
 
 .ref-research-objective {
@@ -2206,8 +2222,8 @@
 }
 
 .ref-active-docked .ref-core--dock {
-  right: 4%;
-  bottom: 4.6%;
+  right: 5%;
+  bottom: 11.5%;
 }
 
 .ref-settings .ref-workspace-heading {

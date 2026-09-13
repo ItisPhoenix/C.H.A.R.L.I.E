@@ -17,14 +17,14 @@ interface OuterHudSystemProps {
 export function OuterHudSystem({ compact = false }: OuterHudSystemProps): ReactElement {
   const nodes: OrbitNode[] = compact
     ? [
-        { cx: 176, cy: 326, size: 2.6, color: "#38bdf8", opacity: 0.52 },
-        { cx: 806, cy: 196, size: 3, color: "#ffffff", opacity: 0.7 },
+        { cx: 176, cy: 326, size: 2.8, color: "#38bdf8", opacity: 0.72 },
+        { cx: 806, cy: 196, size: 3.2, color: "#ffffff", opacity: 0.84 },
       ]
     : [
-        { cx: 112, cy: 500, size: 3.2, color: "#ffffff", opacity: 0.62 },
-        { cx: 738, cy: 214, size: 3, color: "#ffffff", opacity: 0.72 },
-        { cx: 884, cy: 604, size: 2.8, color: "#38bdf8", opacity: 0.5 },
-        { cx: 242, cy: 806, size: 2.1, color: "#38bdf8", opacity: 0.4 },
+        { cx: 112, cy: 500, size: 3.4, color: "#ffffff", opacity: 0.78 },
+        { cx: 738, cy: 214, size: 3.2, color: "#ffffff", opacity: 0.86 },
+        { cx: 884, cy: 604, size: 3, color: "#38bdf8", opacity: 0.64 },
+        { cx: 242, cy: 806, size: 2.3, color: "#38bdf8", opacity: 0.52 },
       ];
   const tickCount = compact ? 12 : 20;
 
@@ -52,18 +52,18 @@ export function OuterHudSystem({ compact = false }: OuterHudSystemProps): ReactE
       </defs>
 
       <g className="hud-vector-structure" fill="none" strokeLinecap="round">
-        <circle cx={CENTER} cy={CENTER} r="366" stroke="rgba(80, 203, 237, .13)" strokeWidth=".9" strokeDasharray="2 18" />
-        <circle cx={CENTER} cy={CENTER} r="408" stroke="rgba(80, 203, 237, .1)" strokeWidth=".8" strokeDasharray={compact ? "22 30" : "48 20 8 28"} />
+        <circle cx={CENTER} cy={CENTER} r="380" stroke="rgba(80, 203, 237, .16)" strokeWidth=".9" strokeDasharray="2 18" />
+        <circle cx={CENTER} cy={CENTER} r="426" stroke="rgba(80, 203, 237, .12)" strokeWidth=".8" strokeDasharray={compact ? "22 30" : "48 20 8 28"} />
         {!compact && (
-          <circle cx={CENTER} cy={CENTER} r="458" stroke="rgba(80, 203, 237, .06)" strokeWidth=".7" strokeDasharray="3 34" />
+          <circle cx={CENTER} cy={CENTER} r="472" stroke="rgba(80, 203, 237, .08)" strokeWidth=".7" strokeDasharray="3 34" />
         )}
         <path d="M 500 56 V 82 M 500 918 V 944 M 56 500 H 82 M 918 500 H 944" stroke="rgba(216, 248, 255, .32)" strokeWidth="1" />
       </g>
 
       <g className="hud-vector-secondary hud-vector-drift" fill="none" strokeLinecap="round">
-        <path d="M 738 214 A 408 408 0 0 1 888 590" stroke="url(#hud-arc-cyan)" strokeWidth="1.3" />
+        <path d="M 738 214 A 426 426 0 0 1 888 590" stroke="url(#hud-arc-cyan)" strokeWidth="1.3" />
         {!compact && (
-          <path d="M 178 748 A 432 432 0 0 1 430 914" stroke="rgba(34, 211, 238, .2)" strokeWidth="1" />
+          <path d="M 178 748 A 444 444 0 0 1 430 914" stroke="rgba(34, 211, 238, .23)" strokeWidth="1" />
         )}
       </g>
 
@@ -81,8 +81,8 @@ export function OuterHudSystem({ compact = false }: OuterHudSystemProps): ReactE
         {Array.from({ length: tickCount }, (_, index) => {
           const angle = -Math.PI / 2 + (index / tickCount) * Math.PI * 2;
           const major = index % (compact ? 4 : 5) === 0;
-          const inner = major ? 438 : 450;
-          const outer = compact ? 462 : 472;
+          const inner = major ? 452 : 464;
+          const outer = compact ? 478 : 486;
           const x1 = CENTER + Math.cos(angle) * inner;
           const y1 = CENTER + Math.sin(angle) * inner;
           const x2 = CENTER + Math.cos(angle) * outer;

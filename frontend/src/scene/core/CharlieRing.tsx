@@ -52,13 +52,13 @@ const TWO_PI = Math.PI * 2;
 
 const PROFILES: Record<CoreVisualState, CoreProfile> = {
   idle: {
-    energy: 0.56,
+    energy: 0.72,
     motion: 0.08,
-    accent: "#087f98",
-    electric: "#2ba7b9",
-    hot: "#c5e4e9",
+    accent: "#109fd1",
+    electric: "#4cddfa",
+    hot: "#eafcff",
     deep: "#01040a",
-    glow: "rgba(34, 181, 204, 0.16)",
+    glow: "rgba(28, 157, 210, 0.27)",
   },
   listening: {
     energy: 0.98,
@@ -187,13 +187,13 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
     glow: "rgba(245, 158, 11, 0.22)",
   },
   offline: {
-    energy: 0.5,
+    energy: 0.68,
     motion: 0.02,
-    accent: "#64748b",
-    electric: "#94a3b8",
-    hot: "#cbd5e1",
+    accent: "#0e91c5",
+    electric: "#45d6f5",
+    hot: "#dff8fc",
     deep: "#080c14",
-    glow: "rgba(100, 116, 139, 0.22)",
+    glow: "rgba(22, 137, 190, 0.24)",
   },
 };
 
@@ -292,8 +292,8 @@ function drawCoreField(
   compact: boolean,
   reduceMotion: boolean,
 ): void {
-  const diskRadius = unit * (compact ? 0.19 : 0.205);
-  const sphereRadius = unit * (compact ? 0.16 : 0.178);
+  const diskRadius = unit * (compact ? 0.22 : 0.255);
+  const sphereRadius = unit * (compact ? 0.19 : 0.22);
   const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, diskRadius);
   gradient.addColorStop(0, profile.deep);
   gradient.addColorStop(0.72, "#01050e");
@@ -312,7 +312,7 @@ function drawCoreField(
   ctx.arc(centerX, centerY, diskRadius, 0, TWO_PI);
   ctx.stroke();
 
-  const reticleRadius = unit * (compact ? 0.055 : 0.065);
+  const reticleRadius = unit * (compact ? 0.06 : 0.07);
   ctx.strokeStyle = colorWithAlpha(profile.hot, compact ? 0.16 : 0.22);
   ctx.lineWidth = Math.max(0.8, unit * 0.0018);
   ctx.beginPath();
@@ -363,6 +363,48 @@ function drawCoreField(
   ctx.restore();
 }
 
+function drawGlowSweep(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  unit: number,
+  time: number,
+  profile: CoreProfile,
+  compact: boolean,
+  reduceMotion: boolean,
+  radius: number,
+  active: boolean,
+): void {
+  const revolutionMs = compact ? 6200 : 6800;
+  const phase = reduceMotion ? 0 : (time % revolutionMs) / revolutionMs;
+  const centerAngle = -Math.PI / 2 + phase * TWO_PI;
+  const arcLength = compact ? 0.54 : 0.62;
+  const start = centerAngle - arcLength * 0.58;
+  const end = centerAngle + arcLength * 0.42;
+  const sweepRadius = radius - unit * (compact ? 0.004 : 0.006);
+
+  ctx.save();
+  ctx.lineCap = "round";
+
+  // One partial bloom, followed by one crisp highlight. No complete sweep ring.
+  ctx.strokeStyle = colorWithAlpha(profile.electric, active ? 0.28 : 0.2);
+  ctx.lineWidth = Math.max(compact ? 3 : 4, unit * 0.014);
+  ctx.shadowColor = profile.electric;
+  ctx.shadowBlur = Math.min(unit * 0.024, compact ? 5 : 8);
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, sweepRadius, start, end);
+  ctx.stroke();
+
+  ctx.strokeStyle = colorWithAlpha(profile.hot, active ? 0.92 : 0.78);
+  ctx.lineWidth = Math.max(compact ? 1.3 : 1.8, unit * 0.0048);
+  ctx.shadowColor = profile.hot;
+  ctx.shadowBlur = compact ? 2 : 3;
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, sweepRadius, start, end);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawConcentricStructure(
   ctx: CanvasRenderingContext2D,
   centerX: number,
@@ -379,7 +421,7 @@ function drawConcentricStructure(
   const audioReactive = ["listening", "transcribing", "speaking"].includes(currentState) ? audioLevel : 0;
   const isIdle = currentState === "idle";
   const active = !["idle", "approval_wait", "offline", "degraded", "error"].includes(currentState);
-  const baseRadius = unit * (compact ? 0.215 : 0.235);
+  const baseRadius = unit * (compact ? 0.28 : 0.32);
   const breath = 1 + Math.sin(time * 0.002) * 0.003 + pulse * 0.022 + audioReactive * 0.016;
   const radius = baseRadius * breath;
   const rotation = reduceMotion ? 0 : time * 0.0006 * (1 + profile.motion);
@@ -391,15 +433,15 @@ function drawConcentricStructure(
     radius - unit * 0.035,
     centerX,
     centerY,
-    radius + unit * (compact ? 0.075 : 0.085),
+    radius + unit * (compact ? 0.085 : 0.1),
   );
   aura.addColorStop(0, "rgba(0, 240, 255, 0)");
-  aura.addColorStop(0.28, colorWithAlpha(profile.electric, isIdle ? 0.09 : 0.13));
+  aura.addColorStop(0.28, colorWithAlpha(profile.electric, isIdle ? 0.14 : 0.16));
   aura.addColorStop(0.58, profile.glow);
   aura.addColorStop(1, "rgba(0, 0, 0, 0)");
   ctx.fillStyle = aura;
   ctx.beginPath();
-  ctx.arc(centerX, centerY, radius + unit * (compact ? 0.075 : 0.085), 0, TWO_PI);
+  ctx.arc(centerX, centerY, radius + unit * (compact ? 0.085 : 0.1), 0, TWO_PI);
   ctx.fill();
 
   const filaments = compact
@@ -415,7 +457,7 @@ function drawConcentricStructure(
 
   ctx.lineCap = "round";
   filaments.forEach((filament) => {
-    ctx.strokeStyle = colorWithAlpha(filament.color, filament.alpha * (isIdle ? 0.7 : 0.92));
+    ctx.strokeStyle = colorWithAlpha(filament.color, filament.alpha * (isIdle ? 0.82 : 0.94));
     ctx.lineWidth = filament.width;
     ctx.shadowColor = profile.electric;
     ctx.shadowBlur = compact ? 1.5 : 2.5;
@@ -430,49 +472,34 @@ function drawConcentricStructure(
     ctx.stroke();
   });
 
-  ctx.strokeStyle = colorWithAlpha(profile.accent, isIdle ? 0.8 : 0.88);
-  ctx.lineWidth = Math.max(compact ? 1.35 : 1.7, unit * (isIdle ? 0.0075 : 0.0095));
+  ctx.strokeStyle = colorWithAlpha(profile.accent, isIdle ? 0.98 : 0.94);
+  ctx.lineWidth = Math.max(compact ? 1.8 : 2.2, unit * (isIdle ? 0.01 : 0.011));
   ctx.shadowColor = profile.electric;
-  ctx.shadowBlur = compact ? 2.5 : 4;
+  ctx.shadowBlur = compact ? 3.5 : 5;
   ctx.beginPath();
   ctx.arc(centerX, centerY, radius, 0, TWO_PI);
   ctx.stroke();
 
-  ctx.strokeStyle = colorWithAlpha(profile.hot, isIdle ? 0.38 : 0.62);
-  ctx.lineWidth = Math.max(0.75, compact ? 0.85 : 1.1);
-  ctx.shadowBlur = compact ? 1 : 2;
+  drawGlowSweep(ctx, centerX, centerY, unit, time, profile, compact, reduceMotion, radius, active);
+
+  const edgeOffset = unit * (compact ? 0.008 : 0.01);
+  const secondaryRadius = radius + edgeOffset;
+  ctx.strokeStyle = colorWithAlpha(profile.electric, active ? 0.24 : 0.14);
+  ctx.lineWidth = Math.max(compact ? 0.7 : 0.9, unit * 0.0018);
+  ctx.shadowColor = profile.electric;
+  ctx.shadowBlur = compact ? 1.2 : 1.8;
   ctx.beginPath();
-  ctx.arc(centerX, centerY, radius - unit * 0.008, 0, TWO_PI);
+  ctx.arc(centerX, centerY, secondaryRadius, 0, TWO_PI);
   ctx.stroke();
 
-  if (active) {
-    ctx.strokeStyle = colorWithAlpha(profile.electric, 0.84);
-    ctx.lineWidth = Math.max(compact ? 1.8 : 2.2, unit * (compact ? 0.009 : 0.011));
-    ctx.shadowColor = profile.electric;
-    ctx.shadowBlur = compact ? 3 : 5;
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, radius, -Math.PI * 0.85, -Math.PI * 0.08);
-    ctx.stroke();
-
-    ctx.strokeStyle = colorWithAlpha(profile.hot, 0.86);
-    ctx.lineWidth = Math.max(0.9, unit * 0.0045);
-    ctx.shadowColor = profile.hot;
-    ctx.shadowBlur = compact ? 2 : 3;
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, radius - unit * 0.006, -Math.PI * 0.72, -Math.PI * 0.18);
-    ctx.stroke();
-  }
-
-  if (active) {
-    const traceAngle = (time * 0.0013 * (1 + profile.motion * 0.5)) % TWO_PI;
-    ctx.strokeStyle = colorWithAlpha(profile.hot, 0.9);
-    ctx.lineWidth = Math.max(0.85, unit * 0.0042);
-    ctx.shadowColor = profile.hot;
-    ctx.shadowBlur = compact ? 2 : 3;
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, radius + unit * 0.004, traceAngle, traceAngle + Math.PI * 0.16);
-    ctx.stroke();
-  }
+  const innerRadius = radius - edgeOffset;
+  ctx.strokeStyle = colorWithAlpha(profile.hot, active ? 0.38 : 0.22);
+  ctx.lineWidth = Math.max(0.8, unit * 0.002);
+  ctx.shadowColor = profile.hot;
+  ctx.shadowBlur = compact ? 1 : 1.5;
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, innerRadius, 0, TWO_PI);
+  ctx.stroke();
 
   if (pulse > 0) {
     const pulseRadius = radius + (1 - pulse) * unit * (compact ? 0.11 : 0.13);
@@ -503,7 +530,7 @@ function drawSignalArcs(
   const moving = !reduceMotion && !["idle", "approval_wait", "offline", "degraded", "error"].includes(currentState);
   const drift = moving ? time * 0.00012 * (1 + profile.motion) : 0;
   const audio = ["listening", "transcribing", "speaking"].includes(currentState) ? audioLevel : 0;
-  const radius = compact ? 0.305 : 0.325;
+  const radius = compact ? 0.36 : 0.4;
   const width = compact ? 0.0024 + audio * 0.001 : 0.0018 + audio * 0.0008;
   const arcs: ArcSpec[] = compact
     ? [
@@ -550,8 +577,8 @@ function drawCalibration(
   compact: boolean,
 ): void {
   const count = compact ? 8 : 16;
-  const outer = unit * (compact ? 0.39 : 0.425);
-  const baseInner = unit * (compact ? 0.365 : 0.402);
+  const outer = unit * (compact ? 0.425 : 0.46);
+  const baseInner = unit * (compact ? 0.395 : 0.425);
 
   for (let i = 0; i < count; i += 1) {
     if (!compact && i % 9 === 4) continue;
@@ -599,14 +626,14 @@ function drawSignalNodes(
 ): void {
   const nodes = compact
     ? [
-        { angle: -0.92, radius: 0.385, size: 1.6, alpha: 0.58 },
-        { angle: 2.36, radius: 0.405, size: 1.1, alpha: 0.34 },
+        { angle: -0.92, radius: 0.42, size: 1.7, alpha: 0.72 },
+        { angle: 2.36, radius: 0.435, size: 1.2, alpha: 0.42 },
       ]
     : [
-        { angle: -0.92, radius: 0.385, size: 1.9, alpha: 0.64 },
-        { angle: -2.38, radius: 0.415, size: 1.3, alpha: 0.4 },
-        { angle: 0.52, radius: 0.415, size: 1.35, alpha: 0.38 },
-        { angle: 2.36, radius: 0.405, size: 1.25, alpha: 0.34 },
+        { angle: -0.92, radius: 0.42, size: 2, alpha: 0.76 },
+        { angle: -2.38, radius: 0.445, size: 1.35, alpha: 0.46 },
+        { angle: 0.52, radius: 0.445, size: 1.4, alpha: 0.44 },
+        { angle: 2.36, radius: 0.435, size: 1.3, alpha: 0.4 },
       ];
 
   nodes.forEach((node, index) => {

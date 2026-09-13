@@ -795,12 +795,12 @@
 }
 
 .charlie-core-center .charlie-core-brand-center {
-  font-size: clamp(12px, 1.5vw, 26px);
-  letter-spacing: .18em;
+  font-size: clamp(11px, 1vw, 18px);
+  letter-spacing: .16em;
 }
 
 .charlie-core-docked .charlie-core-brand-center {
-  font-size: clamp(10px, 1vw, 14px);
+  font-size: clamp(9px, .7vw, 12px);
   letter-spacing: .12em;
 }
 
@@ -908,8 +908,8 @@
 }
 
 .charlie-core-docked::before {
-  inset: -8px;
-  background: radial-gradient(circle at center, rgba(0, 220, 240, .08) 0%, rgba(0, 180, 255, .025) 52%, transparent 74%);
+  inset: -14px;
+  background: radial-gradient(circle at center, rgba(0, 220, 240, .12) 0%, rgba(0, 180, 255, .04) 52%, transparent 74%);
 }
 
 .charlie-core-brand-center {
