@@ -7,6 +7,7 @@ import {
   type SubsystemHealth,
   type SystemStatus,
 } from "../store/charlie";
+import { connectBridge } from "../runtime/bridge";
 import { INITIAL_VISUAL_RUNTIME, type VisualRuntimePhase } from "../runtime/visualRuntime";
 import { useWorkspaceStore } from "../layout/workspaceStore";
 import { CharlieScene } from "../scene/CharlieScene";
@@ -18,6 +19,11 @@ import {
 } from "../scene/spatial/SpatialCanvas";
 import type { SpatialMapData } from "../composer/primitives/SpatialMapTypes";
 import type { VisionProofBox } from "../scene/spatial/VisionProofSurface";
+import {
+  REFERENCE_VISUAL_SCENARIOS,
+  ReferenceVisualLab,
+  type ReferenceVisualScenario,
+} from "./ReferenceVisualLabTruthful";
 
 export type VisualLabScenario =
   | "idle"
@@ -42,6 +48,7 @@ export type VisualLabScenario =
   | "settings"
   | "offline"
   | "degraded"
+  | ReferenceVisualScenario
   | "spatial-idle"
   | "spatial-research"
   | "spatial-research-selected"
@@ -165,7 +172,7 @@ function jsonFixtureResponse(payload: unknown): Response {
 }
 
 function installVisualSettingsFixtures(scenario: VisualLabScenario): () => void {
-  if (scenario !== "settings") return () => {};
+  if (scenario !== "settings" || import.meta.env.MODE !== "test") return () => {};
 
   const runtimeFetch = window.fetch.bind(window);
   window.fetch = async (input, init) => {
@@ -511,6 +518,8 @@ function runtimeFor(scenario: VisualLabScenario): { phase: VisualRuntimePhase; l
   if (scenario === "briefing-rich") return { phase: "acting", label: "COMPOSING BRIEFING", detail: "Assembling verified signals" };
   if (scenario === "system-rich") return { phase: "acting", label: "SYSTEM REVIEW", detail: "Observing authoritative runtime state" };
   if (scenario === "tasks-rich") return { phase: "acting", label: "TASK EXECUTION", detail: "Managing concurrent operations" };
+  if (scenario === "ref-fault") return { phase: "error", label: "SYSTEM FAULT", detail: "Core services unavailable" };
+  if (scenario === "ref-degraded") return { phase: "degraded", label: "DEGRADED MODE", detail: "Limited capability" };
   const phase: VisualRuntimePhase = [
     "idle", "listening", "transcribing", "thinking", "acting", "speaking",
   ].includes(scenario) ? scenario as VisualRuntimePhase : "idle";
@@ -573,18 +582,34 @@ function spatialProofFor(scenario: VisualLabScenario): {
   return null;
 }
 
+function referenceScenarioFor(scenario: VisualLabScenario): ReferenceVisualScenario | null {
+  return (REFERENCE_VISUAL_SCENARIOS as readonly string[]).includes(scenario)
+    ? scenario as ReferenceVisualScenario
+    : null;
+}
+
+function referenceCoreStateFor(scenario: ReferenceVisualScenario): string {
+  if (scenario === "ref-fault") return "error";
+  if (scenario === "ref-degraded") return "degraded";
+  return "idle";
+}
+
 export function VisualLabHarness({ scenario }: { scenario: VisualLabScenario }): ReactElement {
+  const fixtureMode = import.meta.env.MODE === "test";
+
   useEffect(() => {
+    const disconnectBridge = fixtureMode ? () => {} : connectBridge();
     const restoreVisualSettingsFixtures = installVisualSettingsFixtures(scenario);
     const runtime = runtimeFor(scenario);
-    const spatialProof = spatialProofFor(scenario);
-    const workspaceType = workspaceFor[scenario];
-    const content = workspaceContentFor(scenario);
-    const tasks = taskFixturesFor(scenario);
-    const conversation = conversationFor(scenario);
-    const systemStatus = systemStatusFor(scenario);
-    const subsystemHealth = healthFor(scenario);
-    const settingsIntent: Record<string, PresentationIntent> = scenario === "settings" ? {
+    const spatialProof = fixtureMode ? spatialProofFor(scenario) : null;
+    const referenceScenario = referenceScenarioFor(scenario);
+    const workspaceType = fixtureMode ? workspaceFor[scenario] : undefined;
+    const content = fixtureMode ? workspaceContentFor(scenario) : {};
+    const tasks = fixtureMode ? taskFixturesFor(scenario) : {};
+    const conversation = fixtureMode ? conversationFor(scenario) : [];
+    const systemStatus = fixtureMode ? systemStatusFor(scenario) : null;
+    const subsystemHealth = fixtureMode ? healthFor(scenario) : {};
+    const settingsIntent: Record<string, PresentationIntent> = fixtureMode && scenario === "settings" ? {
       "visual-lab-settings": {
         id: "visual-lab-settings",
         kind: "overlay" as const,
@@ -603,11 +628,17 @@ export function VisualLabHarness({ scenario }: { scenario: VisualLabScenario }):
     } : {};
     useWorkspaceStore.setState({ workspaces: {}, activeWorkspaceId: null, recentWorkspaces: [] });
     useCharlieStore.setState({
-      connected: spatialProof ? true : scenario !== "offline",
-      coreState: spatialProof
+      connected: fixtureMode ? (spatialProof || referenceScenario ? true : scenario !== "offline") : false,
+      coreState: !fixtureMode
+        ? "idle"
+        : referenceScenario
+        ? referenceCoreStateFor(referenceScenario)
+        : spatialProof
         ? spatialProof.scene === "idle" ? "idle" : "working"
         : ["acting", "conversation-rich", "research-rich", "briefing-rich", "system-rich", "tasks-rich"].includes(scenario) ? "working" : scenario,
-      visualRuntime: spatialProof
+      visualRuntime: !fixtureMode
+        ? INITIAL_VISUAL_RUNTIME
+        : spatialProof
         ? {
             ...INITIAL_VISUAL_RUNTIME,
             phase: spatialProof.scene === "idle" ? "idle" : "acting",
@@ -616,7 +647,7 @@ export function VisualLabHarness({ scenario }: { scenario: VisualLabScenario }):
             updatedAt: new Date().toISOString(),
           }
         : { ...INITIAL_VISUAL_RUNTIME, ...runtime, updatedAt: new Date().toISOString() },
-      presentationIntents: spatialProof ? {} : workspaceType ? ({
+      presentationIntents: !fixtureMode || spatialProof || referenceScenario ? {} : workspaceType ? ({
         [`visual-lab-${workspaceType}`]: {
           id: `visual-lab-${workspaceType}`,
           kind: "workspace",
@@ -638,44 +669,52 @@ export function VisualLabHarness({ scenario }: { scenario: VisualLabScenario }):
           createdAt: new Date().toISOString(),
         },
       } as unknown as Record<string, PresentationIntent>) : settingsIntent,
-      activeToolApproval: scenario === "approval" ? {
+      activeToolApproval: fixtureMode && scenario === "approval" ? {
         request_id: "visual-lab-approval",
         tool_name: "browser_navigate",
         reason: "Charlie is ready to open the verified briefing source set.",
         arguments: {},
         risk_class: "safe",
       } : null,
-      activeSessionId: TEST_MOCK_SESSION,
-      activeSessionTitle: "TEST / MOCK",
+      activeSessionId: fixtureMode ? TEST_MOCK_SESSION : null,
+      activeSessionTitle: fixtureMode ? "TEST / MOCK" : null,
       tasks,
       chatMessages: conversation,
-      activities: scenario === "conversation" || scenario === "conversation-rich"
+      activities: fixtureMode && (scenario === "conversation" || scenario === "conversation-rich")
         ? ["SYNTHESIS // source timeline checked", "RESPONSE // streaming verified distinction"]
-        : scenario === "research-rich"
+        : fixtureMode && scenario === "research-rich"
           ? ["RESEARCH // source set normalized", "RESEARCH // chronology compared"]
           : [],
       systemStatus,
       systemStatusUpdatedAt: systemStatus ? new Date().toISOString() : null,
       subsystemHealth,
       subsystemHealthUpdatedAt: Object.keys(subsystemHealth).length ? new Date().toISOString() : null,
-      audioLevel: scenario === "listening" || scenario === "speaking" ? 0.68 : 0,
+      audioLevel: fixtureMode && (scenario === "listening" || scenario === "speaking") ? 0.68 : 0,
       activeAlert: null,
     });
 
-    return restoreVisualSettingsFixtures;
-  }, [scenario]);
+    return () => {
+      restoreVisualSettingsFixtures();
+      disconnectBridge();
+    };
+  }, [fixtureMode, scenario]);
+
+  const referenceScenario = referenceScenarioFor(scenario);
+  const spatialProof = fixtureMode ? spatialProofFor(scenario) : null;
 
   return (
     <div
       data-visual-lab="TEST/MOCK"
       data-visual-lab-scenario={scenario}
-      data-visual-lab-settings-fixture={scenario === "settings" ? "contract-valid" : undefined}
+      data-visual-lab-settings-fixture={fixtureMode && scenario === "settings" ? "contract-valid" : undefined}
     >
       <div className="sr-only">TEST/MOCK VISUAL LAB — not runtime acceptance</div>
-      {spatialProofFor(scenario) ? (
+      {referenceScenario ? (
+        <ReferenceVisualLab scenario={referenceScenario} />
+      ) : spatialProof ? (
         <SpatialCanvas
-          initialScene={spatialProofFor(scenario)!.scene}
-          initialContext={spatialProofFor(scenario)!.context}
+          initialScene={spatialProof.scene}
+          initialContext={spatialProof.context}
           researchMap={SPATIAL_RESEARCH_MAP}
           researchFindings={SPATIAL_RESEARCH_FINDINGS}
           visionBoxes={SPATIAL_VISION_BOXES}

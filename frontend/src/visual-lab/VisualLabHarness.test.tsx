@@ -2,12 +2,14 @@ import { describe, expect, test } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { VisualLabHarness, type VisualLabScenario } from "./VisualLabHarness";
+import { REFERENCE_VISUAL_SCENARIOS } from "./ReferenceVisualLabTruthful";
 
 const scenarios: VisualLabScenario[] = [
   "idle", "listening", "transcribing", "thinking", "acting", "speaking", "approval", "error", "recovery",
   "conversation", "research", "briefing", "system", "tasks", "settings", "offline", "degraded",
   "conversation-rich", "research-rich", "briefing-rich", "system-rich", "tasks-rich",
   "spatial-idle", "spatial-research", "spatial-research-selected", "spatial-vision", "spatial-vision-selected",
+  ...REFERENCE_VISUAL_SCENARIOS,
 ];
 
 describe("TEST/MOCK visual lab", () => {
@@ -106,5 +108,32 @@ describe("TEST/MOCK visual lab", () => {
     expect(container.querySelectorAll(".spatial-vision-box")).toHaveLength(3);
     expect(await screen.findByRole("region", { name: "SELECTED REGION" })).toBeInTheDocument();
     expect(container.querySelector('[data-core-position="dock_bottom_right"]')).toBeInTheDocument();
+  });
+
+  test.each(REFERENCE_VISUAL_SCENARIOS)("renders %s as an isolated reference screen", async (scenario) => {
+    const { container } = render(
+      <MemoryRouter>
+        <VisualLabHarness scenario={scenario} />
+      </MemoryRouter>,
+    );
+
+    expect(container.querySelector(`[data-reference-scenario="${scenario}"]`)).toBeInTheDocument();
+    expect(container.querySelector(`[data-reference-screen="${scenario}"]`)).toBeInTheDocument();
+    expect(container.querySelector('[data-reference-core="authoritative-charlie-ring"]')).toBeInTheDocument();
+    expect(await screen.findByText("C.H.A.R.L.I.E.")).toBeInTheDocument();
+  });
+
+  test("keeps selected research context truthful when no live finding exists", async () => {
+    const { container } = render(
+      <MemoryRouter>
+        <VisualLabHarness scenario="ref-research-selected" />
+      </MemoryRouter>,
+    );
+
+    expect(container.querySelector('[data-reference-screen="ref-research-selected"]')).toBeInTheDocument();
+    expect(await screen.findByText("SELECTED CONTEXT")).toBeInTheDocument();
+    expect(await screen.findByText("NO SELECTED FINDING AVAILABLE")).toBeInTheDocument();
+    expect((await screen.findAllByText("DATA CONTRACT MISSING / NOT WIRED")).length).toBeGreaterThan(0);
+    expect(container.querySelector(".ref-selected-callout")).toBeNull();
   });
 });

@@ -7,8 +7,11 @@ const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.VISUAL_LAB_PLAYWRIGHT_PATH || "playwright");
 
 const captureMode = process.env.VISUAL_LAB_PASS || "5b";
+const isReferenceReview = captureMode === "5d-ref";
 const isSpatialProof = captureMode === "5d-1" || captureMode === "5d-1r";
-const defaultOutputDir = isSpatialProof ? "pass5d-1r-visual-lab" : "pass5b-visual-lab";
+const defaultOutputDir = isReferenceReview
+  ? "pass5d-ref-review/implementation"
+  : isSpatialProof ? "pass5d-1r-visual-lab" : "pass5b-visual-lab";
 const outputDir = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -16,7 +19,7 @@ const outputDir = resolve(
   "artifacts",
   process.env.VISUAL_LAB_OUTPUT_DIR || defaultOutputDir,
 );
-const outputPrefix = process.env.VISUAL_LAB_OUTPUT_PREFIX || (isSpatialProof ? "pass5d-1r" : "pass5");
+const outputPrefix = process.env.VISUAL_LAB_OUTPUT_PREFIX || (isReferenceReview ? "pass5d-ref" : isSpatialProof ? "pass5d-1r" : "pass5");
 const baseUrl = process.env.VISUAL_LAB_URL || "http://127.0.0.1:5173";
 mkdirSync(outputDir, { recursive: true });
 
@@ -45,8 +48,18 @@ const pass5d1CapturePlan = [1920, 1366, 800].map((width) => ({
   scenarios: ["spatial-idle", "spatial-research", "spatial-research-selected", "spatial-vision", "spatial-vision-selected"],
 }));
 
-const capturePlan = isSpatialProof
-  ? pass5d1CapturePlan
+const pass5dRefCapturePlan = [1920, 1366, 800].map((width) => ({
+  viewport: [width, width === 1920 ? 1080 : width === 1366 ? 768 : 600],
+  scenarios: [
+    "ref-idle", "ref-online", "ref-research", "ref-research-selected", "ref-vision", "ref-vision-selected",
+    "ref-briefing", "ref-briefing-alt", "ref-system-tasks", "ref-active-docked", "ref-approval", "ref-settings",
+    "ref-fault", "ref-degraded",
+  ],
+}));
+
+const capturePlan = isReferenceReview
+  ? pass5dRefCapturePlan
+  : isSpatialProof ? pass5d1CapturePlan
   : captureMode === "5c-a" ? pass5cCapturePlan : pass5bCapturePlan;
 const browser = await chromium.launch({
   headless: process.env.VISUAL_LAB_HEADLESS !== "false",
@@ -56,9 +69,9 @@ const page = await browser.newPage();
 
 async function waitForScenePaint() {
   await page.locator(".charlie-scene-root").waitFor({ state: "visible" });
-  await page.locator(".charlie-core-brand-center").waitFor({ state: "visible" });
+  await page.locator(".charlie-core-brand-center, .ref-core__wordmark").first().waitFor({ state: "visible" });
   await page.waitForFunction(() => {
-    const core = document.querySelector(".charlie-core-brand-center");
+    const core = document.querySelector(".charlie-core-brand-center, .ref-core__wordmark");
     const ring = document.querySelector('[data-core-renderer="authoritative-charlie-ring"]');
     return Boolean(core && ring && core.getBoundingClientRect().width > 0 && getComputedStyle(core).opacity !== "0");
   });
