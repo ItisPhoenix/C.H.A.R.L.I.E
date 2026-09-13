@@ -30,6 +30,9 @@ from charlie.wake_word import WakeWordDetector
 
 logger = logging.getLogger("charlie.voice")
 
+PROCESSING_SAMPLE_RATE = 16000
+CAPTURE_BLOCK_SIZE = 1024
+
 # --- TTS text humanization constants ---
 _MIN_TEXT_LEN = 3
 _ECHO_WINDOW_SEC = 2.0
@@ -56,6 +59,48 @@ class VoiceShutdownResult:
     diagnostics_worker_alive: Optional[bool] = None
     # Accumulated diagnostics; recovered errors do not override current truth.
     errors: tuple[str, ...] = ()
+
+
+class _CaptureRateAdapter:
+    """Stateful native-capture to canonical-processing-rate adapter."""
+
+    def __init__(self, capture_sample_rate: int, processing_sample_rate: int = PROCESSING_SAMPLE_RATE):
+        self.capture_sample_rate = int(capture_sample_rate)
+        self.processing_sample_rate = int(processing_sample_rate)
+        if self.capture_sample_rate <= 0 or self.processing_sample_rate <= 0:
+            raise ValueError("audio sample rates must be positive")
+        self.resampling_active = self.capture_sample_rate != self.processing_sample_rate
+        self._resampler = None
+        if self.resampling_active:
+            from av.audio.resampler import AudioResampler
+
+            self._resampler = AudioResampler(
+                format="flt",
+                layout="mono",
+                rate=self.processing_sample_rate,
+            )
+
+    @staticmethod
+    def _frames_to_samples(frames) -> np.ndarray:
+        if not frames:
+            return np.empty(0, dtype=np.float32)
+        chunks = [np.asarray(frame.to_ndarray(), dtype=np.float32).reshape(-1) for frame in frames]
+        return chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
+
+    def process(self, samples: np.ndarray) -> np.ndarray:
+        mono = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if mono.size == 0 or self._resampler is None:
+            return mono
+        from av.audio.frame import AudioFrame
+
+        frame = AudioFrame.from_ndarray(mono.reshape(1, -1), format="flt", layout="mono")
+        frame.sample_rate = self.capture_sample_rate
+        return self._frames_to_samples(self._resampler.resample(frame))
+
+    def flush(self) -> np.ndarray:
+        if self._resampler is None:
+            return np.empty(0, dtype=np.float32)
+        return self._frames_to_samples(self._resampler.resample(None))
 
 
 # Ellipsis patterns
@@ -155,7 +200,14 @@ class VoiceEngine:
         self._readiness_lock = threading.Lock()
         self._readiness_status = "starting"
         self._readiness_error: Optional[str] = None
-        self._audio_device_info: dict = {}
+        self._audio_device_info: dict = {
+            "capture_sample_rate": None,
+            "processing_sample_rate": PROCESSING_SAMPLE_RATE,
+            "resampling_active": False,
+            "input_stream_started": False,
+        }
+        self._capture_rate_adapter: Optional[_CaptureRateAdapter] = None
+        self._processing_frame_buffer = np.empty(0, dtype=np.float32)
         self._last_speech_time = 0.0
         self._last_speech_text = ""
         self._last_speech_end = 0.0
@@ -507,6 +559,9 @@ class VoiceEngine:
                 name,
                 not thread_alive,
             )
+
+        self._capture_rate_adapter = None
+        self._processing_frame_buffer = np.empty(0, dtype=np.float32)
 
         with self._ptt_lock:
             self._ptt_active = False
@@ -1406,52 +1461,86 @@ class VoiceEngine:
 
     @staticmethod
     def _input_device_candidates(configured_index: int) -> list[int | None]:
-        """Return configured input first, then same device via other host APIs."""
+        """Return only the configured PortAudio endpoint identity."""
         selected = None if configured_index == -1 else configured_index
         selected_index = int(sd.default.device[0]) if selected is None else int(selected)
-        selected_info = sd.query_devices(selected_index)
-        selected_name = str(selected_info.get("name", "")).strip()
-        candidates: list[int | None] = [selected_index]
-        if not selected_name:
-            return candidates
-        try:
-            devices = sd.query_devices()
-        except Exception:
-            return candidates
-        for index, info in enumerate(devices):
-            if index == selected_index or int(info.get("max_input_channels", 0)) < 1:
-                continue
-            if str(info.get("name", "")).strip() == selected_name:
-                candidates.append(index)
-        return candidates
+        return [selected_index]
 
-    def _open_input_stream(self, samplerate: int, block_size: int, callback, configured_index: int):
-        """Open capture with bounded retry and same-device host API fallback."""
+    @staticmethod
+    def _check_input_settings(device_index: int | None, samplerate: int) -> None:
+        checker = getattr(sd, "check_input_settings", None)
+        if callable(checker):
+            checker(device=device_index, channels=1, dtype="float32", samplerate=samplerate)
+
+    def _open_input_stream(
+        self,
+        processing_rate: int,
+        block_size: int,
+        callback,
+        configured_index: int,
+        native_sample_rate: float,
+    ):
+        """Open the exact endpoint at processing rate or its reported native rate."""
         errors: list[str] = []
         for candidate_index in self._input_device_candidates(configured_index):
-            for attempt in range(2):
-                stream = None
+            rates = [processing_rate]
+            native_rate = int(round(native_sample_rate)) if native_sample_rate > 0 else 0
+            if native_rate and native_rate != processing_rate:
+                rates.append(native_rate)
+            for rate in rates:
                 try:
-                    stream = sd.InputStream(
-                        samplerate=samplerate, channels=1, dtype="float32",
-                        blocksize=block_size, device=candidate_index, callback=callback,
-                    )
-                    stream.start()
-                    return stream, candidate_index
+                    self._check_input_settings(candidate_index, rate)
                 except Exception as error:
-                    if stream is not None:
-                        try:
-                            stream.close()
-                        except Exception:
-                            pass
                     errors.append(
-                        f"{candidate_index if candidate_index is not None else 'default'}: "
-                        f"{self._safe_audio_error(error)}"
+                        f"{candidate_index if candidate_index is not None else 'default'} "
+                        f"{rate}Hz capability check failed: {self._safe_audio_error(error)}"
                     )
-                    if attempt == 0:
-                        time.sleep(0.25)
-        detail = "; ".join(errors[-4:]) or "no input devices available"
-        raise RuntimeError(f"all microphone open attempts failed ({detail})")
+                    continue
+                for attempt in range(2):
+                    stream = None
+                    try:
+                        stream = sd.InputStream(
+                            samplerate=rate,
+                            channels=1,
+                            dtype="float32",
+                            blocksize=block_size,
+                            device=candidate_index,
+                            callback=callback,
+                        )
+                        stream.start()
+                        return stream, candidate_index, rate
+                    except Exception as error:
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except Exception:
+                                pass
+                        errors.append(
+                            f"{candidate_index if candidate_index is not None else 'default'} "
+                            f"{rate}Hz stream open failed: {self._safe_audio_error(error)}"
+                        )
+                        if attempt == 0:
+                            time.sleep(0.25)
+        detail = "; ".join(errors[-6:]) or "no supported input format"
+        raise RuntimeError(f"input format negotiation failed ({detail})")
+
+    def _next_processing_frame(self, block_size: int) -> np.ndarray:
+        """Convert raw capture frames and return one canonical processing frame."""
+        while self._processing_frame_buffer.size < block_size:
+            raw = self._audio_queue.get(timeout=0.1)
+            converted = (
+                self._capture_rate_adapter.process(raw)
+                if self._capture_rate_adapter is not None
+                else np.asarray(raw, dtype=np.float32).reshape(-1)
+            )
+            if converted.size:
+                if self._processing_frame_buffer.size:
+                    self._processing_frame_buffer = np.concatenate((self._processing_frame_buffer, converted))
+                else:
+                    self._processing_frame_buffer = converted
+        frame = self._processing_frame_buffer[:block_size]
+        self._processing_frame_buffer = self._processing_frame_buffer[block_size:]
+        return frame
 
     @staticmethod
     def _queue_depth(audio_queue) -> Optional[int]:
@@ -1715,8 +1804,10 @@ class VoiceEngine:
         )
 
     def _run(self):
-        samplerate = 16000
-        block_size = 1024
+        samplerate = PROCESSING_SAMPLE_RATE
+        block_size = CAPTURE_BLOCK_SIZE
+        self._capture_rate_adapter = None
+        self._processing_frame_buffer = np.empty(0, dtype=np.float32)
 
         def _callback(indata, frames, time_info, status):
             # Mic muted: drop the frame before ASR and stop publishing its
@@ -1748,6 +1839,10 @@ class VoiceEngine:
         device_info: dict = {
             "configured_device_index": self.config.mic_index,
             "configured_sample_rate": samplerate,
+            "processing_sample_rate": samplerate,
+            "capture_sample_rate": None,
+            "resampling_active": False,
+            "input_stream_started": False,
             "channels": 1,
             "block_size": block_size,
         }
@@ -1762,6 +1857,7 @@ class VoiceEngine:
                     "selected_device_index": selected_device_index,
                     "device_name": str(dev_info.get("name", selected_device_index)),
                     "host_api": str(hostapi_info.get("name", "unknown")),
+                    "host_api_index": hostapi_index,
                     "max_input_channels": int(dev_info.get("max_input_channels", 0)),
                     "native_sample_rate": float(dev_info.get("default_samplerate", 0.0)),
                 }
@@ -1774,8 +1870,12 @@ class VoiceEngine:
             return
 
         try:
-            self.audio_stream, selected_device_index = self._open_input_stream(
-                samplerate, block_size, _callback, self.config.mic_index
+            self.audio_stream, selected_device_index, capture_sample_rate = self._open_input_stream(
+                samplerate,
+                block_size,
+                _callback,
+                self.config.mic_index,
+                float(device_info.get("native_sample_rate") or 0.0),
             )
             opened_info = sd.query_devices(selected_device_index)
             opened_hostapi_index = int(opened_info.get("hostapi", -1))
@@ -1785,13 +1885,16 @@ class VoiceEngine:
                     "selected_device_index": selected_device_index,
                     "device_name": str(opened_info.get("name", selected_device_index)),
                     "host_api": str(opened_hostapi.get("name", "unknown")),
+                    "host_api_index": opened_hostapi_index,
                     "max_input_channels": int(opened_info.get("max_input_channels", 0)),
                     "native_sample_rate": float(opened_info.get("default_samplerate", 0.0)),
-                    "fallback_host_api": selected_device_index != (
-                        int(sd.default.device[0]) if input_device is None else input_device
-                    ),
+                    "capture_sample_rate": capture_sample_rate,
+                    "processing_sample_rate": samplerate,
+                    "resampling_active": capture_sample_rate != samplerate,
                 }
             )
+            self._capture_rate_adapter = _CaptureRateAdapter(capture_sample_rate, samplerate)
+            device_info["input_stream_started"] = True
         except Exception as e:
             if self.audio_stream is not None:
                 try:
@@ -1799,6 +1902,7 @@ class VoiceEngine:
                 except Exception:
                     pass
                 self.audio_stream = None
+            self._capture_rate_adapter = None
             self._set_readiness("failed", error=self._safe_audio_error(e), device_info=device_info)
             self._set_asr_readiness("failed", "microphone unavailable; ASR worker was not started")
             logger.error(
@@ -1819,15 +1923,26 @@ class VoiceEngine:
 
         self._set_readiness("ready", device_info={**device_info, "stream_open": True})
         logger.info(
-            "Audio stream opened: device=%s index=%s host_api=%s rate=%s native_rate=%s channels=%s block=%s",
+            "Audio stream opened: device=%s index=%s host_api=%s host_api_index=%s capture_rate=%s "
+            "processing_rate=%s native_rate=%s resampling=%s channels=%s block=%s",
             device_info.get("device_name"),
             device_info.get("selected_device_index"),
             device_info.get("host_api"),
-            samplerate,
+            device_info.get("host_api_index"),
+            device_info.get("capture_sample_rate"),
+            device_info.get("processing_sample_rate"),
             device_info.get("native_sample_rate"),
+            device_info.get("resampling_active"),
             1,
             block_size,
         )
+
+        def _rate_fields() -> dict:
+            return {
+                "capture_sample_rate": device_info.get("capture_sample_rate"),
+                "processing_sample_rate": samplerate,
+                "resampling_active": device_info.get("resampling_active", False),
+            }
 
         # Start ASR worker process
         _asr_config = {
@@ -1890,7 +2005,7 @@ class VoiceEngine:
         while not self.stop_event.is_set():
             self._check_asr_worker_stall()
             try:
-                data = self._audio_queue.get(timeout=0.1)
+                data = self._next_processing_frame(block_size)
             except queue.Empty:
                 continue
 
@@ -1922,6 +2037,7 @@ class VoiceEngine:
                     ptt_trace.mark_once(
                         "voice_capture_endpoint",
                         fields={
+                            **_rate_fields(),
                             "capture_mode": "ptt",
                             "configured_sample_rate": samplerate,
                             "submitted_sample_count": int(len(ptt_audio)),
@@ -1945,6 +2061,7 @@ class VoiceEngine:
                         samplerate,
                         ptt_trace,
                         {
+                            **_rate_fields(),
                             "capture_mode": "ptt",
                             "configured_sample_rate": samplerate,
                             "submitted_sample_count": int(len(ptt_audio)),
@@ -2033,6 +2150,7 @@ class VoiceEngine:
                     speech_trace.mark_once(
                         "voice_capture_onset",
                         fields={
+                            **_rate_fields(),
                             "capture_mode": "vad",
                             "configured_sample_rate": samplerate,
                             "speech_onset_rms": rms,
@@ -2085,6 +2203,7 @@ class VoiceEngine:
                 )
                 if speech_trace is not None:
                     capture_fields = {
+                        **_rate_fields(),
                         "capture_mode": "vad",
                         "configured_sample_rate": samplerate,
                         "submitted_sample_count": int(len(audio)),

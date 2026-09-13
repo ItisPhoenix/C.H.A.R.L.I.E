@@ -16,7 +16,7 @@ import pytest
 
 import charlie.voice
 from charlie.personality import parse_voice_control
-from charlie.voice import VoiceEngine
+from charlie.voice import CAPTURE_BLOCK_SIZE, PROCESSING_SAMPLE_RATE, VoiceEngine, _CaptureRateAdapter
 from charlie.voice_diagnostics import VoiceDiagnostics
 
 
@@ -258,23 +258,15 @@ class TestVoiceEngineInit:
         assert not engine.muted
         assert engine.volume == 1.0
 
-    def test_input_device_candidates_include_same_microphone_host_api_variants(self):
+    def test_input_device_candidates_preserve_exact_endpoint_identity(self):
         with patch("charlie.voice.sd") as mock_sd:
             mock_sd.default.device = [1, 4]
-            mock_sd.query_devices.side_effect = [
-                {"name": "Microphone (NVIDIA Broadcast)", "max_input_channels": 2},
-                [
-                    {"name": "Microsoft Sound Mapper - Input", "max_input_channels": 2},
-                    {"name": "Microphone (NVIDIA Broadcast)", "max_input_channels": 2},
-                    {"name": "Microphone (Realtek(R) Audio)", "max_input_channels": 2},
-                    {"name": "Microphone (NVIDIA Broadcast)", "max_input_channels": 2},
-                ],
-            ]
-            assert VoiceEngine._input_device_candidates(-1) == [1, 3]
+            assert VoiceEngine._input_device_candidates(-1) == [1]
 
     def test_wake_word_disabled_by_default(self):
         engine = self._make_engine()
         assert engine._wake_word_detector is None
+
 
     def test_ptt_state_uses_existing_capture_path(self):
         engine = self._make_engine()
@@ -1132,3 +1124,132 @@ class TestEchoDetection:
         engine.speak("The weather today is sunny and warm.")
         engine.is_speaking.set()
         assert engine.is_echo("open notepad and write this") is False
+
+
+def test_processing_rate_contract_is_explicit():
+    assert PROCESSING_SAMPLE_RATE == 16000
+    assert CAPTURE_BLOCK_SIZE == 1024
+
+
+def test_capture_rate_adapter_bypasses_processing_rate_input():
+    adapter = _CaptureRateAdapter(PROCESSING_SAMPLE_RATE)
+    samples = np.linspace(-1.0, 1.0, 1024, dtype=np.float32)
+
+    output = adapter.process(samples)
+
+    assert adapter.resampling_active is False
+    assert output.dtype == np.float32
+    assert np.array_equal(output, samples)
+    assert adapter.flush().size == 0
+
+
+def test_capture_rate_adapter_resamples_native_frames_statefully():
+    native = np.sin(2 * np.pi * 440 * np.arange(44100, dtype=np.float32) / 44100).astype(np.float32)
+    adapter = _CaptureRateAdapter(44100)
+    chunks = [native[offset : offset + 1024] for offset in range(0, len(native), 1024)]
+
+    output = np.concatenate([adapter.process(chunk) for chunk in chunks] + [adapter.flush()])
+
+    assert adapter.resampling_active is True
+    assert output.dtype == np.float32
+    assert abs(len(output) - 16000) <= 1
+    assert np.max(np.abs(output)) > 0.1
+
+
+def test_capture_rate_adapter_preserves_duration_across_frame_boundaries():
+    adapter = _CaptureRateAdapter(44100)
+    chunks = [np.ones(441, dtype=np.float32) for _ in range(100)]
+
+    output = np.concatenate([adapter.process(chunk) for chunk in chunks] + [adapter.flush()])
+
+    assert abs(len(output) - 16000) <= 1
+
+
+def test_input_negotiation_prefers_supported_processing_rate():
+    engine = TestVoiceEngineInit()._make_engine()
+    stream = Mock()
+    checks = []
+    with patch("charlie.voice.sd") as mock_sd:
+        mock_sd.check_input_settings.side_effect = lambda **kwargs: checks.append(kwargs["samplerate"])
+        mock_sd.InputStream.return_value = stream
+        opened, selected, rate = engine._open_input_stream(
+            PROCESSING_SAMPLE_RATE, CAPTURE_BLOCK_SIZE, lambda *args: None, 21, 44100
+        )
+
+    assert opened is stream
+    assert selected == 21
+    assert rate == PROCESSING_SAMPLE_RATE
+    assert checks == [PROCESSING_SAMPLE_RATE]
+
+
+def test_input_negotiation_uses_native_rate_when_processing_rate_is_rejected():
+    engine = TestVoiceEngineInit()._make_engine()
+    stream = Mock()
+    checks = []
+
+    def check(**kwargs):
+        checks.append(kwargs["samplerate"])
+        if kwargs["samplerate"] == PROCESSING_SAMPLE_RATE:
+            raise RuntimeError("16 kHz unsupported")
+
+    with patch("charlie.voice.sd") as mock_sd:
+        mock_sd.check_input_settings.side_effect = check
+        mock_sd.InputStream.return_value = stream
+        opened, selected, rate = engine._open_input_stream(
+            PROCESSING_SAMPLE_RATE, CAPTURE_BLOCK_SIZE, lambda *args: None, 21, 44100
+        )
+
+    assert opened is stream
+    assert selected == 21
+    assert rate == 44100
+    assert checks == [PROCESSING_SAMPLE_RATE, 44100]
+    assert mock_sd.InputStream.call_args.kwargs["samplerate"] == 44100
+
+
+def test_input_negotiation_reports_unusable_endpoint():
+    engine = TestVoiceEngineInit()._make_engine()
+
+    with patch("charlie.voice.sd") as mock_sd:
+        mock_sd.check_input_settings.side_effect = RuntimeError("unsupported")
+        with pytest.raises(RuntimeError, match="capability check failed"):
+            engine._open_input_stream(
+                PROCESSING_SAMPLE_RATE, CAPTURE_BLOCK_SIZE, lambda *args: None, 21, 44100
+            )
+
+
+def test_readiness_snapshot_exposes_capture_processing_and_resampling_state():
+    engine = TestVoiceEngineInit()._make_engine()
+    engine._set_readiness(
+        "ready",
+        device_info={
+            "selected_device_index": 21,
+            "device_name": "Microphone (Realtek HD Audio Mic input)",
+            "host_api": "Windows WDM-KS",
+            "host_api_index": 2,
+            "capture_sample_rate": 44100,
+            "processing_sample_rate": 16000,
+            "resampling_active": True,
+            "input_stream_started": True,
+        },
+    )
+
+    snapshot = engine.readiness_snapshot()
+
+    assert snapshot["selected_device_index"] == 21
+    assert snapshot["host_api"] == "Windows WDM-KS"
+    assert snapshot["capture_sample_rate"] == 44100
+    assert snapshot["processing_sample_rate"] == 16000
+    assert snapshot["resampling_active"] is True
+    assert snapshot["input_stream_started"] is True
+
+
+def test_stop_resets_capture_rate_adapter_state():
+    engine = TestVoiceEngineInit()._make_engine()
+    engine._capture_rate_adapter = _CaptureRateAdapter(44100)
+    engine._processing_frame_buffer = np.ones(12, dtype=np.float32)
+
+    result = engine.stop()
+
+    assert result.quiescent is True
+    assert engine._capture_rate_adapter is None
+    assert engine._processing_frame_buffer.size == 0
