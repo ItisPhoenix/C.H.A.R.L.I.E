@@ -30,6 +30,11 @@ export function ToolApprovalDialog(): ReactElement | null {
   const accent = activeToolApproval.risk_class === "destructive" ? "danger" : "warning";
   const riskLabel = activeToolApproval.risk_class?.trim().toUpperCase() || "NOT REPORTED";
   const actionLabel = activeToolApproval.tool_name.replaceAll("_", " ").toUpperCase();
+  const runtimeContext = [
+    activeToolApproval.session_id ? `SESSION ${activeToolApproval.session_id}` : null,
+    activeToolApproval.turn_id ? `TURN ${activeToolApproval.turn_id}` : null,
+    activeToolApproval.task_id ? `TASK ${activeToolApproval.task_id}` : null,
+  ].filter((value): value is string => Boolean(value)).join(" · ");
 
   return (
     <section
@@ -58,6 +63,12 @@ export function ToolApprovalDialog(): ReactElement | null {
         <ModalField label="Requested action">
           <strong className="charlie-approval-action">{actionLabel}</strong>
         </ModalField>
+        <ModalField label="Approval request">
+          <span className="charlie-approval-context">{activeToolApproval.request_id}</span>
+        </ModalField>
+        <ModalField label="Runtime context">
+          <span className="charlie-approval-unavailable">{runtimeContext || "CONTEXT UNAVAILABLE"}</span>
+        </ModalField>
         <ModalField label="Risk / severity" tone={accent === "danger" ? "error" : "warning"}>
           {riskLabel}
         </ModalField>
@@ -65,10 +76,10 @@ export function ToolApprovalDialog(): ReactElement | null {
           {activeToolApproval.reason}
         </ModalField>
         <ModalField label="Target / scope">
-          <span className="charlie-approval-unavailable">No sanitized target or scope was supplied by the runtime.</span>
+          <span className="charlie-approval-unavailable">CONTEXT UNAVAILABLE — no sanitized target or scope was supplied.</span>
         </ModalField>
         <ModalField label="Expected effect">
-          <span className="charlie-approval-unavailable">No additional impact summary was supplied by the runtime.</span>
+          <span className="charlie-approval-unavailable">CONTEXT UNAVAILABLE — no impact summary was supplied.</span>
         </ModalField>
       </div>
 

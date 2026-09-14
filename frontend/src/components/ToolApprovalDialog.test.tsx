@@ -34,6 +34,7 @@ describe("ToolApprovalDialog", () => {
 
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(screen.getByText("The command needs approval.")).toBeInTheDocument();
+    expect(screen.getAllByText(/CONTEXT UNAVAILABLE/).length).toBeGreaterThan(0);
     expect(screen.queryByText(/command: python --version/)).toBeNull();
     expect(screen.getByText(/Hidden tool arguments and secrets are not rendered/i)).toBeInTheDocument();
 
@@ -45,6 +46,27 @@ describe("ToolApprovalDialog", () => {
 
     useCharlieStore.getState().applyEvent({ type: "tool_approval_resolved", payload: { request_id: "approval-1" } });
     expect(useCharlieStore.getState().activeToolApproval).toBeNull();
+  });
+
+  test("renders only supplied canonical approval context", () => {
+    useCharlieStore.setState({
+      activeToolApproval: {
+        request_id: "approval-context",
+        tool_name: "browser_navigate",
+        reason: "Open the supplied destination.",
+        arguments: { url: "https://example.com" },
+        risk_class: "safe",
+        session_id: "session-1",
+        turn_id: "turn-1",
+        task_id: "task-1",
+      },
+    });
+
+    render(<ToolApprovalDialog />);
+
+    expect(screen.getByText("session-1 · TURN turn-1 · TASK task-1", { exact: false })).toBeInTheDocument();
+    expect(screen.getByText("CONTEXT UNAVAILABLE — no sanitized target or scope was supplied.")).toBeInTheDocument();
+    expect(screen.queryByText("https://example.com")).toBeNull();
   });
 
   test("declines the active request through the normal bridge command", () => {

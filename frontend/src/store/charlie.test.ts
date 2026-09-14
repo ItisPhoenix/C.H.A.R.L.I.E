@@ -71,6 +71,68 @@ describe("applyEvent", () => {
     expect(useCharlieStore.getState().activeToolApproval?.request_id).toBe("r2");
   });
 
+  test("tool approval projects canonical envelope context and rejects malformed requests", () => {
+    useCharlieStore.getState().setConnected(true);
+    useCharlieStore.getState().applyEvent({
+      type: "tool_approval_request",
+      id: "approval-event-1",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      source: "brain",
+      session_id: "session-1",
+      task_id: "task-1",
+      turn_id: "turn-1",
+      payload: {
+        request_id: "approval-1",
+        tool_name: "browser_navigate",
+        reason: "A navigation requires approval.",
+        arguments: { url: "https://example.com" },
+        risk_class: "safe",
+      },
+    });
+    expect(useCharlieStore.getState().activeToolApproval).toMatchObject({
+      request_id: "approval-1",
+      session_id: "session-1",
+      task_id: "task-1",
+      turn_id: "turn-1",
+      source: "brain",
+      event_id: "approval-event-1",
+    });
+
+    useCharlieStore.getState().applyEvent({
+      type: "tool_approval_request",
+      payload: { request_id: "malformed", tool_name: "", reason: "" },
+    });
+    expect(useCharlieStore.getState().activeToolApproval?.request_id).toBe("approval-1");
+  });
+
+  test("duplicate approval replay does not create a second actionable request", () => {
+    useCharlieStore.getState().setConnected(true);
+    const event = {
+      type: "tool_approval_request",
+      id: "approval-event-duplicate",
+      payload: { request_id: "approval-duplicate", tool_name: "browser_read", reason: "Read approval", arguments: {} },
+    } as const;
+    useCharlieStore.getState().applyEvent(event);
+    useCharlieStore.getState().applyEvent(event);
+
+    expect(Object.keys(useCharlieStore.getState().pendingToolApprovals)).toEqual(["approval-duplicate"]);
+    expect(useCharlieStore.getState().activeToolApproval?.request_id).toBe("approval-duplicate");
+  });
+
+  test("disconnect removes actionable approval state", () => {
+    useCharlieStore.getState().setConnected(true);
+    useCharlieStore.getState().applyEvent({
+      type: "tool_approval_request",
+      payload: { request_id: "approval-disconnect", tool_name: "browser_read", reason: "Read approval", arguments: {} },
+    });
+    expect(useCharlieStore.getState().activeToolApproval?.request_id).toBe("approval-disconnect");
+
+    useCharlieStore.getState().setConnected(false);
+
+    expect(useCharlieStore.getState().activeToolApproval).toBeNull();
+    expect(useCharlieStore.getState().pendingToolApprovals).toEqual({});
+  });
+
   test("session rename and delete update current session metadata", () => {
     useCharlieStore.getState().applyEvent({
       type: "session_active",

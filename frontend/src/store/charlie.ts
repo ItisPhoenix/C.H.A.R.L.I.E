@@ -50,8 +50,14 @@ export interface ToolApprovalRequest {
   request_id: string;
   tool_name: string;
   reason: string;
-  arguments: Record<string, unknown>;
+  arguments: Record<string, unknown> | null;
   risk_class: string | null;
+  session_id?: string | null;
+  task_id?: string | null;
+  turn_id?: string | null;
+  source?: string;
+  event_id?: string;
+  received_at?: string;
 }
 
 export interface AlertInfo {
@@ -216,6 +222,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
         runtimeTruth: null,
         subsystemHealth: {},
         subsystemHealthUpdatedAt: null,
+        activeToolApproval: null,
+        pendingToolApprovals: {},
       }),
   clearVisualRuntime: (expectedUpdatedAt) => set((s) => {
     if (expectedUpdatedAt && s.visualRuntime.updatedAt !== expectedUpdatedAt) return {};
@@ -288,17 +296,20 @@ export const useCharlieStore = create<CharlieState>((set) => ({
         });
         return;
       case "tool_approval_request":
-        set((s) => {
-          const request = payload as unknown as ToolApprovalRequest;
-          const pendingToolApprovals = {
-            ...s.pendingToolApprovals,
-            [request.request_id]: request,
-          };
-          return {
-            pendingToolApprovals,
-            activeToolApproval: s.activeToolApproval ?? request,
-          };
-        });
+        {
+          const request = approvalRequestFromEvent(event, payload);
+          if (!request) return;
+          set((s) => {
+            const pendingToolApprovals = {
+              ...s.pendingToolApprovals,
+              [request.request_id]: request,
+            };
+            return {
+              pendingToolApprovals,
+              activeToolApproval: s.activeToolApproval ?? request,
+            };
+          });
+        }
         return;
       case "tool_approval_resolved":
         set((s) => {
@@ -638,6 +649,31 @@ function applyRuntimeTruth(
     }
     return { runtimeTruth: next };
   });
+}
+
+function approvalRequestFromEvent(event: WSEvent, payload: Record<string, unknown>): ToolApprovalRequest | null {
+  const requestId = typeof payload.request_id === "string" ? payload.request_id.trim() : "";
+  const toolName = typeof payload.tool_name === "string" ? payload.tool_name.trim() : "";
+  const reason = typeof payload.reason === "string" ? payload.reason.trim() : "";
+  if (!requestId || !toolName || !reason) return null;
+
+  const request: ToolApprovalRequest = {
+    request_id: requestId,
+    tool_name: toolName,
+    reason,
+    arguments: isRecord(payload.arguments) ? { ...payload.arguments } : null,
+    risk_class: typeof payload.risk_class === "string" ? payload.risk_class : null,
+  };
+  const sessionId = event.session_id ?? (typeof payload.session_id === "string" ? payload.session_id : null);
+  const taskId = event.task_id ?? (typeof payload.task_id === "string" ? payload.task_id : null);
+  const turnId = event.turn_id ?? (typeof payload.turn_id === "string" ? payload.turn_id : null);
+  if (sessionId !== null && sessionId !== undefined) request.session_id = sessionId;
+  if (taskId !== null && taskId !== undefined) request.task_id = taskId;
+  if (turnId !== null && turnId !== undefined) request.turn_id = turnId;
+  if (event.source) request.source = event.source;
+  if (event.id) request.event_id = event.id;
+  if (event.timestamp) request.received_at = event.timestamp;
+  return request;
 }
 
 function presentationIntentFromPayload(payload: Record<string, unknown>): PresentationIntent {
