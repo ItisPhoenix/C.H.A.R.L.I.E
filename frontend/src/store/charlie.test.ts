@@ -16,6 +16,7 @@ beforeEach(() => {
     activeCaption: null,
     systemStatusUpdatedAt: null,
     subsystemHealthUpdatedAt: null,
+    runtimeTruth: null,
     pendingToolApprovals: {},
     activeToolApproval: null,
     systemStatus: null,
@@ -262,6 +263,45 @@ test("HUD visibility follows the pet toggle event", () => {
     expect(useCharlieStore.getState().subsystemHealth.voice).toEqual({
       status: "degraded", detail: "Unavailable",
     });
+  });
+
+  test("runtime_truth stores only newer snapshots from active main launch", () => {
+    useCharlieStore.getState().setConnected(true);
+    const base = {
+      authority: "main_runtime",
+      launch_id: "launch-1",
+      status: "degraded",
+      subsystems: { brain: { status: "degraded", detail: "Unavailable" } },
+    };
+    useCharlieStore.getState().applyEvent({ type: "runtime_truth", payload: { ...base, revision: 2 } });
+    useCharlieStore.getState().applyEvent({ type: "runtime_truth", payload: { ...base, revision: 1, status: "running" } });
+    useCharlieStore.getState().applyEvent({ type: "runtime_truth", payload: { ...base, revision: 3, launch_id: "old-launch" } });
+
+    expect(useCharlieStore.getState().runtimeTruth).toMatchObject({
+      authority: "main_runtime",
+      launch_id: "launch-1",
+      revision: 2,
+      status: "degraded",
+    });
+  });
+
+  test("runtime_truth stays unavailable while disconnected and after reconnect until replay", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "runtime_truth",
+      payload: { authority: "main_runtime", launch_id: "launch-1", revision: 1, status: "running", subsystems: {} },
+    });
+    expect(useCharlieStore.getState().runtimeTruth).toBeNull();
+
+    useCharlieStore.getState().setConnected(true);
+    useCharlieStore.getState().applyEvent({
+      type: "runtime_truth",
+      payload: { authority: "main_runtime", launch_id: "launch-1", revision: 1, status: "running", subsystems: {} },
+    });
+    expect(useCharlieStore.getState().runtimeTruth?.status).toBe("running");
+    useCharlieStore.getState().setConnected(false);
+    expect(useCharlieStore.getState().runtimeTruth).toBeNull();
+    useCharlieStore.getState().setConnected(true);
+    expect(useCharlieStore.getState().runtimeTruth).toBeNull();
   });
 
   test("system_status preserves missing telemetry as unavailable", () => {

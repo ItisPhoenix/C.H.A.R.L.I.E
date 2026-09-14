@@ -187,6 +187,9 @@ export function CharlieScene(): ReactElement | null {
       data-core-position={projection.corePosition}
       data-core-state={projection.visualRuntime.phase}
       data-authoritative-core-state={projection.coreState}
+      data-runtime-authority={projection.runtimeTruth?.authority ?? "unavailable"}
+      data-runtime-status={projection.runtimeTruth?.status ?? "unavailable"}
+      data-runtime-revision={projection.runtimeTruth?.revision ?? "unavailable"}
       data-approval-active={activeToolApproval ? "true" : "false"}
     >
       {/* 1. Environment Layer (Opaque dark base, technical grid, radial light, vignette, grain, framing) */}

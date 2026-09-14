@@ -19,6 +19,7 @@ beforeEach(() => {
     hudVisible: true,
     coreState: "idle",
     visualRuntime: { ...INITIAL_VISUAL_RUNTIME, phase: "idle", label: "IDLE", detail: null },
+    runtimeTruth: null,
     presentationIntents: {},
     activeCaption: null,
     activeToolApproval: null,
@@ -51,6 +52,27 @@ describe("CharlieScene spatial projection & layers", () => {
     expect(screen.getAllByTestId("charlie-core")).toHaveLength(1);
     expect(screen.getAllByTestId("charlie-core")[0].querySelectorAll('[data-core-renderer="authoritative-charlie-ring"]')).toHaveLength(1);
     expect(screen.queryByRole("region", { name: /primary workspace/i })).toBeNull();
+  });
+
+  test("projects canonical runtime_truth onto the dynamic scene", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "runtime_truth",
+      payload: {
+        authority: "main_runtime",
+        launch_id: "launch-1",
+        revision: 4,
+        status: "degraded",
+        subsystems: { brain: { status: "degraded", detail: "Unavailable" } },
+      },
+    });
+
+    render(<MemoryRouter><CharlieScene /></MemoryRouter>);
+
+    const main = screen.getByRole("main");
+    expect(main).toHaveAttribute("data-runtime-authority", "main_runtime");
+    expect(main).toHaveAttribute("data-runtime-status", "degraded");
+    expect(main).toHaveAttribute("data-runtime-revision", "4");
+    expect(main.querySelector("[data-visual-lab]")).toBeNull();
   });
 
   test("workspace intent causes core to dock and workspace layer to activate", () => {

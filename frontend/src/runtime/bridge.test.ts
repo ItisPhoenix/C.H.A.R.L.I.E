@@ -38,4 +38,20 @@ describe("adaptEvent", () => {
 
     expect(event?.turn_id).toBe("turn-1");
   });
+
+  test("accepts canonical runtime_truth events from the shared contract", () => {
+    const event = adaptEvent({
+      type: "runtime_truth",
+      id: "runtime-truth-1",
+      payload: {
+        authority: "main_runtime",
+        launch_id: "launch-1",
+        revision: 1,
+        status: "degraded",
+        subsystems: {},
+      },
+    });
+
+    expect(event?.type).toBe("runtime_truth");
+  });
 });

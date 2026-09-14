@@ -65,6 +65,23 @@ export interface SubsystemHealth {
   detail: string;
 }
 
+export type RuntimeTruthStatus = "running" | "degraded" | "unavailable" | "shutting_down" | "stopped";
+
+export interface RuntimeTruthSubsystem {
+  [key: string]: unknown;
+}
+
+export interface RuntimeTruth {
+  schema_version?: number;
+  authority: "main_runtime";
+  launch_id: string;
+  revision: number;
+  observed_at?: string;
+  status: RuntimeTruthStatus;
+  required_failures?: string[];
+  subsystems: Record<string, RuntimeTruthSubsystem>;
+}
+
 export interface RuntimeTask {
   id: string;
   title: string;
@@ -137,6 +154,7 @@ interface CharlieState {
   netHistory: number[];
   subsystemHealth: Record<string, SubsystemHealth>;
   subsystemHealthUpdatedAt: string | null;
+  runtimeTruth: RuntimeTruth | null;
   tasks: Record<string, RuntimeTask>;
   mcpStatus: Record<string, McpServerStatus>;
   chatMessages: ChatMessage[];
@@ -174,6 +192,7 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   netHistory: [],
   subsystemHealth: {},
   subsystemHealthUpdatedAt: null,
+  runtimeTruth: null,
   tasks: {},
   mcpStatus: {},
   chatMessages: [],
@@ -186,10 +205,18 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   activeSessionId: null,
   activeSessionTitle: null,
 
-  setConnected: (connected) => set((s) => ({
-    connected,
-    visualRuntime: setVisualRuntimeConnection(s.visualRuntime, connected),
-  })),
+  setConnected: (connected) => set((s) => connected
+    ? {
+        connected,
+        visualRuntime: setVisualRuntimeConnection(s.visualRuntime, true),
+      }
+    : {
+        connected: false,
+        visualRuntime: setVisualRuntimeConnection(s.visualRuntime, false),
+        runtimeTruth: null,
+        subsystemHealth: {},
+        subsystemHealthUpdatedAt: null,
+      }),
   clearVisualRuntime: (expectedUpdatedAt) => set((s) => {
     if (expectedUpdatedAt && s.visualRuntime.updatedAt !== expectedUpdatedAt) return {};
     return {
@@ -307,6 +334,9 @@ export const useCharlieStore = create<CharlieState>((set) => ({
         set((s) => isOlderTimestamp(event.timestamp, s.subsystemHealthUpdatedAt)
           ? {}
           : { subsystemHealth: subsystemHealthFromPayload(payload), subsystemHealthUpdatedAt: event.timestamp ?? new Date().toISOString() });
+        return;
+      case "runtime_truth":
+        applyRuntimeTruth(set, payload);
         return;
       case "task_snapshot":
         set({ tasks: taskMapFromPayload(payload.tasks) });
@@ -549,6 +579,65 @@ function subsystemHealthFromPayload(payload: Record<string, unknown>): Record<st
     health[name] = { status: String(value.status ?? "unknown"), detail: String(value.detail ?? "Unknown") };
     return health;
   }, {});
+}
+
+const RUNTIME_TRUTH_STATUSES = new Set<RuntimeTruthStatus>([
+  "running",
+  "degraded",
+  "unavailable",
+  "shutting_down",
+  "stopped",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function parseRuntimeTruthPayload(payload: Record<string, unknown>): RuntimeTruth | null {
+  if (payload.authority !== "main_runtime" || typeof payload.launch_id !== "string" || !payload.launch_id) return null;
+  if (typeof payload.revision !== "number" || !Number.isInteger(payload.revision) || payload.revision < 0) return null;
+  if (typeof payload.status !== "string" || !RUNTIME_TRUTH_STATUSES.has(payload.status as RuntimeTruthStatus)) return null;
+  if (!isRecord(payload.subsystems)) return null;
+
+  const subsystemEntries = Object.entries(payload.subsystems);
+  if (subsystemEntries.some(([, value]) => !isRecord(value))) return null;
+  if (payload.schema_version !== undefined && payload.schema_version !== 1) return null;
+  if (payload.observed_at !== undefined && typeof payload.observed_at !== "string") return null;
+  if (
+    payload.required_failures !== undefined
+    && (!Array.isArray(payload.required_failures) || payload.required_failures.some((value) => typeof value !== "string"))
+  ) return null;
+
+  return {
+    ...(payload.schema_version === 1 ? { schema_version: 1 } : {}),
+    authority: "main_runtime",
+    launch_id: payload.launch_id,
+    revision: payload.revision,
+    ...(typeof payload.observed_at === "string" ? { observed_at: payload.observed_at } : {}),
+    status: payload.status as RuntimeTruthStatus,
+    ...(Array.isArray(payload.required_failures)
+      ? { required_failures: [...payload.required_failures] as string[] }
+      : {}),
+    subsystems: Object.fromEntries(
+      subsystemEntries.map(([name, value]) => [name, { ...(value as Record<string, unknown>) }]),
+    ),
+  };
+}
+
+function applyRuntimeTruth(
+  set: (fn: (state: CharlieState) => Partial<CharlieState>) => void,
+  payload: Record<string, unknown>,
+): void {
+  const next = parseRuntimeTruthPayload(payload);
+  if (!next) return;
+  set((state) => {
+    if (!state.connected) return {};
+    const current = state.runtimeTruth;
+    if (current) {
+      if (current.launch_id !== next.launch_id || next.revision <= current.revision) return {};
+    }
+    return { runtimeTruth: next };
+  });
 }
 
 function presentationIntentFromPayload(payload: Record<string, unknown>): PresentationIntent {

@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactElement } from "react";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
-import { useCharlieStore } from "../../store/charlie";
+import { useCharlieStore, type RuntimeTruthSubsystem } from "../../store/charlie";
 import { SpatialMapPrimitive, type SpatialMapData } from "../../composer/primitives/SpatialMapPrimitive";
 import { TelemetryGaugesPrimitive, type TelemetryGaugesData } from "../../composer/primitives/TelemetryGaugesPrimitive";
 import { ProcessTelemetryPrimitive, type ProcessTelemetryData } from "../../composer/primitives/ProcessTelemetryPrimitive";
@@ -20,6 +20,10 @@ function freshness(updatedAt: string | null, now: number): "FRESH" | "STALE" | "
   return now - timestamp <= 30_000 ? "FRESH" : "STALE";
 }
 
+function subsystemStatus(value: RuntimeTruthSubsystem): string {
+  return typeof value.status === "string" && value.status ? value.status : "unknown";
+}
+
 export function SystemWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
   const content = workspace.contentState || {};
   const topology = (content.topology || content.network_map) as SpatialMapData | undefined;
@@ -29,24 +33,30 @@ export function SystemWorkspace({ workspace }: { workspace: WorkspaceInstance })
   const vitals = content.vitals && typeof content.vitals === "object" ? content.vitals as TelemetryGaugesData : null;
   const status = useCharlieStore((state) => state.systemStatus);
   const statusUpdatedAt = useCharlieStore((state) => state.systemStatusUpdatedAt);
-  const health = useCharlieStore((state) => state.subsystemHealth);
-  const healthUpdatedAt = useCharlieStore((state) => state.subsystemHealthUpdatedAt);
+  const runtimeTruth = useCharlieStore((state) => state.runtimeTruth);
+  const health = runtimeTruth?.subsystems ?? {};
+  const runtimeObservedAt = runtimeTruth?.observed_at ?? null;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!statusUpdatedAt && !healthUpdatedAt) return;
+    if (!statusUpdatedAt && !runtimeObservedAt) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [healthUpdatedAt, statusUpdatedAt]);
+  }, [runtimeObservedAt, statusUpdatedAt]);
   const statusFreshness = freshness(statusUpdatedAt, now);
-  const healthFreshness = freshness(healthUpdatedAt, now);
+  const healthFreshness = freshness(runtimeObservedAt, now);
 
   return (
     <div className="charlie-spatial-composition system-composition">
       <header className="spatial-heading system-heading">
         <div className="system-heading-line">
           <div className="spatial-kicker">SYSTEM / RUNTIME TOPOLOGY</div>
-          <div className="system-runtime-state" data-runtime-health={statusFreshness.toLowerCase()}>
-            {statusFreshness === "FRESH" ? "RUNTIME ONLINE" : `RUNTIME ${statusFreshness}`}
+          <div
+            className="system-runtime-state"
+            data-runtime-health={runtimeTruth?.status ?? "unavailable"}
+            data-runtime-authority={runtimeTruth?.authority ?? "unavailable"}
+            data-runtime-revision={runtimeTruth?.revision ?? "unavailable"}
+          >
+            {runtimeTruth ? `RUNTIME ${runtimeTruth.status.toUpperCase()}` : "RUNTIME UNAVAILABLE"}
           </div>
         </div>
         <div className="spatial-subtitle">THE MACHINE / AUTHORITATIVE STATE</div>
@@ -61,11 +71,14 @@ export function SystemWorkspace({ workspace }: { workspace: WorkspaceInstance })
           <div className="system-topology-meta">
             <div className="system-topology-health" aria-label={`Subsystem health [${healthFreshness}]`}>
               <span>HEALTH [{healthFreshness}]</span>
-              {Object.entries(health).length === 0 ? <span>NO SUBSYSTEM SNAPSHOT</span> : Object.entries(health).map(([name, item]) => (
-                <span key={name} data-health-status={item.status} className={item.status === "degraded" ? "system-health-degraded" : item.status === "error" ? "system-health-error" : "system-health-quiet"}>
-                  {name.toUpperCase()}: {item.status.toUpperCase()}
-                </span>
-              ))}
+              {Object.entries(health).length === 0 ? <span>RUNTIME TRUTH UNAVAILABLE</span> : Object.entries(health).map(([name, item]) => {
+                const subsystemState = subsystemStatus(item);
+                return (
+                  <span key={name} data-health-status={subsystemState} className={subsystemState === "degraded" ? "system-health-degraded" : subsystemState === "error" ? "system-health-error" : "system-health-quiet"}>
+                    {name.toUpperCase()}: {subsystemState.toUpperCase()}
+                  </span>
+                );
+              })}
             </div>
             <section className="system-live-telemetry" aria-label="Live system telemetry">
               <div className="spatial-kicker">LIVE VALUES <span data-testid="system-telemetry-freshness">[{statusFreshness}]</span></div>

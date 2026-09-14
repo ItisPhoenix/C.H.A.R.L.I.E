@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { useCharlieStore, type PresentationIntent } from "../store/charlie";
+import { useCharlieStore, type PresentationIntent, type RuntimeTruth } from "../store/charlie";
 import type { VisualRuntimeState } from "../runtime/visualRuntime";
 import { useWorkspaceStore, type WorkspaceInstance } from "../layout/workspaceStore";
 import { useWidgetStore, type WidgetInstance } from "../layout/widgetStore";
@@ -17,6 +17,7 @@ export interface SceneProjection {
   activeCaption: string | null;
   coreState: string;
   visualRuntime: VisualRuntimeState;
+  runtimeTruth: RuntimeTruth | null;
 }
 
 export function useSceneProjection(): SceneProjection {
@@ -24,6 +25,7 @@ export function useSceneProjection(): SceneProjection {
   const activeCaption = useCharlieStore((s) => s.activeCaption);
   const coreState = useCharlieStore((s) => s.coreState);
   const visualRuntime = useCharlieStore((s) => s.visualRuntime);
+  const runtimeTruth = useCharlieStore((s) => s.runtimeTruth);
   const connected = useCharlieStore((s) => s.connected);
 
   const workspaces = useWorkspaceStore((s) => s.workspaces);
@@ -103,12 +105,14 @@ export function useSceneProjection(): SceneProjection {
       activeCaption,
       coreState,
       visualRuntime: projectedVisualRuntime,
+      runtimeTruth,
     };
   }, [
     presentationIntents,
     activeCaption,
     coreState,
     visualRuntime,
+    runtimeTruth,
     connected,
     workspaces,
     activeWorkspaceId,

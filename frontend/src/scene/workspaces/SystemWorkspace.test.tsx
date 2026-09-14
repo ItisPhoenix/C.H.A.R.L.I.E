@@ -12,6 +12,7 @@ beforeEach(() => {
     systemStatusUpdatedAt: null,
     subsystemHealth: {},
     subsystemHealthUpdatedAt: null,
+    runtimeTruth: null,
   });
 });
 
@@ -20,8 +21,14 @@ describe("SystemWorkspace live telemetry", () => {
     useCharlieStore.setState({
       systemStatus: { cpu: 12, ram: null, gpu: null, disk: 64, netKbps: 3.5, uptimeSeconds: null, batteryPercent: null },
       systemStatusUpdatedAt: "2020-01-01T00:00:00.000Z",
-      subsystemHealth: { brain: { status: "degraded", detail: "Unavailable" } },
-      subsystemHealthUpdatedAt: "2020-01-01T00:00:00.000Z",
+      runtimeTruth: {
+        authority: "main_runtime",
+        launch_id: "launch-1",
+        revision: 7,
+        observed_at: "2020-01-01T00:00:00.000Z",
+        status: "degraded",
+        subsystems: { brain: { status: "degraded", detail: "Unavailable" } },
+      },
     });
 
     render(<SystemWorkspace workspace={workspace} />);
@@ -30,6 +37,7 @@ describe("SystemWorkspace live telemetry", () => {
     expect(screen.getByText("64%")).toBeInTheDocument();
     expect(screen.getByText("—")).toBeInTheDocument();
     expect(screen.getByTestId("system-telemetry-freshness")).toHaveTextContent("STALE");
+    expect(screen.getByText("RUNTIME DEGRADED")).toBeInTheDocument();
     expect(screen.getByText("BRAIN: DEGRADED")).toBeInTheDocument();
   });
 
@@ -37,6 +45,7 @@ describe("SystemWorkspace live telemetry", () => {
     render(<SystemWorkspace workspace={workspace} />);
     expect(screen.getByTestId("system-telemetry-freshness")).toHaveTextContent("UNAVAILABLE");
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
-    expect(screen.getByText("NO SUBSYSTEM SNAPSHOT")).toBeInTheDocument();
+    expect(screen.getByText("RUNTIME UNAVAILABLE")).toBeInTheDocument();
+    expect(screen.getByText("RUNTIME TRUTH UNAVAILABLE")).toBeInTheDocument();
   });
 });
