@@ -1,7 +1,7 @@
 import { useEffect, useRef, type ReactElement } from "react";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
 import { MapEngine, useMapStore } from "../../map";
-import type { MapCommand, MapFeature, MapRoute } from "../../map/types";
+import type { MapCommand, MapRoute } from "../../map/types";
 import "../../map/MapWorkspace.css";
 
 export function MapWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
@@ -10,7 +10,6 @@ export function MapWorkspace({ workspace }: { workspace: WorkspaceInstance }): R
 
   const dispatchCommand = useMapStore((s) => s.dispatchCommand);
   const setLayerEnabled = useMapStore((s) => s.setLayerEnabled);
-  const setSelectedFeature = useMapStore((s) => s.setSelectedFeature);
   const setRoute = useMapStore((s) => s.setRoute);
 
   // Synchronize incoming presentation intent payload to MapStore
@@ -54,18 +53,6 @@ export function MapWorkspace({ workspace }: { workspace: WorkspaceInstance }): R
         zoom,
       });
 
-      if (content.name || content.title) {
-        const feat: MapFeature = {
-          id: `loc_${Date.now()}`,
-          label: String(content.name || content.title),
-          description: content.description ? String(content.description) : undefined,
-          coordinates: [coords[0], coords[1]],
-          category: content.category ? String(content.category) : "Location",
-          severity: "normal",
-          color: "#00f0ff",
-        };
-        setSelectedFeature(feat);
-      }
       return;
     }
 
@@ -74,7 +61,7 @@ export function MapWorkspace({ workspace }: { workspace: WorkspaceInstance }): R
       const layerId = String(content.layer || content.enable_layer);
       setLayerEnabled(layerId, true);
     }
-  }, [contentStr, dispatchCommand, setLayerEnabled, setSelectedFeature, setRoute]);
+  }, [contentStr, dispatchCommand, setLayerEnabled, setRoute]);
 
   return (
     <div className="charlie-map-workspace w-full h-full relative">

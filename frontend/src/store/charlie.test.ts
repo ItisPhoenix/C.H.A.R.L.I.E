@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { useCharlieStore } from "./charlie";
 import { INITIAL_VISUAL_RUNTIME } from "../runtime/visualRuntime";
 import { useWorkspaceStore } from "../layout/workspaceStore";
+import { useMapStore } from "../map/mapStore";
 
 beforeEach(() => {
   useCharlieStore.setState({
@@ -23,6 +24,8 @@ beforeEach(() => {
     netHistory: [],
     subsystemHealth: {},
     tasks: {},
+    visionObservation: null,
+    desktopFrame: null,
     chatMessages: [],
   });
 });
@@ -339,6 +342,18 @@ test("HUD visibility follows the pet toggle event", () => {
     expect(useCharlieStore.getState().tasks).toEqual({});
   });
 
+  test("disconnect clears presentation-local map selection", () => {
+    useMapStore.getState().setSelectedFeature({
+      id: "selected-1",
+      label: "Selected result",
+      category: "test",
+      coordinates: [77.1, 28.7],
+    });
+    useCharlieStore.getState().setConnected(false);
+
+    expect(useMapStore.getState().selectedFeature).toBeNull();
+  });
+
   test("background_task updates one task without exposing raw errors", () => {
     useCharlieStore.getState().applyEvent({
       type: "background_task",
@@ -350,6 +365,66 @@ test("HUD visibility follows the pet toggle event", () => {
     expect(useCharlieStore.getState().tasks.t1).toEqual({
       id: "t1", title: "Check deployment", status: "failed", currentStep: 1, totalSteps: 2,
     });
+  });
+
+  test("vision observation projects safe canonical counts and rejects stale/disconnected updates", () => {
+    useCharlieStore.getState().setConnected(true);
+    useCharlieStore.getState().applyEvent({
+      type: "vision_observed",
+      timestamp: "2026-09-14T10:02:00.000Z",
+      session_id: "session-vision",
+      payload: { uia_count: 3, ocr_count: 1 },
+    });
+    useCharlieStore.getState().applyEvent({
+      type: "vision_observed",
+      timestamp: "2026-09-14T10:01:00.000Z",
+      payload: { uia_count: 99, ocr_count: 99 },
+    });
+
+    expect(useCharlieStore.getState().visionObservation).toEqual({
+      sessionId: "session-vision",
+      uiaCount: 3,
+      ocrCount: 1,
+      observedAt: "2026-09-14T10:02:00.000Z",
+    });
+    useCharlieStore.getState().setConnected(false);
+    expect(useCharlieStore.getState().visionObservation).toBeNull();
+  });
+
+  test("desktop_frame projects canonical media and mark identity without trusting geometry", () => {
+    useCharlieStore.getState().setConnected(true);
+    useCharlieStore.getState().applyEvent({
+      type: "desktop_frame",
+      timestamp: "2026-09-14T10:03:00.000Z",
+      session_id: "session-frame",
+      payload: {
+        image_b64: "c2NyZWVu",
+        marks: [{ mark_id: 7, name: "Save" }],
+      },
+    });
+    useCharlieStore.getState().applyEvent({
+      type: "desktop_frame",
+      timestamp: "2026-09-14T10:02:00.000Z",
+      payload: { image_b64: "b2xk" },
+    });
+
+    expect(useCharlieStore.getState().desktopFrame).toEqual({
+      imageUrl: "data:image/png;base64,c2NyZWVu",
+      sessionId: "session-frame",
+      marks: [{ markId: 7, name: "Save" }],
+      capturedAt: "2026-09-14T10:03:00.000Z",
+    });
+    useCharlieStore.getState().setConnected(false);
+    expect(useCharlieStore.getState().desktopFrame).toBeNull();
+  });
+
+  test("presentation intent without runtime timestamp does not invent one", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "presentation_intent",
+      payload: { id: "caption-no-time", kind: "caption", summary: "Runtime supplied caption" },
+    });
+
+    expect(useCharlieStore.getState().presentationIntents["caption-no-time"]?.createdAt).toBeUndefined();
   });
 
   test("task state normalizes legacy lifecycle names at the runtime boundary", () => {

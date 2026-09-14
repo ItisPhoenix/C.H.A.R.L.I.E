@@ -195,19 +195,26 @@ export const useMapStore = create<MapStoreState>((set, get) => ({
     })),
 
   setLayerData: (layerId, features, meta) =>
-    set((s) => ({
-      layerData: { ...s.layerData, [layerId]: features },
-      layerStatus: { ...s.layerStatus, [layerId]: { status: "ready" } },
-      layerMetadata: {
-        ...s.layerMetadata,
-        [layerId]: {
-          status: "ready",
-          count: features.length,
-          attribution: meta?.attribution || s.layerMetadata[layerId]?.attribution || "",
-          lastUpdated: meta?.lastUpdated || Date.now(),
+    set((s) => {
+      const layerData = { ...s.layerData, [layerId]: features };
+      const selectedFeature = s.selectedFeature && Object.values(layerData).some((items) =>
+        items.some((feature) => feature.id === s.selectedFeature?.id)
+      ) ? s.selectedFeature : null;
+      return {
+        layerData,
+        selectedFeature,
+        layerStatus: { ...s.layerStatus, [layerId]: { status: "ready" } },
+        layerMetadata: {
+          ...s.layerMetadata,
+          [layerId]: {
+            status: "ready",
+            count: features.length,
+            attribution: meta?.attribution || s.layerMetadata[layerId]?.attribution || "",
+            lastUpdated: meta?.lastUpdated || Date.now(),
+          },
         },
-      },
-    })),
+      };
+    }),
 
   setSelectedFeature: (feature) => set({ selectedFeature: feature }),
   setRoute: (route) => set({ route }),

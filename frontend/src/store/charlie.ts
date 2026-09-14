@@ -8,6 +8,7 @@ import {
 } from "../runtime/visualRuntime";
 import { useWorkspaceStore } from "../layout/workspaceStore";
 import { useWidgetStore } from "../layout/widgetStore";
+import { useMapStore } from "../map/mapStore";
 
 export interface SystemStatus {
   cpu: number | null;
@@ -44,6 +45,25 @@ export interface ResearchResultPayload {
   sources: Array<Record<string, unknown>>;
   products: Array<Record<string, unknown>>;
   media: Array<Record<string, unknown>>;
+}
+
+export interface VisionObservation {
+  sessionId: string | null;
+  uiaCount: number;
+  ocrCount: number;
+  observedAt?: string;
+}
+
+export interface VisionFrameMark {
+  markId: number;
+  name: string;
+}
+
+export interface VisionFrame {
+  imageUrl: string;
+  sessionId: string | null;
+  marks: VisionFrameMark[];
+  capturedAt?: string;
 }
 
 export interface ToolApprovalRequest {
@@ -136,7 +156,7 @@ export interface PresentationIntent {
   anchor: "core" | "workspace" | "screen" | "widget";
   spokenText?: string | null;
   captionText?: string | null;
-  createdAt: string;
+  createdAt?: string;
   expiresAt?: string | null;
   replaceKey?: string | null;
   correlationId?: string | null;
@@ -168,6 +188,8 @@ interface CharlieState {
   mcpStatus: Record<string, McpServerStatus>;
   chatMessages: ChatMessage[];
   latestResearchResult: ResearchResultPayload | null;
+  visionObservation: VisionObservation | null;
+  desktopFrame: VisionFrame | null;
   activeAlert: AlertInfo | null;
   audioState: AudioState | null;
   micMuted: boolean | null;
@@ -206,6 +228,8 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   mcpStatus: {},
   chatMessages: [],
   latestResearchResult: null,
+  visionObservation: null,
+  desktopFrame: null,
   activeAlert: null,
   audioState: null,
   micMuted: null,
@@ -214,22 +238,28 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   activeSessionId: null,
   activeSessionTitle: null,
 
-  setConnected: (connected) => set((s) => connected
-    ? {
-        connected,
-        visualRuntime: setVisualRuntimeConnection(s.visualRuntime, true),
-      }
-    : {
-        connected: false,
-        visualRuntime: setVisualRuntimeConnection(s.visualRuntime, false),
-        activities: [],
-        runtimeTruth: null,
-        subsystemHealth: {},
-        subsystemHealthUpdatedAt: null,
-        tasks: {},
-        activeToolApproval: null,
-        pendingToolApprovals: {},
-      }),
+  setConnected: (connected) => {
+    if (!connected) useMapStore.getState().clearSelection();
+    set((s) => connected
+      ? {
+          connected,
+          visualRuntime: setVisualRuntimeConnection(s.visualRuntime, true),
+        }
+      : {
+          connected: false,
+          visualRuntime: setVisualRuntimeConnection(s.visualRuntime, false),
+          activities: [],
+          runtimeTruth: null,
+          subsystemHealth: {},
+          subsystemHealthUpdatedAt: null,
+          tasks: {},
+          latestResearchResult: null,
+          visionObservation: null,
+          desktopFrame: null,
+          activeToolApproval: null,
+          pendingToolApprovals: {},
+        });
+  },
   clearVisualRuntime: (expectedUpdatedAt) => set((s) => {
     if (expectedUpdatedAt && s.visualRuntime.updatedAt !== expectedUpdatedAt) return {};
     return {
@@ -490,6 +520,29 @@ export const useCharlieStore = create<CharlieState>((set) => ({
       case "research_result":
         set({ latestResearchResult: payload as unknown as ResearchResultPayload });
         return;
+      case "desktop_frame": {
+        const frame = visionFrameFromEvent(event, payload);
+        if (!frame) return;
+        set((s) => {
+          if (!s.connected || (s.desktopFrame?.capturedAt && (!event.timestamp || isOlderTimestamp(event.timestamp, s.desktopFrame.capturedAt)))) return {};
+          return { desktopFrame: frame };
+        });
+        return;
+      }
+      case "vision_observed": {
+        const uiaCount = nonNegativeInteger(payload.uia_count, -1);
+        const ocrCount = nonNegativeInteger(payload.ocr_count, -1);
+        if (uiaCount === null || ocrCount === null || uiaCount < 0 || ocrCount < 0) return;
+        const sessionId = event.session_id ?? (typeof payload.session_id === "string" ? payload.session_id : null);
+        const observedAt = typeof event.timestamp === "string" && event.timestamp ? event.timestamp : undefined;
+        set((s) => {
+          if (!s.connected) return {};
+          const current = s.visionObservation;
+          if (current?.observedAt && (!observedAt || Date.parse(observedAt) < Date.parse(current.observedAt))) return {};
+          return { visionObservation: { sessionId, uiaCount, ocrCount, ...(observedAt ? { observedAt } : {}) } };
+        });
+        return;
+      }
       case "presentation_intent":
       case "presentation_update":
         applyPresentationIntentUpsert(set, payload);
@@ -555,6 +608,25 @@ function safeTaskError(value: unknown): string | null {
   if (typeof value !== "string" || !value.trim()) return null;
   if (/(api[-_ ]?key|token|password|secret)\s*[:=]/i.test(value)) return null;
   return value.trim().slice(0, 500);
+}
+
+function visionFrameFromEvent(event: WSEvent, payload: Record<string, unknown>): VisionFrame | null {
+  const imageBase64 = typeof payload.image_b64 === "string" ? payload.image_b64 : "";
+  if (!imageBase64 || imageBase64.length > 8_000_000 || !/^[A-Za-z0-9+/]*={0,2}$/.test(imageBase64)) return null;
+  const rawMarks = payload.marks;
+  if (rawMarks !== undefined && !Array.isArray(rawMarks)) return null;
+  const marks: VisionFrameMark[] = [];
+  for (const rawMark of (Array.isArray(rawMarks) ? rawMarks : [])) {
+    if (!isRecord(rawMark) || typeof rawMark.mark_id !== "number" || !Number.isInteger(rawMark.mark_id) || rawMark.mark_id < 0) return null;
+    if (typeof rawMark.name !== "string" || !rawMark.name.trim()) return null;
+    marks.push({ markId: rawMark.mark_id, name: rawMark.name.trim() });
+  }
+  return {
+    imageUrl: `data:image/png;base64,${imageBase64}`,
+    sessionId: event.session_id ?? (typeof payload.session_id === "string" ? payload.session_id : null),
+    marks,
+    ...(typeof event.timestamp === "string" && event.timestamp ? { capturedAt: event.timestamp } : {}),
+  };
 }
 
 function taskFromPayload(rawTask: unknown): RuntimeTask | null {
@@ -734,6 +806,11 @@ function approvalRequestFromEvent(event: WSEvent, payload: Record<string, unknow
 }
 
 function presentationIntentFromPayload(payload: Record<string, unknown>): PresentationIntent {
+  const createdAt = typeof payload.created_at === "string"
+    ? payload.created_at
+    : typeof payload.createdAt === "string"
+      ? payload.createdAt
+      : undefined;
   return {
     id: String(payload.id ?? ""),
     kind: (payload.kind as PresentationIntent["kind"]) ?? "silent",
@@ -758,7 +835,7 @@ function presentationIntentFromPayload(payload: Record<string, unknown>): Presen
     anchor: (payload.anchor as PresentationIntent["anchor"]) ?? "core",
     spokenText: (payload.spoken_text as string) ?? (payload.spokenText as string) ?? null,
     captionText: (payload.caption_text as string) ?? (payload.captionText as string) ?? null,
-    createdAt: String(payload.created_at ?? payload.createdAt ?? new Date().toISOString()),
+    ...(createdAt ? { createdAt } : {}),
     expiresAt: (payload.expires_at as string) ?? (payload.expiresAt as string) ?? null,
     replaceKey: (payload.replace_key as string) ?? (payload.replaceKey as string) ?? null,
     correlationId: (payload.correlation_id as string) ?? (payload.correlationId as string) ?? null,
@@ -806,9 +883,7 @@ function applyPresentationIntentDismiss(
 }
 
 function latestCaption(intents: Record<string, PresentationIntent>): string | null {
-  const captions = Object.values(intents)
-    .filter((intent) => intent.kind === "caption")
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const captions = Object.values(intents).filter((intent) => intent.kind === "caption");
   const latest = captions.at(-1);
   return latest?.captionText || latest?.summary || null;
 }

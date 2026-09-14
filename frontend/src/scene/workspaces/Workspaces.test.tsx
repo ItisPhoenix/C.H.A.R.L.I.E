@@ -131,8 +131,38 @@ describe("Phase 9 Workspaces Suite", () => {
     render(<VisionWorkspace workspace={{ ...mockWorkspace, type: "vision" }} />);
     expect(screen.getByText("LOCAL VISION PERCEPTION")).toBeDefined();
     expect(screen.getByText("DETECTION RESULTS")).toBeDefined();
-    expect(screen.getByText("NO AUTHORITATIVE VISION FRAME AVAILABLE")).toBeDefined();
+    expect(screen.getByText("NO LIVE MEDIA AVAILABLE")).toBeDefined();
     expect(screen.queryByText("BUTTON [Submit]")).toBeNull();
+  });
+
+  test("VisionWorkspace renders canonical observation metadata without fabricating media", () => {
+    useCharlieStore.setState({
+      visionObservation: {
+        sessionId: "vision-session",
+        uiaCount: 4,
+        ocrCount: 2,
+        observedAt: "2026-09-14T10:02:00.000Z",
+      },
+    });
+    render(<VisionWorkspace workspace={{ ...mockWorkspace, type: "vision" }} />);
+
+    expect(screen.getByTestId("vision-observation-metadata")).toHaveTextContent("OBSERVED UIA 4 · OCR 2");
+    expect(screen.getByText("NO LIVE MEDIA AVAILABLE")).toBeDefined();
+  });
+
+  test("VisionWorkspace renders canonical desktop frame and mark metadata without inferred boxes", () => {
+    useCharlieStore.setState({
+      desktopFrame: {
+        imageUrl: "data:image/png;base64,c2NyZWVu",
+        sessionId: "vision-session",
+        marks: [{ markId: 7, name: "Save" }],
+        capturedAt: "2026-09-14T10:03:00.000Z",
+      },
+    });
+    render(<VisionWorkspace workspace={{ ...mockWorkspace, type: "vision" }} />);
+
+    expect(screen.getByAltText("Perception Frame")).toBeDefined();
+    expect(screen.getByTestId("vision-mark")).toHaveTextContent("MARK 7: Save");
   });
 
   test("VisionWorkspace renders only supplied grounding payload", () => {
@@ -141,6 +171,9 @@ describe("Phase 9 Workspaces Suite", () => {
       type: "vision",
       contentState: {
         image_url: "/observations/frame.png",
+        bounding_box_coordinate_space: "percent",
+        frame_width: 1920,
+        frame_height: 1080,
         bounding_boxes: [{ id: "real-1", label: "REAL CONTROL", confidence: 0.8, box: [10, 20, 30, 40] }],
       },
     }} />);
@@ -158,6 +191,9 @@ describe("Phase 9 Workspaces Suite", () => {
           { id: "bad", label: "MALFORMED", box: [0, 1, 2] },
           { id: "valid", label: "VALID REGION", confidence: 0.5, box: [10, 20, 30, 40] },
         ],
+        bounding_box_coordinate_space: "percent",
+        frame_width: 1920,
+        frame_height: 1080,
       },
     }} />);
 

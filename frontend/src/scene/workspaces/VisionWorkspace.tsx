@@ -1,5 +1,6 @@
 import type { ReactElement } from "react";
 import type { WorkspaceInstance } from "../../layout/workspaceStore";
+import { useCharlieStore } from "../../store/charlie";
 
 export interface VisionBoundingBox {
   id: string;
@@ -9,14 +10,29 @@ export interface VisionBoundingBox {
   color?: string;
 }
 
-function parseBoundingBoxes(raw: unknown): VisionBoundingBox[] {
+function parseBoundingBoxes(raw: unknown, coordinateSpace: unknown, frameWidth: unknown, frameHeight: unknown): VisionBoundingBox[] {
+  if (
+    coordinateSpace !== "percent"
+    || typeof frameWidth !== "number" || !Number.isFinite(frameWidth) || frameWidth <= 0
+    || typeof frameHeight !== "number" || !Number.isFinite(frameHeight) || frameHeight <= 0
+  ) return [];
   if (!Array.isArray(raw)) return [];
 
-  return raw.flatMap((entry, index) => {
+  return raw.flatMap((entry) => {
     if (!entry || typeof entry !== "object") return [];
     const value = entry as Record<string, unknown>;
     const rawBox = value.box;
     if (!Array.isArray(rawBox) || rawBox.length !== 4) return [];
+
+    const id = typeof value.id === "string" && value.id.trim() ? value.id.trim() : null;
+    const label = typeof value.label === "string" && value.label.trim() ? value.label.trim() : null;
+    const confidence = typeof value.confidence === "number"
+      && Number.isFinite(value.confidence)
+      && value.confidence >= 0
+      && value.confidence <= 1
+      ? value.confidence
+      : null;
+    if (!id || !label || confidence === null) return [];
 
     const box = rawBox.map(Number);
     if (box.some((coordinate) => !Number.isFinite(coordinate) || coordinate < 0 || coordinate > 100)) return [];
@@ -24,20 +40,35 @@ function parseBoundingBoxes(raw: unknown): VisionBoundingBox[] {
     if (ymax < ymin || xmax < xmin) return [];
 
     return [{
-      id: String(value.id || `observation-${index}`),
-      label: String(value.label || "GROUNDED REGION"),
-      confidence: typeof value.confidence === "number" ? value.confidence : 0,
+      id,
+      label,
+      confidence,
       box: [ymin, xmin, ymax, xmax],
       ...(typeof value.color === "string" ? { color: value.color } : {}),
     }];
   });
 }
 
+function safeMediaUrl(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) return "";
+  const candidate = value.trim();
+  if (/^(?:data:|file:|[a-zA-Z]:[\\/]|\\\\)/i.test(candidate)) return "";
+  if (candidate.startsWith("/") || candidate.startsWith("blob:") || /^https?:\/\//i.test(candidate)) return candidate;
+  return "";
+}
+
 export function VisionWorkspace({ workspace }: { workspace: WorkspaceInstance }): ReactElement {
   const content = workspace.contentState || {};
+  const visionObservation = useCharlieStore((state) => state.visionObservation);
+  const desktopFrame = useCharlieStore((state) => state.desktopFrame);
   const title = String(content.title || workspace.title || "VISION GROUNDING WORKSPACE").replace(/^WORKSPACE\s*\/\/\s*/i, "");
-  const imageUrl = String(content.image_url || content.snapshot_url || "");
-  const boxes = parseBoundingBoxes(content.bounding_boxes);
+  const imageUrl = safeMediaUrl(content.image_url || content.snapshot_url) || desktopFrame?.imageUrl || "";
+  const boxes = parseBoundingBoxes(
+    content.bounding_boxes,
+    content.bounding_box_coordinate_space,
+    content.frame_width,
+    content.frame_height,
+  );
   const status = String(content.status || content.state || "").toLowerCase();
   const isPending = content.loading === true || ["loading", "pending", "processing", "starting"].includes(status);
   const isUnavailable = content.available === false || ["unavailable", "offline", "error", "failed"].includes(status);
@@ -47,7 +78,7 @@ export function VisionWorkspace({ workspace }: { workspace: WorkspaceInstance })
       ? "VISION OBSERVATION UNAVAILABLE"
       : imageUrl
         ? "NO GROUNDED OBJECTS REPORTED"
-        : "NO AUTHORITATIVE VISION FRAME AVAILABLE";
+        : "NO LIVE MEDIA AVAILABLE";
 
   return (
     <div className="w-full h-full flex flex-col justify-between font-mono select-none text-left p-2 overflow-y-auto space-y-4">
@@ -63,6 +94,12 @@ export function VisionWorkspace({ workspace }: { workspace: WorkspaceInstance })
           </h1>
           <div className="text-xs text-cyan-400/70 tracking-widest uppercase">
             UIA / OCR GROUNDED INFERENCE
+          </div>
+          <div data-testid="vision-observation-metadata" className="text-[10px] text-slate-400 tracking-wider uppercase mt-2">
+            {visionObservation
+              ? `OBSERVED UIA ${visionObservation.uiaCount} · OCR ${visionObservation.ocrCount}${visionObservation.observedAt ? ` · ${visionObservation.observedAt}` : ""}`
+              : "NO LIVE VISION METADATA AVAILABLE"}
+            {desktopFrame?.capturedAt && ` · FRAME ${desktopFrame.capturedAt}`}
           </div>
         </div>
       </div>
@@ -141,6 +178,10 @@ export function VisionWorkspace({ workspace }: { workspace: WorkspaceInstance })
                 <span className="text-[11px] font-bold text-cyan-300 font-mono">
                   {(b.confidence * 100).toFixed(0)}%
                 </span>
+              </div>
+            )) : desktopFrame?.marks.length ? desktopFrame.marks.map((mark) => (
+              <div key={mark.markId} className="p-3 border border-cyan-500/15 text-[11px] text-slate-400" data-testid="vision-mark">
+                MARK {mark.markId}: {mark.name}
               </div>
             )) : <div className="p-3 border border-cyan-500/15 text-[11px] text-slate-500 italic" role="status">{emptyMessage}</div>}
           </div>

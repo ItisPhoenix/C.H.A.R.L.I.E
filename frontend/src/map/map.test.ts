@@ -44,6 +44,21 @@ describe("Map Subsystem & Implementation Tests", () => {
     expect(Object.keys(state.activeLayers).length).toBe(0);
   });
 
+  it("clears local selection when its canonical layer result no longer contains the selected feature", () => {
+    const feature: MapFeature = {
+      id: "selected-1",
+      label: "Selected result",
+      category: "test",
+      coordinates: [77.1, 28.7],
+    };
+    useMapStore.getState().setSelectedFeature(feature);
+    useMapStore.getState().setLayerData("research", [feature]);
+    expect(useMapStore.getState().selectedFeature?.id).toBe("selected-1");
+
+    useMapStore.getState().setLayerData("research", []);
+    expect(useMapStore.getState().selectedFeature).toBeNull();
+  });
+
   it("handles all declared map commands in command queue", () => {
     const store = useMapStore.getState();
 
@@ -668,4 +683,3 @@ describe("Map Subsystem & Implementation Tests", () => {
     expect(removeEventListenerSpy).toHaveBeenCalledWith("touchstart", onTouchStart);
   });
 });
-

@@ -148,6 +148,77 @@ function sourceItems(value: unknown): PresentationSource[] {
   });
 }
 
+function finiteConfidence(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function validCanonicalSources(value: unknown): value is Array<Record<string, unknown>> {
+  return Array.isArray(value) && value.every((item) => {
+    const source = record(item);
+    return typeof source.id === "string"
+      && Boolean(source.id.trim())
+      && typeof source.title === "string"
+      && Boolean(source.title.trim())
+      && (source.url === undefined || source.url === null || typeof source.url === "string")
+      && (source.snippet === undefined || source.snippet === null || typeof source.snippet === "string")
+      && (source.domain === undefined || source.domain === null || typeof source.domain === "string")
+      && (source.published_at === undefined || source.published_at === null || typeof source.published_at === "string")
+      && (source.confidence === undefined || source.confidence === null || finiteConfidence(source.confidence));
+  });
+}
+
+function validCanonicalTimeline(value: unknown): boolean {
+  return value === undefined || (
+    Array.isArray(value)
+    && value.every((item) => {
+      const timeline = record(item);
+      return typeof timeline.id === "string"
+        && Boolean(timeline.id.trim())
+        && typeof timeline.title === "string"
+        && Boolean(timeline.title.trim())
+        && (timeline.timestamp === undefined || timeline.timestamp === null || typeof timeline.timestamp === "string")
+        && (timeline.time === undefined || timeline.time === null || typeof timeline.time === "string");
+    })
+  );
+}
+
+function validCanonicalResearchRecords(content: Record<string, unknown>): boolean {
+  if (!validCanonicalSources(content.sources)) return false;
+  const sourceIds = new Set(content.sources.map((source) => source.id));
+  if (!Array.isArray(content.findings) || !content.findings.every((item) => {
+    const finding = record(item);
+    return typeof finding.id === "string"
+      && Boolean(finding.id.trim())
+      && typeof finding.title === "string"
+      && Boolean(finding.title.trim())
+      && typeof finding.detail === "string"
+      && Array.isArray(finding.source_ids)
+      && finding.source_ids.every((id) => typeof id === "string" && sourceIds.has(id))
+      && (finding.confidence === undefined || finiteConfidence(finding.confidence))
+      && (finding.contradiction === undefined || typeof finding.contradiction === "boolean");
+  })) return false;
+  return validCanonicalTimeline(content.timeline_items);
+}
+
+function validCanonicalBriefingRecords(content: Record<string, unknown>): boolean {
+  if (!validCanonicalSources(content.sources)) return false;
+  const sourceIds = new Set(content.sources.map((source) => source.id));
+  if (!Array.isArray(content.summaries) || content.summaries.some((summary) => typeof summary !== "string")) return false;
+  if (!Array.isArray(content.stories) || !content.stories.every((item) => {
+    const story = record(item);
+    return typeof story.id === "string"
+      && Boolean(story.id.trim())
+      && typeof story.title === "string"
+      && Boolean(story.title.trim())
+      && typeof story.summary === "string"
+      && Array.isArray(story.source_ids)
+      && story.source_ids.every((id) => typeof id === "string" && sourceIds.has(id))
+      && (story.published_at === undefined || story.published_at === null || typeof story.published_at === "string")
+      && (story.region === undefined || story.region === null || typeof story.region === "string");
+  })) return false;
+  return validCanonicalTimeline(content.timeline_items);
+}
+
 function validSourceIds(ids: unknown, sources: PresentationSource[]): string[] {
   const known = new Set(sources.map((source) => source.id));
   return Array.isArray(ids)
@@ -173,12 +244,13 @@ function timelineItems(value: unknown): TimelinePayloadItem[] {
 
 export function normalizeResearchWorkspacePayload(input: unknown): ResearchWorkspacePayload {
   const content = record(input);
-  if (
-    !isLegacyPayload(content) &&
-    !isCanonicalPayload(content, RESEARCH_SCHEMA, RESEARCH_VERSION, [
+  const canonical = isCanonicalPayload(content, RESEARCH_SCHEMA, RESEARCH_VERSION, [
       "query", "mode", "summary", "status", "confidence", "findings", "sources",
-    ])
-  ) {
+    ]);
+  if (!isLegacyPayload(content) && !canonical) {
+    return unsupportedResearchPayload();
+  }
+  if (canonical && !validCanonicalResearchRecords(content)) {
     return unsupportedResearchPayload();
   }
   const sources = sourceItems(content.sources ?? content.evidence);
@@ -214,12 +286,13 @@ export function normalizeResearchWorkspacePayload(input: unknown): ResearchWorks
 
 export function normalizeBriefingWorkspacePayload(input: unknown): BriefingWorkspacePayload {
   const content = record(input);
-  if (
-    !isLegacyPayload(content) &&
-    !isCanonicalPayload(content, BRIEFING_SCHEMA, BRIEFING_VERSION, [
+  const canonical = isCanonicalPayload(content, BRIEFING_SCHEMA, BRIEFING_VERSION, [
       "headline", "summary", "stories", "summaries", "sources", "status", "confidence",
-    ])
-  ) {
+    ]);
+  if (!isLegacyPayload(content) && !canonical) {
+    return unsupportedBriefingPayload();
+  }
+  if (canonical && !validCanonicalBriefingRecords(content)) {
     return unsupportedBriefingPayload();
   }
   const sources = sourceItems(content.sources ?? content.evidence);

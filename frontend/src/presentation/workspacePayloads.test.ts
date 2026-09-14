@@ -85,6 +85,23 @@ describe("workspace payload normalization", () => {
     expect(payload.summary).toContain("Unsupported");
   });
 
+  it("rejects malformed canonical research records instead of fabricating identities", () => {
+    const payload = normalizeResearchWorkspacePayload({
+      schema: "charlie.research_workspace",
+      version: 1,
+      query: "q",
+      mode: "standard",
+      summary: "summary",
+      status: "complete",
+      confidence: 0.5,
+      findings: [{ title: "Missing canonical id", detail: "Evidence", source_ids: ["S1"] }],
+      sources: [{ id: "S1", title: "Source", url: "https://example.com", snippet: "Snippet" }],
+    });
+
+    expect(payload.status).toBe("unsupported");
+    expect(payload.findings).toEqual([]);
+  });
+
   it.each([
     ["future version", { schema: "charlie.briefing_workspace", version: 99, stories: [{ title: "future" }] }],
     ["wrong schema", { schema: "charlie.research_workspace", version: 1, findings: [{ title: "research" }] }],
@@ -105,6 +122,23 @@ describe("workspace payload normalization", () => {
     expect(payload.stories).toEqual([]);
     expect(payload.sources).toEqual([]);
     expect(payload.summary).toContain("Unsupported");
+  });
+
+  it("rejects malformed canonical briefing records instead of fabricating story identity", () => {
+    const payload = normalizeBriefingWorkspacePayload({
+      schema: "charlie.briefing_workspace",
+      version: 1,
+      headline: "Headline",
+      summary: "Summary",
+      stories: [{ title: "Missing canonical id", summary: "Details", source_ids: ["S1"] }],
+      summaries: ["Details"],
+      sources: [{ id: "S1", title: "Source", url: "https://example.com", snippet: "Snippet" }],
+      status: "complete",
+      confidence: 0.5,
+    });
+
+    expect(payload.status).toBe("unsupported");
+    expect(payload.stories).toEqual([]);
   });
 
   it("keeps unversioned legacy briefing payloads bounded and compatible", () => {
