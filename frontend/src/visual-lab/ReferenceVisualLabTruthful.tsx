@@ -170,10 +170,10 @@ function DataPlane({ label, kind = "unavailable" }: { label: string; kind?: Unav
   return <div className="ref-data-plane"><DataUnavailable label={label} kind={kind} /></div>;
 }
 
-function ReferenceCore({ position, tone = "cyan" }: { position: CorePosition; tone?: ReferenceTone }): ReactElement {
+function ReferenceCore({ position, tone = "cyan", showStatus = position === "center" }: { position: CorePosition; tone?: ReferenceTone; showStatus?: boolean }): ReactElement {
   const connected = useCharlieStore((state) => state.connected);
   const runtime = useCharlieStore((state) => state.visualRuntime);
-  return <div className={`ref-core ref-core--${position} ref-core--${tone}`} data-reference-core="authoritative-charlie-ring" data-core-position={position === "center" ? "center" : "dock_bottom_right"} data-core-tone={tone} role="img" aria-label={`C.H.A.R.L.I.E. ${connected ? runtime.label : "NOT VERIFIED"}`}><div className="ref-core__orb"><CharlieRing compact={position === "dock"} /><span className="ref-core__wordmark">C.H.A.R.L.I.E.</span></div><div className="ref-core__status"><span className="ref-core__label">{connected ? runtime.label : "NOT VERIFIED"}</span><span className="ref-core__subtext">{connected ? runtime.detail || "RUNTIME STATE OBSERVED" : "REAL DATA / UNAVAILABLE STATE"}</span><span className="ref-core__dots" aria-hidden="true"><i /><i /><i /></span></div></div>;
+  return <div className={`ref-core ref-core--${position} ref-core--${tone}`} data-reference-core="authoritative-charlie-ring" data-core-position={position === "center" ? "center" : "dock_bottom_right"} data-core-tone={tone} role="img" aria-label={`C.H.A.R.L.I.E. ${connected ? runtime.label : "NOT VERIFIED"}`}><div className="ref-core__orb"><CharlieRing compact={position === "dock"} /><span className="ref-core__wordmark">C.H.A.R.L.I.E.</span></div>{showStatus && <div className="ref-core__status"><span className="ref-core__label">{connected ? runtime.label : "NOT VERIFIED"}</span><span className="ref-core__subtext">{connected ? runtime.detail || "RUNTIME STATE OBSERVED" : "REAL DATA / UNAVAILABLE STATE"}</span><span className="ref-core__dots" aria-hidden="true"><i /><i /><i /></span></div>}</div>;
 }
 
 function WorkspaceHeading({ eyebrow, title, subtitle, className = "" }: { eyebrow: string; title: string; subtitle: string; className?: string }): ReactElement {
@@ -203,7 +203,7 @@ function SourceList({ sources }: { sources: Array<Record<string, unknown>> }): R
 
 function TimelineList({ items }: { items: Array<{ title: string; summary?: string; time?: string; timestamp?: string }> }): ReactElement {
   if (!items.length) return <DataUnavailable label="NO TIMELINE DATA AVAILABLE" />;
-  return <div className="ref-timeline">{items.slice(0, 5).map((item, index) => <div className="ref-timeline__item" key={`${item.title}-${index}`}><i /><strong>{item.time || item.timestamp || "TIME UNAVAILABLE"}</strong><span>{item.title || "EVENT UNAVAILABLE"}{item.summary ? ` · ${item.summary}` : ""}</span></div>)}</div>;
+  return <div className="ref-timeline">{items.slice(0, 5).map((item, index) => <div className="ref-timeline__item" key={`${item.title}-${index}`}><i /><strong>{item.time || item.timestamp || "TIME UNAVAILABLE"}</strong><span>{item.title || "EVENT UNAVAILABLE"}{item.summary ? ` / ${item.summary}` : ""}</span></div>)}</div>;
 }
 
 function FindingsList({ payload }: { payload: ResearchWorkspacePayload | null }): ReactElement {
@@ -229,7 +229,7 @@ function ResearchScreen({ selected, screenId, payload, content, result }: { sele
 
 function OnlineScreen({ status, netHistory }: { status: SystemStatus | null; netHistory: number[] }): ReactElement {
   const cpu = status?.cpu ?? null;
-  return <div className="ref-screen ref-online" data-reference-screen="ref-online"><ReferenceCore position="center" /><ReferencePanel eyebrow="SYSTEM" title="CPU USAGE" className="ref-online-system"><div className="ref-online-metric">{cpu === null ? "—" : cpu}<span>{cpu === null ? "" : "%"}</span></div>{netHistory.length ? <div className="ref-live-sparkline">{netHistory.slice(-24).map((value, index) => <i key={`${value}-${index}`} style={{ height: `${Math.max(5, Math.min(100, value / Math.max(...netHistory, 1) * 100))}%` }} />)}</div> : <DataUnavailable label="NO TELEMETRY HISTORY AVAILABLE" />}<dl><dt>Core Temperature</dt><dd>UNAVAILABLE</dd><dt>Fan Speed</dt><dd>UNAVAILABLE</dd></dl></ReferencePanel><div className="ref-online-prompt"><DataUnavailable label="RUNTIME STATE UNAVAILABLE" /></div></div>;
+  return <div className="ref-screen ref-online" data-reference-screen="ref-online"><ReferenceCore position="center" /><ReferencePanel eyebrow="SYSTEM" title="CPU USAGE" className="ref-online-system"><div className={`ref-online-metric${cpu === null ? " is-unavailable" : ""}`}>{cpu === null ? "UNAVAILABLE" : cpu}<span>{cpu === null ? "" : "%"}</span></div>{netHistory.length ? <div className="ref-live-sparkline">{netHistory.slice(-24).map((value, index) => <i key={`${value}-${index}`} style={{ height: `${Math.max(5, Math.min(100, value / Math.max(...netHistory, 1) * 100))}%` }} />)}</div> : <DataUnavailable label="NO TELEMETRY HISTORY AVAILABLE" />}<dl><dt>Core Temperature</dt><dd>UNAVAILABLE</dd><dt>Fan Speed</dt><dd>UNAVAILABLE</dd></dl></ReferencePanel><div className="ref-online-prompt"><DataUnavailable label="RUNTIME STATE UNAVAILABLE" /></div></div>;
 }
 
 function VisionSurface({ content }: { content: Record<string, unknown> }): ReactElement {
@@ -351,5 +351,5 @@ export function ReferenceVisualLab({ scenario }: ReferenceVisualLabProps): React
   const centered = isCenteredScenario(scenario);
   const sourceLabel = connected ? "SANDBOXED RUNTIME" : "NOT VERIFIED";
   const data: ReferenceDataSnapshot = { connected, intents, researchPayload: research.payload, researchContent: research.content, latestResearchResult, briefingPayload: briefing.payload, briefingContent: briefing.content, visionContent, systemContent, systemStatus, subsystemHealth, tasks, activities, approval, netHistory, settings };
-  return <main className={`charlie-scene-root reference-lab reference-lab--${centered ? "centered" : "workspace"}`} data-visual-lab="TEST/MOCK" data-reference-lab="TEST/MOCK" data-reference-scenario={scenario} data-reference-source={sourceLabel} data-core-position={centered ? "center" : "dock_bottom_right"} aria-label={`TEST/MOCK reference visual scenario ${scenario}`}><EnvironmentLayer corePosition={centered ? "center" : "dock_bottom_right"} hasWorkspace={!centered} /><div className="reference-lab__content"><ReferenceScreen scenario={scenario} data={data} /></div><div className="reference-proof-badge">TEST/MOCK · {sourceLabel}</div><div className="sr-only">TEST/MOCK reference visual lab — not runtime acceptance</div></main>;
+  return <main className={`charlie-scene-root reference-lab reference-lab--${centered ? "centered" : "workspace"}`} data-visual-lab="TEST/MOCK" data-reference-lab="TEST/MOCK" data-reference-scenario={scenario} data-reference-source={sourceLabel} data-core-position={centered ? "center" : "dock_bottom_right"} aria-label={`TEST/MOCK reference visual scenario ${scenario}`}><EnvironmentLayer corePosition={centered ? "center" : "dock_bottom_right"} hasWorkspace={!centered} /><div className="reference-lab__content"><ReferenceScreen scenario={scenario} data={data} /></div><div className="sr-only">TEST/MOCK reference visual lab - not runtime acceptance</div></main>;
 }

@@ -149,4 +149,15 @@ describe("TEST/MOCK visual lab", () => {
       "UNAVAILABLE",
     ]);
   });
+
+  test("keeps docked reference core ring-only", async () => {
+    const { container } = render(
+      <MemoryRouter>
+        <VisualLabHarness scenario="ref-active-docked" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("C.H.A.R.L.I.E.")).toBeInTheDocument();
+    expect(container.querySelector(".ref-core--dock .ref-core__status")).toBeNull();
+  });
 });
