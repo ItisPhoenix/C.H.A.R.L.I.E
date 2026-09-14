@@ -81,9 +81,9 @@ export function VisionWorkspace({ workspace }: { workspace: WorkspaceInstance })
         : "NO LIVE MEDIA AVAILABLE";
 
   return (
-    <div className="w-full h-full flex flex-col justify-between font-mono select-none text-left p-2 overflow-y-auto space-y-4">
+    <div className="vision-workspace w-full h-full flex flex-col justify-between font-mono select-none text-left p-2 overflow-y-auto space-y-4">
       {/* Header */}
-      <div className="flex items-start justify-between border-b border-cyan-500/20 pb-3">
+      <div className="vision-workspace__header flex items-start justify-between border-b border-cyan-500/20 pb-3">
         <div>
           <div className="text-[10px] text-cyan-400 font-bold tracking-widest uppercase mb-0.5 flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
@@ -105,9 +105,9 @@ export function VisionWorkspace({ workspace }: { workspace: WorkspaceInstance })
       </div>
 
       {/* Main Viewport */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+      <div className="vision-workspace__viewport grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Visual Frame with Bounding Box Overlays */}
-        <div className="lg:col-span-8 relative aspect-video rounded-xl border border-cyan-500/30 bg-slate-950 overflow-hidden shadow-2xl">
+        <div className="vision-workspace__frame lg:col-span-8 relative aspect-video rounded-xl border border-cyan-500/30 bg-slate-950 overflow-hidden shadow-2xl">
           {imageUrl ? (
             <img src={imageUrl} alt="Perception Frame" className="w-full h-full object-contain" />
           ) : (
@@ -151,7 +151,7 @@ export function VisionWorkspace({ workspace }: { workspace: WorkspaceInstance })
         </div>
 
         {/* Detections List & Grounding Logs */}
-        <div className="lg:col-span-4 flex flex-col gap-4">
+        <div className="vision-workspace__results lg:col-span-4 flex flex-col gap-4">
           <div className="text-left">
             <div className="text-xs font-semibold text-cyan-200 tracking-wider uppercase">
               DETECTION RESULTS
@@ -165,7 +165,7 @@ export function VisionWorkspace({ workspace }: { workspace: WorkspaceInstance })
             {boxes.length > 0 ? boxes.map((b) => (
               <div
                 key={b.id}
-                className="p-3 rounded-xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md flex items-center justify-between gap-3 text-left hover:border-cyan-400/40 transition"
+                className="vision-workspace__result p-3 rounded-xl border border-cyan-500/20 bg-slate-950/60 backdrop-blur-md flex items-center justify-between gap-3 text-left hover:border-cyan-400/40 transition"
               >
                 <div>
                   <div className="text-xs font-bold text-slate-200 font-mono">
@@ -180,10 +180,10 @@ export function VisionWorkspace({ workspace }: { workspace: WorkspaceInstance })
                 </span>
               </div>
             )) : desktopFrame?.marks.length ? desktopFrame.marks.map((mark) => (
-              <div key={mark.markId} className="p-3 border border-cyan-500/15 text-[11px] text-slate-400" data-testid="vision-mark">
+              <div key={mark.markId} className="vision-workspace__result p-3 border border-cyan-500/15 text-[11px] text-slate-400" data-testid="vision-mark">
                 MARK {mark.markId}: {mark.name}
               </div>
-            )) : <div className="p-3 border border-cyan-500/15 text-[11px] text-slate-500 italic" role="status">{emptyMessage}</div>}
+            )) : <div className="vision-workspace__result p-3 border border-cyan-500/15 text-[11px] text-slate-500 italic" role="status">{emptyMessage}</div>}
           </div>
         </div>
       </div>

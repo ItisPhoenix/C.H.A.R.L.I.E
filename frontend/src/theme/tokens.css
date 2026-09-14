@@ -27,6 +27,26 @@
   --glow-warning: 0 0 1px rgba(251, 191, 36, 0.7), 0 0 12px rgba(251, 191, 36, 0.16);
   --glow-success: 0 0 1px rgba(52, 211, 153, 0.7), 0 0 12px rgba(52, 211, 153, 0.16);
 
+  /* Spatial HUD system: typography, spacing, signal lines, and restrained bloom. */
+  --type-display: clamp(2.15rem, 4.2vw, 5rem);
+  --type-title: clamp(1.65rem, 2.8vw, 3.25rem);
+  --type-section: clamp(0.72rem, 0.86vw, 0.9rem);
+  --type-body: clamp(0.875rem, 0.95vw, 1rem);
+  --type-data: clamp(0.78rem, 0.82vw, 0.9rem);
+  --type-meta: clamp(0.68rem, 0.72vw, 0.78rem);
+  --type-control: 0.72rem;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --hud-line: rgba(93, 218, 255, 0.16);
+  --hud-line-strong: rgba(93, 218, 255, 0.34);
+  --hud-glow-atmosphere: rgba(0, 126, 194, 0.18);
+  --hud-glow-bloom: rgba(34, 211, 238, 0.2);
+  --hud-glow-electric: rgba(93, 218, 255, 0.45);
+
   --font-sans: "Geist", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Mono", "Segoe UI Mono", Consolas, monospace;
 
@@ -72,4 +92,7 @@
   --scene-frame-tick: var(--color-frame-tick);
   --font-ui: var(--font-sans);
   --font-technical: var(--font-mono);
+  --font-display: var(--font-sans);
+  --font-body: var(--font-sans);
+  --font-data: var(--font-mono);
 }

@@ -916,3 +916,347 @@
   color: #d8f8ff;
   text-shadow: 0 0 5px rgba(80, 203, 237, .5), 0 0 12px rgba(34, 211, 238, .18);
 }
+
+/* Production spatial visual contract: the persistent environment carries the
+   surface; typography, spacing, and partial signal lines carry hierarchy. */
+:root {
+  --scene-safe-x: clamp(14px, 3.5vw, 48px);
+  --scene-safe-y: clamp(14px, 3.5vh, 48px);
+  --core-center-size: clamp(160px, 20vh, 240px);
+  --core-docked-size: 148px;
+  --workspace-core-safe: clamp(140px, 12vw, 190px);
+}
+
+.charlie-scene-root {
+  background:
+    radial-gradient(circle at 50% 44%, rgba(11, 39, 59, .28), transparent 44%),
+    var(--scene-bg-deep);
+}
+
+.charlie-env-base {
+  background:
+    radial-gradient(circle at var(--light-x, 50%) var(--light-y, 50%),
+      #0d2a40 0%, #071725 34%, #02060c 78%, #010306 100%);
+}
+
+.charlie-env-grid {
+  opacity: .3;
+  mask-image: radial-gradient(ellipse at center, rgba(0, 0, 0, .72) 14%, rgba(0, 0, 0, 0) 76%);
+  -webkit-mask-image: radial-gradient(ellipse at center, rgba(0, 0, 0, .72) 14%, rgba(0, 0, 0, 0) 76%);
+}
+
+.charlie-workspace-host {
+  padding: clamp(10px, 1.5vw, 24px) var(--workspace-core-safe) clamp(14px, 2vh, 28px) clamp(8px, 2vw, 32px);
+}
+
+.charlie-spatial-composition {
+  font-family: var(--font-body);
+  font-size: var(--type-body);
+  line-height: 1.5;
+}
+
+.charlie-spatial-composition .spatial-kicker,
+.charlie-spatial-composition .system-runtime-state,
+.charlie-spatial-composition .system-topology-subtitle,
+.charlie-spatial-composition .spatial-subtitle,
+.charlie-spatial-composition .rail-label {
+  font-family: var(--font-data);
+}
+
+.charlie-spatial-composition .spatial-kicker {
+  font-size: var(--type-section);
+  letter-spacing: .14em;
+  line-height: 1.3;
+}
+
+.charlie-spatial-composition .spatial-subtitle {
+  font-size: var(--type-meta);
+  letter-spacing: .1em;
+}
+
+.charlie-spatial-composition .spatial-heading h1,
+.charlie-spatial-composition .briefing-rail h1,
+.charlie-workspace-vision h1,
+.tasks-workspace__header h1 {
+  font-family: var(--font-display);
+  font-size: var(--type-title);
+  font-weight: 500;
+  letter-spacing: .04em;
+  line-height: 1.08;
+}
+
+.charlie-spatial-composition .spatial-objective,
+.charlie-spatial-composition .briefing-summary,
+.charlie-spatial-composition .finding-signal p,
+.charlie-workspace-vision .text-slate-400,
+.charlie-workspace-vision .text-slate-500 {
+  font-family: var(--font-body);
+  font-size: var(--type-body);
+  line-height: 1.55;
+}
+
+.charlie-spatial-composition .font-mono,
+.charlie-spatial-composition table,
+.charlie-spatial-composition .system-topology-health,
+.charlie-spatial-composition .log-row,
+.charlie-spatial-composition .operation-row em {
+  font-family: var(--font-data);
+  font-size: var(--type-data);
+}
+
+/* Open primitives: source/evidence and chart data are projections into the
+   environment, never nested dashboard panels. */
+.charlie-spatial-composition .charlie-context-card,
+.charlie-spatial-composition .charlie-evidence-card,
+.charlie-spatial-composition .briefing-sources,
+.charlie-spatial-composition .research-visual,
+.charlie-spatial-composition .research-density,
+.charlie-spatial-composition .research-chart,
+.charlie-spatial-composition .research-support,
+.charlie-spatial-composition .system-topology {
+  border-radius: 0 !important;
+  border-right: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+.charlie-spatial-composition .research-visual {
+  border-left: 1px solid var(--hud-line) !important;
+  border-top: 0 !important;
+  border-bottom: 0 !important;
+  background: radial-gradient(ellipse at center, rgba(8, 40, 58, .16), transparent 72%) !important;
+}
+
+.charlie-spatial-composition .research-support {
+  border-top-color: var(--hud-line-strong) !important;
+}
+
+.charlie-spatial-composition .research-findings,
+.charlie-spatial-composition .briefing-rail {
+  border-left-color: var(--hud-line) !important;
+}
+
+.charlie-spatial-composition .charlie-card-header {
+  border-bottom-color: var(--hud-line) !important;
+}
+
+.charlie-spatial-composition .charlie-card-header strong,
+.charlie-spatial-composition .charlie-card-header span,
+.charlie-spatial-composition .charlie-evidence-card p {
+  font-family: var(--font-body);
+}
+
+.charlie-spatial-composition .charlie-evidence-deck {
+  gap: clamp(14px, 2vw, 28px);
+}
+
+.charlie-spatial-composition .briefing-map {
+  background: radial-gradient(ellipse at center, rgba(7, 37, 54, .16), transparent 72%) !important;
+}
+
+/* Runtime and task telemetry use rows, rails, and values instead of boxes. */
+.system-composition,
+.tasks-workspace {
+  font-family: var(--font-body) !important;
+  font-size: var(--type-body);
+}
+
+.system-composition .system-topology {
+  border-top: 1px solid var(--hud-line-strong) !important;
+  border-left: 0 !important;
+  padding-inline: 0 !important;
+}
+
+.system-composition .system-operations {
+  border-left-color: var(--hud-line) !important;
+}
+
+.system-composition .system-live-telemetry strong {
+  font-family: var(--font-data);
+  font-size: var(--type-data);
+}
+
+.tasks-workspace__header {
+  border-bottom-color: var(--hud-line-strong) !important;
+}
+
+.tasks-workspace .tasks-status-strip,
+.tasks-workspace .tasks-panel,
+.tasks-workspace .tasks-task-row,
+.tasks-workspace__background {
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+.tasks-workspace .tasks-status-strip,
+.tasks-workspace .tasks-panel {
+  border: 0 !important;
+  border-top: 1px solid var(--hud-line) !important;
+}
+
+.tasks-workspace .tasks-status-badge {
+  min-width: 0;
+  border: 0 !important;
+  background: transparent !important;
+  padding-inline: 0 !important;
+}
+
+.tasks-workspace .tasks-panel .rounded-full {
+  border-radius: 0 !important;
+  border: 0 !important;
+  background: rgba(93, 218, 255, .12) !important;
+}
+
+.tasks-workspace .tasks-panel .rounded-lg {
+  border: 0 !important;
+  border-bottom: 1px solid var(--hud-line) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+.tasks-workspace .tasks-task-row {
+  border: 0 !important;
+  border-left: 1px solid var(--hud-line-strong) !important;
+  border-bottom: 1px solid var(--hud-line) !important;
+}
+
+/* Vision remains truthful while its frame and result list dissolve into the
+   same environment as every other workspace. */
+.vision-workspace {
+  font-family: var(--font-body) !important;
+  font-size: var(--type-body);
+  gap: var(--space-5) !important;
+  padding: clamp(8px, 1.5vw, 20px) clamp(4px, 2vw, 28px) 28px !important;
+}
+
+.vision-workspace__header {
+  border-bottom-color: var(--hud-line-strong) !important;
+}
+
+.vision-workspace__frame {
+  border: 0 !important;
+  border-left: 1px solid var(--hud-line-strong) !important;
+  border-top: 1px solid var(--hud-line) !important;
+  border-radius: 0 !important;
+  background: radial-gradient(ellipse at center, rgba(7, 37, 54, .16), transparent 74%) !important;
+  box-shadow: none !important;
+}
+
+.vision-workspace__results {
+  gap: var(--space-4) !important;
+}
+
+.vision-workspace__result {
+  border: 0 !important;
+  border-bottom: 1px solid var(--hud-line) !important;
+  border-left: 1px solid var(--hud-line) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+/* A single atmospheric bloom supports the existing canvas layers; no new
+   visible ring geometry is introduced. */
+.charlie-core-wrapper > div:first-child {
+  z-index: 1;
+}
+
+.charlie-core-center::before {
+  content: "";
+  position: absolute;
+  inset: -16%;
+  z-index: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--hud-glow-bloom) 0%, var(--hud-glow-atmosphere) 42%, transparent 72%);
+  filter: blur(10px);
+  opacity: .7;
+  pointer-events: none;
+}
+
+.charlie-core-docked::before {
+  inset: -18px;
+  background: radial-gradient(circle, var(--hud-glow-bloom) 0%, var(--hud-glow-atmosphere) 46%, transparent 76%);
+  filter: blur(5px);
+}
+
+.charlie-core-center .hud-ring,
+.charlie-core-docked .hud-ring {
+  filter: drop-shadow(0 0 8px rgba(34, 211, 238, .18));
+}
+
+.charlie-core-docked {
+  bottom: calc(var(--scene-safe-y) + 18px);
+  right: calc(var(--scene-safe-x) + 18px);
+}
+
+@media (max-width: 900px) {
+  .charlie-workspace-host {
+    padding-left: 4px;
+    padding-right: calc(var(--workspace-core-safe) + 4px);
+  }
+
+  .charlie-spatial-composition .spatial-heading h1,
+  .charlie-spatial-composition .briefing-rail h1,
+  .charlie-workspace-vision h1,
+  .tasks-workspace__header h1 {
+    font-size: clamp(1.35rem, 5vw, 2.2rem);
+  }
+
+  .vision-workspace__viewport {
+    gap: var(--space-5) !important;
+  }
+}
+
+@media (max-width: 560px) {
+  .charlie-workspace-host {
+    padding-left: 0;
+    padding-right: calc(var(--workspace-core-safe) + 2px);
+  }
+
+  .charlie-workspace-controls {
+    top: 0;
+    right: 0;
+  }
+
+  .charlie-spatial-composition .spatial-kicker {
+    letter-spacing: .1em;
+  }
+
+  .vision-workspace {
+    padding-inline: 0 !important;
+  }
+}
+
+@media (max-width: 1439px) {
+  :root {
+    --core-docked-size: 132px;
+  }
+}
+
+@media (max-width: 1099px) {
+  :root {
+    --core-center-size: clamp(144px, 22vh, 198px);
+    --core-docked-size: 120px;
+    --workspace-core-safe: clamp(126px, 14vw, 170px);
+  }
+}
+
+@media (max-width: 900px) {
+  :root {
+    --core-center-size: clamp(124px, 20vh, 174px);
+    --core-docked-size: 112px;
+    --workspace-core-safe: 126px;
+  }
+}
+
+@media (max-width: 560px) {
+  :root {
+    --core-center-size: 124px;
+    --core-docked-size: 104px;
+    --workspace-core-safe: 112px;
+  }
+}
