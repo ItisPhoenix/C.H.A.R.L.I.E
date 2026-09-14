@@ -67,7 +67,16 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
         ) : heatmap ? (
           <DensityHeatmapPrimitive data={heatmap} />
         ) : (
-          <div className="spatial-empty">NO GROUNDED SPATIAL OR TEMPORAL VISUAL AVAILABLE</div>
+          <div className="research-empty-field" data-testid="research-grounded-signal">
+            <div className="spatial-kicker">GROUNDED RESEARCH SIGNAL</div>
+            <p>{payload.summary || "NO GROUNDED SUMMARY REPORTED"}</p>
+            <div className="research-signal-metrics" aria-label="Research evidence counts">
+              <span><strong>{findings.length}</strong> FINDINGS</span>
+              <span><strong>{sources.length}</strong> SOURCES</span>
+              <span><strong>{timeline.length}</strong> TIMELINE EVENTS</span>
+            </div>
+            <div className="research-signal-unavailable">NO GROUNDED SPATIAL OR TEMPORAL VISUAL AVAILABLE</div>
+          </div>
         )}
       </section>
       <section className="research-findings spatial-rail-section">

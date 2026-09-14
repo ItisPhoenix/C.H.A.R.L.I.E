@@ -38,6 +38,19 @@ than creating dashboard pages.
 - Controls stay quiet until hover/focus. Every interactive control keeps a
   visible keyboard focus treatment.
 
+## Reference calibration
+
+- The canonical wordmark is `C.H.A.R.L.I.E.` in centered and docked modes.
+- The complete centered orbit system targets roughly 60% of viewport height;
+  the complete docked orbit targets roughly 46% of viewport height. Positioning
+  remains normalized to the centered 50%/50% origin and the docked lower-right
+  safe area.
+- Ring light is layered on one circumference: deep-blue atmosphere, cyan bloom,
+  electric band, thin white-hot core, and one moving partial sweep. No extra
+  visible concentric geometry is added.
+- Media frames feather into the environment. Missing media is a spatial
+  unavailable state, never a fabricated black panel.
+
 ## Truth boundary
 
 Backend/main remains authoritative for runtime, task, research, briefing,

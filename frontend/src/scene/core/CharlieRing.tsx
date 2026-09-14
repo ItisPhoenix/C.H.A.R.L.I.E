@@ -54,11 +54,11 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
   idle: {
     energy: 0.72,
     motion: 0.08,
-    accent: "#109fd1",
-    electric: "#4cddfa",
-    hot: "#eafcff",
+    accent: "#18bce8",
+    electric: "#52e8ff",
+    hot: "#f5fdff",
     deep: "#01040a",
-    glow: "rgba(28, 157, 210, 0.27)",
+    glow: "rgba(28, 157, 210, 0.38)",
   },
   listening: {
     energy: 0.98,
@@ -427,6 +427,7 @@ function drawConcentricStructure(
   const rotation = reduceMotion ? 0 : time * 0.0006 * (1 + profile.motion);
 
   ctx.save();
+  ctx.globalCompositeOperation = "lighter";
   const aura = ctx.createRadialGradient(
     centerX,
     centerY,
@@ -436,8 +437,9 @@ function drawConcentricStructure(
     radius + unit * (compact ? 0.085 : 0.1),
   );
   aura.addColorStop(0, "rgba(0, 240, 255, 0)");
-  aura.addColorStop(0.28, colorWithAlpha(profile.electric, isIdle ? 0.14 : 0.16));
-  aura.addColorStop(0.58, profile.glow);
+  aura.addColorStop(0.18, colorWithAlpha(profile.electric, isIdle ? 0.2 : 0.24));
+  aura.addColorStop(0.46, profile.glow);
+  aura.addColorStop(0.76, "rgba(0, 96, 168, 0.11)");
   aura.addColorStop(1, "rgba(0, 0, 0, 0)");
   ctx.fillStyle = aura;
   ctx.beginPath();
@@ -472,10 +474,10 @@ function drawConcentricStructure(
     ctx.stroke();
   });
 
-  ctx.strokeStyle = colorWithAlpha(profile.accent, isIdle ? 0.98 : 0.94);
-  ctx.lineWidth = Math.max(compact ? 1.8 : 2.2, unit * (isIdle ? 0.01 : 0.011));
+  ctx.strokeStyle = colorWithAlpha(profile.electric, isIdle ? 0.92 : 0.96);
+  ctx.lineWidth = Math.max(compact ? 2.4 : 3.2, unit * (isIdle ? 0.013 : 0.014));
   ctx.shadowColor = profile.electric;
-  ctx.shadowBlur = compact ? 3.5 : 5;
+  ctx.shadowBlur = compact ? 5 : 8;
   ctx.beginPath();
   ctx.arc(centerX, centerY, radius, 0, TWO_PI);
   ctx.stroke();
@@ -493,10 +495,10 @@ function drawConcentricStructure(
   ctx.stroke();
 
   const innerRadius = radius - edgeOffset;
-  ctx.strokeStyle = colorWithAlpha(profile.hot, active ? 0.38 : 0.22);
-  ctx.lineWidth = Math.max(0.8, unit * 0.002);
+  ctx.strokeStyle = colorWithAlpha(profile.hot, active ? 0.78 : 0.68);
+  ctx.lineWidth = Math.max(1.1, unit * 0.0032);
   ctx.shadowColor = profile.hot;
-  ctx.shadowBlur = compact ? 1 : 1.5;
+  ctx.shadowBlur = compact ? 2 : 3;
   ctx.beginPath();
   ctx.arc(centerX, centerY, innerRadius, 0, TWO_PI);
   ctx.stroke();

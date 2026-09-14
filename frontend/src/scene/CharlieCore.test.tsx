@@ -34,6 +34,7 @@ describe("CharlieCore authority", () => {
     expect(screen.getAllByTestId("charlie-core")).toHaveLength(1);
     expect(container.querySelectorAll('[data-core-renderer="authoritative-charlie-ring"]')).toHaveLength(1);
     expect(container.querySelector(".charlie-core-status-bar")).toBeInTheDocument();
+    expect(screen.getByText("C.H.A.R.L.I.E.")).toBeInTheDocument();
   });
 
   test("docked mode uses same renderer and omits status metadata", () => {

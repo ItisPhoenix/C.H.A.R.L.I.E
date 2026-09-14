@@ -18,6 +18,8 @@
   gap: 20px;
   padding: 12px clamp(8px, 2vw, 28px) 30px;
   font-size: 13px;
+  min-width: 0;
+  overflow-x: clip;
 }
 
 .tasks-workspace__header h1 {
@@ -34,6 +36,8 @@
 
 .tasks-workspace__layout {
   gap: clamp(20px, 3vw, 48px);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .tasks-workspace__journal {
@@ -42,6 +46,7 @@
 
 .tasks-workspace__background {
   min-width: 0;
+  max-width: 100%;
   border-left: 1px solid rgba(34, 211, 238, .16);
   padding-left: clamp(14px, 2vw, 28px);
 }
@@ -51,6 +56,8 @@
   border-left: 2px solid rgba(34, 211, 238, .24);
   background: rgba(2, 8, 15, .48);
   padding: 14px 16px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .tasks-task-row:has(.text-emerald-400) {
@@ -83,5 +90,44 @@
     border-left: 0;
     border-top: 1px solid rgba(34, 211, 238, .16);
     padding: 16px 0 0;
+  }
+}
+
+.tasks-workspace__header h1 {
+  letter-spacing: .015em;
+  text-transform: none;
+}
+
+.tasks-workspace .tasks-status-strip {
+  padding-left: 10px;
+  background: transparent;
+}
+
+.tasks-workspace .tasks-panel {
+  padding: 16px 0;
+}
+
+.tasks-workspace .tasks-panel .rounded-full {
+  height: 4px;
+  background: linear-gradient(90deg, rgba(34, 211, 238, .72), rgba(34, 211, 238, .16)) !important;
+}
+
+.tasks-task-row {
+  padding-inline: 12px;
+}
+
+@media (max-width: 900px) {
+  .tasks-workspace__header {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .tasks-workspace__header > div:first-child {
+    min-width: 0;
+    flex: 1 1 220px;
+  }
+
+  .tasks-workspace__header h1 {
+    overflow-wrap: anywhere;
   }
 }

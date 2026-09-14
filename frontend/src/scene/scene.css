@@ -1260,3 +1260,146 @@
     --workspace-core-safe: 112px;
   }
 }
+
+/* Reference-calibrated production geometry. The wrapper carries the complete
+   orbit system; the shared ring renderer keeps its own normalized radii. */
+:root {
+  --core-center-size: clamp(240px, 59.7vh, 650px);
+  --core-docked-size: clamp(220px, 45.8vh, 500px);
+  --workspace-core-safe: calc(var(--core-docked-size) + 24px);
+}
+
+.charlie-scene-root {
+  background:
+    radial-gradient(circle at 50% 46%, rgba(11, 39, 59, .1), transparent 38%),
+    var(--scene-bg-deep);
+}
+
+.charlie-env-base {
+  background:
+    radial-gradient(circle at var(--light-x, 50%) var(--light-y, 50%),
+      #0a2132 0%, #061522 30%, #02060c 72%, #010306 100%);
+}
+
+.charlie-env-grid {
+  opacity: .24;
+}
+
+.charlie-core-center::before {
+  inset: -10%;
+  background: radial-gradient(circle, rgba(34, 211, 238, .16) 0%, rgba(0, 126, 194, .12) 44%, transparent 72%);
+  filter: blur(8px);
+  opacity: .54;
+}
+
+.charlie-core-docked::before {
+  inset: -16px;
+  background: radial-gradient(circle, rgba(34, 211, 238, .16) 0%, rgba(0, 126, 194, .1) 46%, transparent 74%);
+  filter: blur(4px);
+}
+
+.charlie-core-docked {
+  bottom: calc(var(--scene-safe-y) + clamp(18px, 2.5vh, 30px));
+  right: calc(var(--scene-safe-x) + clamp(18px, 2.5vw, 30px));
+}
+
+.charlie-core-center .hud-ring,
+.charlie-core-docked .hud-ring {
+  filter: drop-shadow(0 0 10px rgba(34, 211, 238, .26));
+}
+
+.charlie-core-brand-center {
+  color: #f2fcff;
+  font-family: var(--font-data);
+  font-size: clamp(16px, 1.2vw, 22px);
+  letter-spacing: .16em;
+  text-shadow: 0 0 8px rgba(93, 218, 255, .7), 0 0 18px rgba(34, 211, 238, .32);
+}
+
+.charlie-core-docked .charlie-core-brand-center {
+  font-size: clamp(11px, .86vw, 16px);
+  letter-spacing: .12em;
+}
+
+.charlie-core-center[data-core-display-state="idle"] .charlie-core-state-subtext {
+  display: block;
+}
+
+.charlie-core-center[data-core-display-state="idle"] .charlie-core-indicator-dots {
+  display: flex;
+}
+
+.charlie-core-center .charlie-core-status-bar {
+  top: calc(100% - 2px);
+  gap: 9px;
+}
+
+.charlie-spatial-composition .spatial-heading h1,
+.charlie-spatial-composition .briefing-rail h1,
+.charlie-workspace-vision h1,
+.tasks-workspace__header h1 {
+  letter-spacing: .015em;
+  text-transform: none;
+}
+
+.charlie-spatial-composition .spatial-kicker,
+.charlie-spatial-composition .rail-label {
+  letter-spacing: .11em;
+}
+
+/* A media frame should dissolve into the scene. Only supplied media becomes
+   dominant; an unavailable frame remains a quiet spatial status field. */
+.vision-workspace__frame {
+  overflow: visible !important;
+  border: 0 !important;
+  background: radial-gradient(ellipse at center, rgba(8, 39, 57, .18), transparent 72%) !important;
+  mask-image: radial-gradient(ellipse 91% 90% at center, #000 58%, rgba(0, 0, 0, .86) 82%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 91% 90% at center, #000 58%, rgba(0, 0, 0, .86) 82%, transparent 100%);
+}
+
+.vision-workspace__frame::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, rgba(93, 218, 255, .42), transparent 14%, transparent 86%, rgba(93, 218, 255, .2)) top / 100% 1px no-repeat,
+    linear-gradient(90deg, rgba(93, 218, 255, .18), transparent 12%, transparent 88%, rgba(93, 218, 255, .28)) bottom / 100% 1px no-repeat,
+    radial-gradient(ellipse at center, transparent 54%, rgba(1, 7, 13, .48) 100%);
+}
+
+.vision-workspace__frame img {
+  display: block;
+  mask-image: radial-gradient(ellipse 92% 92% at center, #000 60%, rgba(0, 0, 0, .86) 85%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 92% 92% at center, #000 60%, rgba(0, 0, 0, .86) 85%, transparent 100%);
+}
+
+.vision-workspace__frame > div[role="status"] {
+  background: transparent !important;
+  color: var(--scene-text-secondary) !important;
+}
+
+@media (max-width: 1439px) {
+  :root {
+    --core-center-size: clamp(240px, 59.7vh, 650px);
+    --core-docked-size: clamp(220px, 45.8vh, 500px);
+    --workspace-core-safe: calc(var(--core-docked-size) + 20px);
+  }
+}
+
+@media (max-width: 900px) {
+  :root {
+    --core-center-size: clamp(220px, 59.7vh, 420px);
+    --core-docked-size: clamp(200px, 45.8vh, 360px);
+    --workspace-core-safe: calc(var(--core-docked-size) + 16px);
+  }
+}
+
+@media (max-width: 560px) {
+  :root {
+    --core-center-size: clamp(210px, 59.7vh, 360px);
+    --core-docked-size: clamp(190px, 45.8vh, 280px);
+    --workspace-core-safe: calc(var(--core-docked-size) + 12px);
+  }
+}

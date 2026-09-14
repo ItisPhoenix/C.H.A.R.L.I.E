@@ -38,9 +38,10 @@ describe("Phase 9 Workspaces Suite", () => {
   test("ResearchWorkspace renders objective, key findings, and tactical elements", () => {
     render(<ResearchWorkspace workspace={mockWorkspace} />);
     expect(screen.getByText("RESEARCH WORKSPACE")).toBeDefined();
-    expect(screen.getByText("Verify operational readiness of test subsystem.")).toBeDefined();
+    expect(screen.getAllByText("Verify operational readiness of test subsystem.").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("KEY FINDINGS & ANALYTICAL SIGNALS")).toBeDefined();
     expect(screen.getByText("TEST FINDING")).toBeDefined();
+    expect(screen.getByTestId("research-grounded-signal")).toHaveTextContent("FINDINGS");
   });
 
   test("BriefingWorkspace renders top headline, summary, and timeline", () => {
@@ -62,6 +63,7 @@ describe("Phase 9 Workspaces Suite", () => {
     expect(screen.getByText("TOP HEADLINE")).toBeDefined();
     expect(screen.getByText("GLOBAL BRIEFING UPDATE")).toBeDefined();
     expect(screen.getByText("SOURCE FEED")).toBeDefined();
+    expect(screen.getByText("GROUNDED NEWS SIGNAL")).toBeDefined();
   });
 
   test("SystemWorkspace renders task status, vitals overview, and live processes", () => {

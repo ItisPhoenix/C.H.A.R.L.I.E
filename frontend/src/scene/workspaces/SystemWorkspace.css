@@ -429,3 +429,95 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* Runtime truth stays dense, but separators become local anchors instead of
+   reconstructing a topology panel. */
+.system-composition .system-topology {
+  border-top: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.system-composition .system-topology-heading {
+  position: relative;
+  padding-top: 10px;
+}
+
+.system-composition .system-topology-heading::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 72px;
+  height: 1px;
+  background: rgba(93, 218, 255, .42);
+}
+
+.system-composition .system-subsystem-list {
+  border-top: 0;
+  gap: 5px;
+}
+
+.system-composition .system-subsystem-row {
+  position: relative;
+  min-height: 46px;
+  border-bottom: 0;
+  padding-left: 12px;
+}
+
+.system-composition .system-subsystem-row::before {
+  content: "";
+  position: absolute;
+  top: 17px;
+  left: 0;
+  width: 4px;
+  height: 1px;
+  background: var(--hud-line-strong);
+}
+
+.system-composition .system-subsystem-row[data-health-status="degraded"]::before,
+.system-composition .system-subsystem-row[data-health-status="unavailable"]::before {
+  width: 8px;
+  background: var(--color-status-warning);
+}
+
+.system-composition .system-subsystem-row[data-health-status="error"]::before {
+  width: 8px;
+  background: var(--color-status-error);
+}
+
+.system-composition .system-operations {
+  border-left: 0 !important;
+  padding-left: 12px !important;
+}
+
+.system-composition .operation-row {
+  position: relative;
+  min-height: 58px;
+  border-bottom: 0;
+  padding-left: 10px;
+}
+
+.system-composition .operation-row::before {
+  content: "";
+  position: absolute;
+  top: 27px;
+  left: 0;
+  width: 5px;
+  height: 1px;
+  background: var(--hud-line-strong);
+}
+
+.system-composition .system-feed {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.system-composition .system-feed::before {
+  content: "";
+  display: block;
+  width: 64px;
+  height: 1px;
+  margin-bottom: 9px;
+  background: var(--hud-line-strong);
+}

@@ -74,7 +74,7 @@ export function CharlieCore({
 
         {/* Center Inner Branding */}
         <div className="charlie-core-brand-center" aria-hidden="true">
-          CHARLIE
+          C.H.A.R.L.I.E.
         </div>
 
         {/* Below-Core Status Bar: Rendered ONLY in Centered Idle mode (Docked mode shows CORE ONLY) */}
