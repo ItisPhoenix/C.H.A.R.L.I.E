@@ -107,6 +107,9 @@ export interface RuntimeTask {
   errorSummary?: string;
   approvalReference?: string;
   capabilityRequirements?: string[];
+  createdAt?: string;
+  updatedAt?: string;
+  completedAt?: string;
 }
 
 export interface PresentationIntent {
@@ -219,9 +222,11 @@ export const useCharlieStore = create<CharlieState>((set) => ({
     : {
         connected: false,
         visualRuntime: setVisualRuntimeConnection(s.visualRuntime, false),
+        activities: [],
         runtimeTruth: null,
         subsystemHealth: {},
         subsystemHealthUpdatedAt: null,
+        tasks: {},
         activeToolApproval: null,
         pendingToolApprovals: {},
       }),
@@ -350,11 +355,21 @@ export const useCharlieStore = create<CharlieState>((set) => ({
         applyRuntimeTruth(set, payload);
         return;
       case "task_snapshot":
-        set({ tasks: taskMapFromPayload(payload.tasks) });
+        {
+          const tasks = taskMapFromPayload(payload.tasks);
+          if (tasks) set({ tasks });
+        }
         return;
       case "background_task": {
         const task = taskFromPayload(payload);
-        if (task) set((s) => ({ tasks: { ...s.tasks, [task.id]: task } }));
+        if (task) {
+          set((s) => {
+            const current = s.tasks[task.id];
+            return shouldApplyTaskUpdate(current, task)
+              ? { tasks: { ...s.tasks, [task.id]: task } }
+              : {};
+          });
+        }
         return;
       }
       case "alert":
@@ -499,13 +514,15 @@ export const useCharlieStore = create<CharlieState>((set) => ({
   },
 }));
 
-function taskMapFromPayload(rawTasks: unknown): Record<string, RuntimeTask> {
-  if (!Array.isArray(rawTasks)) return {};
-  return rawTasks.reduce<Record<string, RuntimeTask>>((tasks, rawTask) => {
+function taskMapFromPayload(rawTasks: unknown): Record<string, RuntimeTask> | null {
+  if (!Array.isArray(rawTasks)) return null;
+  const tasks: Record<string, RuntimeTask> = {};
+  for (const rawTask of rawTasks) {
     const task = taskFromPayload(rawTask);
-    if (task) tasks[task.id] = task;
-    return tasks;
-  }, {});
+    if (!task) return null;
+    tasks[task.id] = task;
+  }
+  return tasks;
 }
 
 function lastPendingAssistantIndex(
@@ -543,15 +560,27 @@ function safeTaskError(value: unknown): string | null {
 function taskFromPayload(rawTask: unknown): RuntimeTask | null {
   if (!rawTask || typeof rawTask !== "object") return null;
   const task = rawTask as Record<string, unknown>;
-  const id = String(task.id ?? "");
-  if (!id) return null;
+  const id = typeof task.id === "string" ? task.id.trim() : "";
+  const title = typeof task.title === "string" ? task.title : "";
+  if (!id || typeof task.status !== "string") return null;
   const status = normalizeTaskStatus(task.status);
+  if (!TASK_STATUSES.has(status)) return null;
+  const currentStep = nonNegativeInteger(task.current_step, 0);
+  const totalSteps = nonNegativeInteger(task.total_steps, 0);
+  if (currentStep === null || totalSteps === null) return null;
+  if (task.progress !== undefined && task.progress !== null && (
+    typeof task.progress !== "number" || !Number.isFinite(task.progress) || task.progress < 0 || task.progress > 1
+  )) return null;
+  if (task.capability_requirements !== undefined && (
+    !Array.isArray(task.capability_requirements)
+    || task.capability_requirements.some((value) => typeof value !== "string")
+  )) return null;
   const runtimeTask: RuntimeTask = {
     id,
-    title: String(task.title ?? ""),
+    title,
     status,
-    currentStep: Number(task.current_step ?? 0),
-    totalSteps: Number(task.total_steps ?? 0),
+    currentStep,
+    totalSteps,
   };
   if (typeof task.origin === "string") runtimeTask.origin = task.origin;
   if (typeof task.lane === "string") runtimeTask.lane = task.lane;
@@ -567,10 +596,25 @@ function taskFromPayload(rawTask: unknown): RuntimeTask | null {
   if (errorSummary) runtimeTask.errorSummary = errorSummary;
   if (typeof task.approval_reference === "string") runtimeTask.approvalReference = task.approval_reference;
   if (Array.isArray(task.capability_requirements)) {
-    runtimeTask.capabilityRequirements = task.capability_requirements.filter((value): value is string => typeof value === "string");
+    runtimeTask.capabilityRequirements = [...task.capability_requirements] as string[];
+  }
+  for (const [wireName, stateName] of [
+    ["created_at", "createdAt"],
+    ["updated_at", "updatedAt"],
+    ["completed_at", "completedAt"],
+  ] as const) {
+    if (task[wireName] === undefined || task[wireName] === null) continue;
+    if (typeof task[wireName] !== "string" || !Number.isFinite(Date.parse(task[wireName]))) return null;
+    runtimeTask[stateName] = task[wireName];
   }
   return runtimeTask;
 }
+
+const TASK_STATUSES = new Set([
+  "queued", "planning", "waiting", "running", "paused", "approval_required", "verifying",
+  "completed", "failed", "cancelled",
+]);
+const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 function normalizeTaskStatus(status: unknown): string {
   switch (status) {
@@ -581,6 +625,19 @@ function normalizeTaskStatus(status: unknown): string {
     default:
       return String(status ?? "unknown");
   }
+}
+
+function nonNegativeInteger(value: unknown, fallback: number): number | null {
+  if (value === undefined) return fallback;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function shouldApplyTaskUpdate(current: RuntimeTask | undefined, incoming: RuntimeTask): boolean {
+  if (!current) return true;
+  if (TERMINAL_TASK_STATUSES.has(current.status) && !TERMINAL_TASK_STATUSES.has(incoming.status)) return false;
+  if (!current.updatedAt) return true;
+  if (!incoming.updatedAt) return false;
+  return Date.parse(incoming.updatedAt) >= Date.parse(current.updatedAt);
 }
 
 function subsystemHealthFromPayload(payload: Record<string, unknown>): Record<string, SubsystemHealth> {

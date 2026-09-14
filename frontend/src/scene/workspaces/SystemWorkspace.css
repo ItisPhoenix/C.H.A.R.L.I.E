@@ -167,16 +167,7 @@
   margin-top: 10px;
 }
 
-/* SpatialMapFallback already has its own title. Topology owns that hierarchy. */
-.system-composition .system-topology > :last-child > div:first-child {
-  display: none;
-}
-
-.system-composition .system-topology > :last-child > div:last-child {
-  height: 100% !important;
-  min-height: 0 !important;
-}
-
+/* Runtime subsystem inventory owns its own hierarchy. */
 .system-composition .system-topology [class*="rounded-2xl"],
 .system-composition .system-topology [class*="rounded-xl"] {
   border: 0 !important;
@@ -184,6 +175,58 @@
   background: rgba(2, 9, 18, .28) !important;
   box-shadow: none !important;
   backdrop-filter: none !important;
+}
+
+.system-subsystem-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0;
+  min-height: 0;
+  overflow-y: auto;
+  border-top: 1px solid rgba(58, 171, 211, .14);
+}
+
+.system-subsystem-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 52px;
+  border-bottom: 1px solid rgba(58, 171, 211, .12);
+  color: #9bb2bd;
+}
+
+.system-subsystem-row > div {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.system-subsystem-row strong {
+  color: #d8eff8;
+  font-size: 12px;
+  letter-spacing: .08em;
+}
+
+.system-subsystem-row span {
+  color: #6e8d9d;
+  font: 11px var(--font-ui);
+}
+
+.system-subsystem-required {
+  color: #e7b15b !important;
+  font-size: 9px !important;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.system-subsystem-row > b {
+  flex: 0 0 auto;
+  font-size: 10px;
+  letter-spacing: .1em;
 }
 
 .system-composition .system-operations {
@@ -294,6 +337,10 @@
 
 .system-composition .log-info {
   color: #58c9e9;
+}
+
+.system-composition .log-active {
+  color: #65ddb0;
 }
 
 .system-composition .log-warn {

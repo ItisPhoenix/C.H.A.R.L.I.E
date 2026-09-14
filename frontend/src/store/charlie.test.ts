@@ -290,6 +290,55 @@ test("HUD visibility follows the pet toggle event", () => {
     });
   });
 
+  test("task projection preserves canonical timestamps and rejects stale or malformed updates", () => {
+    useCharlieStore.getState().applyEvent({
+      type: "task_snapshot",
+      payload: {
+        tasks: [{
+          id: "t1",
+          title: "Check deployment",
+          status: "running",
+          current_step: 1,
+          total_steps: 2,
+          created_at: "2026-09-14T10:00:00.000Z",
+          updated_at: "2026-09-14T10:02:00.000Z",
+        }],
+      },
+    });
+    useCharlieStore.getState().applyEvent({
+      type: "background_task",
+      payload: {
+        id: "t1",
+        title: "Check deployment",
+        status: "queued",
+        current_step: 0,
+        total_steps: 2,
+        updated_at: "2026-09-14T10:01:00.000Z",
+      },
+    });
+    useCharlieStore.getState().applyEvent({
+      type: "task_snapshot",
+      payload: { tasks: [{ id: "t1", title: "bad", status: "not-a-task-state", current_step: 0, total_steps: 0 }] },
+    });
+
+    expect(useCharlieStore.getState().tasks.t1).toMatchObject({
+      status: "running",
+      currentStep: 1,
+      updatedAt: "2026-09-14T10:02:00.000Z",
+    });
+  });
+
+  test("disconnect clears task activity until canonical replay arrives", () => {
+    useCharlieStore.getState().setConnected(true);
+    useCharlieStore.getState().applyEvent({
+      type: "task_snapshot",
+      payload: { tasks: [{ id: "t1", title: "Live task", status: "running", current_step: 0, total_steps: 1 }] },
+    });
+    useCharlieStore.getState().setConnected(false);
+
+    expect(useCharlieStore.getState().tasks).toEqual({});
+  });
+
   test("background_task updates one task without exposing raw errors", () => {
     useCharlieStore.getState().applyEvent({
       type: "background_task",

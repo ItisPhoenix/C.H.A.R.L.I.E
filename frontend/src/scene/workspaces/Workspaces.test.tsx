@@ -65,6 +65,19 @@ describe("Phase 9 Workspaces Suite", () => {
   });
 
   test("SystemWorkspace renders task status, vitals overview, and live processes", () => {
+    useCharlieStore.setState({
+      tasks: {
+        "system-task": {
+          id: "system-task",
+          title: "INGESTION",
+          status: "running",
+          currentStep: 1,
+          totalSteps: 2,
+          origin: "background",
+          progress: 0.5,
+        },
+      },
+    });
     render(
       <SystemWorkspace
         workspace={{
@@ -84,8 +97,8 @@ describe("Phase 9 Workspaces Suite", () => {
       />
     );
     expect(screen.getByText("SYSTEM STATUS")).toBeDefined();
-    expect(screen.getByText("TASK STATUS")).toBeDefined();
-    expect(screen.getByText("INGESTION")).toBeDefined();
+    expect(screen.getByText("ACTIVE TASKS")).toBeDefined();
+    expect(screen.getAllByText("INGESTION").length).toBeGreaterThan(0);
   });
 
   test("TasksWorkspace collapses absent execution details while keeping progress and queue", () => {
