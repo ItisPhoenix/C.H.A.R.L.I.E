@@ -7,9 +7,23 @@ import {
   type SubsystemHealth,
   type SystemStatus,
 } from "../store/charlie";
+import { connectBridge } from "../runtime/bridge";
 import { INITIAL_VISUAL_RUNTIME, type VisualRuntimePhase } from "../runtime/visualRuntime";
 import { useWorkspaceStore } from "../layout/workspaceStore";
 import { CharlieScene } from "../scene/CharlieScene";
+import {
+  SpatialCanvas,
+  type SpatialProofContext,
+  type SpatialProofFinding,
+  type SpatialProofScene,
+} from "../scene/spatial/SpatialCanvas";
+import type { SpatialMapData } from "../composer/primitives/SpatialMapTypes";
+import type { VisionProofBox } from "../scene/spatial/VisionProofSurface";
+import {
+  REFERENCE_VISUAL_SCENARIOS,
+  ReferenceVisualLab,
+  type ReferenceVisualScenario,
+} from "./ReferenceVisualLabTruthful";
 
 export type VisualLabScenario =
   | "idle"
@@ -33,7 +47,13 @@ export type VisualLabScenario =
   | "tasks-rich"
   | "settings"
   | "offline"
-  | "degraded";
+  | "degraded"
+  | ReferenceVisualScenario
+  | "spatial-idle"
+  | "spatial-research"
+  | "spatial-research-selected"
+  | "spatial-vision"
+  | "spatial-vision-selected";
 
 const workspaceFor: Partial<Record<VisualLabScenario, string>> = {
   conversation: "conversation",
@@ -49,6 +69,131 @@ const workspaceFor: Partial<Record<VisualLabScenario, string>> = {
 };
 
 const TEST_MOCK_SESSION = "visual-lab-session";
+
+type VisualConfigFieldFixture = {
+  key: string;
+  field: string;
+  label: string;
+  group: string;
+  type: "str" | "int" | "float" | "bool";
+  secret: false;
+  restart: string | null;
+  value: string | number | boolean;
+  is_set: null;
+};
+
+const VISUAL_SETTINGS_CONFIG_FIXTURE: { fields: VisualConfigFieldFixture[] } = {
+  fields: [
+    {
+      key: "LLM_URL",
+      field: "llm_url",
+      label: "LLM Endpoint",
+      group: "LLM",
+      type: "str",
+      secret: false,
+      restart: null,
+      value: "https://example.test/charlie/mock-gateway/v1",
+      is_set: null,
+    },
+    {
+      key: "LLM_MODEL",
+      field: "llm_model",
+      label: "LLM Model",
+      group: "LLM",
+      type: "str",
+      secret: false,
+      restart: null,
+      value: "test/mock-charlie-operator",
+      is_set: null,
+    },
+    {
+      key: "CONTEXT_WINDOW",
+      field: "context_window",
+      label: "Context Window",
+      group: "LLM",
+      type: "int",
+      secret: false,
+      restart: null,
+      value: 32768,
+      is_set: null,
+    },
+    {
+      key: "LLM_TEMPERATURE",
+      field: "llm_temperature",
+      label: "Response Temperature",
+      group: "LLM",
+      type: "float",
+      secret: false,
+      restart: null,
+      value: 0.2,
+      is_set: null,
+    },
+    {
+      key: "VISION_ENABLED",
+      field: "vision_enabled",
+      label: "Vision Enabled",
+      group: "Vision",
+      type: "bool",
+      secret: false,
+      restart: "process",
+      value: true,
+      is_set: null,
+    },
+    {
+      key: "VISION_MODEL",
+      field: "vision_model",
+      label: "Vision Model",
+      group: "Vision",
+      type: "str",
+      secret: false,
+      restart: "process",
+      value: "test/mock-vision-grounding",
+      is_set: null,
+    },
+  ],
+};
+
+const VISUAL_SETTINGS_MODELS_FIXTURE = {
+  active_model: "test/mock-charlie-operator",
+  models: ["test/mock-charlie-operator", "test/mock-charlie-fast"],
+  has_api_key: false,
+  provider_discovery: {
+    status: "available" as const,
+    count: 2,
+    error: null,
+  },
+};
+
+function jsonFixtureResponse(payload: unknown): Response {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function installVisualSettingsFixtures(scenario: VisualLabScenario): () => void {
+  if (scenario !== "settings" || import.meta.env.MODE !== "test") return () => {};
+
+  const runtimeFetch = window.fetch.bind(window);
+  window.fetch = async (input, init) => {
+    const request = typeof Request !== "undefined" && input instanceof Request ? input : null;
+    const url = request ? request.url : input.toString();
+    const method = (init?.method || request?.method || "GET").toUpperCase();
+    const pathname = new URL(url, window.location.origin).pathname;
+
+    if (method === "GET" && pathname === "/api/config") {
+      return jsonFixtureResponse(VISUAL_SETTINGS_CONFIG_FIXTURE);
+    }
+    if (method === "GET" && pathname === "/api/models") {
+      return jsonFixtureResponse(VISUAL_SETTINGS_MODELS_FIXTURE);
+    }
+    return runtimeFetch(input, init);
+  };
+
+  return () => {
+    window.fetch = runtimeFetch;
+  };
+}
 
 const RESEARCH_SOURCES = [
   {
@@ -126,6 +271,25 @@ const RESEARCH_CONTENT: Record<string, unknown> = {
     mode: "radar",
     title: "EVIDENCE SIGNAL FIELD",
     subtitle: "SOURCE-BOUND OBSERVATIONS",
+    nodes: [
+      { id: "evidence-core", label: "GRID RESILIENCE", sublabel: "SYNTHESIS / 87%", x: 50, y: 51, type: "hub", status: "active", color: "#22d3ee" },
+      { id: "finding-recovery", label: "RECOVERY", sublabel: "FINDING / 91%", x: 26, y: 27, type: "finding", status: "active", color: "#38bdf8" },
+      { id: "finding-risk", label: "RISK", sublabel: "FINDING / 84%", x: 74, y: 27, type: "finding", status: "warning", color: "#fbbf24" },
+      { id: "source-storage", label: "STORAGE", sublabel: "SOURCE / 92%", x: 12, y: 73, type: "source", status: "active", color: "#38bdf8" },
+      { id: "source-demand", label: "DEMAND", sublabel: "SOURCE / 84%", x: 34, y: 88, type: "source", status: "active", color: "#22d3ee" },
+      { id: "source-cooling", label: "COOLING", sublabel: "SOURCE / 79%", x: 66, y: 88, type: "source", status: "active", color: "#22d3ee" },
+      { id: "source-transformer", label: "TRANSFORMER", sublabel: "SOURCE / 76%", x: 88, y: 73, type: "source", status: "warning", color: "#fbbf24" },
+      { id: "signal-duration", label: "DURATION", sublabel: "SIGNAL / 75%", x: 50, y: 14, type: "signal", status: "idle", color: "#818cf8" },
+    ],
+    edges: [
+      { from: "source-storage", to: "finding-recovery", type: "route", active: true, label: "supports" },
+      { from: "source-demand", to: "finding-recovery", type: "route", active: true, label: "supports" },
+      { from: "finding-recovery", to: "evidence-core", type: "route", active: true, label: "confirms" },
+      { from: "source-transformer", to: "finding-risk", type: "route", active: true, label: "supports" },
+      { from: "source-cooling", to: "evidence-core", type: "link", active: true, label: "informs" },
+      { from: "signal-duration", to: "evidence-core", type: "link", active: true, label: "weights" },
+      { from: "evidence-core", to: "finding-risk", type: "link", active: true, label: "concentrates" },
+    ],
     objects: [
       { id: "signal-1", label: "NORTH", type: "hub", status: "active", angle: 18, distance: 0.72 },
       { id: "signal-2", label: "EAST", type: "signal", status: "warning", angle: 92, distance: 0.58 },
@@ -158,6 +322,14 @@ const RESEARCH_CONTENT: Record<string, unknown> = {
     ],
   },
 };
+
+const SPATIAL_RESEARCH_MAP = RESEARCH_CONTENT.radar as SpatialMapData;
+const SPATIAL_RESEARCH_FINDINGS = RESEARCH_CONTENT.findings as SpatialProofFinding[];
+const SPATIAL_VISION_BOXES: VisionProofBox[] = [
+  { id: "vision-console", label: "CONTROL CONSOLE", confidence: 0.94, box: [22, 10, 54, 34], color: "#22d3ee" },
+  { id: "vision-signal", label: "SIGNAL ARRAY", confidence: 0.89, box: [17, 38, 58, 69], color: "#38bdf8" },
+  { id: "vision-terminal", label: "TERMINAL SURFACE", confidence: 0.86, box: [42, 70, 78, 93], color: "#fbbf24" },
+];
 
 const BRIEFING_CONTENT: Record<string, unknown> = {
   schema: "charlie.briefing_workspace",
@@ -217,19 +389,25 @@ const SYSTEM_CONTENT: Record<string, unknown> = {
     title: "LOCAL RUNTIME TOPOLOGY",
     subtitle: "AUTHORITATIVE SUBSYSTEM LINKS",
     nodes: [
-      { id: "brain", label: "BRAIN", sublabel: "READY", x: 50, y: 20, status: "active", color: "#22d3ee" },
-      { id: "voice", label: "VOICE", sublabel: "ONLINE", x: 23, y: 47, status: "active", color: "#38bdf8" },
-      { id: "browser", label: "BROWSER", sublabel: "READY", x: 77, y: 47, status: "active", color: "#22d3ee" },
-      { id: "memory", label: "MEMORY", sublabel: "SYNC", x: 34, y: 78, status: "active", color: "#818cf8" },
-      { id: "event-bus", label: "EVENT BUS", sublabel: "LIVE", x: 66, y: 78, status: "active", color: "#22d3ee" },
+      { id: "brain", label: "BRAIN", sublabel: "READY", type: "hub", x: 50, y: 13, status: "active", color: "#22d3ee" },
+      { id: "voice", label: "VOICE", sublabel: "ONLINE", type: "service", x: 16, y: 42, status: "active", color: "#38bdf8" },
+      { id: "browser", label: "BROWSER", sublabel: "READY", type: "service", x: 84, y: 42, status: "active", color: "#22d3ee" },
+      { id: "event-bus", label: "EVENT BUS", sublabel: "LIVE", type: "hub", x: 50, y: 46, status: "active", color: "#22d3ee" },
+      { id: "task-journal", label: "TASK JOURNAL", sublabel: "ACTIVE", type: "service", x: 50, y: 67, status: "active", color: "#38bdf8" },
+      { id: "memory", label: "MEMORY", sublabel: "SYNC", type: "service", x: 17, y: 82, status: "active", color: "#818cf8" },
+      { id: "research", label: "RESEARCH", sublabel: "SYNTHESIS", type: "service", x: 50, y: 88, status: "active", color: "#22d3ee" },
+      { id: "desktop", label: "DESKTOP", sublabel: "READY", type: "service", x: 83, y: 82, status: "active", color: "#38bdf8" },
     ],
     edges: [
-      { from: "brain", to: "voice", type: "route", active: true },
-      { from: "brain", to: "browser", type: "route", active: true },
-      { from: "brain", to: "memory", type: "link", active: true },
-      { from: "brain", to: "event-bus", type: "route", active: true },
+      { from: "brain", to: "event-bus", type: "route", active: true, label: "dispatch" },
+      { from: "brain", to: "voice", type: "route", active: true, label: "listen" },
+      { from: "brain", to: "browser", type: "route", active: true, label: "verify" },
+      { from: "event-bus", to: "task-journal", type: "route", active: true, label: "record" },
+      { from: "event-bus", to: "research", type: "route", active: true, label: "project" },
+      { from: "task-journal", to: "memory", type: "link", active: true, label: "retain" },
+      { from: "research", to: "memory", type: "link", active: true, label: "recall" },
+      { from: "browser", to: "desktop", type: "route", active: true, label: "act" },
       { from: "voice", to: "memory", type: "dotted", active: false },
-      { from: "browser", to: "event-bus", type: "link", active: true },
     ],
   },
   operations: [
@@ -340,6 +518,8 @@ function runtimeFor(scenario: VisualLabScenario): { phase: VisualRuntimePhase; l
   if (scenario === "briefing-rich") return { phase: "acting", label: "COMPOSING BRIEFING", detail: "Assembling verified signals" };
   if (scenario === "system-rich") return { phase: "acting", label: "SYSTEM REVIEW", detail: "Observing authoritative runtime state" };
   if (scenario === "tasks-rich") return { phase: "acting", label: "TASK EXECUTION", detail: "Managing concurrent operations" };
+  if (scenario === "ref-fault") return { phase: "error", label: "SYSTEM FAULT", detail: "Core services unavailable" };
+  if (scenario === "ref-degraded") return { phase: "degraded", label: "DEGRADED MODE", detail: "Limited capability" };
   const phase: VisualRuntimePhase = [
     "idle", "listening", "transcribing", "thinking", "acting", "speaking",
   ].includes(scenario) ? scenario as VisualRuntimePhase : "idle";
@@ -390,16 +570,46 @@ function healthFor(scenario: VisualLabScenario): Record<string, SubsystemHealth>
   return {};
 }
 
+function spatialProofFor(scenario: VisualLabScenario): {
+  scene: SpatialProofScene;
+  context: SpatialProofContext;
+} | null {
+  if (scenario === "spatial-idle") return { scene: "idle", context: "base" };
+  if (scenario === "spatial-research") return { scene: "research", context: "base" };
+  if (scenario === "spatial-research-selected") return { scene: "research", context: "selected" };
+  if (scenario === "spatial-vision") return { scene: "vision", context: "base" };
+  if (scenario === "spatial-vision-selected") return { scene: "vision", context: "selected" };
+  return null;
+}
+
+function referenceScenarioFor(scenario: VisualLabScenario): ReferenceVisualScenario | null {
+  return (REFERENCE_VISUAL_SCENARIOS as readonly string[]).includes(scenario)
+    ? scenario as ReferenceVisualScenario
+    : null;
+}
+
+function referenceCoreStateFor(scenario: ReferenceVisualScenario): string {
+  if (scenario === "ref-fault") return "error";
+  if (scenario === "ref-degraded") return "degraded";
+  return "idle";
+}
+
 export function VisualLabHarness({ scenario }: { scenario: VisualLabScenario }): ReactElement {
+  const fixtureMode = import.meta.env.MODE === "test";
+
   useEffect(() => {
+    const disconnectBridge = fixtureMode ? () => {} : connectBridge();
+    const restoreVisualSettingsFixtures = installVisualSettingsFixtures(scenario);
     const runtime = runtimeFor(scenario);
-    const workspaceType = workspaceFor[scenario];
-    const content = workspaceContentFor(scenario);
-    const tasks = taskFixturesFor(scenario);
-    const conversation = conversationFor(scenario);
-    const systemStatus = systemStatusFor(scenario);
-    const subsystemHealth = healthFor(scenario);
-    const settingsIntent: Record<string, PresentationIntent> = scenario === "settings" ? {
+    const spatialProof = fixtureMode ? spatialProofFor(scenario) : null;
+    const referenceScenario = referenceScenarioFor(scenario);
+    const workspaceType = fixtureMode ? workspaceFor[scenario] : undefined;
+    const content = fixtureMode ? workspaceContentFor(scenario) : {};
+    const tasks = fixtureMode ? taskFixturesFor(scenario) : {};
+    const conversation = fixtureMode ? conversationFor(scenario) : [];
+    const systemStatus = fixtureMode ? systemStatusFor(scenario) : null;
+    const subsystemHealth = fixtureMode ? healthFor(scenario) : {};
+    const settingsIntent: Record<string, PresentationIntent> = fixtureMode && scenario === "settings" ? {
       "visual-lab-settings": {
         id: "visual-lab-settings",
         kind: "overlay" as const,
@@ -418,10 +628,26 @@ export function VisualLabHarness({ scenario }: { scenario: VisualLabScenario }):
     } : {};
     useWorkspaceStore.setState({ workspaces: {}, activeWorkspaceId: null, recentWorkspaces: [] });
     useCharlieStore.setState({
-      connected: scenario !== "offline",
-      coreState: ["acting", "conversation-rich", "research-rich", "briefing-rich", "system-rich", "tasks-rich"].includes(scenario) ? "working" : scenario,
-      visualRuntime: { ...INITIAL_VISUAL_RUNTIME, ...runtime, updatedAt: new Date().toISOString() },
-      presentationIntents: workspaceType ? ({
+      connected: fixtureMode ? (spatialProof || referenceScenario ? true : scenario !== "offline") : false,
+      coreState: !fixtureMode
+        ? "idle"
+        : referenceScenario
+        ? referenceCoreStateFor(referenceScenario)
+        : spatialProof
+        ? spatialProof.scene === "idle" ? "idle" : "working"
+        : ["acting", "conversation-rich", "research-rich", "briefing-rich", "system-rich", "tasks-rich"].includes(scenario) ? "working" : scenario,
+      visualRuntime: !fixtureMode
+        ? INITIAL_VISUAL_RUNTIME
+        : spatialProof
+        ? {
+            ...INITIAL_VISUAL_RUNTIME,
+            phase: spatialProof.scene === "idle" ? "idle" : "acting",
+            label: spatialProof.scene === "idle" ? "IDLE" : spatialProof.scene === "research" ? "RESEARCHING" : "VISION ACTIVE",
+            detail: "TEST/MOCK spatial proof",
+            updatedAt: new Date().toISOString(),
+          }
+        : { ...INITIAL_VISUAL_RUNTIME, ...runtime, updatedAt: new Date().toISOString() },
+      presentationIntents: !fixtureMode || spatialProof || referenceScenario ? {} : workspaceType ? ({
         [`visual-lab-${workspaceType}`]: {
           id: `visual-lab-${workspaceType}`,
           kind: "workspace",
@@ -443,35 +669,57 @@ export function VisualLabHarness({ scenario }: { scenario: VisualLabScenario }):
           createdAt: new Date().toISOString(),
         },
       } as unknown as Record<string, PresentationIntent>) : settingsIntent,
-      activeToolApproval: scenario === "approval" ? {
+      activeToolApproval: fixtureMode && scenario === "approval" ? {
         request_id: "visual-lab-approval",
         tool_name: "browser_navigate",
         reason: "Charlie is ready to open the verified briefing source set.",
         arguments: {},
         risk_class: "safe",
       } : null,
-      activeSessionId: TEST_MOCK_SESSION,
-      activeSessionTitle: "TEST / MOCK",
+      activeSessionId: fixtureMode ? TEST_MOCK_SESSION : null,
+      activeSessionTitle: fixtureMode ? "TEST / MOCK" : null,
       tasks,
       chatMessages: conversation,
-      activities: scenario === "conversation" || scenario === "conversation-rich"
+      activities: fixtureMode && (scenario === "conversation" || scenario === "conversation-rich")
         ? ["SYNTHESIS // source timeline checked", "RESPONSE // streaming verified distinction"]
-        : scenario === "research-rich"
+        : fixtureMode && scenario === "research-rich"
           ? ["RESEARCH // source set normalized", "RESEARCH // chronology compared"]
           : [],
       systemStatus,
       systemStatusUpdatedAt: systemStatus ? new Date().toISOString() : null,
       subsystemHealth,
       subsystemHealthUpdatedAt: Object.keys(subsystemHealth).length ? new Date().toISOString() : null,
-      audioLevel: scenario === "listening" || scenario === "speaking" ? 0.68 : 0,
+      audioLevel: fixtureMode && (scenario === "listening" || scenario === "speaking") ? 0.68 : 0,
       activeAlert: null,
     });
-  }, [scenario]);
+
+    return () => {
+      restoreVisualSettingsFixtures();
+      disconnectBridge();
+    };
+  }, [fixtureMode, scenario]);
+
+  const referenceScenario = referenceScenarioFor(scenario);
+  const spatialProof = fixtureMode ? spatialProofFor(scenario) : null;
 
   return (
-    <div data-visual-lab="TEST/MOCK" data-visual-lab-scenario={scenario}>
+    <div
+      data-visual-lab="TEST/MOCK"
+      data-visual-lab-scenario={scenario}
+      data-visual-lab-settings-fixture={fixtureMode && scenario === "settings" ? "contract-valid" : undefined}
+    >
       <div className="sr-only">TEST/MOCK VISUAL LAB — not runtime acceptance</div>
-      <CharlieScene />
+      {referenceScenario ? (
+        <ReferenceVisualLab scenario={referenceScenario} />
+      ) : spatialProof ? (
+        <SpatialCanvas
+          initialScene={spatialProof.scene}
+          initialContext={spatialProof.context}
+          researchMap={SPATIAL_RESEARCH_MAP}
+          researchFindings={SPATIAL_RESEARCH_FINDINGS}
+          visionBoxes={SPATIAL_VISION_BOXES}
+        />
+      ) : <CharlieScene />}
     </div>
   );
 }

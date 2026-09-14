@@ -206,7 +206,7 @@ export function Settings(): ReactElement {
   const currentModelRef = useRef("");
   const [modelSearch, setModelSearch] = useState("");
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const [activeCategory, setActiveCategory] = useState("All");
+  const [activeCategory, setActiveCategory] = useState("Models");
 
   // MCP State
   const [mcpServers, setMcpServers] = useState<MCPServerInfo[]>([]);
@@ -720,6 +720,7 @@ export function Settings(): ReactElement {
     <div
       className="settings-workspace font-mono text-left flex flex-col h-full"
       data-testid="authoritative-settings"
+      data-active-category={activeCategory}
     >
       {/* 1. Header Toolbar */}
       <div className="settings-intro mb-3 flex flex-wrap items-center gap-3 border-b border-cyan-500/20 pb-2.5">
@@ -730,6 +731,10 @@ export function Settings(): ReactElement {
           <p className="text-[11px] text-slate-400 font-sans mt-0.5">
             Settings are applied locally and activated on runtime reload.
           </p>
+          <div className="settings-current-category" aria-live="polite">
+            <span>ACTIVE CATEGORY</span>
+            <strong>{activeCategory}</strong>
+          </div>
         </div>
         <div className="ml-auto flex min-w-0 items-center gap-3">
           <button

@@ -30,6 +30,16 @@ interface CoreProfile {
   glow: string;
 }
 
+interface ArcSpec {
+  radius: number;
+  start: number;
+  end: number;
+  alpha: number;
+  width: number;
+  color?: string;
+  blur?: number;
+}
+
 interface SpherePoint {
   x: number;
   y: number;
@@ -42,13 +52,13 @@ const TWO_PI = Math.PI * 2;
 
 const PROFILES: Record<CoreVisualState, CoreProfile> = {
   idle: {
-    energy: 0.85,
-    motion: 0.15,
-    accent: "#00c8f8",
-    electric: "#00f0ff",
-    hot: "#ffffff",
+    energy: 0.72,
+    motion: 0.08,
+    accent: "#109fd1",
+    electric: "#4cddfa",
+    hot: "#eafcff",
     deep: "#01040a",
-    glow: "rgba(0, 220, 255, 0.55)",
+    glow: "rgba(28, 157, 210, 0.27)",
   },
   listening: {
     energy: 0.98,
@@ -57,7 +67,7 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
     electric: "#38bdf8",
     hot: "#ffffff",
     deep: "#020a16",
-    glow: "rgba(0, 240, 255, 0.75)",
+    glow: "rgba(0, 220, 240, 0.38)",
   },
   transcribing: {
     energy: 0.92,
@@ -66,7 +76,7 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
     electric: "#67e8f9",
     hot: "#ffffff",
     deep: "#020b18",
-    glow: "rgba(56, 189, 248, 0.62)",
+    glow: "rgba(56, 189, 248, 0.34)",
   },
   thinking: {
     energy: 0.92,
@@ -75,25 +85,25 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
     electric: "#00f0ff",
     hot: "#ffffff",
     deep: "#020e20",
-    glow: "rgba(2, 132, 199, 0.7)",
+    glow: "rgba(2, 132, 199, 0.38)",
   },
   acting: {
-    energy: 1.0,
+    energy: 1,
     motion: 0.88,
     accent: "#06b6d4",
     electric: "#22d3ee",
     hot: "#ffffff",
     deep: "#021226",
-    glow: "rgba(6, 182, 212, 0.78)",
+    glow: "rgba(6, 182, 212, 0.42)",
   },
   working: {
-    energy: 1.0,
+    energy: 1,
     motion: 0.5,
     accent: "#00b4d8",
     electric: "#00f0ff",
     hot: "#ffffff",
     deep: "#021226",
-    glow: "rgba(0, 180, 216, 0.75)",
+    glow: "rgba(0, 180, 216, 0.38)",
   },
   speaking: {
     energy: 0.95,
@@ -102,16 +112,16 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
     electric: "#00f0ff",
     hot: "#ffffff",
     deep: "#011216",
-    glow: "rgba(45, 212, 191, 0.7)",
+    glow: "rgba(45, 212, 191, 0.36)",
   },
   approval_wait: {
     energy: 0.7,
     motion: 0.04,
-    accent: "#f59e0b",
+    accent: "#d99818",
     electric: "#fbbf24",
     hot: "#fef3c7",
     deep: "#180c02",
-    glow: "rgba(245, 158, 11, 0.5)",
+    glow: "rgba(245, 158, 11, 0.3)",
   },
   waiting: {
     energy: 0.75,
@@ -120,43 +130,43 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
     electric: "#38bdf8",
     hot: "#e0f2fe",
     deep: "#010814",
-    glow: "rgba(14, 165, 233, 0.5)",
+    glow: "rgba(14, 165, 233, 0.3)",
   },
   attention: {
     energy: 0.98,
     motion: 0.4,
-    accent: "#f59e0b",
+    accent: "#d99818",
     electric: "#fbbf24",
     hot: "#fef3c7",
     deep: "#180c02",
-    glow: "rgba(245, 158, 11, 0.75)",
+    glow: "rgba(245, 158, 11, 0.36)",
   },
   completed: {
-    energy: 1.0,
+    energy: 1,
     motion: 0.6,
     accent: "#10b981",
     electric: "#34d399",
     hot: "#ecfdf5",
     deep: "#01160e",
-    glow: "rgba(16, 185, 129, 0.8)",
+    glow: "rgba(16, 185, 129, 0.38)",
   },
   success: {
-    energy: 1.0,
+    energy: 1,
     motion: 0.18,
     accent: "#10b981",
     electric: "#34d399",
     hot: "#ecfdf5",
     deep: "#01160e",
-    glow: "rgba(16, 185, 129, 0.72)",
+    glow: "rgba(16, 185, 129, 0.36)",
   },
   recovering: {
     energy: 0.82,
     motion: 0.22,
-    accent: "#f59e0b",
+    accent: "#d99818",
     electric: "#fbbf24",
     hot: "#fef3c7",
     deep: "#120b02",
-    glow: "rgba(245, 158, 11, 0.56)",
+    glow: "rgba(245, 158, 11, 0.3)",
   },
   error: {
     energy: 0.9,
@@ -165,25 +175,25 @@ const PROFILES: Record<CoreVisualState, CoreProfile> = {
     electric: "#fca5a5",
     hot: "#fef2f2",
     deep: "#1a0404",
-    glow: "rgba(248, 113, 113, 0.7)",
+    glow: "rgba(248, 113, 113, 0.34)",
   },
   degraded: {
     energy: 0.58,
     motion: 0.06,
-    accent: "#f59e0b",
+    accent: "#d99818",
     electric: "#94a3b8",
     hot: "#fef3c7",
     deep: "#0f0c08",
-    glow: "rgba(245, 158, 11, 0.34)",
+    glow: "rgba(245, 158, 11, 0.22)",
   },
   offline: {
-    energy: 0.5,
+    energy: 0.68,
     motion: 0.02,
-    accent: "#64748b",
-    electric: "#94a3b8",
-    hot: "#cbd5e1",
+    accent: "#0e91c5",
+    electric: "#45d6f5",
+    hot: "#dff8fc",
     deep: "#080c14",
-    glow: "rgba(100, 116, 139, 0.35)",
+    glow: "rgba(22, 137, 190, 0.24)",
   },
 };
 
@@ -203,255 +213,463 @@ function colorWithAlpha(color: string, alpha: number): string {
   return `rgba(${value >> 16}, ${(value >> 8) & 255}, ${value & 255}, ${Math.max(0, Math.min(1, alpha))})`;
 }
 
-function generateSpherePoints(count = 360): SpherePoint[] {
+function generateSpherePoints(count = 240): SpherePoint[] {
   const points: SpherePoint[] = [];
-  const phi = Math.PI * (3 - Math.sqrt(5)); // Golden ratio angle
+  const phi = Math.PI * (3 - Math.sqrt(5));
 
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < count; i += 1) {
     const y = 1 - (i / (count - 1)) * 2;
     const radiusAtY = Math.sqrt(1 - y * y);
     const theta = phi * i;
-
     const x = Math.cos(theta) * radiusAtY;
     const z = Math.sin(theta) * radiusAtY;
     const layer = (i % 3) * 0.08;
-    const r = 0.84 + layer;
 
     points.push({
-      x: x * r,
-      y: y * r,
-      z: z * r,
-      size: i % 4 === 0 ? 1.3 : 0.85,
-      alpha: 0.28 + (i % 5) * 0.12,
+      x: x * (0.84 + layer),
+      y: y * (0.84 + layer),
+      z: z * (0.84 + layer),
+      size: i % 4 === 0 ? 1.2 : 0.78,
+      alpha: 0.24 + (i % 5) * 0.1,
     });
   }
   return points;
 }
 
-const SPHERE_POINTS = generateSpherePoints(360);
+const SPHERE_POINTS = generateSpherePoints();
 
-/**
- * 1. Deep Dark Central Disk — pitch black center with subtle radial depth.
- */
-function drawInnerDisk(
+function drawLine(
   ctx: CanvasRenderingContext2D,
-  centerX: number,
-  centerY: number,
-  diskRadius: number,
-  profile: CoreProfile
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  color: string,
+  alpha: number,
+  width: number,
 ): void {
   ctx.save();
-  const grad = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, diskRadius);
-  grad.addColorStop(0, "#01040a");
-  grad.addColorStop(0.7, "#01050e");
-  grad.addColorStop(0.94, "#020b18");
-  grad.addColorStop(1, colorWithAlpha(profile.accent, 0.18));
-  ctx.fillStyle = grad;
+  ctx.strokeStyle = colorWithAlpha(color, alpha);
+  ctx.lineWidth = width;
+  ctx.lineCap = "butt";
   ctx.beginPath();
-  ctx.arc(centerX, centerY, diskRadius, 0, TWO_PI);
-  ctx.fill();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
   ctx.restore();
 }
 
-/**
- * 2. Subtle Volumetric Dotted Particle Sphere inside the black disk behind C.H.A.R.L.I.E.
- */
-function drawParticleSphere(
+function drawArc(
   ctx: CanvasRenderingContext2D,
   centerX: number,
   centerY: number,
-  sphereRadius: number,
-  time: number,
+  unit: number,
+  spec: ArcSpec,
   profile: CoreProfile,
-  points: SpherePoint[],
-  reduceMotion: boolean
+  offset = 0,
 ): void {
-  const rotY = reduceMotion ? 0.3 : time * 0.00045 * (1 + profile.motion * 0.4);
-  const rotX = reduceMotion ? 0.2 : Math.sin(time * 0.0003) * 0.25;
-
-  const cosY = Math.cos(rotY);
-  const sinY = Math.sin(rotY);
-  const cosX = Math.cos(rotX);
-  const sinX = Math.sin(rotX);
-
   ctx.save();
-  for (let i = 0; i < points.length; i++) {
-    const p = points[i];
-
-    // 3D rotation Y
-    const x1 = p.x * cosY + p.z * sinY;
-    const z1 = -p.x * sinY + p.z * cosY;
-
-    // 3D rotation X
-    const y2 = p.y * cosX - z1 * sinX;
-    const z2 = p.y * sinX + z1 * cosX;
-
-    // Perspective projection
-    const perspective = 1 / (1.25 - z2 * 0.22);
-    const px = centerX + x1 * sphereRadius * perspective;
-    const py = centerY + y2 * sphereRadius * perspective;
-
-    // Soft center mask: keep text zone clear
-    const distFromCenter = Math.hypot(px - centerX, py - centerY);
-    if (distFromCenter < sphereRadius * 0.26) {
-      continue;
-    }
-
-    // Depth shading: front particles brighter, rear particles dimmer
-    const depthFactor = (z2 + 1) * 0.5;
-    const alpha = Math.max(0.06, Math.min(0.75, p.alpha * (0.35 + depthFactor * 0.65) * profile.energy));
-    const size = Math.max(0.6, p.size * perspective * (0.8 + depthFactor * 0.35));
-
-    ctx.fillStyle = z2 > 0.25
-      ? colorWithAlpha(profile.electric, alpha)
-      : colorWithAlpha(profile.accent, alpha * 0.7);
-
-    ctx.beginPath();
-    ctx.arc(px, py, size, 0, TWO_PI);
-    ctx.fill();
-  }
+  ctx.strokeStyle = colorWithAlpha(spec.color || profile.accent, spec.alpha * profile.energy);
+  ctx.lineWidth = Math.max(0.8, unit * spec.width);
+  ctx.lineCap = "butt";
+  ctx.shadowColor = spec.color || profile.electric;
+  ctx.shadowBlur = Math.min(unit * 0.012, spec.blur ?? 0);
+  if (spec.width < 0.004) ctx.setLineDash([unit * 0.012, unit * 0.02]);
+  ctx.lineDashOffset = -offset;
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, unit * spec.radius, spec.start + offset, spec.end + offset);
+  ctx.stroke();
   ctx.restore();
 }
 
-/**
- * 3. Luminous Electric Cyan / Blue Torus Ring with Hot Energy Crescent & Concentric Filaments
- */
-function drawLuminousRing(
+function drawCoreField(
   ctx: CanvasRenderingContext2D,
   centerX: number,
   centerY: number,
   unit: number,
   time: number,
   profile: CoreProfile,
+  compact: boolean,
+  reduceMotion: boolean,
+): void {
+  const diskRadius = unit * (compact ? 0.22 : 0.255);
+  const sphereRadius = unit * (compact ? 0.19 : 0.22);
+  const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, diskRadius);
+  gradient.addColorStop(0, profile.deep);
+  gradient.addColorStop(0.72, "#01050e");
+  gradient.addColorStop(0.94, "#020b18");
+  gradient.addColorStop(1, colorWithAlpha(profile.accent, compact ? 0.1 : 0.14));
+
+  ctx.save();
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, diskRadius, 0, TWO_PI);
+  ctx.fill();
+
+  ctx.strokeStyle = colorWithAlpha(profile.accent, compact ? 0.16 : 0.22);
+  ctx.lineWidth = Math.max(0.7, compact ? 0.8 : 1);
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, diskRadius, 0, TWO_PI);
+  ctx.stroke();
+
+  const reticleRadius = unit * (compact ? 0.06 : 0.07);
+  ctx.strokeStyle = colorWithAlpha(profile.hot, compact ? 0.16 : 0.22);
+  ctx.lineWidth = Math.max(0.8, unit * 0.0018);
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, reticleRadius, 0, TWO_PI);
+  ctx.stroke();
+  drawLine(ctx, centerX - reticleRadius * 1.45, centerY, centerX - reticleRadius * 0.7, centerY, profile.electric, 0.36, 1);
+  drawLine(ctx, centerX + reticleRadius * 0.7, centerY, centerX + reticleRadius * 1.45, centerY, profile.electric, 0.36, 1);
+  drawLine(ctx, centerX, centerY - reticleRadius * 1.45, centerX, centerY - reticleRadius * 0.7, profile.electric, 0.28, 1);
+  drawLine(ctx, centerX, centerY + reticleRadius * 0.7, centerX, centerY + reticleRadius * 1.45, profile.electric, 0.28, 1);
+  ctx.restore();
+
+  const rotY = reduceMotion ? 0.3 : time * 0.00045 * (1 + profile.motion * 0.4);
+  const rotX = reduceMotion ? 0.2 : Math.sin(time * 0.0003) * 0.25;
+  const cosY = Math.cos(rotY);
+  const sinY = Math.sin(rotY);
+  const cosX = Math.cos(rotX);
+  const sinX = Math.sin(rotX);
+  const stride = compact ? 4 : 1;
+
+  ctx.save();
+  for (let i = 0; i < SPHERE_POINTS.length; i += stride) {
+    const point = SPHERE_POINTS[i];
+    const x1 = point.x * cosY + point.z * sinY;
+    const z1 = -point.x * sinY + point.z * cosY;
+    const y2 = point.y * cosX - z1 * sinX;
+    const z2 = point.y * sinX + z1 * cosX;
+    const perspective = 1 / (1.25 - z2 * 0.22);
+    const x = centerX + x1 * sphereRadius * perspective;
+    const y = centerY + y2 * sphereRadius * perspective;
+    const distance = Math.hypot(x - centerX, y - centerY);
+
+    if (distance < sphereRadius * 0.28) continue;
+
+    const depth = (z2 + 1) * 0.5;
+    const alpha = Math.max(
+      0.035,
+      Math.min(0.42, point.alpha * (0.3 + depth * 0.58) * profile.energy * (compact ? 0.72 : 0.86)),
+    );
+    const size = Math.max(0.48, point.size * perspective * (0.78 + depth * 0.3));
+
+    ctx.fillStyle = z2 > 0.25
+      ? colorWithAlpha(profile.electric, alpha)
+      : colorWithAlpha(profile.accent, alpha * 0.72);
+    ctx.beginPath();
+    ctx.arc(x, y, size, 0, TWO_PI);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawGlowSweep(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  unit: number,
+  time: number,
+  profile: CoreProfile,
+  compact: boolean,
+  reduceMotion: boolean,
+  radius: number,
+  active: boolean,
+): void {
+  const revolutionMs = compact ? 6200 : 6800;
+  const phase = reduceMotion ? 0 : (time % revolutionMs) / revolutionMs;
+  const centerAngle = -Math.PI / 2 + phase * TWO_PI;
+  const arcLength = compact ? 0.54 : 0.62;
+  const start = centerAngle - arcLength * 0.58;
+  const end = centerAngle + arcLength * 0.42;
+  const sweepRadius = radius - unit * (compact ? 0.004 : 0.006);
+
+  ctx.save();
+  ctx.lineCap = "round";
+
+  // One partial bloom, followed by one crisp highlight. No complete sweep ring.
+  ctx.strokeStyle = colorWithAlpha(profile.electric, active ? 0.28 : 0.2);
+  ctx.lineWidth = Math.max(compact ? 3 : 4, unit * 0.014);
+  ctx.shadowColor = profile.electric;
+  ctx.shadowBlur = Math.min(unit * 0.024, compact ? 5 : 8);
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, sweepRadius, start, end);
+  ctx.stroke();
+
+  ctx.strokeStyle = colorWithAlpha(profile.hot, active ? 0.92 : 0.78);
+  ctx.lineWidth = Math.max(compact ? 1.3 : 1.8, unit * 0.0048);
+  ctx.shadowColor = profile.hot;
+  ctx.shadowBlur = compact ? 2 : 3;
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, sweepRadius, start, end);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawConcentricStructure(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  unit: number,
+  time: number,
+  profile: CoreProfile,
+  compact: boolean,
+  reduceMotion: boolean,
   pulse: number,
   audioLevel: number,
   currentState: CoreVisualState,
 ): void {
-  const baseRadius = unit * 0.285;
   const audioReactive = ["listening", "transcribing", "speaking"].includes(currentState) ? audioLevel : 0;
-  const breath = 1 + Math.sin(time * 0.002) * 0.004 + pulse * 0.03 + audioReactive * 0.02;
-  const r = baseRadius * breath;
-  const rot = time * 0.0006 * (1 + profile.motion);
+  const isIdle = currentState === "idle";
+  const active = !["idle", "approval_wait", "offline", "degraded", "error"].includes(currentState);
+  const baseRadius = unit * (compact ? 0.28 : 0.32);
+  const breath = 1 + Math.sin(time * 0.002) * 0.003 + pulse * 0.022 + audioReactive * 0.016;
+  const radius = baseRadius * breath;
+  const rotation = reduceMotion ? 0 : time * 0.0006 * (1 + profile.motion);
 
   ctx.save();
-
-  // A. Broad Electric-Blue Atmospheric Falloff
-  const outerHalo = ctx.createRadialGradient(
+  const aura = ctx.createRadialGradient(
     centerX,
     centerY,
-    r - unit * 0.03,
+    radius - unit * 0.035,
     centerX,
     centerY,
-    r + unit * 0.12
+    radius + unit * (compact ? 0.085 : 0.1),
   );
-  outerHalo.addColorStop(0, "rgba(0, 240, 255, 0)");
-  outerHalo.addColorStop(0.25, profile.glow);
-  outerHalo.addColorStop(0.55, "rgba(0, 140, 255, 0.25)");
-  outerHalo.addColorStop(0.85, "rgba(0, 100, 220, 0.08)");
-  outerHalo.addColorStop(1, "rgba(0, 0, 0, 0)");
-
-  ctx.fillStyle = outerHalo;
+  aura.addColorStop(0, "rgba(0, 240, 255, 0)");
+  aura.addColorStop(0.28, colorWithAlpha(profile.electric, isIdle ? 0.14 : 0.16));
+  aura.addColorStop(0.58, profile.glow);
+  aura.addColorStop(1, "rgba(0, 0, 0, 0)");
+  ctx.fillStyle = aura;
   ctx.beginPath();
-  ctx.arc(centerX, centerY, r + unit * 0.12, 0, TWO_PI);
+  ctx.arc(centerX, centerY, radius + unit * (compact ? 0.085 : 0.1), 0, TWO_PI);
   ctx.fill();
 
-  // B. Multi-Layer Concentric Luminous Filaments (Wisps of Light creating deep torus texture)
+  const filaments = compact
+    ? [
+        { offset: -0.012, width: 0.9, alpha: 0.32, speed: 0.8, start: 0.2, length: 1.24, color: "#00d4ff" },
+        { offset: 0.009, width: 0.8, alpha: 0.25, speed: -0.6, start: 0.8, length: 1.38, color: "#38bdf8" },
+      ]
+    : [
+        { offset: -0.014, width: 0.9, alpha: 0.34, speed: 0.8, start: 0.2, length: 1.34, color: "#00d4ff" },
+        { offset: -0.006, width: 1.1, alpha: 0.4, speed: -0.6, start: 0.8, length: 1.46, color: "#38bdf8" },
+        { offset: 0.009, width: 0.85, alpha: 0.3, speed: 1.1, start: 1.4, length: 1.3, color: "#00f0ff" },
+      ];
+
   ctx.lineCap = "round";
-  const filaments = [
-    { offset: -unit * 0.018, width: 1.0, alpha: 0.45, speed: 0.8, start: 0.2, len: 1.6, color: "#00f0ff" },
-    { offset: -unit * 0.01, width: 1.4, alpha: 0.6, speed: -0.6, start: 0.8, len: 1.8, color: "#38bdf8" },
-    { offset: unit * 0.008, width: 1.2, alpha: 0.55, speed: 1.1, start: 1.4, len: 1.7, color: "#00d4ff" },
-    { offset: unit * 0.016, width: 1.0, alpha: 0.45, speed: -0.9, start: 0.5, len: 1.4, color: "#00f0ff" },
-    { offset: unit * 0.024, width: 0.8, alpha: 0.35, speed: 0.5, start: 1.1, len: 1.3, color: "#0284c7" },
-  ];
-
-  for (let i = 0; i < filaments.length; i++) {
-    const f = filaments[i];
-    const fr = r + f.offset;
-    const startAngle = rot * f.speed + f.start * Math.PI;
-    const arcLength = Math.PI * f.len;
-
-    ctx.strokeStyle = colorWithAlpha(f.color, f.alpha);
-    ctx.lineWidth = f.width;
-    ctx.shadowColor = "#00f0ff";
-    ctx.shadowBlur = unit * 0.015;
+  filaments.forEach((filament) => {
+    ctx.strokeStyle = colorWithAlpha(filament.color, filament.alpha * (isIdle ? 0.82 : 0.94));
+    ctx.lineWidth = filament.width;
+    ctx.shadowColor = profile.electric;
+    ctx.shadowBlur = compact ? 1.5 : 2.5;
     ctx.beginPath();
-    ctx.arc(centerX, centerY, fr, startAngle, startAngle + arcLength);
+    ctx.arc(
+      centerX,
+      centerY,
+      radius + unit * filament.offset,
+      rotation * filament.speed + filament.start * Math.PI,
+      rotation * filament.speed + filament.start * Math.PI + Math.PI * filament.length,
+    );
     ctx.stroke();
-  }
+  });
 
-  // C. Main Vivid Electric-Cyan Torus Body (Vibrant saturated cyan-blue)
-  ctx.strokeStyle = profile.accent;
-  ctx.lineWidth = Math.max(4.0, unit * 0.02);
+  ctx.strokeStyle = colorWithAlpha(profile.accent, isIdle ? 0.98 : 0.94);
+  ctx.lineWidth = Math.max(compact ? 1.8 : 2.2, unit * (isIdle ? 0.01 : 0.011));
   ctx.shadowColor = profile.electric;
-  ctx.shadowBlur = unit * 0.035;
+  ctx.shadowBlur = compact ? 3.5 : 5;
   ctx.beginPath();
-  ctx.arc(centerX, centerY, r, 0, TWO_PI);
+  ctx.arc(centerX, centerY, radius, 0, TWO_PI);
   ctx.stroke();
 
-  // D. Secondary Electric Blue Glow Layer on Torus
-  ctx.strokeStyle = "rgba(0, 180, 240, 0.75)";
-  ctx.lineWidth = Math.max(6.0, unit * 0.03);
-  ctx.shadowColor = "#00d4ff";
-  ctx.shadowBlur = unit * 0.025;
+  drawGlowSweep(ctx, centerX, centerY, unit, time, profile, compact, reduceMotion, radius, active);
+
+  const edgeOffset = unit * (compact ? 0.008 : 0.01);
+  const secondaryRadius = radius + edgeOffset;
+  ctx.strokeStyle = colorWithAlpha(profile.electric, active ? 0.24 : 0.14);
+  ctx.lineWidth = Math.max(compact ? 0.7 : 0.9, unit * 0.0018);
+  ctx.shadowColor = profile.electric;
+  ctx.shadowBlur = compact ? 1.2 : 1.8;
   ctx.beginPath();
-  ctx.arc(centerX, centerY, r, 0, TWO_PI);
+  ctx.arc(centerX, centerY, secondaryRadius, 0, TWO_PI);
   ctx.stroke();
 
-  // E. Inner Sharp Cyan Rim (catchlight)
-  ctx.strokeStyle = "rgba(180, 240, 255, 0.9)";
-  ctx.lineWidth = 1.2;
-  ctx.shadowColor = "#00f0ff";
-  ctx.shadowBlur = 6;
+  const innerRadius = radius - edgeOffset;
+  ctx.strokeStyle = colorWithAlpha(profile.hot, active ? 0.38 : 0.22);
+  ctx.lineWidth = Math.max(0.8, unit * 0.002);
+  ctx.shadowColor = profile.hot;
+  ctx.shadowBlur = compact ? 1 : 1.5;
   ctx.beginPath();
-  ctx.arc(centerX, centerY, r - unit * 0.008, 0, TWO_PI);
+  ctx.arc(centerX, centerY, innerRadius, 0, TWO_PI);
   ctx.stroke();
 
-  // F. Brilliant Top/Upper-Left Hot-White Energy Crescent Highlight
-  // Crescent from ~10 o'clock to ~1:30
-  ctx.strokeStyle = "rgba(0, 240, 255, 0.95)";
-  ctx.lineWidth = Math.max(3.0, unit * 0.014);
-  ctx.shadowColor = "#00f0ff";
-  ctx.shadowBlur = unit * 0.02;
-  ctx.beginPath();
-  ctx.arc(centerX, centerY, r, -Math.PI * 0.85, -Math.PI * 0.05);
-  ctx.stroke();
-
-  // Hot White Core of Crescent
-  ctx.strokeStyle = "#ffffff";
-  ctx.lineWidth = Math.max(2.0, unit * 0.009);
-  ctx.shadowColor = "#ffffff";
-  ctx.shadowBlur = unit * 0.015;
-  ctx.beginPath();
-  ctx.arc(centerX, centerY, r, -Math.PI * 0.75, -Math.PI * 0.15);
-  ctx.stroke();
-
-  // G. Dynamic Directional Traveling Wave Segment
-  const traceAngle = (time * 0.0016 * (1 + profile.motion * 0.5)) % TWO_PI;
-  const traceLen = Math.PI * 0.28;
-  const hasTravelingSignal = !["idle", "approval_wait", "offline", "degraded", "error"].includes(currentState);
-  if (hasTravelingSignal) {
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.95)";
-    ctx.lineWidth = Math.max(2.0, unit * 0.009);
-    ctx.shadowColor = "#ffffff";
-    ctx.shadowBlur = 10;
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, r + unit * 0.004, traceAngle, traceAngle + traceLen);
-    ctx.stroke();
-  }
-
-  // H. Completion / Click Pulse Wave
   if (pulse > 0) {
-    const pulseR = r + (1 - pulse) * unit * 0.18;
-    ctx.strokeStyle = colorWithAlpha("#ffffff", pulse * 0.9);
-    ctx.lineWidth = 2.4;
-    ctx.shadowColor = "#00f0ff";
-    ctx.shadowBlur = unit * 0.04;
+    const pulseRadius = radius + (1 - pulse) * unit * (compact ? 0.11 : 0.13);
+    ctx.strokeStyle = colorWithAlpha(profile.hot, pulse * 0.72);
+    ctx.lineWidth = Math.max(0.85, compact ? 0.9 : 1.1);
+    ctx.setLineDash([unit * 0.012, unit * 0.025]);
+    ctx.shadowColor = profile.electric;
+    ctx.shadowBlur = compact ? 2 : 4;
     ctx.beginPath();
-    ctx.arc(centerX, centerY, pulseR, 0, TWO_PI);
+    ctx.arc(centerX, centerY, pulseRadius, 0, TWO_PI);
     ctx.stroke();
   }
+  ctx.restore();
+}
 
+function drawSignalArcs(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  unit: number,
+  time: number,
+  profile: CoreProfile,
+  currentState: CoreVisualState,
+  compact: boolean,
+  audioLevel: number,
+  reduceMotion: boolean,
+): void {
+  const moving = !reduceMotion && !["idle", "approval_wait", "offline", "degraded", "error"].includes(currentState);
+  const drift = moving ? time * 0.00012 * (1 + profile.motion) : 0;
+  const audio = ["listening", "transcribing", "speaking"].includes(currentState) ? audioLevel : 0;
+  const radius = compact ? 0.36 : 0.4;
+  const width = compact ? 0.0024 + audio * 0.001 : 0.0018 + audio * 0.0008;
+  const arcs: ArcSpec[] = compact
+    ? [
+        { radius, start: -2.4, end: -1.78, alpha: 0.58, width, blur: 1 },
+        { radius, start: 0.72, end: 1.42, alpha: 0.42, width: 0.0022 },
+        { radius, start: 2.32, end: 2.72, alpha: 0.3, width: 0.0018 },
+      ]
+    : [
+        { radius, start: -2.48, end: -1.78, alpha: 0.6, width, blur: 1 },
+        { radius, start: -1.12, end: -0.7, alpha: 0.34, width: 0.0016 },
+        { radius, start: 0.78, end: 1.54, alpha: 0.42, width: 0.0019 },
+        { radius, start: 2.14, end: 2.56, alpha: 0.3, width: 0.0015 },
+      ];
+
+  arcs.forEach((arc, index) => drawArc(
+    ctx,
+    centerX,
+    centerY,
+    unit,
+    { ...arc, color: index === 0 ? profile.electric : profile.accent },
+    profile,
+    drift * (index % 2 ? -0.35 : 0.22),
+  ));
+
+  if (moving) {
+    drawArc(ctx, centerX, centerY, unit, {
+      radius: radius + 0.014,
+      start: -0.78,
+      end: -0.62,
+      alpha: 0.56,
+      width: 0.0018,
+      color: profile.hot,
+      blur: 1,
+    }, profile, drift * 0.8);
+  }
+}
+
+function drawCalibration(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  unit: number,
+  profile: CoreProfile,
+  compact: boolean,
+): void {
+  const count = compact ? 8 : 16;
+  const outer = unit * (compact ? 0.425 : 0.46);
+  const baseInner = unit * (compact ? 0.395 : 0.425);
+
+  for (let i = 0; i < count; i += 1) {
+    if (!compact && i % 9 === 4) continue;
+    const angle = -Math.PI / 2 + (i / count) * TWO_PI;
+    const major = i % (compact ? 4 : 5) === 0;
+    const inner = baseInner - (major ? unit * 0.018 : 0);
+    const color = major ? profile.hot : profile.electric;
+    drawLine(
+      ctx,
+      centerX + Math.cos(angle) * inner,
+      centerY + Math.sin(angle) * inner,
+      centerX + Math.cos(angle) * outer,
+      centerY + Math.sin(angle) * outer,
+      color,
+      major ? 0.42 : compact ? 0.22 : 0.28,
+      major ? 1 : 0.7,
+    );
+  }
+
+  const asymmetry = compact ? 1 : 2;
+  for (let i = 0; i < asymmetry; i += 1) {
+    const angle = -1.12 + i * 0.13;
+    const inner = unit * 0.32;
+    const outerPoint = unit * (0.37 + (i % 2) * 0.015);
+    drawLine(
+      ctx,
+      centerX + Math.cos(angle) * inner,
+      centerY + Math.sin(angle) * inner,
+      centerX + Math.cos(angle) * outerPoint,
+      centerY + Math.sin(angle) * outerPoint,
+      profile.electric,
+      compact ? 0.24 : 0.3,
+      0.8,
+    );
+  }
+}
+
+function drawSignalNodes(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  unit: number,
+  profile: CoreProfile,
+  compact: boolean,
+): void {
+  const nodes = compact
+    ? [
+        { angle: -0.92, radius: 0.42, size: 1.7, alpha: 0.72 },
+        { angle: 2.36, radius: 0.435, size: 1.2, alpha: 0.42 },
+      ]
+    : [
+        { angle: -0.92, radius: 0.42, size: 2, alpha: 0.76 },
+        { angle: -2.38, radius: 0.445, size: 1.35, alpha: 0.46 },
+        { angle: 0.52, radius: 0.445, size: 1.4, alpha: 0.44 },
+        { angle: 2.36, radius: 0.435, size: 1.3, alpha: 0.4 },
+      ];
+
+  nodes.forEach((node, index) => {
+    const x = centerX + Math.cos(node.angle) * unit * node.radius;
+    const y = centerY + Math.sin(node.angle) * unit * node.radius;
+    ctx.save();
+    ctx.fillStyle = colorWithAlpha(index === 0 ? profile.hot : profile.electric, node.alpha * profile.energy);
+    ctx.shadowColor = profile.electric;
+    ctx.shadowBlur = Math.min(unit * 0.008, index === 0 ? 3 : 1.5);
+    ctx.beginPath();
+    ctx.arc(x, y, node.size, 0, TWO_PI);
+    ctx.fill();
+    ctx.restore();
+  });
+}
+
+function drawPulse(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  unit: number,
+  pulse: number,
+  profile: CoreProfile,
+  compact: boolean,
+): void {
+  if (pulse <= 0) return;
+  const radius = unit * ((compact ? 0.3 : 0.34) + (1 - pulse) * (compact ? 0.1 : 0.12));
+  ctx.save();
+  ctx.strokeStyle = colorWithAlpha(profile.hot, pulse * 0.46);
+  ctx.lineWidth = Math.max(0.8, unit * (compact ? 0.0017 : 0.002));
+  ctx.setLineDash([unit * 0.014, unit * 0.024]);
+  ctx.shadowColor = profile.electric;
+  ctx.shadowBlur = Math.min(unit * 0.01, 4);
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, radius, 0, TWO_PI);
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -464,34 +682,46 @@ function drawFrame(
   audioLevel: number,
   pulseStartedAt: number,
   clickPulseStartedAt: number,
-  reduceMotion: boolean
+  reduceMotion: boolean,
+  compact: boolean,
 ): void {
   const profile = PROFILES[currentState] || PROFILES.idle;
   const centerX = width / 2;
   const centerY = height / 2;
   const unit = Math.min(width, height);
   const elapsed = reduceMotion ? 0 : time;
-
-  const statePulse =
-    currentState === "success"
-      ? Math.max(0, Math.min(1, (time - pulseStartedAt) / 800))
-      : 0;
+  const statePulse = currentState === "success"
+    ? Math.max(0, Math.min(1, (time - pulseStartedAt) / 800))
+    : 0;
   const clickPulse = Math.max(0, Math.min(1, (time - clickPulseStartedAt) / 500));
   const pulse = Math.max(statePulse > 0 ? 1 - statePulse : 0, clickPulse > 0 ? 1 - clickPulse : 0);
 
   ctx.clearRect(0, 0, width, height);
-
-  // 1. Deep pitch-black circular disk
-  drawInnerDisk(ctx, centerX, centerY, unit * 0.28, profile);
-
-  // 2. Subtle volumetric dotted particle sphere inside black disk
-  drawParticleSphere(ctx, centerX, centerY, unit * 0.23, elapsed, profile, SPHERE_POINTS, reduceMotion);
-
-  // 3. Exact multi-layer luminous electric cyan torus ring with hot crescent
-  drawLuminousRing(ctx, centerX, centerY, unit, elapsed, profile, pulse, audioLevel, currentState);
+  drawCoreField(ctx, centerX, centerY, unit, elapsed, profile, compact, reduceMotion);
+  drawConcentricStructure(
+    ctx,
+    centerX,
+    centerY,
+    unit,
+    elapsed,
+    profile,
+    compact,
+    reduceMotion,
+    pulse,
+    audioLevel,
+    currentState,
+  );
+  drawSignalArcs(ctx, centerX, centerY, unit, elapsed, profile, currentState, compact, audioLevel, reduceMotion);
+  drawCalibration(ctx, centerX, centerY, unit, profile, compact);
+  drawSignalNodes(ctx, centerX, centerY, unit, profile, compact);
+  drawPulse(ctx, centerX, centerY, unit, pulse, profile, compact);
 }
 
-export function CharlieRing(): ReactElement {
+interface CharlieRingProps {
+  compact?: boolean;
+}
+
+export function CharlieRing({ compact = false }: CharlieRingProps): ReactElement {
   const coreState = useCharlieStore((state) => state.coreState);
   const visualPhase = useCharlieStore((state) => state.visualRuntime.phase);
   const connected = useCharlieStore((state) => state.connected);
@@ -505,6 +735,8 @@ export function CharlieRing(): ReactElement {
   const pulseStartedAtRef = useRef(0);
   const clickPulseStartedAtRef = useRef(0);
   const reduceMotionRef = useRef(false);
+  const compactRef = useRef(compact);
+  compactRef.current = compact;
 
   const state = normalizeState(visualPhase === "offline" && connected ? coreState : visualPhase, connected);
 
@@ -517,15 +749,15 @@ export function CharlieRing(): ReactElement {
     }
   }, [state]);
 
-  // Transient subscription: audio levels update ref for canvas loop and DOM attribute directly without React component re-renders
+  // Audio levels update refs so microphone energy never drives React re-renders.
   useEffect(() => {
     if (containerRef.current) {
       containerRef.current.setAttribute("data-audio-level", String(useCharlieStore.getState().audioLevel));
     }
-    const unsub = useCharlieStore.subscribe((state) => {
-      audioLevelRef.current = state.audioLevel;
+    const unsub = useCharlieStore.subscribe((storeState) => {
+      audioLevelRef.current = storeState.audioLevel;
       if (containerRef.current) {
-        containerRef.current.setAttribute("data-audio-level", String(state.audioLevel));
+        containerRef.current.setAttribute("data-audio-level", String(storeState.audioLevel));
       }
     });
     return unsub;
@@ -578,7 +810,8 @@ export function CharlieRing(): ReactElement {
           audioLevelRef.current,
           pulseStartedAtRef.current,
           clickPulseStartedAtRef.current,
-          reduceMotionRef.current
+          reduceMotionRef.current,
+          compactRef.current,
         );
       }
       animationFrame = window.requestAnimationFrame(render);
@@ -604,13 +837,15 @@ export function CharlieRing(): ReactElement {
       ref={containerRef}
       className="hud-ring"
       data-core-renderer="authoritative-charlie-ring"
+      data-core-scale={compact ? "docked" : "centered"}
+      data-geometry="concentric-segments-calibration"
       data-state={state}
       role="img"
       aria-label={`Charlie ${label}`}
       onClick={handleClick}
     >
       <canvas ref={canvasRef} className="hud-core-canvas" aria-hidden="true" />
-      <OuterHudSystem />
+      <OuterHudSystem compact={compact} />
     </div>
   );
 }

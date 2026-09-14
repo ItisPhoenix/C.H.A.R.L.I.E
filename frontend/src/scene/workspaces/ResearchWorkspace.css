@@ -1,39 +1,48 @@
-/* PASS 5C-A: evidence field first, supporting signals second. */
+/* Investigation field dominates; context and evidence support it. */
 .research-composition {
-  position: relative;
+  display: grid;
+  grid-template-columns: minmax(190px, .28fr) minmax(0, 1fr) minmax(210px, .24fr);
+  grid-template-rows: minmax(0, 1fr) 210px;
+  grid-template-areas:
+    "heading visual findings"
+    "support support support";
+  gap: 0 clamp(20px, 2.5vw, 42px);
   width: 100%;
   height: 100%;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
+  padding: 14px 2% 14px;
   color: var(--scene-text-primary);
   font: 13px/1.45 var(--font-technical);
 }
 
 .research-composition .research-heading {
-  top: 3%;
-  left: 2%;
-  width: 21%;
+  position: static !important;
+  grid-area: heading;
+  width: auto !important;
+  min-width: 0;
+  padding: 2% 0 0;
 }
 
 .research-composition .research-heading h1 {
-  margin: 18px 0 13px;
+  margin: 17px 0 12px;
   color: #edf7ff;
-  font-family: var(--font-ui);
-  font-size: clamp(32px, 3.4vw, 60px);
-  font-weight: 350;
-  letter-spacing: .1em;
-  line-height: 1.02;
+  font: 400 clamp(28px, 2.65vw, 46px)/1.08 var(--font-ui);
+  letter-spacing: .06em;
+  text-transform: uppercase;
 }
 
 .research-composition .research-heading .spatial-subtitle {
+  color: #7898a9;
+  font-size: 10px;
   line-height: 1.5;
 }
 
 .research-composition .research-status-strip {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 14px;
+  gap: 9px;
+  margin-top: 15px;
   padding: 8px 0;
   border-block: 1px solid rgba(58, 171, 211, .22);
   color: #a6c4cf;
@@ -43,13 +52,14 @@
 }
 
 .research-composition .spatial-objective {
-  max-width: 30ch;
+  max-width: 32ch;
   margin-top: 26px;
-  color: #a9c0cc;
-  font: 14px/1.65 var(--font-ui);
+  color: #b4c8d0;
+  font: 14px/1.6 var(--font-ui);
 }
 
 .research-composition .spatial-objective > span {
+  display: block;
   margin-bottom: 9px;
   color: #48b9df;
   font: 9px/1.2 var(--font-technical);
@@ -57,16 +67,21 @@
 }
 
 .research-composition .research-visual {
-  top: 7%;
-  left: 24%;
-  right: 15%;
-  height: 58%;
+  position: relative !important;
+  grid-area: visual;
+  inset: auto !important;
+  width: auto !important;
+  height: auto !important;
+  min-width: 0;
+  min-height: 0;
   overflow: hidden;
-  border-block: 1px solid rgba(58, 171, 211, .2);
-  padding: 13px 0;
-  background: linear-gradient(120deg, rgba(4, 20, 31, .18), transparent 62%);
-  mask-image: radial-gradient(ellipse 96% 92% at 48% 48%, #000 72%, rgba(0, 0, 0, .82) 88%, transparent 100%);
-  -webkit-mask-image: radial-gradient(ellipse 96% 92% at 48% 48%, #000 72%, rgba(0, 0, 0, .82) 88%, transparent 100%);
+  border-left: 1px solid rgba(58, 171, 211, .24);
+  border-top: 1px solid rgba(58, 171, 211, .28);
+  border-bottom: 1px solid rgba(58, 171, 211, .16);
+  padding: 14px 18px;
+  background: linear-gradient(115deg, rgba(4, 20, 31, .25), transparent 68%);
+  mask-image: radial-gradient(ellipse 98% 96% at 50% 48%, #000 78%, rgba(0, 0, 0, .82) 91%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 98% 96% at 50% 48%, #000 78%, rgba(0, 0, 0, .82) 91%, transparent 100%);
 }
 
 .research-composition .research-visual > * {
@@ -75,21 +90,35 @@
   min-height: 0;
 }
 
+.research-composition .research-visual svg {
+  transform: scale(1.18);
+  transform-origin: center;
+}
+
 .research-composition .research-visual [class*="rounded-2xl"],
 .research-composition .research-visual [class*="rounded-xl"] {
   border: 0 !important;
   border-radius: 0 !important;
-  background: rgba(2, 9, 18, .32) !important;
+  background: rgba(2, 9, 18, .3) !important;
   box-shadow: none !important;
   backdrop-filter: none !important;
 }
 
 .research-composition .research-findings {
-  top: 22%;
-  right: 2%;
-  width: 17%;
-  max-height: 58%;
-  overflow: hidden;
+  position: static !important;
+  grid-area: findings;
+  inset: auto !important;
+  width: auto !important;
+  min-width: 0;
+  max-height: none;
+  overflow-y: auto;
+  border-left: 1px solid rgba(58, 171, 211, .16);
+  padding: 12px 0 0 20px;
+}
+
+.research-composition .research-findings .spatial-kicker {
+  font-size: 9px;
+  letter-spacing: .18em;
 }
 
 .research-composition .spatial-rail-section {
@@ -97,15 +126,11 @@
   padding-top: 10px;
 }
 
-.research-composition .research-findings .spatial-kicker {
-  font-size: 9px;
-  letter-spacing: .2em;
-}
-
 .research-composition .finding-signal {
+  display: grid;
   grid-template-columns: 16px 1fr;
   gap: 8px;
-  padding: 11px 0;
+  padding: 12px 0;
   border-bottom: 1px solid rgba(58, 171, 211, .13);
 }
 
@@ -116,35 +141,53 @@
 
 .research-composition .finding-signal strong {
   color: #d3f2fc;
-  font: 10px/1.45 var(--font-technical);
-  letter-spacing: .08em;
+  font: 11px/1.4 var(--font-technical);
+  letter-spacing: .06em;
   text-transform: uppercase;
 }
 
 .research-composition .finding-signal p {
   margin: 5px 0 0;
-  color: #91aeba;
-  font: 12px/1.45 var(--font-ui);
+  color: #9db8c2;
+  font: 13px/1.45 var(--font-ui);
 }
 
-.research-composition .research-density,
-.research-composition .research-chart {
-  top: 68%;
-  height: 13%;
+.research-composition .research-support {
+  grid-area: support;
+  display: grid;
+  grid-template-columns: minmax(0, .38fr) minmax(0, .62fr);
+  grid-template-rows: auto auto auto;
+  grid-template-areas:
+    "density chart"
+    "evidence evidence"
+    "timeline timeline";
+  gap: 10px 28px;
+  min-width: 0;
+  height: 210px;
+  min-height: 0;
   overflow: hidden;
-  border-top: 1px solid rgba(58, 171, 211, .2);
-  padding-top: 9px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(58, 171, 211, .24);
+}
+
+.research-composition .research-support > section {
+  position: static !important;
+  inset: auto !important;
+  width: auto !important;
+  height: auto !important;
+  min-width: 0;
+  margin: 0;
 }
 
 .research-composition .research-density {
-  left: 2%;
-  width: 20%;
+  grid-area: density;
+  overflow: hidden;
 }
 
 .research-composition .research-chart {
-  right: auto;
-  left: 24%;
-  width: 20%;
+  grid-area: chart;
+  overflow: hidden;
 }
 
 .research-composition .research-density > .spatial-kicker,
@@ -156,7 +199,7 @@
 .research-composition .research-density > div:not(.spatial-kicker),
 .research-composition .research-chart > div:not(.spatial-kicker) {
   height: 100%;
-  margin: 0;
+  margin: 7px 0 0;
 }
 
 .research-composition .research-density [class*="rounded-xl"],
@@ -169,27 +212,16 @@
 }
 
 .research-composition .research-chart svg {
-  max-height: 76px;
+  max-height: 78px;
 }
 
 .research-composition .research-evidence {
-  top: 81%;
-  left: 2%;
-  right: 15%;
-  bottom: auto;
-  height: 11%;
-  min-height: 0;
+  grid-area: evidence;
   overflow: hidden;
-  border-top: 1px solid rgba(58, 171, 211, .24);
-  padding-top: 9px;
 }
 
 .research-composition .research-timeline {
-  top: 93%;
-  left: 2%;
-  right: 15%;
-  bottom: auto;
-  height: 7%;
+  grid-area: timeline;
   overflow: hidden;
 }
 
@@ -238,59 +270,91 @@
   .research-composition {
     display: flex;
     flex-direction: column;
-    gap: 22px;
+    gap: 20px;
     height: auto;
     min-height: 100%;
     overflow-y: visible;
-    padding: 16px 4% 48px;
+    padding: 14px 4% 48px;
   }
 
   .research-composition .research-heading,
   .research-composition .research-visual,
-  .research-composition .research-density,
-  .research-composition .research-chart,
   .research-composition .research-findings,
-  .research-composition .research-evidence,
-  .research-composition .research-timeline {
-    position: relative;
-    inset: auto;
-    width: auto;
-    height: auto;
+  .research-composition .research-support {
+    position: relative !important;
+    inset: auto !important;
+    width: auto !important;
     max-height: none;
     margin: 0;
+    height: auto;
+    overflow: visible;
   }
 
   .research-composition .research-heading {
     order: 1;
+    padding: 0;
+  }
+
+  .research-composition .research-heading h1 {
+    margin: 12px 0 8px;
+    font-size: clamp(26px, 6vw, 38px);
+    letter-spacing: .04em;
+  }
+
+  .research-composition .spatial-objective {
+    max-width: 48ch;
+    margin-top: 13px;
+    max-height: 4.5em;
+    overflow: hidden;
+    font-size: 13px;
+    line-height: 1.5;
   }
 
   .research-composition .research-visual {
     order: 2;
-    flex: 0 0 clamp(280px, 58vw, 380px);
-    min-height: 280px;
+    flex: 0 0 clamp(300px, 40vw, 360px);
+    min-height: 300px;
     padding: 0;
+    border-left: 0;
+  }
+
+  .research-composition .research-visual svg {
+    transform: scale(1.02);
   }
 
   .research-composition .research-findings {
     order: 3;
     overflow: visible;
+    border-left: 0;
+    padding: 0;
+  }
+
+  .research-composition .research-support {
+    order: 4;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
+    grid-template-areas:
+      "density chart"
+      "evidence evidence"
+      "timeline timeline";
+    gap: 18px;
+    margin-top: 0;
+    height: 420px !important;
   }
 
   .research-composition .research-density,
   .research-composition .research-chart {
-    order: 4;
     min-height: 130px;
     overflow: visible;
   }
 
   .research-composition .research-evidence {
-    order: 5;
     min-height: 125px;
     overflow: visible;
   }
 
   .research-composition .research-timeline {
-    order: 6;
     min-height: 130px;
     overflow-x: auto;
     overflow-y: hidden;
@@ -302,9 +366,41 @@
   }
 }
 
+@media (min-width: 901px) and (max-width: 1439px) {
+  .research-composition {
+    grid-template-rows: minmax(515px, 1fr) 170px;
+  }
+
+  .research-composition .research-support {
+    height: 170px;
+    grid-template-rows: 54px 58px 42px;
+    gap: 7px 20px;
+  }
+
+  .research-composition .research-heading h1 {
+    font-size: clamp(27px, 2.6vw, 36px);
+  }
+
+  .research-composition .spatial-objective {
+    margin-top: 20px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+}
+
 @media (max-width: 560px) {
   .research-composition .research-heading h1 {
-    font-size: clamp(28px, 10vw, 42px);
+    font-size: clamp(25px, 8.5vw, 34px);
+  }
+
+  .research-composition .research-support {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "density"
+      "chart"
+      "evidence"
+      "timeline";
+    height: 590px !important;
   }
 
   .research-composition .research-evidence .charlie-evidence-deck {

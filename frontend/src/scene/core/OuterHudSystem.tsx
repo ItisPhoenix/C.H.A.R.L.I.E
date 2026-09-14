@@ -2,139 +2,100 @@ import type { ReactElement } from "react";
 
 const CENTER = 500;
 
-interface OrbitPlanet {
+interface OrbitNode {
   cx: number;
   cy: number;
-  radius: number;
   size: number;
-  haloSize: number;
-  haloOpacity: number;
-  color?: string;
-  hasTrail?: boolean;
+  color: string;
+  opacity: number;
 }
 
-export function OuterHudSystem(): ReactElement {
-  // Exact sparse orbital nodes with cyan halos matching the approved reference
-  const PLANETS: OrbitPlanet[] = [
-    // 1. West / 9 o'clock planet on main orbital track
-    { cx: 105, cy: 500, radius: 395, size: 4.5, haloSize: 13, haloOpacity: 0.55, color: "#ffffff" },
-    // 2. North-East / 1 o'clock planet at head of energy trail
-    { cx: 725, cy: 220, radius: 425, size: 4.2, haloSize: 12, haloOpacity: 0.6, color: "#ffffff", hasTrail: true },
-    // 3. East / 3 o'clock outer planet
-    { cx: 945, cy: 460, radius: 450, size: 3.8, haloSize: 10, haloOpacity: 0.45, color: "#ffffff" },
-    // 4. Upper small spark node (~11:30)
-    { cx: 430, cy: 135, radius: 370, size: 2.5, haloSize: 7, haloOpacity: 0.45, color: "#00f0ff" },
-    // 5. South-East wisp node (~5 o'clock)
-    { cx: 830, cy: 740, radius: 430, size: 2.8, haloSize: 8, haloOpacity: 0.45, color: "#00f0ff" },
-    // 6. South-West node (~7 o'clock)
-    { cx: 280, cy: 820, radius: 440, size: 2.4, haloSize: 6, haloOpacity: 0.4, color: "#38bdf8" },
-  ];
+interface OuterHudSystemProps {
+  compact?: boolean;
+}
+
+export function OuterHudSystem({ compact = false }: OuterHudSystemProps): ReactElement {
+  const nodes: OrbitNode[] = compact
+    ? [
+        { cx: 176, cy: 326, size: 2.8, color: "#38bdf8", opacity: 0.72 },
+        { cx: 806, cy: 196, size: 3.2, color: "#ffffff", opacity: 0.84 },
+      ]
+    : [
+        { cx: 112, cy: 500, size: 3.4, color: "#ffffff", opacity: 0.78 },
+        { cx: 738, cy: 214, size: 3.2, color: "#ffffff", opacity: 0.86 },
+        { cx: 884, cy: 604, size: 3, color: "#38bdf8", opacity: 0.64 },
+        { cx: 242, cy: 806, size: 2.3, color: "#38bdf8", opacity: 0.52 },
+      ];
+  const tickCount = compact ? 12 : 20;
 
   return (
-    <svg className="hud-outer-svg" viewBox="0 0 1000 1000" aria-hidden="true">
+    <svg
+      className="hud-outer-svg"
+      viewBox="0 0 1000 1000"
+      data-core-scale={compact ? "docked" : "centered"}
+      data-geometry="orbital-calibration"
+      aria-hidden="true"
+    >
       <defs>
-        <filter id="hud-bead-glow" x="-100%" y="-100%" width="300%" height="300%">
-          <feGaussianBlur stdDeviation="3.5" result="blur" />
+        <filter id="hud-node-glow" x="-100%" y="-100%" width="300%" height="300%">
+          <feGaussianBlur stdDeviation="1.3" result="blur" />
           <feMerge>
             <feMergeNode in="blur" />
             <feMergeNode in="SourceGraphic" />
           </feMerge>
         </filter>
-        <linearGradient id="hud-trail-1" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#ffffff" stopOpacity="0.95" />
-          <stop offset="35%" stopColor="#00f0ff" stopOpacity="0.75" />
-          <stop offset="70%" stopColor="#0077b6" stopOpacity="0.3" />
-          <stop offset="100%" stopColor="#00f0ff" stopOpacity="0" />
-        </linearGradient>
-        <linearGradient id="hud-trail-2" x1="100%" y1="100%" x2="0%" y2="0%">
-          <stop offset="0%" stopColor="#00f0ff" stopOpacity="0.8" />
-          <stop offset="60%" stopColor="#0077b6" stopOpacity="0.2" />
-          <stop offset="100%" stopColor="#00f0ff" stopOpacity="0" />
+        <linearGradient id="hud-arc-cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#d8f8ff" stopOpacity=".62" />
+          <stop offset="28%" stopColor="#22d3ee" stopOpacity=".38" />
+          <stop offset="100%" stopColor="#22d3ee" stopOpacity="0" />
         </linearGradient>
       </defs>
 
-      {/* 1. Thin Concentric Orbital Guide Rings (Sparse, subtle) */}
-      <g className="hud-vector-structure opacity-45">
-        {/* Inner Guide Orbit */}
-        <circle cx={CENTER} cy={CENTER} r="370" fill="none" stroke="rgba(0, 240, 255, 0.16)" strokeWidth="0.8" />
-        {/* Main Orbit */}
-        <circle cx={CENTER} cy={CENTER} r="395" fill="none" stroke="rgba(0, 240, 255, 0.28)" strokeWidth="1.0" />
-        {/* Secondary Dashed Orbit */}
-        <circle cx={CENTER} cy={CENTER} r="430" fill="none" stroke="rgba(0, 240, 255, 0.18)" strokeWidth="0.9" strokeDasharray="5 7" />
-        {/* Outer Orbit */}
-        <circle cx={CENTER} cy={CENTER} r="455" fill="none" stroke="rgba(0, 240, 255, 0.12)" strokeWidth="0.8" />
+      <g className="hud-vector-structure" fill="none" strokeLinecap="round">
+        <circle cx={CENTER} cy={CENTER} r="380" stroke="rgba(80, 203, 237, .16)" strokeWidth=".9" strokeDasharray="2 18" />
+        <circle cx={CENTER} cy={CENTER} r="426" stroke="rgba(80, 203, 237, .12)" strokeWidth=".8" strokeDasharray={compact ? "22 30" : "48 20 8 28"} />
+        {!compact && (
+          <circle cx={CENTER} cy={CENTER} r="472" stroke="rgba(80, 203, 237, .08)" strokeWidth=".7" strokeDasharray="3 34" />
+        )}
+        <path d="M 500 56 V 82 M 500 918 V 944 M 56 500 H 82 M 918 500 H 944" stroke="rgba(216, 248, 255, .32)" strokeWidth="1" />
       </g>
 
-      {/* 2. Sweeping Curved Energy Wisps / Trails */}
-      <g className="hud-vector-secondary hud-vector-drift">
-        {/* Upper-Right Sweeping Arc from 1 o'clock */}
-        <path
-          d="M 725 220 A 425 425 0 0 1 895 620"
-          fill="none"
-          stroke="url(#hud-trail-1)"
-          strokeWidth="1.8"
-          strokeLinecap="round"
-        />
-        {/* Bottom-Right Filament Arc */}
-        <path
-          d="M 830 740 A 430 430 0 0 1 450 925"
-          fill="none"
-          stroke="url(#hud-trail-2)"
-          strokeWidth="1.4"
-          strokeLinecap="round"
-        />
-        {/* Left Orbit Segment */}
-        <path
-          d="M 125 360 A 395 395 0 0 0 105 500"
-          fill="none"
-          stroke="rgba(0, 240, 255, 0.45)"
-          strokeWidth="1.4"
-          strokeLinecap="round"
-        />
+      <g className="hud-vector-secondary hud-vector-drift" fill="none" strokeLinecap="round">
+        <path d="M 738 214 A 426 426 0 0 1 888 590" stroke="url(#hud-arc-cyan)" strokeWidth="1.3" />
+        {!compact && (
+          <path d="M 178 748 A 444 444 0 0 1 430 914" stroke="rgba(34, 211, 238, .23)" strokeWidth="1" />
+        )}
       </g>
 
-      {/* 3. Orbiting Planets / Glowing Beads */}
-      <g className="hud-vector-nodes hud-vector-drift">
-        {PLANETS.map((planet, idx) => (
-          <g key={`planet-${idx}`}>
-            {/* Outer Cyan Halo */}
-            <circle
-              cx={planet.cx}
-              cy={planet.cy}
-              r={planet.haloSize}
-              fill={planet.color || "#00f0ff"}
-              opacity={planet.haloOpacity}
-              filter="url(#hud-bead-glow)"
-            />
-            {/* Crisp Inner Node */}
-            <circle
-              cx={planet.cx}
-              cy={planet.cy}
-              r={planet.size}
-              fill={planet.color || "#ffffff"}
-              filter="url(#hud-bead-glow)"
-            />
+      <g className="hud-vector-nodes hud-vector-drift" filter="url(#hud-node-glow)">
+        {nodes.map((node, index) => (
+          <g key={`${node.cx}-${node.cy}`}>
+            <circle cx={node.cx} cy={node.cy} r={node.size * 3} fill={node.color} opacity={node.opacity * 0.1} />
+            <circle cx={node.cx} cy={node.cy} r={node.size} fill={node.color} opacity={node.opacity} />
+            {index === 0 && <path d={`M ${node.cx - 13} ${node.cy} H ${node.cx - 5}`} stroke={node.color} strokeOpacity=".42" strokeWidth="1" />}
           </g>
         ))}
       </g>
 
-      {/* 4. Subtle Perimeter Azimuth Coordinates */}
-      <g className="hud-vector-ticks opacity-45">
-        {/* 36 Perimeter dots around radius 475 */}
-        {Array.from({ length: 36 }, (_, i) => {
-          const deg = i * 10;
-          const rad = (deg * Math.PI) / 180;
-          const r = 475;
-          const isMajor = deg % 90 === 0;
-          const isSemiMajor = deg % 30 === 0;
-
+      <g className="hud-vector-ticks">
+        {Array.from({ length: tickCount }, (_, index) => {
+          const angle = -Math.PI / 2 + (index / tickCount) * Math.PI * 2;
+          const major = index % (compact ? 4 : 5) === 0;
+          const inner = major ? 452 : 464;
+          const outer = compact ? 478 : 486;
+          const x1 = CENTER + Math.cos(angle) * inner;
+          const y1 = CENTER + Math.sin(angle) * inner;
+          const x2 = CENTER + Math.cos(angle) * outer;
+          const y2 = CENTER + Math.sin(angle) * outer;
           return (
-            <circle
-              key={`dot-${deg}`}
-              cx={CENTER + r * Math.cos(rad)}
-              cy={CENTER + r * Math.sin(rad)}
-              r={isMajor ? "1.6" : isSemiMajor ? "1.2" : "0.8"}
-              fill={isMajor ? "#ffffff" : isSemiMajor ? "#00f0ff" : "rgba(0, 240, 255, 0.35)"}
+            <line
+              key={`tick-${index}`}
+              x1={x1}
+              y1={y1}
+              x2={x2}
+              y2={y2}
+              stroke={major ? "rgba(216, 248, 255, .42)" : "rgba(80, 203, 237, .24)"}
+              strokeWidth={major ? "1" : ".7"}
             />
           );
         })}

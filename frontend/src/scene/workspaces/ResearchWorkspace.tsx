@@ -70,8 +70,6 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
           <div className="spatial-empty">NO GROUNDED SPATIAL OR TEMPORAL VISUAL AVAILABLE</div>
         )}
       </section>
-      {heatmap && map && <section className="research-density"><div className="spatial-kicker">ACTIVITY DENSITY</div><DensityHeatmapPrimitive data={heatmap} /></section>}
-      {chart && map && <section className="research-chart"><div className="spatial-kicker">ACTIVITY OVER TIME</div><ChartPrimitive primitive={{ id: "research-activity", type: "chart", data: chart }} /></section>}
       <section className="research-findings spatial-rail-section">
         <div className="spatial-kicker">KEY FINDINGS &amp; ANALYTICAL SIGNALS</div>
         {findings.length ? findings.slice(0, 5).map((finding, index) => (
@@ -84,8 +82,12 @@ export function ResearchWorkspace({ workspace }: { workspace: WorkspaceInstance 
           </article>
         )) : <div className="spatial-empty">NO GROUNDED FINDINGS REPORTED</div>}
       </section>
-      {sources.length > 0 && <section className="research-evidence"><SourceEvidencePrimitive data={{ title: "EVIDENCE & SOURCES", items: sources }} /></section>}
-      {timeline.length > 0 && <section className="research-timeline"><TimelinePrimitive data={{ title: "TIMELINE", layout: "horizontal", items: timeline }} /></section>}
+      <div className="research-support" aria-label="Supporting research signals">
+        {heatmap && map && <section className="research-density"><div className="spatial-kicker">ACTIVITY DENSITY</div><DensityHeatmapPrimitive data={heatmap} /></section>}
+        {chart && map && <section className="research-chart"><div className="spatial-kicker">ACTIVITY OVER TIME</div><ChartPrimitive primitive={{ id: "research-activity", type: "chart", data: chart }} /></section>}
+        {sources.length > 0 && <section className="research-evidence"><SourceEvidencePrimitive data={{ title: "EVIDENCE & SOURCES", items: sources }} /></section>}
+        {timeline.length > 0 && <section className="research-timeline"><TimelinePrimitive data={{ title: "TIMELINE", layout: "horizontal", items: timeline }} /></section>}
+      </div>
     </div>
   );
 }

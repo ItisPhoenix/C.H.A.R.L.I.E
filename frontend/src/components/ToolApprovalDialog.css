@@ -423,3 +423,127 @@
     padding-block: 11px !important;
   }
 }
+
+/* Open decision composition; technical rule replaces modal box. */
+.charlie-approval-field {
+  border: 0;
+  border-left: 1px solid rgba(245, 158, 11, .7);
+  background: linear-gradient(105deg, rgba(7, 16, 23, .66), rgba(5, 16, 22, .2) 78%, transparent);
+  box-shadow: none;
+}
+
+/* Decision authority stays open: local rules carry risk, not a modal frame. */
+.charlie-approval-state {
+  align-items: center;
+  overflow: hidden !important;
+}
+
+.charlie-approval-field {
+  max-height: none !important;
+  overflow: visible !important;
+  border: 0 !important;
+  border-left: 1px solid rgba(245, 158, 11, .68) !important;
+  padding: clamp(22px, 3.4vw, 48px) clamp(18px, 3.8vw, 54px) !important;
+  background: linear-gradient(105deg, rgba(7, 16, 23, .34), rgba(5, 16, 22, .1) 78%, transparent) !important;
+  box-shadow: none !important;
+}
+
+.charlie-approval-field:focus-visible {
+  outline: none;
+  border-left-color: #f5c45e !important;
+}
+
+.charlie-approval-panel {
+  padding-bottom: 18px;
+  border-bottom-color: rgba(245, 158, 11, .32);
+}
+
+.charlie-approval-facts > div {
+  border-bottom-color: rgba(34, 211, 238, .16);
+}
+
+@media (max-width: 900px) {
+  .charlie-approval-state {
+    grid-template-rows: 116px minmax(0, 1fr) !important;
+    align-content: stretch;
+    padding: 12px 4% 16px !important;
+  }
+
+  .charlie-approval-field {
+    align-self: stretch;
+    min-height: 0;
+    padding: 12px 0 0 18px !important;
+  }
+
+  .charlie-scene-root[data-approval-active="true"] .charlie-core-center .charlie-core-status-bar {
+    display: none;
+  }
+}
+
+@media (min-width: 561px) and (max-width: 900px) {
+  .charlie-approval-panel {
+    padding-bottom: 8px;
+  }
+
+  .charlie-approval-kicker {
+    margin-bottom: 6px;
+  }
+
+  .charlie-approval-header h3 {
+    font-size: clamp(26px, 4.5vw, 36px);
+  }
+
+  .charlie-approval-lede {
+    margin-top: 7px;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
+  .charlie-approval-facts {
+    padding: 6px 0 0;
+  }
+
+  .charlie-approval-facts > div {
+    min-height: 44px;
+    padding: 5px 0 6px;
+  }
+
+  .charlie-approval-facts > div:first-child {
+    min-height: 58px;
+  }
+
+  .charlie-approval-facts > div > div {
+    margin-top: 3px;
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .charlie-approval-action {
+    font-size: 22px;
+  }
+
+  .charlie-approval-safety {
+    margin-top: 5px;
+    padding: 5px 9px;
+    font-size: 10px;
+    line-height: 1.35;
+  }
+
+  .charlie-approval-actions {
+    padding-top: 8px;
+  }
+
+  .charlie-approval-actions button {
+    padding-block: 9px !important;
+  }
+}
+
+@media (max-width: 560px) {
+  .charlie-approval-state {
+    grid-template-rows: 136px minmax(0, 1fr) !important;
+  }
+
+  .charlie-approval-field {
+    padding-left: 0 !important;
+  }
+}

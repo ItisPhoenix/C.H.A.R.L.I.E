@@ -21,6 +21,7 @@ export function CharlieCore({
   position,
   coreState,
   visualPhase,
+  activeWorkspaceType,
   customStatusLabel,
   customSubtext,
   onClearScreen,
@@ -54,7 +55,7 @@ export function CharlieCore({
   return (
     <div
       ref={rootRef}
-      className={`charlie-core-wrapper ${isDocked ? "charlie-core-docked" : "charlie-core-center"}`}
+      className={`charlie-core-wrapper ${isDocked ? "charlie-core-docked" : "charlie-core-center"} ${activeWorkspaceType === "system" ? "charlie-core-system" : ""}`}
       data-testid="charlie-core"
       data-core-display-state={displayState}
       onClick={() => setShowMenu((prev) => !prev)}
@@ -69,7 +70,7 @@ export function CharlieCore({
     >
       <div className="w-full h-full relative flex items-center justify-center">
         {/* Core Ring */}
-        <CharlieRing />
+        <CharlieRing compact={isDocked} />
 
         {/* Center Inner Branding */}
         <div className="charlie-core-brand-center" aria-hidden="true">
