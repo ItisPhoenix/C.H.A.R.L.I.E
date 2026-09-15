@@ -92,6 +92,11 @@
   }
 }
 
+.briefing-composition .briefing-rail,
+.briefing-composition .briefing-sources {
+  background: transparent;
+}
+
 /* Story constellation fills unavailable map space with supplied briefing
    records, while map-backed briefings retain their dominant spatial surface. */
 .briefing-composition--signal {

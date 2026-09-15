@@ -408,6 +408,51 @@
   }
 }
 
+/* Keep findings in the parent scroll flow. Native rail is not content. */
+.research-composition .research-findings {
+  overflow: visible;
+  border-left: 0;
+  padding-left: 12px;
+}
+
+.research-composition .research-findings::before,
+.research-composition .research-visual::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 56px;
+  height: 1px;
+  background: rgba(93, 218, 255, .34);
+  pointer-events: none;
+}
+
+.research-composition .research-visual {
+  border: 0;
+}
+
+@media (min-width: 901px) {
+  .research-composition {
+    overflow-y: visible;
+  }
+
+  .charlie-workspace-research .charlie-workspace-content {
+    scrollbar-width: none;
+  }
+
+  .charlie-workspace-research .charlie-workspace-content::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+}
+
+@media (max-width: 900px) {
+  .research-composition .research-findings::before,
+  .research-composition .research-visual::before {
+    display: none;
+  }
+}
+
 /* Dense projection without enclosing panels: canonical summary, counts, and
    evidence remain visible when no spatial contract is available. */
 .research-composition {

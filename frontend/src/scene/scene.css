@@ -1364,8 +1364,10 @@
   z-index: 2;
   pointer-events: none;
   background:
-    linear-gradient(90deg, rgba(93, 218, 255, .42), transparent 14%, transparent 86%, rgba(93, 218, 255, .2)) top / 100% 1px no-repeat,
-    linear-gradient(90deg, rgba(93, 218, 255, .18), transparent 12%, transparent 88%, rgba(93, 218, 255, .28)) bottom / 100% 1px no-repeat,
+    linear-gradient(90deg, rgba(93, 218, 255, .42), transparent) top left / 72px 1px no-repeat,
+    linear-gradient(90deg, rgba(93, 218, 255, .18), transparent) bottom right / 72px 1px no-repeat,
+    linear-gradient(0deg, rgba(93, 218, 255, .34), transparent) top left / 1px 72px no-repeat,
+    linear-gradient(180deg, rgba(93, 218, 255, .2), transparent) bottom right / 1px 72px no-repeat,
     radial-gradient(ellipse at center, transparent 54%, rgba(1, 7, 13, .48) 100%);
 }
 
@@ -1378,6 +1380,85 @@
 .vision-workspace__frame > div[role="status"] {
   background: transparent !important;
   color: var(--scene-text-secondary) !important;
+}
+
+/* Active-task switcher is a contextual rail, not a floating pill. */
+.charlie-scene-root [aria-label="Active Tasks HUD Rail"] {
+  border: 0 !important;
+  border-bottom: 1px solid var(--hud-line) !important;
+  border-radius: 0 !important;
+  background: linear-gradient(90deg, rgba(3, 17, 27, .5), transparent) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+.charlie-scene-root [aria-label="Active Tasks HUD Rail"] button {
+  border-radius: 0 !important;
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.charlie-scene-root [aria-label="Active Tasks HUD Rail"] button:hover,
+.charlie-scene-root [aria-label="Active Tasks HUD Rail"] button:focus-visible,
+.charlie-scene-root [aria-label="Active Tasks HUD Rail"] button[class*="bg-cyan-950"] {
+  border-bottom-color: var(--hud-line-strong) !important;
+  background: rgba(7, 45, 59, .34) !important;
+}
+
+/* Runtime hierarchy uses local markers rather than full dashboard dividers. */
+.system-composition .system-topology {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.system-composition .system-subsystem-list {
+  border-top: 0;
+  gap: 4px;
+}
+
+.system-composition .system-subsystem-row {
+  position: relative;
+  min-height: 46px;
+  border-bottom: 0;
+  padding-left: 12px;
+}
+
+.system-composition .system-subsystem-row::before {
+  content: "";
+  position: absolute;
+  top: 17px;
+  left: 0;
+  width: 5px;
+  height: 1px;
+  background: var(--hud-line-strong);
+}
+
+.system-composition .system-operations {
+  border-left: 0 !important;
+  padding-left: 12px !important;
+}
+
+.system-composition .operation-row {
+  position: relative;
+  min-height: 58px;
+  border-bottom: 0;
+  padding-left: 10px;
+}
+
+.system-composition .operation-row::before {
+  content: "";
+  position: absolute;
+  top: 27px;
+  left: 0;
+  width: 5px;
+  height: 1px;
+  background: var(--hud-line-strong);
+}
+
+.system-composition .system-feed {
+  border-top: 0;
 }
 
 @media (max-width: 1439px) {

@@ -787,6 +787,18 @@ export function CharlieRing({ compact = false }: CharlieRingProps): ReactElement
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
       context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      drawFrame(
+        context,
+        width,
+        height,
+        performance.now(),
+        stateRef.current,
+        audioLevelRef.current,
+        pulseStartedAtRef.current,
+        clickPulseStartedAtRef.current,
+        reduceMotionRef.current,
+        compactRef.current,
+      );
     };
 
     const observer = new ResizeObserver(resize);
