@@ -1,57 +1,46 @@
-import { beforeEach, describe, expect, test } from "vitest";
-import { adaptEvent, reconnectDelayMs, resetEventDedupe, shouldQueueCommand } from "./bridge";
+import { beforeEach, describe, expect, it } from "vitest";
+import { adaptEvent, resetEventDedupe } from "./bridge";
 
-beforeEach(() => {
-  resetEventDedupe();
+const canonical = (overrides: Record<string, unknown> = {}) => ({
+  type: "research_progress",
+  version: 1,
+  id: "event-1",
+  timestamp: "2026-09-17T10:00:00.000Z",
+  source: "task",
+  session_id: "session-1",
+  task_id: "task-1",
+  turn_id: "turn-1",
+  replay: false,
+  payload: { stage: "searching", message: "Searching", session_id: "session-1" },
+  ...overrides,
 });
 
-describe("reconnectDelayMs", () => {
-  test("starts at 3000ms on the first attempt", () => {
-    expect(reconnectDelayMs(0)).toBe(3000);
-  });
+beforeEach(() => resetEventDedupe());
 
-  test("doubles each attempt", () => {
-    expect(reconnectDelayMs(1)).toBe(6000);
-    expect(reconnectDelayMs(2)).toBe(12000);
-  });
-
-  test("caps at 30000ms", () => {
-    expect(reconnectDelayMs(10)).toBe(30000);
-  });
-});
-
-describe("command queue safety", () => {
-  test("does not queue process-global recovery decisions while disconnected", () => {
-    expect(shouldQueueCommand("recovery_approve")).toBe(false);
-    expect(shouldQueueCommand("recovery_reject")).toBe(false);
-    expect(shouldQueueCommand("presentation_command")).toBe(true);
-  });
-});
-
-describe("adaptEvent", () => {
-  test("preserves a payload turn_id at the frontend transport boundary", () => {
-    const event = adaptEvent({
-      type: "token",
-      id: "event-1",
-      payload: { text: "hello", turn_id: "turn-1" },
+describe("canonical runtime event bridge", () => {
+  it("requires the shared envelope fields and preserves research identity", () => {
+    const event = adaptEvent(canonical());
+    expect(event).toMatchObject({
+      type: "research_progress",
+      version: 1,
+      session_id: "session-1",
+      task_id: "task-1",
+      turn_id: "turn-1",
     });
-
-    expect(event?.turn_id).toBe("turn-1");
+    expect(adaptEvent({ ...canonical(), version: 2 })).toBeNull();
+    expect(adaptEvent({ ...canonical(), id: "" })).toBeNull();
+    expect(adaptEvent({ ...canonical(), timestamp: undefined })).toBeNull();
   });
 
-  test("accepts canonical runtime_truth events from the shared contract", () => {
-    const event = adaptEvent({
-      type: "runtime_truth",
-      id: "runtime-truth-1",
-      payload: {
-        authority: "main_runtime",
-        launch_id: "launch-1",
-        revision: 1,
-        status: "degraded",
-        subsystems: {},
-      },
-    });
+  it("drops duplicate event IDs at the transport boundary", () => {
+    const first = adaptEvent(canonical());
+    const duplicate = adaptEvent(canonical());
+    expect(first?.id).toBe("event-1");
+    expect(duplicate).toBeNull();
+  });
 
-    expect(event?.type).toBe("runtime_truth");
+  it("does not invent unsupported research event types", () => {
+    expect(adaptEvent(canonical({ type: "research_started" }))).toBeNull();
+    expect(adaptEvent(canonical({ type: "research_source_update" }))).toBeNull();
   });
 });

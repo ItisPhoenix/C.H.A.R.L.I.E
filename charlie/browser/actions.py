@@ -20,11 +20,12 @@ _READ_TIMEOUT_SEC = 15.0
 _READ_MAX_CHARS = 50000
 
 
-def navigate(page: Any, url: str, wait_selector: Optional[str] = None) -> None:
+def navigate(page: Any, url: str, wait_selector: Optional[str] = None) -> Any:
     """Go to url, optionally waiting for a specific selector -- never networkidle (too slow)."""
     controller.wait_host_cooldown(url)
+    response = None
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=_DEFAULT_NAV_TIMEOUT_MS)
+        response = page.goto(url, wait_until="domcontentloaded", timeout=_DEFAULT_NAV_TIMEOUT_MS)
     except Exception as exc:
         if type(exc).__name__ not in {"TimeoutError", "PlaywrightTimeoutError"}:
             raise
@@ -35,7 +36,7 @@ def navigate(page: Any, url: str, wait_selector: Optional[str] = None) -> None:
         )
         if not reached_host:
             try:
-                page.goto(url, wait_until="commit", timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
+                response = page.goto(url, wait_until="commit", timeout=_DEFAULT_SELECTOR_TIMEOUT_MS)
             except Exception as commit_exc:
                 if type(commit_exc).__name__ not in {"TimeoutError", "PlaywrightTimeoutError"}:
                     raise
@@ -53,6 +54,7 @@ def navigate(page: Any, url: str, wait_selector: Optional[str] = None) -> None:
             logger.debug("wait_for_selector(%r) timed out on %s", wait_selector, url)
     session.record_navigation(page.url)
     session.record_action(f"navigate {url}")
+    return response
 
 
 def back(page: Any) -> None:

@@ -297,6 +297,7 @@ def match_browser_media_continuation(query: str, current_url: Optional[str]) -> 
 
 
 _URL_RE = re.compile(r"\b((?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+)\b", re.IGNORECASE)
+_EXPLICIT_HTTP_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _FILE_EXTENSIONS = frozenset(
     {
         "txt",
@@ -361,6 +362,14 @@ def _is_probable_domain(text: str) -> bool:
     return resolve_website_url(candidate) is not None
 
 
+def extract_explicit_http_url(query: str) -> Optional[str]:
+    """Return the URL explicitly present in user text, without inventing one."""
+    match = _EXPLICIT_HTTP_URL_RE.search(query or "")
+    if match is None:
+        return None
+    return match.group(0).rstrip(".,!?;:")
+
+
 def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[str]]]:
     """Pure: which known apps/URLs does `query` ask to open?
 
@@ -390,7 +399,7 @@ def match_open_app(query: str) -> Optional[Tuple[List[str], List[str], Optional[
     is_website_flags: List[bool] = []
     remaining_text = " " + target_text + " "
 
-    explicit_urls = re.findall(r"https?://[^\s<>\"']+", remaining_text, re.IGNORECASE)
+    explicit_urls = _EXPLICIT_HTTP_URL_RE.findall(remaining_text)
     for match in dict.fromkeys(explicit_urls + _URL_RE.findall(remaining_text)):
         if "://" not in match and not _is_probable_domain(match):
             continue

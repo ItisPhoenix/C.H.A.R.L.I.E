@@ -7,8 +7,10 @@ Brain/core.py -- same constraint as agent.py, core.py imports this lazily instea
 
 import asyncio
 import inspect
+import ipaddress
 import logging
 import re
+import socket
 import time
 from typing import Optional
 from urllib.parse import urlparse
@@ -17,6 +19,7 @@ from charlie import resource_locks
 from charlie.browser import agent, controller, intent, recipes, session, stealth
 from charlie.browser.recipes import BrowserResult
 from charlie.known_apps import APP_REGISTRY, resolve_website_url
+from charlie.router import extract_explicit_http_url
 from charlie.utils import make_id
 
 logger = logging.getLogger("charlie.browser")
@@ -51,6 +54,9 @@ _AUTHORITATIVE_DETERMINISTIC_FAILURES = {
     "media-result-unverified",
     "result-open-unverified",
     "back-unverified",
+    "content-unreadable",
+    "page-http-failure",
+    "private-url-blocked",
 }
 
 
@@ -72,11 +78,49 @@ async def _acquire_browser(owner_id: str, max_wait_s: float) -> Optional[resourc
         return None
 
 
-def _resolve_known_site(task: str) -> Optional[str]:
+def _is_private_or_local_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    if not host or host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None:
+        return bool(
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_unspecified
+            or address.is_multicast
+        )
+    try:
+        resolved = socket.getaddrinfo(
+            host,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+    except OSError:
+        resolved = []
+    for _family, _kind, _proto, _canonname, sockaddr in resolved:
+        try:
+            address = ipaddress.ip_address(sockaddr[0])
+        except (ValueError, IndexError):
+            continue
+        if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
+            return True
+    return "." not in host
+
+
+def _resolve_known_site(task: str, *, user_supplied_url: bool = False) -> Optional[str]:
     """Resolve a site hint or arbitrary HTTP(S) target from current intent text."""
-    url_match = re.search(r"https?://[^\s<>\"']+", task, re.IGNORECASE)
-    if url_match:
-        return resolve_website_url(url_match.group(0))
+    explicit_url = extract_explicit_http_url(task)
+    if explicit_url:
+        if _is_private_or_local_url(explicit_url) and not user_supplied_url:
+            return None
+        return resolve_website_url(explicit_url)
     domain_match = re.search(r"\b(?:www\.)?[a-z0-9](?:[a-z0-9-]*\.)+[a-z]{2,}\b", task, re.IGNORECASE)
     if domain_match:
         resolved = resolve_website_url(domain_match.group(0))
@@ -103,6 +147,7 @@ async def resolve(
     deadline_s: float = 25.0,
     on_progress=None,
     owner_id: Optional[str] = None,
+    user_supplied_url: bool = False,
 ) -> BrowserResult:
     start_time = time.perf_counter()
     outcome = "success"
@@ -116,6 +161,7 @@ async def resolve(
             deadline_s,
             on_progress,
             owner_id,
+            user_supplied_url,
         )
     except Exception as e:
         outcome = f"error: {type(e).__name__}"
@@ -134,6 +180,7 @@ async def _resolve_inner(
     deadline_s: float = 25.0,
     on_progress=None,
     owner_id: Optional[str] = None,
+    user_supplied_url: bool = False,
 ) -> BrowserResult:
     """Run the tier cascade for `task`, falling through tier by tier, and cache the result."""
     freshness_sensitive = intent.is_freshness_sensitive(task)
@@ -170,7 +217,31 @@ async def _resolve_inner(
             task,
             urlparse(current_url).hostname or session.get_session().current_domain or "",
         )
-        resolved_site = _resolve_known_site(task)
+        explicit_url = extract_explicit_http_url(task)
+        if explicit_url and _is_private_or_local_url(explicit_url) and not user_supplied_url:
+            return BrowserResult(
+                url=explicit_url,
+                answer=(
+                    "I can't open a private or loopback URL unless it was explicitly "
+                    "supplied for browser navigation."
+                ),
+                verification="private-url-blocked",
+                evidence={"requested_url": explicit_url, "provenance": "not_user_supplied"},
+            )
+        resolved_site = _resolve_known_site(task, user_supplied_url=user_supplied_url)
+        if (
+            result is None
+            and resolved_site
+            and explicit_url
+            and parsed_intent.operation in {"OPEN", "READ"}
+        ):
+            result = await loop.run_in_executor(
+                None,
+                lambda: recipes.open_site(
+                    resolved_site,
+                    read_content=parsed_intent.operation == "READ",
+                ),
+            )
         if (
             result is None
             and current_url

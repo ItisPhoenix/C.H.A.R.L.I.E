@@ -13,11 +13,7 @@ from charlie.config import Config
 from charlie.fastpaths import FastPathResult
 from charlie.research.models import ResearchMode, ResearchReport
 from charlie.research.router import ResearchDecision
-from charlie.turn_contracts import (
-    IntentDecision,
-    TurnContractError,
-    TurnRequest,
-)
+from charlie.turn_contracts import IntentDecision, ResultEnvelope, TurnContractError, TurnRequest
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN_SOURCE = (ROOT / "main.py").read_text(encoding="utf-8")
@@ -91,6 +87,8 @@ async def test_time_date_turn_emits_one_canonical_decision(brain_config: Config)
     assert decision.original_request == request.input
     assert decision.intent == "time_date"
     assert decision.capabilities == ("system",)
+    assert getattr(decision, "execution_policy", None) == "conversation"
+    assert getattr(decision, "durable_work_required", False) is False
     assert decision.routing_source == "deterministic"
     assert decision.confidence == 1.0
 
@@ -143,6 +141,8 @@ async def test_research_turn_records_research_and_live_freshness(
     assert decisions[0].intent == "research"
     assert decisions[0].capabilities == ("research",)
     assert decisions[0].freshness_requirement == "live"
+    assert getattr(decisions[0], "execution_policy", None) == "research"
+    assert getattr(decisions[0], "durable_work_required", False) is False
     assert decisions[0].routing_source == "research_router"
     assert decisions[0].confidence == 1.0
 
@@ -173,6 +173,7 @@ async def test_disabled_research_keeps_the_model_route(
     assert len(decisions) == 1
     assert decisions[0].intent == "conversation"
     assert decisions[0].capabilities == ()
+    assert getattr(decisions[0], "execution_policy", None) == "conversation"
     assert decisions[0].routing_source == "model"
 
 
@@ -220,8 +221,123 @@ async def test_ordinary_conversation_records_no_capability_model_route(brain_con
     assert len(decisions) == 1
     assert decisions[0].intent == "conversation"
     assert decisions[0].capabilities == ()
+    assert getattr(decisions[0], "execution_policy", None) == "conversation"
     assert decisions[0].routing_source == "model"
     assert decisions[0].confidence is None
+
+
+@pytest.mark.asyncio
+async def test_latest_bounded_question_is_grounded_without_durable_work(
+    monkeypatch: pytest.MonkeyPatch, brain_config: Config
+) -> None:
+    request = _request("What is the latest stable Python release?")
+    report = ResearchReport(query=request.input, mode=ResearchMode.STANDARD)
+    decisions: list[IntentDecision] = []
+    brain = core.Brain(brain_config, on_intent_decision=decisions.append, register_panic_hotkey=False)
+
+    async def fake_research(*_args: Any, **_kwargs: Any) -> ResearchReport:
+        return report
+
+    async def fake_completion(_payload: dict[str, Any], _generation: int) -> tuple[str, list[dict[str, Any]]]:
+        return "The latest release is available from current evidence.", []
+
+    monkeypatch.setattr(brain, "_run_research_for_turn", fake_research)
+    monkeypatch.setattr(brain, "_stream_completion", fake_completion)
+    try:
+        await _run_turn(brain, request, skip_pre_search=False)
+    finally:
+        await brain.close()
+
+    assert len(decisions) == 1
+    assert getattr(decisions[0], "execution_policy", None) == "grounded_answer"
+    assert decisions[0].freshness_requirement == "live"
+    assert decisions[0].durable_work_required is False
+
+
+@pytest.mark.asyncio
+async def test_open_app_is_action_without_durable_work(
+    monkeypatch: pytest.MonkeyPatch, brain_config: Config
+) -> None:
+    request = _request("Open Notepad")
+    decisions: list[IntentDecision] = []
+    brain = core.Brain(brain_config, on_intent_decision=decisions.append, register_panic_hotkey=False)
+
+    async def fake_execute(*_args: Any, **kwargs: Any) -> ResultEnvelope:
+        return ResultEnvelope(
+            request=kwargs.get("request", request.input),
+            turn_id=kwargs.get("turn_id", request.turn_id),
+            task_id=kwargs.get("task_id"),
+            session_id=kwargs.get("session_id", request.session_id),
+            capability="desktop",
+            operation="desktop.app.open",
+            result="Notepad opened.",
+        )
+
+    monkeypatch.setattr(brain, "execute_tool_operation", fake_execute)
+    try:
+        await _run_turn(brain, request)
+    finally:
+        await brain.close()
+
+    assert len(decisions) == 1
+    assert getattr(decisions[0], "execution_policy", None) == "action"
+    assert getattr(decisions[0], "external_action_required", False) is True
+    assert getattr(decisions[0], "durable_work_required", False) is False
+
+
+@pytest.mark.asyncio
+async def test_background_tool_selection_is_work_without_a_second_router(
+    monkeypatch: pytest.MonkeyPatch, brain_config: Config
+) -> None:
+    request = _request("Process these files while I keep chatting")
+    decisions: list[IntentDecision] = []
+    brain = core.Brain(brain_config, on_intent_decision=decisions.append, register_panic_hotkey=False)
+    calls = 0
+
+    async def fake_completion(_payload: dict[str, Any], _generation: int) -> tuple[str, list[dict[str, Any]]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return "", [{
+                "id": "call-work",
+                "name": "start_background_task",
+                "arguments": {"text": "Process these files"},
+            }]
+        return "The work has started.", []
+
+    async def fake_followup(_client: Any, _model: str, _payload: dict[str, Any], _generation: int, state: Any) -> Any:
+        state.accumulated = "The work has started."
+        state.tc_by_index = {}
+        if False:
+            yield ""
+
+    async def fake_start(_arguments: dict[str, Any], **_kwargs: Any) -> str:
+        return "Background task started."
+
+    monkeypatch.setattr(brain, "_stream_completion", fake_completion)
+    monkeypatch.setattr(brain, "_stream_followup_once", fake_followup)
+    monkeypatch.setattr(brain, "_handle_start_background_task", fake_start)
+    try:
+        await _run_turn(brain, request)
+    finally:
+        await brain.close()
+
+    assert len(decisions) == 1
+    assert getattr(decisions[0], "execution_policy", None) == "work"
+    assert getattr(decisions[0], "durable_work_required", False) is True
+    assert getattr(decisions[0], "external_action_required", False) is False
+
+
+def test_calendar_capability_selects_automation_policy() -> None:
+    policy, capabilities, freshness, external, durable, _rationale = core._execution_policy_from_tool_calls(
+        [{"name": "calendar_create", "arguments": {"title": "Daily check"}}]
+    )
+
+    assert policy.value == "automation"
+    assert capabilities == ("calendar",)
+    assert freshness is None
+    assert external is True
+    assert durable is True
 
 
 @pytest.mark.asyncio
@@ -344,7 +460,10 @@ def test_intent_decision_contract_serializes_only_routing_metadata() -> None:
         "original_request": request.input,
         "intent": "research",
         "capabilities": ["research"],
+        "execution_policy": "conversation",
         "freshness_requirement": "live",
+        "external_action_required": False,
+        "durable_work_required": False,
         "routing_source": "research_router",
         "confidence": 1.0,
         "rationale": "freshness signal",

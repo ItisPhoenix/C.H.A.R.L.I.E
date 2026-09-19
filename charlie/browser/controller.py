@@ -6,6 +6,7 @@ the thread-affine Playwright objects and no lock is needed around them.
 """
 
 import logging
+import os
 import sys
 import threading
 import time
@@ -135,6 +136,71 @@ def _ensure_launched() -> Any:
         _dispose_stale()
         _launch()
     return _page
+
+
+def _windows_session_id(pid: Optional[int]) -> Optional[int]:
+    if pid is None or sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        session_id = ctypes.c_ulong()
+        if ctypes.windll.kernel32.ProcessIdToSessionId(pid, ctypes.byref(session_id)):
+            return int(session_id.value)
+    except Exception:
+        logger.debug("Unable to resolve browser Windows SessionId", exc_info=True)
+    return None
+
+
+def _browser_process_pid() -> Optional[int]:
+    """Find the browser process tied to Charlie's persistent profile, if exposed by the host."""
+    profile = os.path.abspath(str(config.browser_profile_path)).casefold()
+    headless_candidates: list[tuple[float, int]] = []
+    try:
+        import psutil
+
+        for process in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
+            try:
+                name = str(process.info.get("name") or "").casefold()
+                command_line = " ".join(process.info.get("cmdline") or []).casefold()
+                browser_names = {"chrome.exe", "chromium.exe", "msedge.exe", "chrome-headless-shell.exe"}
+                if name in browser_names and profile in command_line:
+                    return int(process.info["pid"])
+                if name == "chrome-headless-shell.exe":
+                    headless_candidates.append(
+                        (float(process.info.get("create_time") or 0.0), int(process.info["pid"]))
+                    )
+            except (OSError, psutil.Error, TypeError, ValueError):
+                continue
+        if headless_candidates:
+            return min(headless_candidates)[1]
+    except Exception:
+        logger.debug("Unable to resolve browser process provenance", exc_info=True)
+    return None
+
+
+def runtime_identity(page: Any) -> Dict[str, Any]:
+    """Expose only identities the live Playwright/host runtime actually provides."""
+    context = _context
+    browser = getattr(context, "browser", None) if context is not None else None
+
+    def guid(value: Any) -> Optional[str]:
+        return getattr(getattr(value, "_impl_obj", None), "_guid", None)
+
+    browser_pid = _browser_process_pid()
+    try:
+        browser_version = browser.version if browser is not None else None
+    except Exception:
+        browser_version = None
+    return {
+        "browser_pid": browser_pid,
+        "windows_session_id": _windows_session_id(browser_pid),
+        "browser_id": guid(browser),
+        "browser_context_id": guid(context),
+        "target_id": guid(page),
+        "browser_version": browser_version,
+        "profile_path": os.path.abspath(str(config.browser_profile_path)),
+    }
 
 
 def set_resource_blocking(enabled: bool) -> None:

@@ -804,7 +804,7 @@ class TestNormalRoundTrips:
         monkeypatch.setattr(brain.client, "stream", mock_stream)
         monkeypatch.setattr("charlie.tools.registry.execute_tool", lambda name, args: "Clicked mark 3.")
         result = await _collect(brain, "click the submit button")
-        assert "clicked it" in result.lower()
+        assert result == "I executed the action, but I couldn't verify the resulting state."
         assert calls["n"] == 2
 
     @pytest.mark.asyncio

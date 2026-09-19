@@ -524,6 +524,20 @@ async def broadcast(data: dict):
         ws_sessions.pop(ws, None)
 
 
+async def _execute_terminal_request(payload: object) -> None:
+    """Execute one approved command against the web-owned canonical session."""
+
+    if not isinstance(payload, dict) or event_bus is None:
+        return
+    request_id = payload.get("request_id")
+    session_id = payload.get("terminal_session_id")
+    command = payload.get("command")
+    if not all(isinstance(value, str) and value for value in (request_id, session_id, command)):
+        return
+    result = await _terminal_manager.execute_command(session_id, command, request_id)
+    await event_bus.send_command({"type": "terminal_session_result", "payload": result})
+
+
 async def _event_bridge():
     """Background task: ZeroMQ events -> WebSocket broadcast."""
     global pipeline_state
@@ -549,6 +563,9 @@ async def _event_bridge():
         logger.debug(f"Event received: {event}")
         global pipeline_state
         etype = event.get("type", "")
+        if etype == "terminal_execute_request":
+            await _execute_terminal_request(event.get("payload", {}))
+            return
         if etype.startswith("self_extension_"):
             _self_extension_events.append(event)
             del _self_extension_events[:-200]
@@ -974,6 +991,7 @@ async def terminal_input(session_id: str, data: dict):
                 "request_id": request_id,
                 "terminal_session_id": target_sid,
                 "command": line,
+                "execution_target": "terminal_session",
             },
         }
     )

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -30,6 +31,7 @@ class VerificationResult:
     verified: bool
     message: str
     latency_ms: float = 0.0
+    verification_status: Optional[str] = None
 
 
 def verify_app_launch(
@@ -280,6 +282,49 @@ def verify_browser_navigate(
         verified=False,
         message=f"Browser URL is '{actual_url}', expected '{expected_url_or_domain}'",
         latency_ms=round(latency, 2),
+        verification_status="verified_failure",
+    )
+
+
+def verify_terminal_command(
+    command: str,
+    request: str,
+    exit_code: Optional[int],
+    output: str = "",
+) -> VerificationResult:
+    """Verify command execution while keeping higher-level user goals separate."""
+
+    if exit_code is None:
+        return VerificationResult(
+            status="unverified",
+            verified=False,
+            message="The terminal command ran without a readable exit code.",
+            verification_status="verification_unavailable",
+        )
+    if exit_code != 0:
+        return VerificationResult(
+            status="failed",
+            verified=False,
+            message=f"Terminal command exited with code {exit_code}.",
+            verification_status="verified_failure",
+        )
+
+    higher_level_goal = re.search(
+        r"\b(?:install|make\s+sure|ensure|verify|confirm|works?|working|test\s+it)\b",
+        request.casefold(),
+    )
+    if higher_level_goal:
+        return VerificationResult(
+            status="unverified",
+            verified=False,
+            message="The command succeeded, but the requested higher-level postcondition was not checked.",
+            verification_status="executed_unverified",
+        )
+    return VerificationResult(
+        status="completed",
+        verified=True,
+        message=f"Terminal command completed with exit code 0{': output observed' if output.strip() else ''}.",
+        verification_status="verified_success",
     )
 
 
@@ -316,7 +361,11 @@ def run_verifier_for_match(
 
         if verifier_name == "verify_browser_navigate":
             url = arguments.get("url") or ""
-            return verify_browser_navigate(str(url), actual_url=str(url))
+            observed_url = None
+            match = re.search(r"^URL:\s*(\S+)", result_text or "", re.IGNORECASE | re.MULTILINE)
+            if match:
+                observed_url = match.group(1)
+            return verify_browser_navigate(str(url), actual_url=observed_url)
 
         return VerificationResult(
             status="unverified",

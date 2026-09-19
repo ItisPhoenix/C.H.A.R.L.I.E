@@ -428,7 +428,12 @@ async def test_run_task_done_action_returns_result(monkeypatch):
         return 'DONE url="https://x.com" answer="found it"'
 
     result = await run_task("do something", complete)
-    assert result == BrowserResult(url="https://x.com", answer="found it", success=True, verification="agent-confirmed")
+    assert result == BrowserResult(
+        url="https://example.com",
+        answer="I couldn't independently verify the requested browser result.",
+        success=False,
+        verification="agent-done-unverified",
+    )
 
 
 @pytest.mark.asyncio

@@ -49,8 +49,31 @@ class FreshnessRequirement(StrEnum):
     LIVE = "live"
 
 
+class ExecutionPolicy(StrEnum):
+    """Internal execution semantics selected for one conversational turn."""
+
+    CONVERSATION = "conversation"
+    GROUNDED_ANSWER = "grounded_answer"
+    RESEARCH = "research"
+    ACTION = "action"
+    WORK = "work"
+    AUTOMATION = "automation"
+    LIVE_ASSIST = "live_assist"
+
+
+class VerificationStatus(StrEnum):
+    """Semantic postcondition state for one executed operation."""
+
+    VERIFIED_SUCCESS = "verified_success"
+    EXECUTED_UNVERIFIED = "executed_unverified"
+    VERIFIED_FAILURE = "verified_failure"
+    VERIFICATION_UNAVAILABLE = "verification_unavailable"
+
+
 _ROUTING_SOURCE_VALUES = frozenset(item.value for item in RoutingSource)
 _FRESHNESS_REQUIREMENT_VALUES = frozenset(item.value for item in FreshnessRequirement)
+_EXECUTION_POLICY_VALUES = frozenset(item.value for item in ExecutionPolicy)
+_VERIFICATION_STATUS_VALUES = frozenset(item.value for item in VerificationStatus)
 
 
 def _require_text(value: str, field_name: str) -> None:
@@ -146,6 +169,9 @@ class IntentDecision:
     confidence: Optional[float] = None
     rationale: str = ""
     presentation_expectation: Optional[str] = None
+    execution_policy: str = ExecutionPolicy.CONVERSATION.value
+    external_action_required: bool = False
+    durable_work_required: bool = False
 
     def __post_init__(self) -> None:
         _require_text(self.turn_id, "turn_id")
@@ -172,6 +198,18 @@ class IntentDecision:
             raise TurnContractError("confidence must be between 0 and 1")
         if any(not isinstance(capability, str) or not capability.strip() for capability in self.capabilities):
             raise TurnContractError("capabilities must contain non-empty strings")
+        execution_policy = (
+            self.execution_policy.value
+            if isinstance(self.execution_policy, ExecutionPolicy)
+            else self.execution_policy
+        )
+        if execution_policy not in _EXECUTION_POLICY_VALUES:
+            raise TurnContractError(f"unsupported execution_policy: {execution_policy}")
+        object.__setattr__(self, "execution_policy", execution_policy)
+        if type(self.external_action_required) is not bool:
+            raise TurnContractError("external_action_required must be a bool")
+        if type(self.durable_work_required) is not bool:
+            raise TurnContractError("durable_work_required must be a bool")
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
 
     @classmethod
@@ -194,7 +232,10 @@ class IntentDecision:
             "original_request": self.original_request,
             "intent": self.intent,
             "capabilities": list(self.capabilities),
+            "execution_policy": self.execution_policy,
             "freshness_requirement": self.freshness_requirement,
+            "external_action_required": self.external_action_required,
+            "durable_work_required": self.durable_work_required,
             "routing_source": self.routing_source,
             "confidence": self.confidence,
             "rationale": self.rationale,
@@ -220,6 +261,7 @@ class ResultEnvelope:
     progress: float = 1.0
     result: Any = None
     verification: Optional[dict[str, Any]] = None
+    verification_status: Optional[str] = None
     risk_class: str = "safe"
     requires_approval: bool = False
     reason: str = ""
@@ -237,6 +279,15 @@ class ResultEnvelope:
             _require_text(self.task_id, "task_id")
         if self.session_id is not None:
             _require_text(self.session_id, "session_id")
+        if self.verification_status is not None:
+            verification_status = (
+                self.verification_status.value
+                if isinstance(self.verification_status, VerificationStatus)
+                else self.verification_status
+            )
+            if verification_status not in _VERIFICATION_STATUS_VALUES:
+                raise TurnContractError(f"unsupported verification_status: {verification_status}")
+            object.__setattr__(self, "verification_status", verification_status)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-shaped form used at process/event boundaries."""
@@ -254,6 +305,7 @@ class ResultEnvelope:
             "evidence": list(self.evidence),
             "artifacts": list(self.artifacts),
             "verification": self.verification,
+            "verification_status": self.verification_status,
             "errors": list(self.errors),
             "risk_class": self.risk_class,
             "requires_approval": self.requires_approval,
@@ -279,6 +331,7 @@ class ResultEnvelope:
             evidence=list(data.get("evidence") or []),
             artifacts=list(data.get("artifacts") or []),
             verification=data.get("verification"),
+            verification_status=data.get("verification_status"),
             errors=[str(error) for error in (data.get("errors") or [])],
             risk_class=str(data.get("risk_class", "safe")),
             requires_approval=bool(data.get("requires_approval", False)),
@@ -323,6 +376,7 @@ def validate_turn_chain(
 
 
 __all__ = [
+    "ExecutionPolicy",
     "IntentDecision",
     "FreshnessRequirement",
     "ResultEnvelope",
@@ -331,5 +385,6 @@ __all__ = [
     "TurnContext",
     "TurnContractError",
     "TurnRequest",
+    "VerificationStatus",
     "validate_turn_chain",
 ]

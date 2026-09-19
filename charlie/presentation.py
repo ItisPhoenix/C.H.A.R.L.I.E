@@ -25,7 +25,7 @@ from charlie.presentation_contract_generated import (
     PresentationKind,
 )
 from charlie.research.router import is_briefing_query
-from charlie.turn_contracts import ResultEnvelope
+from charlie.turn_contracts import ResultEnvelope, VerificationStatus
 from charlie.utils import utc_now_iso
 
 # Compatibility name retained for current callers while result ownership moves
@@ -514,6 +514,12 @@ class PresentationResolver:
             if (not is_verified or v_status in ("unverified", "partially_completed")) and outcome.status == "completed":
                 outcome.status = v_status or "unverified"
 
+        if outcome.verification_status in {
+            VerificationStatus.EXECUTED_UNVERIFIED.value,
+            VerificationStatus.VERIFICATION_UNAVAILABLE.value,
+        }:
+            return self._build_unverified_presentation(outcome, ctx, result_text, verification_msg)
+
         # 5. Failed execution -> NOTIFICATION or ATTENTION
         if outcome.status == "failed":
             return self._build_failure_presentation(outcome, ctx, result_text, verification_msg)
@@ -689,6 +695,35 @@ class PresentationResolver:
             spoken_text=f"I couldn't complete that: {msg}",
             caption_text=f"Failed: {msg}",
             replace_key=f"failure:{outcome.task_id or outcome.operation}",
+            replayable=False,
+        )
+
+    def _build_unverified_presentation(
+        self,
+        outcome: ExecutionOutcome,
+        ctx: PresentationContext,
+        result_text: str,
+        verification_msg: str,
+    ) -> PresentationIntent:
+        message = verification_msg or result_text or f"Operation '{outcome.operation}' executed."
+        spoken = "I executed that action, but I couldn't verify the resulting state."
+        return PresentationIntent(
+            kind=PresentationKind.NOTIFICATION,
+            task_id=outcome.task_id,
+            session_id=outcome.session_id,
+            capability=outcome.capability,
+            operation=outcome.operation,
+            title="Action Unverified",
+            summary=message,
+            content={"result": result_text, "verification": message, "details": outcome.data},
+            priority=65,
+            attention_level=AttentionLevel.NORMAL,
+            dismiss_policy=DismissPolicy.TIMED,
+            auto_dismiss_ms=DEFAULT_NOTIFICATION_MS,
+            preferred_zone=PreferredZone.TOP_RIGHT,
+            spoken_text=spoken,
+            caption_text=f"Unverified: {message}",
+            replace_key=f"unverified:{outcome.task_id or outcome.operation}",
             replayable=False,
         )
 

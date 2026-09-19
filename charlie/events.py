@@ -71,6 +71,7 @@ class EventType(StrEnum):
     VISION_OBSERVED = "vision_observed"
     HUD_VISIBILITY = "hud_visibility"
     TERMINAL_COMMAND_RESULT = "terminal_command_result"
+    TERMINAL_EXECUTE_REQUEST = "terminal_execute_request"
     MEDIA_OPERATION_RESULT = "media_operation_result"
     CALENDAR_OPERATION_RESULT = "calendar_operation_result"
     SETTINGS_OPERATION_RESULT = "settings_operation_result"

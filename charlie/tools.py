@@ -279,6 +279,7 @@ class ToolRegistry:
             "desktop_open_app",
             "desktop_close_app",
             "desktop_open_url",
+            "shell_execute",
             "media_control",
             "media_snapshot",
             "calendar_list",
@@ -707,7 +708,7 @@ def _detect_app_launch(command: str):
     },
     is_interactive=True,
 )
-def shell_execute(command: str, *, voice_mode: bool = False) -> str:
+def shell_execute(command: str, *, voice_mode: bool = False) -> ToolExecutionResult | str:
     lowered = command.lower().strip()
 
     # An already-running known app gets focused instead of relaunched -- applies
@@ -717,7 +718,13 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
     app_entry = _detect_app_launch(command)
     if app_entry and sys.platform == "win32" and is_process_running(app_entry.close_process):
         from charlie.desktop.windows import focus_window
-        return focus_window(app_entry.close_process.removesuffix(".exe"))
+        focused = focus_window(app_entry.close_process.removesuffix(".exe"))
+        verified = "(verified)" in focused.casefold()
+        return ToolExecutionResult(
+            focused,
+            {"ok": True, "verified": verified, "goal_verified": verified},
+            "terminal_result",
+        )
 
     if voice_mode:
         if not lowered:
@@ -805,19 +812,31 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> str:
                 process.communicate(timeout=_SHELL_KILL_DRAIN_TIMEOUT)
             except subprocess.TimeoutExpired:
                 pass
-            return (
-                f"Command is still running after {SHELL_TIMEOUT}s with no output "
-                "(left running -- if this opened an app or window, it launched "
-                "successfully)."
+            return ToolExecutionResult(
+                (
+                    f"Command is still running after {SHELL_TIMEOUT}s with no output "
+                    "(left running -- if this opened an app or window, it launched "
+                    "successfully)."
+                ),
+                {"ok": True, "exit_code": None, "running": True},
+                "terminal_result",
             )
         parts = []
         if stdout and stdout.strip():
             parts.append(f"STDOUT:\n{stdout.strip()}")
         if stderr and stderr.strip():
             parts.append(f"STDERR:\n{stderr.strip()}")
-        if parts:
-            return "\n".join(parts)
-        return _render_shell_result(stdout, stderr, process.returncode, voice_mode)
+        rendered = "\n".join(parts) if parts else _render_shell_result(stdout, stderr, process.returncode, voice_mode)
+        return ToolExecutionResult(
+            rendered,
+            {
+                "ok": process.returncode == 0,
+                "exit_code": process.returncode,
+                "stdout": stdout or "",
+                "stderr": stderr or "",
+            },
+            "terminal_result",
+        )
     except Exception as e:
         logger.exception("Shell command error: %s", command)
         return f"Error executing shell command: {e}"
@@ -861,7 +880,12 @@ def _cancel_owned_shell_process(owned_process: Any) -> bool:
     return quiescent
 
 
-def _shell_execute_owned(command: str, *, voice_mode: bool, context: ExecutionContext) -> str:
+def _shell_execute_owned(
+    command: str,
+    *,
+    voice_mode: bool,
+    context: ExecutionContext,
+) -> ToolExecutionResult | str:
     """Run shell with prompt cancellation and explicit process ownership."""
     process = subprocess.Popen(
         command,
@@ -895,16 +919,29 @@ def _shell_execute_owned(command: str, *, voice_mode: bool, context: ExecutionCo
                     process.communicate(timeout=_SHELL_KILL_DRAIN_TIMEOUT)
                 except subprocess.TimeoutExpired:
                     pass
-                return (
-                    f"Command is still running after {SHELL_TIMEOUT}s with no output "
-                    "(left running -- if this opened an app or window, it launched "
-                    "successfully)."
+                return ToolExecutionResult(
+                    (
+                        f"Command is still running after {SHELL_TIMEOUT}s with no output "
+                        "(left running -- if this opened an app or window, it launched "
+                        "successfully)."
+                    ),
+                    {"ok": True, "exit_code": None, "running": True},
+                    "terminal_result",
                 )
             try:
                 stdout, stderr = process.communicate(timeout=min(_SHELL_POLL_INTERVAL, remaining))
                 if context.cancellation_requested:
                     return "Command cancelled."
-                return _render_shell_result(stdout, stderr, process.returncode, voice_mode)
+                return ToolExecutionResult(
+                    _render_shell_result(stdout, stderr, process.returncode, voice_mode),
+                    {
+                        "ok": process.returncode == 0,
+                        "exit_code": process.returncode,
+                        "stdout": stdout or "",
+                        "stderr": stderr or "",
+                    },
+                    "terminal_result",
+                )
             except subprocess.TimeoutExpired:
                 if context.cancellation_requested:
                     if _cancel_owned_shell_process(owned_process):
@@ -1967,7 +2004,7 @@ def desktop_open_app(apps: list[str] | str, commands: list[str] | str | None = N
 
     result = launch_apps(app_list, command_list)
     ok = "could not open" not in result.lower()
-    return ToolExecutionResult(result, {"ok": ok, "apps": app_list}, "desktop_app_open")
+    return ToolExecutionResult(result, {"ok": ok, "verified": ok, "apps": app_list}, "desktop_app_open")
 
 
 @registry.register_tool(
@@ -2006,7 +2043,7 @@ def desktop_close_app(apps: list[str] | str, processes: list[str] | str | None =
 
     result = close_apps(app_list, process_list)
     ok = "failed to close" not in result.lower()
-    return ToolExecutionResult(result, {"ok": ok, "apps": app_list}, "desktop_app_close")
+    return ToolExecutionResult(result, {"ok": ok, "verified": ok, "apps": app_list}, "desktop_app_close")
 
 
 @registry.register_tool(
@@ -2042,7 +2079,12 @@ def desktop_open_url(url: str) -> ToolExecutionResult:
         )
     return ToolExecutionResult(
         f"Opened {url} in the default browser.",
-        {"ok": True, "verified": True, "url": url},
+        {
+            "ok": True,
+            "verified": False,
+            "verification_status": "executed_unverified",
+            "url": url,
+        },
         "desktop_url_open",
     )
 

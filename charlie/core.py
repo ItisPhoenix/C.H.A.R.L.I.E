@@ -12,6 +12,7 @@ import os
 import re
 import threading
 import time
+from dataclasses import replace
 from enum import StrEnum
 from functools import wraps
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
@@ -30,6 +31,7 @@ from charlie.presentation_registry import get_presentation_registry
 from charlie.research.citations import strip_invalid_citations
 from charlie.research.engine import ResearchEngine
 from charlie.research.models import ResearchProgress, ResearchReport, SearchResult, SourceDocument
+from charlie.research.router import is_sustained_research_query
 from charlie.research.router import route as route_research
 from charlie.security.provenance import trust_level_for_tool
 from charlie.session_store import SessionNotFoundError
@@ -44,11 +46,13 @@ from charlie.subsystem_health import HealthStatus
 from charlie.tools import ToolExecutionResult, pop_pending_vision_image, set_pending_vision_image
 from charlie.tools import registry as tool_registry
 from charlie.turn_contracts import (
+    ExecutionPolicy,
     IntentDecision,
     ResultEnvelope,
     ResultStatus,
     TurnContractError,
     TurnRequest,
+    VerificationStatus,
     validate_turn_chain,
 )
 from charlie.utils import build_auth_headers, make_id, parse_json_object
@@ -932,6 +936,89 @@ def _freshness_requirement(query: str) -> Optional[str]:
     return "live" if _FRESHNESS_REQUIREMENT_RE.search(query) else None
 
 
+_WORK_POLICY_TOOLS = frozenset({"start_background_task"})
+_AUTOMATION_POLICY_TOOLS = frozenset({
+    "calendar_create", "calendar_update", "calendar_delete",
+})
+_RESEARCH_POLICY_TOOLS = frozenset({"web_research"})
+_GROUNDED_POLICY_TOOLS = frozenset({"web_search", "browser_read"})
+_ACTION_POLICY_TOOLS = frozenset({
+    "browser_task", "desktop_open_app", "desktop_close_app", "desktop_click",
+    "desktop_click_at", "desktop_type", "desktop_invoke", "desktop_key",
+    "desktop_move", "desktop_drag", "desktop_scroll", "desktop_focus",
+    "desktop_window", "desktop_move_window", "file_write", "shell_execute",
+    "media_control", "open_windows_settings", "system_control",
+})
+
+
+def _execution_policy_from_tool_calls(
+    tool_calls: List[Dict[str, Any]],
+) -> tuple[ExecutionPolicy, tuple[str, ...], Optional[str], bool, bool, str]:
+    """Project typed capability selection into one turn execution policy.
+
+    This is deliberately downstream of the existing model/tool boundary. It is
+    not a second text classifier: the selected registered capability is the
+    semantic signal, while the existing research router handles research
+    intent before this point.
+    """
+
+    names = {str(call.get("name") or "") for call in tool_calls}
+    if names & _WORK_POLICY_TOOLS:
+        action_selected = bool(names & _ACTION_POLICY_TOOLS)
+        return (
+            ExecutionPolicy.WORK,
+            ("task",),
+            None,
+            action_selected,
+            True,
+            "registered background-work capability selected durable execution",
+        )
+    if names & _AUTOMATION_POLICY_TOOLS:
+        return (
+            ExecutionPolicy.AUTOMATION,
+            ("calendar",),
+            None,
+            True,
+            True,
+            "registered calendar capability selected persisted responsibility",
+        )
+    if names & _RESEARCH_POLICY_TOOLS:
+        return (
+            ExecutionPolicy.RESEARCH,
+            ("research",),
+            "live",
+            False,
+            False,
+            "registered research capability selected evidence investigation",
+        )
+    if names & _GROUNDED_POLICY_TOOLS:
+        return (
+            ExecutionPolicy.GROUNDED_ANSWER,
+            ("research",),
+            "live",
+            False,
+            False,
+            "registered retrieval capability selected a bounded grounded answer",
+        )
+    if names & _ACTION_POLICY_TOOLS:
+        return (
+            ExecutionPolicy.ACTION,
+            ("action",),
+            None,
+            True,
+            False,
+            "registered mutating capability selected external action",
+        )
+    return (
+        ExecutionPolicy.CONVERSATION,
+        (),
+        None,
+        False,
+        False,
+        "registered read-only capability remained part of the conversation",
+    )
+
+
 def _tool_result_text(raw_result: Any) -> str:
     """Return the existing textual adapter representation for model-facing paths."""
 
@@ -960,6 +1047,48 @@ def _legacy_tool_result_status(raw_result: Any) -> str:
         if _tool_result_text(raw_result).startswith("Error")
         else ResultStatus.COMPLETED.value
     )
+
+
+def _verification_status_from_result(
+    tool_name: str,
+    raw_result: Any,
+    verification: Optional[dict[str, Any]],
+) -> Optional[str]:
+    """Resolve semantic postcondition truth at the shared result boundary."""
+
+    if verification:
+        explicit = verification.get("verification_status")
+        if explicit:
+            return str(getattr(explicit, "value", explicit))
+        if verification.get("verified") is True:
+            return VerificationStatus.VERIFIED_SUCCESS.value
+        if verification.get("verified") is False:
+            status = str(verification.get("status", ""))
+            if status in {ResultStatus.FAILED.value, ResultStatus.PARTIALLY_COMPLETED.value}:
+                return VerificationStatus.VERIFIED_FAILURE.value
+            return VerificationStatus.VERIFICATION_UNAVAILABLE.value
+
+    structured_data = raw_result.structured_data if isinstance(raw_result, ToolExecutionResult) else None
+    if isinstance(structured_data, dict):
+        explicit = structured_data.get("verification_status")
+        if explicit:
+            return str(getattr(explicit, "value", explicit))
+        if structured_data.get("goal_verified") is False:
+            return VerificationStatus.EXECUTED_UNVERIFIED.value
+        if structured_data.get("verified") is True:
+            return VerificationStatus.VERIFIED_SUCCESS.value
+        if structured_data.get("verified") is False:
+            return VerificationStatus.EXECUTED_UNVERIFIED.value
+        if tool_name == "shell_execute" and "exit_code" in structured_data:
+            return (
+                VerificationStatus.VERIFIED_SUCCESS.value
+                if structured_data.get("exit_code") == 0
+                else VerificationStatus.VERIFIED_FAILURE.value
+            )
+
+    if tool_name in _DESKTOP_CONTROL_TOOLS - {"desktop_open_app", "desktop_close_app"}:
+        return VerificationStatus.EXECUTED_UNVERIFIED.value
+    return None
 
 
 def _normalize_tool_result(
@@ -998,6 +1127,17 @@ def _normalize_tool_result(
     status_value = status.value if isinstance(status, ResultStatus) else status
     if status_value is None:
         status_value = _legacy_tool_result_status(raw_result)
+    verification_status = _verification_status_from_result(tool_name, raw_result, verification)
+    if verification_status in {
+        VerificationStatus.EXECUTED_UNVERIFIED.value,
+        VerificationStatus.VERIFICATION_UNAVAILABLE.value,
+    } and status_value == ResultStatus.COMPLETED.value:
+        status_value = ResultStatus.UNVERIFIED.value
+    elif verification_status == VerificationStatus.VERIFIED_FAILURE.value and status_value in {
+        ResultStatus.COMPLETED.value,
+        ResultStatus.UNVERIFIED.value,
+    }:
+        status_value = ResultStatus.FAILED.value
 
     operation = capability_index.get_operation(tool_name)
     structured_data = None
@@ -1032,6 +1172,7 @@ def _normalize_tool_result(
         status=status_value,
         result=result_text,
         verification=verification,
+        verification_status=verification_status,
         risk_class=risk_class or (operation.risk_class if operation is not None else "safe"),
         requires_approval=requires_approval,
         reason=reason,
@@ -1046,7 +1187,21 @@ def _normalize_tool_result(
 def _result_envelope_to_model_text(envelope: ResultEnvelope) -> str:
     """Project one canonical operation result into model-facing tool text."""
 
-    return str(envelope.result) if envelope.result is not None else ""
+    result_text = str(envelope.result) if envelope.result is not None else ""
+    verification_status = envelope.verification_status
+    if verification_status in {
+        VerificationStatus.EXECUTED_UNVERIFIED.value,
+        VerificationStatus.VERIFICATION_UNAVAILABLE.value,
+    }:
+        lowered = result_text.casefold()
+        if "couldn't verify" in lowered or "could not verify" in lowered or "unverified" in lowered:
+            return result_text
+        return f"{result_text} I couldn't verify the resulting state."
+    if verification_status == VerificationStatus.VERIFIED_FAILURE.value:
+        message = str((envelope.verification or {}).get("message") or "The observed state did not match.")
+        if message.casefold() not in result_text.casefold():
+            return f"{result_text} {message}"
+    return result_text
 
 
 def _operation_succeeded(envelope: ResultEnvelope) -> bool:
@@ -1079,15 +1234,27 @@ def _ground_external_action_response(
     response: str,
     action_results: List[ResultEnvelope],
 ) -> str:
-    """Prevent model-only success claims for explicit app lifecycle commands."""
-    if not router.is_explicit_app_action(query):
-        return response
+    """Prevent model-only success claims when an action lacks proof."""
     if not action_results:
-        logger.warning("Suppressing ungrounded external action claim for: %s", query)
-        return "I couldn't verify that requested app action was executed."
+        if router.is_explicit_app_action(query):
+            logger.warning("Suppressing ungrounded external action claim for: %s", query)
+            return "I couldn't verify that requested app action was executed."
+        return response
     if any(_operation_failed(result) for result in action_results):
         logger.warning("Suppressing failed external action claim for: %s", query)
-        return "I couldn't complete that requested app action."
+        if router.is_explicit_app_action(query):
+            return "I couldn't complete that requested app action."
+        return "I couldn't complete that requested action."
+    if any(
+        result.verification_status
+        in {
+            VerificationStatus.EXECUTED_UNVERIFIED.value,
+            VerificationStatus.VERIFICATION_UNAVAILABLE.value,
+        }
+        for result in action_results
+    ):
+        logger.warning("Suppressing unverified external action claim for: %s", query)
+        return "I executed the action, but I couldn't verify the resulting state."
     return response
 
 
@@ -1648,6 +1815,9 @@ class Brain:
         confidence: Optional[float] = None,
         rationale: str = "",
         presentation_expectation: Optional[str] = None,
+        execution_policy: str | ExecutionPolicy = ExecutionPolicy.CONVERSATION,
+        external_action_required: bool = False,
+        durable_work_required: bool = False,
     ) -> IntentDecision:
         """Record the primary route selected for one ingress request."""
 
@@ -1660,8 +1830,66 @@ class Brain:
             confidence=confidence,
             rationale=rationale,
             presentation_expectation=presentation_expectation,
+            execution_policy=execution_policy,
+            external_action_required=external_action_required,
+            durable_work_required=durable_work_required,
         )
         return self._remember_intent_decision(decision)
+
+    def refine_intent_decision(
+        self,
+        request: TurnRequest,
+        *,
+        intent: str,
+        capabilities: tuple[str, ...] = (),
+        freshness_requirement: Optional[str] = None,
+        routing_source: str = "deterministic",
+        confidence: Optional[float] = None,
+        rationale: str = "",
+        presentation_expectation: Optional[str] = None,
+        execution_policy: str | ExecutionPolicy = ExecutionPolicy.CONVERSATION,
+        external_action_required: bool = False,
+        durable_work_required: bool = False,
+    ) -> IntentDecision:
+        """Refine one provisional decision without creating a second route."""
+
+        existing = self._intent_decisions.get(request.turn_id)
+        if existing is None:
+            return self.record_intent_decision(
+                request,
+                intent=intent,
+                capabilities=capabilities,
+                freshness_requirement=freshness_requirement,
+                routing_source=routing_source,
+                confidence=confidence,
+                rationale=rationale,
+                presentation_expectation=presentation_expectation,
+                execution_policy=execution_policy,
+                external_action_required=external_action_required,
+                durable_work_required=durable_work_required,
+            )
+
+        updated = replace(
+            existing,
+            intent=intent,
+            capabilities=capabilities,
+            freshness_requirement=freshness_requirement,
+            routing_source=routing_source,
+            confidence=confidence,
+            rationale=rationale,
+            presentation_expectation=presentation_expectation,
+            execution_policy=execution_policy,
+            external_action_required=external_action_required,
+            durable_work_required=durable_work_required,
+        )
+        for field_name in (
+            "intent", "capabilities", "freshness_requirement", "routing_source",
+            "confidence", "rationale", "presentation_expectation", "execution_policy",
+            "external_action_required", "durable_work_required",
+        ):
+            object.__setattr__(existing, field_name, getattr(updated, field_name))
+        self.last_intent_decision = existing
+        return existing
 
     def _panic(self) -> None:
         """Global panic hotkey handler: halt desktop motion and cancel the turn."""
@@ -1863,6 +2091,7 @@ class Brain:
         session_id: Optional[str] = None,
         turn_id: Optional[str] = None,
         execution_owner_id: Optional[str] = None,
+        user_supplied_url: bool = False,
     ) -> ResultEnvelope:
         """Fast-path callers' safety net -- same timeout bound _exec_one already gives the LLM-dispatched path."""
         try:
@@ -1874,6 +2103,7 @@ class Brain:
                     session_id=session_id,
                     turn_id=turn_id,
                     execution_owner_id=execution_owner_id,
+                    user_supplied_url=user_supplied_url,
                     return_envelope=True,
                 ),
                 timeout=_tool_timeout("browser_task"),
@@ -1905,6 +2135,7 @@ class Brain:
         turn_id: Optional[str] = None,
         execution_owner_id: Optional[str] = None,
         return_envelope: bool = False,
+        user_supplied_url: bool = False,
     ) -> Any:
         """Resolve `task` through charlie.browser's tier cascade and report back.
 
@@ -2082,8 +2313,14 @@ class Brain:
                 if turn_id
                 else (f"task:{task_id}" if task_id else None)
             ),
+            user_supplied_url=user_supplied_url,
         )
 
+        browser_verification_status = (
+            VerificationStatus.VERIFIED_SUCCESS.value
+            if result.success
+            else VerificationStatus.VERIFICATION_UNAVAILABLE.value
+        )
         verification_status = ResultStatus.COMPLETED.value if result.success else ResultStatus.UNVERIFIED.value
         outcome = ResultEnvelope(
             request=task,
@@ -2097,14 +2334,17 @@ class Brain:
             verification={
                 "verified": result.success,
                 "status": verification_status,
+                "verification_status": browser_verification_status,
                 "message": result.verification,
             },
+            verification_status=browser_verification_status,
             source="browser_runtime",
             data={
                 "url": result.url,
                 "site": result.site,
                 "query": result.query,
                 "verification": result.verification,
+                "browser_evidence": result.evidence,
             },
         )
 
@@ -2340,6 +2580,7 @@ class Brain:
         platform: str = "web",
         operation_override: Optional[str] = None,
         execution_owner_id: Optional[str] = None,
+        execute_override: Optional[Callable[[], Any]] = None,
     ) -> ResultEnvelope:
         """Execute one non-LLM operation through the shared primitive."""
         approval_requester = self._request_tool_approval_decision
@@ -2358,6 +2599,7 @@ class Brain:
             platform=platform,
             execution_owner_id=execution_owner_id,
             approval_requester=approval_requester,
+            execute_override=execute_override,
             include_approval_status=True,
             source="brain.operation",
             operation_override=operation_override,
@@ -2665,6 +2907,7 @@ class Brain:
         result_errors: List[str] = []
         result_reason = ""
         result_data: dict[str, Any] = {}
+        result_verification: Optional[dict[str, Any]] = None
         if include_approval_status:
             result_data["approval_status"] = (
                 ApprovalDecision.APPROVED.value if gate_reason else "not_required"
@@ -2775,6 +3018,24 @@ class Brain:
                 result_data.update({"failure_kind": "exception", "exception_type": type(exc).__name__})
                 result_errors.append(_tool_result_text(raw_result))
 
+        if tool_name == "shell_execute" and isinstance(raw_result, ToolExecutionResult):
+            structured = raw_result.structured_data
+            if isinstance(structured, dict) and "exit_code" in structured:
+                from charlie.verifiers import verify_terminal_command
+
+                verification_result = verify_terminal_command(
+                    str(call_args.get("command", "")),
+                    request,
+                    structured.get("exit_code"),
+                    str(structured.get("stdout") or ""),
+                )
+                result_verification = {
+                    "verified": verification_result.verified,
+                    "status": verification_result.status,
+                    "verification_status": verification_result.verification_status,
+                    "message": verification_result.message,
+                }
+
         envelope = _normalize_tool_result(
             tool_name,
             raw_result,
@@ -2783,6 +3044,7 @@ class Brain:
             task_id=task_id,
             session_id=session_id,
             status=policy_status,
+            verification=result_verification,
             reason=result_reason,
             risk_class=risk_value,
             requires_approval=bool(gate_reason),
@@ -3374,6 +3636,9 @@ class Brain:
             confidence: Optional[float] = None,
             rationale: str = "",
             presentation_expectation: Optional[str] = None,
+            execution_policy: str | ExecutionPolicy = ExecutionPolicy.CONVERSATION,
+            external_action_required: bool = False,
+            durable_work_required: bool = False,
         ) -> Optional[IntentDecision]:
             """Publish the first route decision; legacy calls remain uncorrelated."""
 
@@ -3389,6 +3654,9 @@ class Brain:
                 confidence=confidence,
                 rationale=rationale,
                 presentation_expectation=presentation_expectation,
+                execution_policy=execution_policy,
+                external_action_required=external_action_required,
+                durable_work_required=durable_work_required,
             )
             if diagnostic_trace is not None:
                 diagnostic_trace.mark_once(
@@ -3507,7 +3775,7 @@ class Brain:
             _publish_direct_operation_result(tool_name, args or {}, envelope)
             return envelope
 
-        async def _run_direct_browser(task_text: str) -> str:
+        async def _run_direct_browser(task_text: str, *, user_supplied_url: bool = False) -> str:
             outcome = await self._browser_task_bounded(
                 task_text,
                 platform,
@@ -3515,6 +3783,7 @@ class Brain:
                 session_id=session_id,
                 turn_id=turn_id,
                 execution_owner_id=explicit_execution_owner_id,
+                user_supplied_url=user_supplied_url,
             )
             if isinstance(outcome, ResultEnvelope):
                 _publish_direct_operation_result(
@@ -3804,6 +4073,8 @@ class Brain:
                     routing_source="browser_context",
                     confidence=1.0,
                     rationale="verified active browser media context selected browser control",
+                    execution_policy=ExecutionPolicy.ACTION,
+                    external_action_required=True,
                 )
                 logger.info("Fast-path browser media continuation: %s", browser_media)
                 yield await _run_direct_browser(browser_media)
@@ -3814,6 +4085,19 @@ class Brain:
 
         fp_match = match_fast_path(user_input)
         if fp_match is not None:
+            if fp_match.intent == "browser_read_url" and self.config.browser_enabled:
+                record_primary_decision(
+                    intent="browser",
+                    capabilities=("browser",),
+                    routing_source="fastpath",
+                    confidence=fp_match.confidence,
+                    rationale="explicit URL fast-path selected canonical browser action",
+                    execution_policy=ExecutionPolicy.ACTION,
+                    external_action_required=True,
+                )
+                logger.info("Canonical browser URL action: %s", user_input)
+                yield await _run_direct_browser(user_input, user_supplied_url=True)
+                return
             fastpath_capability = fp_match.target_domain
             fastpath_intent = (
                 "system"
@@ -3822,12 +4106,28 @@ class Brain:
                 if fp_match.target_domain == "browser"
                 else fp_match.target_domain
             )
+            fastpath_policy = (
+                ExecutionPolicy.ACTION
+                if fp_match.tool_name in _ACTION_POLICY_TOOLS
+                else ExecutionPolicy.GROUNDED_ANSWER
+                if fp_match.tool_name in _GROUNDED_POLICY_TOOLS
+                else ExecutionPolicy.RESEARCH
+                if fp_match.tool_name in _RESEARCH_POLICY_TOOLS
+                else ExecutionPolicy.CONVERSATION
+            )
             record_primary_decision(
                 intent=fastpath_intent,
                 capabilities=(fastpath_capability,),
                 routing_source="fastpath",
                 confidence=fp_match.confidence,
                 rationale=f"fastpath matched {fp_match.intent}",
+                freshness_requirement=(
+                    "live"
+                    if fastpath_policy in {ExecutionPolicy.GROUNDED_ANSWER, ExecutionPolicy.RESEARCH}
+                    else None
+                ),
+                execution_policy=fastpath_policy,
+                external_action_required=fastpath_policy is ExecutionPolicy.ACTION,
             )
             logger.info(
                 "Deterministic fast-path matched: %s -> %s (domain=%s)",
@@ -4033,6 +4333,8 @@ class Brain:
                 routing_source="deterministic",
                 confidence=1.0,
                 rationale="close-app matcher selected desktop app lifecycle",
+                execution_policy=ExecutionPolicy.ACTION,
+                external_action_required=True,
             )
             close_args = {"apps": close_match[0], "processes": close_match[1]}
             close_outcome = await self.execute_tool_operation(
@@ -4067,9 +4369,14 @@ class Brain:
                         routing_source="browser_context",
                         confidence=1.0,
                         rationale="open-site matcher deferred execution to browser task",
+                        execution_policy=ExecutionPolicy.ACTION,
+                        external_action_required=True,
                     )
                     logger.info("Fast-path browser task (deferred open): %s", open_remaining)
-                    yield await _run_direct_browser(open_remaining)
+                    yield await _run_direct_browser(
+                        open_remaining,
+                        user_supplied_url=router.extract_explicit_http_url(open_remaining) is not None,
+                    )
                     return
                 user_input = open_remaining
             else:
@@ -4079,6 +4386,8 @@ class Brain:
                     routing_source="deterministic",
                     confidence=1.0,
                     rationale="open-app matcher selected desktop app lifecycle",
+                    execution_policy=ExecutionPolicy.ACTION,
+                    external_action_required=True,
                 )
                 open_args = {"apps": open_apps, "commands": open_commands}
                 open_outcome = await self.execute_tool_operation(
@@ -4120,9 +4429,14 @@ class Brain:
                 routing_source="browser_context",
                 confidence=1.0,
                 rationale="site-scoped browser matcher selected browser task",
+                execution_policy=ExecutionPolicy.ACTION,
+                external_action_required=True,
             )
             logger.info("Fast-path browser task: %s", browser_task_query)
-            yield await _run_direct_browser(browser_task_query)
+            yield await _run_direct_browser(
+                browser_task_query,
+                user_supplied_url=router.extract_explicit_http_url(browser_task_query) is not None,
+            )
             return
 
         # --- Fast-path: continue an explicit request against the active browser page ---
@@ -4137,9 +4451,14 @@ class Brain:
                     routing_source="browser_context",
                     confidence=1.0,
                     rationale="active browser page context selected browser continuation",
+                    execution_policy=ExecutionPolicy.ACTION,
+                    external_action_required=True,
                 )
                 logger.info("Fast-path browser continuation: %s", browser_continuation)
-                yield await _run_direct_browser(browser_continuation)
+                yield await _run_direct_browser(
+                    browser_continuation,
+                    user_supplied_url=router.extract_explicit_http_url(browser_continuation) is not None,
+                )
                 return
 
         # --- Fast-path: live background-task progress query (deterministic, no LLM needed) ---
@@ -4255,6 +4574,15 @@ class Brain:
                 rationale="direct screen-perception query selected fresh local visual observation",
             )
         elif research_route is not None and research_route.should_research:
+            execution_policy = (
+                ExecutionPolicy.RESEARCH
+                if research_route.mode is not None
+                and (
+                    str(research_route.mode).lower() == "deep"
+                    or is_sustained_research_query(user_input, research_route)
+                )
+                else ExecutionPolicy.GROUNDED_ANSWER
+            )
             record_primary_decision(
                 intent="research",
                 capabilities=("research",),
@@ -4262,6 +4590,7 @@ class Brain:
                 routing_source="research_router",
                 confidence=1.0,
                 rationale=research_route.reason,
+                execution_policy=execution_policy,
             )
         elif router.SCREEN_QUERY_RE.search(user_input):
             record_primary_decision(
@@ -4272,6 +4601,9 @@ class Brain:
                 rationale="screen query selected fresh desktop observation",
             )
         else:
+            # Keep a provisional conversation decision while the model chooses
+            # among registered capabilities. A typed Work/action/automation
+            # selection may refine this same decision object later.
             record_primary_decision(
                 intent="conversation",
                 routing_source="model",
@@ -4477,6 +4809,50 @@ class Brain:
 
         tool_calls = router.maybe_inject_visual_screenshot_call(tool_calls, queue_visual_screenshot and not skip_tools)
         executed_action_results: List[ResultEnvelope] = []
+
+        if primary_decision is None:
+            (
+                tool_policy,
+                tool_capabilities,
+                tool_freshness,
+                tool_action_required,
+                tool_work_required,
+                tool_rationale,
+            ) = _execution_policy_from_tool_calls(tool_calls)
+            record_primary_decision(
+                intent=tool_policy.value,
+                capabilities=tool_capabilities,
+                freshness_requirement=tool_freshness,
+                routing_source="model",
+                rationale=tool_rationale,
+                execution_policy=tool_policy,
+                external_action_required=tool_action_required,
+                durable_work_required=tool_work_required,
+            )
+        elif (
+            turn_request is not None
+            and primary_decision.execution_policy == ExecutionPolicy.CONVERSATION.value
+        ):
+            (
+                tool_policy,
+                tool_capabilities,
+                tool_freshness,
+                tool_action_required,
+                tool_work_required,
+                tool_rationale,
+            ) = _execution_policy_from_tool_calls(tool_calls)
+            if tool_policy is not ExecutionPolicy.CONVERSATION:
+                primary_decision = self.refine_intent_decision(
+                    turn_request,
+                    intent=tool_policy.value,
+                    capabilities=tool_capabilities,
+                    freshness_requirement=tool_freshness,
+                    routing_source="model",
+                    rationale=tool_rationale,
+                    execution_policy=tool_policy,
+                    external_action_required=tool_action_required,
+                    durable_work_required=tool_work_required,
+                )
 
         if not tool_calls:
             if accumulated:

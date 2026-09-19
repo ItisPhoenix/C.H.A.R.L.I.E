@@ -9,7 +9,7 @@ import logging
 import re
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, List, Optional
 from urllib.parse import quote, unquote, urljoin, urlparse
 
@@ -35,6 +35,7 @@ class BrowserResult:
     verification: str = "unverified"
     site: Optional[str] = None
     query: Optional[str] = None
+    evidence: dict[str, Any] = field(default_factory=dict)
 
 
 def _normalize_semantic_text(value: str) -> str:
@@ -1244,22 +1245,48 @@ def media_result_candidates(
     return sorted(candidates, key=lambda item: (item["relevance"], item.get("duration") or 0), reverse=True)
 
 
-def open_site(site_url: str) -> Optional[BrowserResult]:
-    """Navigate Charlie's active page to an arbitrary public site and verify rendered state."""
+def open_site(site_url: str, *, read_content: bool = False) -> Optional[BrowserResult]:
+    """Navigate the canonical browser page and optionally verify readable DOM content."""
     resolved = resolve_website_url(site_url)
     if not resolved:
         return None
 
     def run(page: Any) -> BrowserResult:
-        actions.navigate(page, resolved)
+        response = actions.navigate(page, resolved)
         marks = _observe(page)
         content = _content_text(page)
         try:
             title = str(page.title()).strip()
         except Exception:
             title = ""
+        observed_url = str(page.url)
         requested_host = (urlparse(resolved).hostname or "").casefold()
-        current_host = (urlparse(str(page.url)).hostname or "").casefold()
+        current_host = (urlparse(observed_url).hostname or "").casefold()
+        from charlie.browser.session import get_session
+
+        evidence = {
+            "requested_url": resolved,
+            "observed_url": observed_url,
+            "http_status": getattr(response, "status", None),
+            "title": title,
+            "content": content,
+            "browser_session_id": get_session().session_id,
+            **controller.runtime_identity(page),
+        }
+        logger.info(
+            "Browser page observed: requested_url=%s observed_url=%s status=%s title=%r "
+            "content_chars=%d browser_pid=%s windows_session_id=%s browser_session_id=%s "
+            "target_id=%s",
+            resolved,
+            observed_url,
+            evidence["http_status"],
+            title,
+            len(content),
+            evidence.get("browser_pid"),
+            evidence.get("windows_session_id"),
+            evidence.get("browser_session_id"),
+            evidence.get("target_id"),
+        )
         same_site = bool(
             requested_host
             and current_host
@@ -1268,26 +1295,54 @@ def open_site(site_url: str) -> Optional[BrowserResult]:
         rendered = f"{title}\n{content}"
         if is_blocked(marks, rendered):
             return BrowserResult(
-                url=page.url,
+                url=observed_url,
                 answer="SITE_STATE_BLOCKED: The current site displayed an external access challenge.",
                 verification="site-state-blocked",
                 site=current_host or requested_host,
+                evidence=evidence,
+            )
+        if evidence["http_status"] is not None and evidence["http_status"] >= 400:
+            return BrowserResult(
+                url=observed_url,
+                answer=f"The requested page returned HTTP {evidence['http_status']} and was not verified.",
+                verification="page-http-failure",
+                site=current_host or requested_host,
+                evidence=evidence,
+            )
+        if read_content and not content.strip():
+            return BrowserResult(
+                url=observed_url,
+                answer="The requested page navigated, but its readable content was not observed.",
+                verification="content-unreadable",
+                site=current_host or requested_host,
+                evidence=evidence,
             )
         semantic_evidence = bool(marks) or bool(content)
         if not same_site or not title or not semantic_evidence:
             return BrowserResult(
-                url=page.url,
+                url=observed_url,
                 answer="The requested page did not expose enough rendered evidence to verify navigation.",
                 verification="page-open-unverified",
                 site=current_host or requested_host,
+                evidence=evidence,
             )
-        session.record_observation(page.url, page_type="page")
+        session.record_observation(observed_url, page_type="page")
+        if read_content:
+            return BrowserResult(
+                url=observed_url,
+                answer=f"Read {title or observed_url}: {content[:4000]}",
+                success=True,
+                verification="page-read",
+                site=current_host,
+                evidence=evidence,
+            )
         return BrowserResult(
-            url=page.url,
-            answer=f"Opened {title or page.url}.",
+            url=observed_url,
+            answer=f"Opened {title or observed_url}.",
             success=True,
             verification="page-opened",
             site=current_host,
+            evidence=evidence,
         )
 
     try:
@@ -1299,6 +1354,7 @@ def open_site(site_url: str) -> Optional[BrowserResult]:
             answer="The requested page could not be verified in the Charlie browser.",
             verification="page-open-unverified",
             site=urlparse(resolved).hostname,
+            evidence={"requested_url": resolved, "observed_url": None},
         )
 
 

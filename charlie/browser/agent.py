@@ -268,11 +268,41 @@ async def run_task(
             if not action.url and not action.answer:
                 fail_count += 1
                 continue
+            try:
+                observed, _observed_marks, observed_blocked = await loop.run_in_executor(
+                    None,
+                    lambda: _controller_run(_observe_page, timeout=_STEP_CALL_TIMEOUT_S),
+                )
+            except Exception:
+                observed = ""
+                observed_blocked = False
+            observed_url = ""
+            if isinstance(observed, str):
+                first_line = observed.splitlines()[0] if observed.splitlines() else ""
+                if first_line.upper().startswith("URL:"):
+                    observed_url = first_line.split(":", 1)[1].strip()
+            expected_url = (action.url or "").rstrip("/")
+            actual_url = observed_url.rstrip("/")
+            url_verified = bool(
+                expected_url
+                and actual_url
+                and (
+                    actual_url == expected_url
+                    or actual_url.startswith(f"{expected_url}/")
+                    or actual_url.startswith(f"{expected_url}?")
+                )
+            )
+            if observed_blocked or (action.url and not url_verified) or not action.url:
+                return BrowserResult(
+                    url=observed_url or action.url,
+                    answer="I couldn't independently verify the requested browser result.",
+                    verification="agent-done-unverified",
+                )
             return BrowserResult(
                 url=action.url or None,
                 answer=action.answer or None,
                 success=True,
-                verification="agent-confirmed",
+                verification="agent-observed-url",
             )
         if action.kind == "navigate" and action.url and _is_site_continuation(task):
             current_url = session.get_session().last_url or ""

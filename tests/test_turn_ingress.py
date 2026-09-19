@@ -455,7 +455,10 @@ def test_process_accepts_only_the_existing_request_and_dequeues_it_unchanged() -
 
     assert "async def _process(request: TurnRequest" in process_source
     assert "_allocate_turn_request" not in process_source
-    assert "task_id = uuid.uuid4().hex" in process_source
+    assert "task_id = request.task_id" in process_source
+    assert "foreground_journal.create_task" not in process_source
+    assert "_emit_foreground_task" not in process_source
+    assert "foreground_journal.transition" not in process_source
     assert "brain.chat_stream(" in process_source
     assert "task_id=task_id" in process_source
     assert "turn_id=request.turn_id" in process_source

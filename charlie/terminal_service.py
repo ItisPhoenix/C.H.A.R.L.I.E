@@ -4,6 +4,7 @@ import asyncio
 import ctypes
 import logging
 import os
+import re
 import sys
 import threading
 import uuid
@@ -16,6 +17,7 @@ logger = logging.getLogger("charlie.terminal_service")
 
 _MAX_OUTPUT_CHARS = 200_000
 _READ_CHUNK_SIZE = 4096
+_COMMAND_TIMEOUT_S = 30.0
 
 # Win32 definitions for ConPTY
 if sys.platform == "win32":
@@ -569,6 +571,98 @@ class TerminalSession:
             data = data.encode("utf-8")
         return self.backend.write(data)
 
+    async def execute_command(
+        self,
+        command: str,
+        request_id: str,
+        *,
+        timeout_s: float = _COMMAND_TIMEOUT_S,
+    ) -> dict:
+        """Execute one approved command against this exact persistent session."""
+
+        if self.status != "running" or self._closed:
+            return {
+                "request_id": request_id,
+                "terminal_session_id": self.session_id,
+                "command": command,
+                "status": "failed",
+                "failure_kind": "session_unavailable",
+                "stdout": "",
+                "stderr": "",
+                "exit_code": None,
+                "pid": self.pid,
+            }
+        if self.lease_holder not in {"idle", "charlie"}:
+            return {
+                "request_id": request_id,
+                "terminal_session_id": self.session_id,
+                "command": command,
+                "status": "failed",
+                "failure_kind": "terminal_in_use",
+                "stdout": "",
+                "stderr": "",
+                "exit_code": None,
+                "pid": self.pid,
+            }
+
+        marker = f"__CHARLIE_EXIT_{uuid.uuid4().hex}__"
+        queue = self.subscribe()
+        self.lease_holder = "charlie"
+        output: list[str] = []
+        try:
+            if "powershell" in self.shell_name.casefold():
+                payload = f'{command}\r\nWrite-Output "{marker}:$LASTEXITCODE"\r\n'
+            else:
+                payload = f'{command}\nprintf "{marker}:%s\\n" "$?"\n'
+            self.write_bytes(payload, source="charlie")
+            deadline = asyncio.get_running_loop().time() + timeout_s
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    return {
+                        "request_id": request_id,
+                        "terminal_session_id": self.session_id,
+                        "command": command,
+                        "status": "unverified",
+                        "failure_kind": "execution_timeout",
+                        "stdout": "".join(output),
+                        "stderr": "",
+                        "exit_code": None,
+                        "pid": self.pid,
+                    }
+                event = await asyncio.wait_for(queue.get(), timeout=remaining)
+                if event.get("type") == "output":
+                    output.append(str(event.get("data") or ""))
+                    combined = "".join(output)
+                    match = re.search(rf"{re.escape(marker)}:(-?\d+)", combined)
+                    if match:
+                        stdout = combined.replace(match.group(0), "")
+                        return {
+                            "request_id": request_id,
+                            "terminal_session_id": self.session_id,
+                            "command": command,
+                            "status": "completed",
+                            "stdout": stdout,
+                            "stderr": "",
+                            "exit_code": int(match.group(1)),
+                            "pid": self.pid,
+                        }
+                elif event.get("type") in {"exit", "closed"}:
+                    return {
+                        "request_id": request_id,
+                        "terminal_session_id": self.session_id,
+                        "command": command,
+                        "status": "failed",
+                        "failure_kind": "session_ended",
+                        "stdout": "".join(output),
+                        "stderr": "",
+                        "exit_code": self.exit_code,
+                        "pid": self.pid,
+                    }
+        finally:
+            self.unsubscribe(queue)
+            self.lease_holder = "idle"
+
     def resize(self, cols: int, rows: int) -> None:
         self.cols = max(1, cols)
         self.rows = max(1, rows)
@@ -677,6 +771,24 @@ class TerminalManager:
         if session is None:
             raise KeyError(session_id)
         session.write_bytes(data, source=source)
+
+    async def execute_command(self, session_id: str, command: str, request_id: str) -> dict:
+        """Delegate approved execution to the selected canonical session."""
+
+        session = self._sessions.get(session_id)
+        if session is None:
+            return {
+                "request_id": request_id,
+                "terminal_session_id": session_id,
+                "command": command,
+                "status": "failed",
+                "failure_kind": "session_unavailable",
+                "stdout": "",
+                "stderr": "",
+                "exit_code": None,
+                "pid": None,
+            }
+        return await session.execute_command(command, request_id)
 
     async def resize(self, session_id: str, cols: int, rows: int) -> None:
         session = self._sessions.get(session_id)

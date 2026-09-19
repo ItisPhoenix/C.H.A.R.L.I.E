@@ -146,8 +146,8 @@ from charlie.settings_service import (
 )
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus, RuntimeStatus
-from charlie.task_journal import TaskOrigin, TaskPriority, TaskStatus, get_task_journal
-from charlie.turn_contracts import IntentDecision, ResultEnvelope, ResultStatus, TurnRequest
+from charlie.task_journal import TaskOrigin, get_task_journal
+from charlie.turn_contracts import ExecutionPolicy, IntentDecision, ResultEnvelope, ResultStatus, TurnRequest
 from charlie.presentation import (
     AnchorTarget,
     AttentionLevel as PresentationAttention,
@@ -321,6 +321,32 @@ def _terminal_request_id_conflict_payload(
         "request_id_conflict": True,
         "error": message,
     }
+
+
+_terminal_session_result_waiters: dict[str, Any] = {}
+
+
+def _resolve_terminal_session_result(payload: object) -> bool:
+    """Resolve only the waiter bound to the exact terminal request/session."""
+
+    if not isinstance(payload, dict):
+        return False
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return False
+    entry = _terminal_session_result_waiters.get(request_id)
+    if entry is None:
+        return False
+    if isinstance(entry, tuple) and len(entry) == 3:
+        waiter, expected_session_id, expected_command = entry
+        if payload.get("terminal_session_id") != expected_session_id or payload.get("command") != expected_command:
+            return False
+    else:
+        waiter = entry
+    if waiter.done():
+        return False
+    waiter.set_result(dict(payload))
+    return True
 
 
 def _cache_media_result(
@@ -785,6 +811,7 @@ async def _handle_terminal_command_request(
     command: str,
     result_cache: OrderedDict[str, dict[str, Any]],
     in_flight: dict[str, Any],
+    execution_target: str = "shell",
 ) -> dict[str, Any] | None:
     """Run one terminal request through main Brain authority exactly once."""
     request_id = _normalize_terminal_request_id(request_id)
@@ -872,15 +899,64 @@ async def _handle_terminal_command_request(
     if current is not None:
         in_flight[request_id] = (current, fingerprint)
     try:
+        async def _execute_selected_terminal() -> Any:
+            from charlie.tools import ToolExecutionResult
+
+            loop = asyncio.get_running_loop()
+            waiter = loop.create_future()
+            _terminal_session_result_waiters[request_id] = (waiter, terminal_session_id, command)
+            try:
+                await event_bus.emit(
+                    "terminal_execute_request",
+                    {
+                        "request_id": request_id,
+                        "terminal_session_id": terminal_session_id,
+                        "command": command,
+                    },
+                    meta=EventMeta(
+                        source=EventSource.BRAIN,
+                        task_id=request_id,
+                        rationale="approved terminal command routed to selected terminal session",
+                    ),
+                )
+                result = await asyncio.wait_for(waiter, timeout=30.0)
+            except asyncio.TimeoutError:
+                return ToolExecutionResult(
+                    "Error: selected terminal session did not return a result before timeout.",
+                    {
+                        "ok": True,
+                        "exit_code": None,
+                        "terminal_session_id": terminal_session_id,
+                        "verification_status": "verification_unavailable",
+                    },
+                    "terminal_session_result",
+                )
+            finally:
+                _terminal_session_result_waiters.pop(request_id, None)
+
+            stdout = str(result.get("stdout") or "")
+            stderr = str(result.get("stderr") or "")
+            model_text = "\n".join(part for part in (stdout, stderr) if part)
+            if not model_text:
+                model_text = str(result.get("failure_kind") or result.get("status") or "")
+            structured = dict(result)
+            structured["ok"] = result.get("status") in {"completed", "unverified"}
+            return ToolExecutionResult(model_text, structured, "terminal_session_result")
+
         try:
+            operation_kwargs = {
+                "request": command,
+                "task_id": request_id,
+                "session_id": None,
+                "turn_id": None,
+                "platform": "web",
+            }
+            if execution_target == "terminal_session":
+                operation_kwargs["execute_override"] = _execute_selected_terminal
             envelope = await brain.execute_tool_operation(
                 "shell_execute",
                 {"command": command},
-                request=command,
-                task_id=request_id,
-                session_id=None,
-                turn_id=None,
-                platform="web",
+                **operation_kwargs,
             )
         except OperationCancelled as cancelled:
             payload = _terminal_command_result_payload(
@@ -4660,10 +4736,15 @@ async def main() -> int:
             """Observe the one primary route selected for an interactive turn."""
 
             logger.info(
-                "Intent decision: turn=%s session=%s intent=%s source=%s capabilities=%s",
+                "Intent decision: turn=%s session=%s intent=%s policy=%s fresh=%s action=%s durable=%s "
+                "source=%s capabilities=%s",
                 decision.turn_id,
                 decision.session_id,
                 decision.intent,
+                decision.execution_policy,
+                decision.freshness_requirement,
+                decision.external_action_required,
+                decision.durable_work_required,
                 decision.routing_source,
                 decision.capabilities,
             )
@@ -5208,6 +5289,16 @@ async def main() -> int:
                 and not get_active_voice_approval()
                 and sustained_checker(request.input, runtime_config)
             ):
+                brain.record_intent_decision(
+                    request,
+                    intent="research",
+                    capabilities=("research", "task"),
+                    routing_source="research_router",
+                    confidence=1.0,
+                    rationale="sustained research request admitted to the durable research lane",
+                    execution_policy=ExecutionPolicy.RESEARCH,
+                    durable_work_required=True,
+                )
                 await _start_sustained_research_task(
                     request,
                     runtime_config=runtime_config,
@@ -5575,62 +5666,8 @@ async def main() -> int:
                 mark_response_complete()
                 return
 
-            task_id = uuid.uuid4().hex
+            task_id = request.task_id
             active_task_id = task_id
-            capability_requirements: tuple[str, ...] = ()
-            try:
-                from charlie import router as task_router
-                from charlie.browser import intent as browser_intent
-                from charlie.browser.session import get_session as get_browser_session
-
-                browser_session = get_browser_session()
-                parsed_browser_request = browser_intent.parse_browser_intent(
-                    text,
-                    browser_session.current_domain or "",
-                )
-                browser_operations = {
-                    "BACK",
-                    "FILTER",
-                    "SORT",
-                    "READ",
-                    "CURRENT_PAGE_FACT",
-                    "COMPARE",
-                    "PRODUCT_SELECT",
-                    "MEDIA",
-                }
-                if task_router.match_browser_task(text) or (
-                    browser_session.last_url and parsed_browser_request.operation in browser_operations
-                ):
-                    capability_requirements = ("browser",)
-            except Exception:
-                logger.debug("Foreground capability classification failed", exc_info=True)
-
-            foreground_journal = get_task_journal()
-            turn_task = foreground_journal.create_task(
-                text,
-                task_id=task_id,
-                origin=TaskOrigin.FOREGROUND,
-                priority=TaskPriority.HIGH,
-                status=TaskStatus.RUNNING,
-                session_id=session_id,
-                turn_id=request.turn_id,
-                capability_requirements=capability_requirements,
-            )
-
-            async def _emit_foreground_task(record) -> None:
-                if event_bus:
-                    await event_bus.emit(
-                        "background_task",
-                        background_task._public_event_from_record(record),
-                        meta=EventMeta(
-                            source=EventSource.TASK,
-                            task_id=task_id,
-                            session_id=session_id,
-                            turn_id=request.turn_id,
-                        ),
-                    )
-
-            await _emit_foreground_task(turn_task)
 
             # Emit transcript event for voice-originated turns only. The web
             # client already renders its own optimistic user bubble the instant
@@ -5858,13 +5895,6 @@ async def main() -> int:
                             logger.warning("Failed to send Telegram reply", exc_info=True)
 
                 # Emit response_done event so the UI can stop its typing indicator.
-                turn_task = foreground_journal.transition(task_id, TaskStatus.VERIFYING)
-                await _emit_foreground_task(turn_task)
-                turn_task = foreground_journal.complete(
-                    task_id,
-                    result_reference=f"session:{session_id}",
-                )
-                await _emit_foreground_task(turn_task)
                 if event_bus:
                     await event_bus.emit(
                         "response_done",
@@ -5882,11 +5912,6 @@ async def main() -> int:
                     "stale_foreground_output_suppressed | old_turn_id=%s | reason=foreground_cancelled",
                     request.turn_id,
                 )
-                try:
-                    turn_task = foreground_journal.cancel(task_id)
-                    await _emit_foreground_task(turn_task)
-                except Exception:
-                    logger.debug("Failed to mark superseded foreground turn cancelled", exc_info=True)
                 if event_bus:
                     await event_bus.emit(
                         "response_done",
@@ -5903,11 +5928,6 @@ async def main() -> int:
                 return
             except Exception as exc:
                 logger.error("Turn failed", exc_info=True)
-                try:
-                    turn_task = foreground_journal.fail(task_id, error_summary=str(exc)[:500])
-                    await _emit_foreground_task(turn_task)
-                except Exception:
-                    logger.warning("Failed to mark foreground task failed", exc_info=True)
                 error_class, message = classify_exception(exc)
                 _safe_speak(voice, message, last_emotion, "turn-failed")
                 if event_bus:
@@ -6484,8 +6504,11 @@ async def main() -> int:
                                     command=command,
                                     result_cache=terminal_command_results,
                                     in_flight=terminal_command_in_flight,
+                                    execution_target=str(payload.get("execution_target") or "shell"),
                                 )
                             )
+                    elif cmd_type == "terminal_session_result":
+                        _resolve_terminal_session_result(cmd.get("payload", {}))
                     elif cmd_type == "media_operation":
                         _submit_event_task(
                             _handle_media_operation_request(

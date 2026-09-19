@@ -1,10 +1,9 @@
 import contract from "../../../shared/event_contract.json";
-import { useCharlieStore } from "../store/charlie";
 
 export const EVENT_CONTRACT = contract;
 export type KnownEventType = keyof typeof EVENT_CONTRACT.event_types;
 
-export interface WSEvent {
+export interface RuntimeWireEvent {
   type: string;
   version?: number;
   id?: string;
@@ -13,12 +12,14 @@ export interface WSEvent {
   session_id?: string | null;
   task_id?: string | null;
   turn_id?: string | null;
+  correlation_id?: string | null;
   replay?: boolean;
   rationale?: string;
   payload?: Record<string, unknown>;
+  [key: string]: unknown;
 }
 
-export interface ValidatedWSEvent extends WSEvent {
+export interface ValidatedRuntimeEvent extends RuntimeWireEvent {
   type: KnownEventType;
   version: 1;
   id: string;
@@ -31,135 +32,82 @@ export interface ValidatedWSEvent extends WSEvent {
   payload: Record<string, unknown>;
 }
 
-const _BASE_DELAY_MS = 3000;
-const _MAX_DELAY_MS = 30000;
-const _SEEN_EVENT_IDS = new Set<string>();
-
-export function reconnectDelayMs(attempt: number): number {
-  return Math.min(_BASE_DELAY_MS * 2 ** attempt, _MAX_DELAY_MS);
-}
-
-export function resetEventDedupe(): void {
-  _SEEN_EVENT_IDS.clear();
-}
-
-function newEventId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  return `legacy-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
+const SEEN_EVENT_IDS = new Set<string>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function adaptEvent(raw: unknown): ValidatedWSEvent | null {
+function nullableString(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  return typeof value === "string" ? value : undefined;
+}
+
+export function resetEventDedupe(): void {
+  SEEN_EVENT_IDS.clear();
+}
+
+export function adaptEvent(raw: unknown): ValidatedRuntimeEvent | null {
   if (!isRecord(raw) || typeof raw.type !== "string") return null;
   if (!(raw.type in EVENT_CONTRACT.event_types)) return null;
+  if (raw.version !== 1 || typeof raw.id !== "string" || !raw.id.trim()) return null;
+  if (typeof raw.timestamp !== "string" || !raw.timestamp.trim()) return null;
+  if (typeof raw.source !== "string" || !raw.source.trim()) return null;
+  if (typeof raw.replay !== "boolean") return null;
 
-  const definition = EVENT_CONTRACT.event_types[raw.type as KnownEventType];
-  const version = raw.version ?? 1;
-  if (version !== 1) return null;
-
-  const payload = raw.payload ?? {};
+  const payload = raw.payload;
   if (!isRecord(payload)) return null;
+  const definition = EVENT_CONTRACT.event_types[raw.type as KnownEventType];
   if (definition.required.some((key) => !(key in payload))) return null;
 
-  const id = raw.id ?? newEventId();
-  if (typeof id !== "string" || !id) return null;
-  if (_SEEN_EVENT_IDS.has(id)) return null;
-  _SEEN_EVENT_IDS.add(id);
-  if (_SEEN_EVENT_IDS.size > 1024) _SEEN_EVENT_IDS.delete(_SEEN_EVENT_IDS.values().next().value as string);
-
-  const timestamp = raw.timestamp ?? new Date().toISOString();
-  if (typeof timestamp !== "string" || !timestamp) return null;
-  const source = raw.source ?? "compatibility";
-  if (typeof source !== "string" || !source) return null;
-  const sessionId = raw.session_id ?? (typeof payload.session_id === "string" ? payload.session_id : null);
-  const taskId = raw.task_id ?? null;
-  const turnId = raw.turn_id ?? (typeof payload.turn_id === "string" ? payload.turn_id : null);
-  if (sessionId !== null && typeof sessionId !== "string") return null;
-  if (taskId !== null && typeof taskId !== "string") return null;
-  if (turnId !== null && typeof turnId !== "string") return null;
-  if (raw.replay !== undefined && typeof raw.replay !== "boolean") return null;
+  const sessionId = nullableString(raw.session_id);
+  const taskId = nullableString(raw.task_id);
+  const turnId = nullableString(raw.turn_id);
+  if (sessionId === undefined || taskId === undefined || turnId === undefined) return null;
+  if (SEEN_EVENT_IDS.has(raw.id)) return null;
+  SEEN_EVENT_IDS.add(raw.id);
+  if (SEEN_EVENT_IDS.size > 1024) {
+    const oldest = SEEN_EVENT_IDS.values().next().value;
+    if (typeof oldest === "string") SEEN_EVENT_IDS.delete(oldest);
+  }
 
   return {
     type: raw.type as KnownEventType,
     version: 1,
-    id,
-    timestamp,
-    source,
+    id: raw.id,
+    timestamp: raw.timestamp,
+    source: raw.source,
     session_id: sessionId,
     task_id: taskId,
     turn_id: turnId,
-    replay: raw.replay ?? false,
+    replay: raw.replay,
+    ...(typeof raw.correlation_id === "string" ? { correlation_id: raw.correlation_id } : {}),
     ...(typeof raw.rationale === "string" ? { rationale: raw.rationale } : {}),
     payload,
   };
 }
 
+export function createLocalEvent(
+  type: string,
+  payload: Record<string, unknown>,
+  identity: Partial<Pick<RuntimeWireEvent, "session_id" | "task_id" | "turn_id" | "correlation_id">> = {},
+): ValidatedRuntimeEvent | null {
+  const id = globalThis.crypto?.randomUUID?.() ?? `frontend-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return adaptEvent({
+    type,
+    version: 1,
+    id,
+    timestamp: new Date().toISOString(),
+    source: "frontend",
+    replay: false,
+    session_id: identity.session_id ?? null,
+    task_id: identity.task_id ?? null,
+    turn_id: identity.turn_id ?? null,
+    ...identity,
+    payload,
+  });
+}
+
 export function shouldQueueCommand(type: string): boolean {
   return type !== "recovery_approve" && type !== "recovery_reject";
-}
-
-export function sendCommand(type: string, payload?: Record<string, unknown>): void {
-  const message = JSON.stringify({ type, payload });
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(message);
-    return;
-  }
-  if (shouldQueueCommand(type) && pendingCommands.length < 50) pendingCommands.push(message);
-}
-
-function handleMessage(event: MessageEvent<string>): void {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(event.data);
-  } catch {
-    return;
-  }
-  const message = adaptEvent(raw);
-  if (message) useCharlieStore.getState().applyEvent(message);
-}
-
-let socket: WebSocket | null = null;
-let reconnectAttempt = 0;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-const pendingCommands: string[] = [];
-
-function wsUrl(): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/ws`;
-}
-
-// Idempotent -- safe to call from a React effect that may re-run under StrictMode.
-export function connectBridge(): () => void {
-  if (socket) return () => {};
-
-  const open = () => {
-    const ws = new WebSocket(wsUrl());
-    socket = ws;
-
-    ws.onopen = () => {
-      reconnectAttempt = 0;
-      useCharlieStore.getState().setConnected(true);
-      while (pendingCommands.length > 0 && ws.readyState === WebSocket.OPEN) {
-        ws.send(pendingCommands.shift() as string);
-      }
-    };
-    ws.onmessage = handleMessage;
-    ws.onerror = () => ws.close();
-    ws.onclose = () => {
-      socket = null;
-      useCharlieStore.getState().setConnected(false);
-      const delay = reconnectDelayMs(reconnectAttempt++);
-      reconnectTimer = setTimeout(open, delay);
-    };
-  };
-  open();
-
-  return () => {
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    socket?.close();
-    socket = null;
-  };
 }
