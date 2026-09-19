@@ -48,7 +48,7 @@ def test_model_awareness_tracks_added_and_removed_registry_workspaces():
         "aliases": [],
         "implemented": True,
         "renderer": "FutureRenderer",
-        "renderer_module": "frontend/src/workspaces/Future.tsx",
+        "renderer_module": "",
         "spatial": False,
         "core_position": "dock_bottom_right",
         "dismiss_policy": "persistent",

@@ -1,8 +1,8 @@
 """C.H.A.R.L.I.E. V1 — Canonical SurfaceComposer Specification and Validation.
 
 Hard Security Invariants:
-1. No arbitrary JavaScript, React JSX, CSS, HTML, eval(), or script tags.
-2. Every primitive is strictly schema-typed and rendered by an approved React component.
+1. No arbitrary JavaScript, JSX, CSS, HTML, eval(), or script tags.
+2. Every primitive is strictly schema-typed and rendered by an approved client component.
 3. Explicit schema versioning (version 1).
 4. Strictly enforced complexity limits against resource exhaustion.
 """

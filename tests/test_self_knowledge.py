@@ -412,7 +412,7 @@ def test_dynamic_extensibility_hypothetical_workspace():
                 "aliases": ["quantum_spatial"],
                 "implemented": True,
                 "renderer": "QuantumTelemetryWorkspace",
-                "renderer_module": "frontend/src/workspaces/Quantum.tsx",
+                "renderer_module": "",
                 "spatial": True,
                 "core_position": "dock_bottom_right",
                 "dismiss_policy": "persistent",

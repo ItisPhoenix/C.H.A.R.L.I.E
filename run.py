@@ -1,22 +1,17 @@
-"""Unified entry point for Charlie -- voice runtime plus React HUD bridge.
+"""Unified entry point for Charlie's voice and web runtime.
 
 Usage:
-    python run.py              Full mode: voice pipeline + React HUD bridge
-    python run.py --web-only   Web-only mode: just the React HUD (no mic/speaker needed)
+    python run.py              Full mode: voice pipeline plus web/API bridge
+    python run.py --web-only   Web/API-only mode (no mic/speaker needed)
 
 In full mode, main.py spawns the web server as a subprocess.
-In web-only mode, only the FastAPI server starts (useful for testing the UI).
+In web-only mode, only the FastAPI server starts.
 """
 
 import argparse
 import asyncio
-import hashlib
-import json
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
 import uuid
 from pathlib import Path
 
@@ -37,246 +32,13 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 
-_FRONTEND_SHARED_INPUTS = (
-    Path("shared/event_contract.json"),
-    Path("shared/presentation_contract.json"),
-)
-_FRONTEND_CONFIG_GLOBS = (
-    "vite.config.*",
-    "tsconfig*.json",
-    "package.json",
-    "package-lock.json",
-    "index.html",
-)
-_FRONTEND_DIST_ENV = "CHARLIE_FRONTEND_DIST"
-
-
-def _frontend_build_inputs(frontend_dir: Path) -> list[Path]:
-    """Return files that can affect Vite's production bundle.
-
-    Keep this list rooted in actual Vite inputs. Backend-only files and generated
-    output are intentionally excluded. Shared JSON files are listed because
-    frontend runtime modules import them directly.
-    """
-    root = frontend_dir.parent
-    inputs: set[Path] = set()
-    for directory in (frontend_dir / "src", frontend_dir / "public"):
-        if directory.is_dir():
-            inputs.update(path for path in directory.rglob("*") if path.is_file())
-    for pattern in _FRONTEND_CONFIG_GLOBS:
-        inputs.update(path for path in frontend_dir.glob(pattern) if path.is_file())
-    inputs.update(path for path in (root / relative for relative in _FRONTEND_SHARED_INPUTS) if path.is_file())
-    return sorted(inputs, key=lambda path: path.relative_to(root).as_posix())
-
-
-def _frontend_inputs_fingerprint(frontend_dir: Path) -> str:
-    digest = hashlib.sha256()
-    root = frontend_dir.parent
-    for path in _frontend_build_inputs(frontend_dir):
-        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
-def _read_frontend_manifest(dist_dir: Path) -> dict | None:
-    manifest_path = dist_dir / "charlie-build.json"
-    try:
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
-from charlie.runtime_identity import git_build_identity as _runtime_git_build_identity
-from charlie.runtime_identity import persistent_frontend_dist as _persistent_frontend_dist
-from charlie.runtime_identity import temporary_frontend_dist as _temporary_frontend_dist
-
-
-def _git_build_identity(root: Path) -> tuple[str | None, bool | None]:
-    """Preserve run.py's tested identity seam over shared runtime identity."""
-    return _runtime_git_build_identity(root)
-
-
-def _frontend_runtime_dist_candidates(root: Path) -> tuple[Path, ...]:
-    """Keep launcher test/backward-compatibility seams over shared helpers."""
-    preferred = _persistent_frontend_dist(root)
-    fallback = _temporary_frontend_dist(root)
-    return (preferred,) if preferred == fallback else (preferred, fallback)
-
-
-def _frontend_build_is_stale(frontend_dir: Path, dist_dir: Path) -> bool:
-    """True when required build inputs differ from the served frontend build."""
-    if not (dist_dir / "index.html").is_file():
-        return True
-    manifest = _read_frontend_manifest(dist_dir)
-    if not manifest or manifest.get("input_fingerprint") != _frontend_inputs_fingerprint(frontend_dir):
-        return True
-    return False
-
-
-def _frontend_runtime_build_is_stale(frontend_dir: Path, dist_dir: Path) -> bool:
-    """Require both current inputs and the runtime authority marker."""
-    if _frontend_build_is_stale(frontend_dir, dist_dir):
-        return True
-    manifest = _read_frontend_manifest(dist_dir)
-    return not manifest or manifest.get("authority") != "user_runtime_cache"
-
-
-def _frontend_dist_is_user_accessible(dist_dir: Path) -> bool:
-    """Return whether the current user can read and replace the served build.
-
-    Windows sandboxes and stale elevated builds can leave ``frontend/dist`` with
-    an ACL that excludes the normal user.  Detect that state before attempting
-    the rename transaction so a fresh build can be served from an owned path.
-    """
-    if not dist_dir.exists():
-        return True
-    try:
-        next(dist_dir.iterdir(), None)
-        return os.access(dist_dir, os.R_OK | os.W_OK | os.X_OK)
-    except OSError:
-        return False
-
-
-def _publish_frontend_build(staging_dir: Path, dist_dir: Path) -> None:
-    """Publish a verified build while retaining old output on build failure."""
-    backup_dir = dist_dir.with_name(f"{dist_dir.name}.previous")
-    if backup_dir.exists():
-        shutil.rmtree(backup_dir)
-    moved_old = False
-    try:
-        if dist_dir.exists():
-            dist_dir.rename(backup_dir)
-            moved_old = True
-        staging_dir.rename(dist_dir)
-    except Exception:
-        if dist_dir.exists():
-            shutil.rmtree(dist_dir)
-        if moved_old and backup_dir.exists():
-            backup_dir.rename(dist_dir)
-        raise
-    finally:
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir)
-
-
-def check_and_build_frontend(project_root: Path | None = None) -> None:
-    """Prepare the one verified user-owned frontend runtime artifact."""
-    root = project_root or Path(__file__).parent
-    frontend_dir = root / "frontend"
-    os.environ.pop(_FRONTEND_DIST_ENV, None)
-
-    if not frontend_dir.exists():
-        raise RuntimeError("Frontend directory not found; refusing to start without the React HUD build.")
-
-    runtime_dist = None
-    for candidate in _frontend_runtime_dist_candidates(root):
-        try:
-            candidate.parent.mkdir(parents=True, exist_ok=True)
-            if not _frontend_dist_is_user_accessible(candidate.parent):
-                raise OSError("frontend runtime directory is not user-accessible")
-            if not _frontend_runtime_build_is_stale(frontend_dir, candidate):
-                os.environ[_FRONTEND_DIST_ENV] = str(candidate)
-                print(f"Frontend runtime build ready: {candidate}")
-                return
-            if runtime_dist is None:
-                runtime_dist = candidate
-        except OSError:
-            continue
-
-    if runtime_dist is None:
-        raise RuntimeError(
-            "No user-owned frontend runtime directory is available; "
-            "refusing to use a temporary build."
-        )
-
-    print("Frontend runtime build missing or stale. Compiling frontend...")
-    npm_path = shutil.which("npm")
-    if not npm_path:
-        raise RuntimeError("npm was not found; install Node.js/npm and run 'npm run build' in frontend/.")
-
-    try:
-        staging_dir = Path(
-            tempfile.mkdtemp(
-                prefix=".charlie-runtime-build-",
-                dir=str(runtime_dist.parent),
-            )
-        )
-    except OSError as exc:
-        fallback = _temporary_frontend_dist(root)
-        if runtime_dist == fallback:
-            raise RuntimeError(
-                "No user-owned frontend runtime staging directory is writable; "
-                "refusing to use a temporary build."
-            ) from exc
-        try:
-            fallback.parent.mkdir(parents=True, exist_ok=True)
-            if not _frontend_dist_is_user_accessible(fallback.parent):
-                raise OSError("frontend runtime fallback directory is not user-accessible")
-            if not _frontend_runtime_build_is_stale(frontend_dir, fallback):
-                os.environ[_FRONTEND_DIST_ENV] = str(fallback)
-                print(f"Frontend runtime build ready: {fallback}")
-                return
-            staging_dir = Path(
-                tempfile.mkdtemp(
-                    prefix=".charlie-runtime-build-",
-                    dir=str(fallback.parent),
-                )
-            )
-            runtime_dist = fallback
-        except OSError as fallback_exc:
-            raise RuntimeError(
-                "No user-owned frontend runtime staging directory is writable; "
-                "refusing to use a temporary build."
-            ) from fallback_exc
-    build_env = os.environ.copy()
-    build_env["CHARLIE_FRONTEND_OUT_DIR"] = str(staging_dir)
-    try:
-        if not (frontend_dir / "node_modules").exists():
-            print("Running 'npm install' in frontend...")
-            subprocess.run(
-                [npm_path, "install"],
-                cwd=str(frontend_dir),
-                check=True,
-            )
-        print("Running 'npm run build' in frontend...")
-        subprocess.run(
-            [npm_path, "run", "build"],
-            cwd=str(frontend_dir),
-            env=build_env,
-            check=True,
-        )
-        manifest = _read_frontend_manifest(staging_dir)
-        if not (staging_dir / "index.html").is_file() or not manifest or not manifest.get("build_id"):
-            raise RuntimeError("Frontend build completed without a valid charlie-build.json identity.")
-        manifest["input_fingerprint"] = _frontend_inputs_fingerprint(frontend_dir)
-        manifest["authority"] = "user_runtime_cache"
-        (staging_dir / "charlie-build.json").write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        _publish_frontend_build(staging_dir, runtime_dist)
-        os.environ[_FRONTEND_DIST_ENV] = str(runtime_dist)
-        print(f"Frontend runtime build published: {runtime_dist}")
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            "Frontend build failed; the previously verified runtime build was preserved but not selected. "
-            "See the npm output above and fix the build before restarting."
-        ) from e
-    finally:
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir)
-
-
 def run_full() -> int:
-    """Run voice pipeline + React HUD bridge (the default)."""
-    check_and_build_frontend()
+    """Run the voice pipeline and web/API bridge."""
 
     print("=" * 50)
-    print("  Charlie Assistant + React HUD (Full Mode)")
+    print("  Charlie Assistant (Full Mode)")
     print("  - Voice Loop: Starting (microphone readiness pending)")
-    print("  - React HUD: Available at http://localhost:8000/")
+    print("  - Web/API bridge: Available at the configured local endpoint")
     print("=" * 50)
 
     from main import main
@@ -289,7 +51,6 @@ def run_full() -> int:
 
 def run_web_only() -> int:
     """Run just the web server -- no voice hardware needed."""
-    check_and_build_frontend()
 
     import uvicorn
 
@@ -297,8 +58,8 @@ def run_web_only() -> int:
     from charlie.web_server import app
 
     print("=" * 50)
-    print("  Charlie React HUD (web-only mode)")
-    print(f"  - React HUD: Active at http://{config.charlie_host}:{config.charlie_port}/")
+    print("  Charlie Web/API server (web-only mode)")
+    print(f"  - API: Active at http://{config.charlie_host}:{config.charlie_port}/")
     print("=" * 50)
 
     try:
@@ -321,24 +82,16 @@ def run_web_only() -> int:
 
 def cli_main(argv: list[str] | None = None) -> int:
     """Canonical user-facing CLI launcher boundary."""
-    parser = argparse.ArgumentParser(description="Charlie: voice assistant + React HUD")
+    parser = argparse.ArgumentParser(description="Charlie: voice assistant and local web/API runtime")
     parser.add_argument(
         "--web-only",
         action="store_true",
-        help="Start only the React HUD bridge (no voice pipeline)",
+        help="Start only the web/API server (no voice pipeline)",
     )
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 1
-
-    try:
-        check_and_build_frontend()
-    except KeyboardInterrupt:
-        return 0
-    except Exception as exc:
-        print(f"Frontend preflight failed: {exc}", file=sys.stderr)
-        return 1
 
     try:
         if args.web_only:

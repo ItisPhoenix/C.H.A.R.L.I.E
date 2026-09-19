@@ -284,8 +284,6 @@ def _all_subsystems():
 # Test 1: run.py is the canonical full-mode launcher boundary
 # ---------------------------------------------------------------------------
 def test_run_is_canonical_full_mode_launcher_boundary(monkeypatch):
-    monkeypatch.setattr(run, "check_and_build_frontend", lambda *args: None)
-
     called = False
 
     async def fake_main() -> int:
@@ -379,8 +377,6 @@ async def test_main_does_not_call_os_exit_on_startup_failure(monkeypatch):
 # Test 4: full-runtime startup failure returns non-zero status to launcher
 # ---------------------------------------------------------------------------
 def test_full_runtime_startup_failure_returns_nonzero_to_launcher(monkeypatch):
-    monkeypatch.setattr(run, "check_and_build_frontend", lambda *args: None)
-
     async def failing_main() -> int:
         return 1
 
@@ -395,8 +391,6 @@ def test_full_runtime_startup_failure_returns_nonzero_to_launcher(monkeypatch):
 # Test 5: successful graceful runtime returns success status
 # ---------------------------------------------------------------------------
 def test_successful_graceful_runtime_returns_success_status(monkeypatch):
-    monkeypatch.setattr(run, "check_and_build_frontend", lambda *args: None)
-
     async def clean_main() -> int:
         return 0
 
@@ -845,8 +839,6 @@ async def test_cleanup_failure_in_one_resource_does_not_skip_remaining(monkeypat
 # Test 18: web-only normal shutdown does not use unconditional hard exit
 # ---------------------------------------------------------------------------
 def test_web_only_normal_shutdown_does_not_use_unconditional_hard_exit(monkeypatch):
-    monkeypatch.setattr(run, "check_and_build_frontend", lambda *args: None)
-
     def forbidden_exit(code):
         pytest.fail(f"run_web_only called os._exit({code}) on normal path")
 
@@ -870,8 +862,6 @@ def test_web_only_normal_shutdown_does_not_use_unconditional_hard_exit(monkeypat
 # Test 19: web-only Ctrl+C is deterministic
 # ---------------------------------------------------------------------------
 def test_web_only_ctrl_c_is_deterministic(monkeypatch):
-    monkeypatch.setattr(run, "check_and_build_frontend", lambda *args: None)
-
     class InterruptServer:
         def __init__(self, config):
             self.config = config
@@ -890,8 +880,6 @@ def test_web_only_ctrl_c_is_deterministic(monkeypatch):
 # Test 20: launcher returns/raises the correct final process exit code
 # ---------------------------------------------------------------------------
 def test_launcher_returns_or_exits_with_correct_final_code(monkeypatch):
-    monkeypatch.setattr(run, "check_and_build_frontend", lambda *args: None)
-
     # Test full mode exit code 0
     import main as main_module
     monkeypatch.setattr(main_module, "main", AsyncMock(return_value=0))
@@ -1995,54 +1983,7 @@ async def test_canonical_shell_execute_normal_success_preserves_output():
 
 
 # ---------------------------------------------------------------------------
-# Test 31: Full-mode frontend build failure returns canonical code 1
-# ---------------------------------------------------------------------------
-def test_full_mode_frontend_failure_returns_canonical_code_1(monkeypatch):
-    def failing_build(*args):
-        raise RuntimeError("Vite compilation exploded")
-
-    monkeypatch.setattr(run, "check_and_build_frontend", failing_build)
-    exit_code = run.cli_main([])
-    assert exit_code == 1
-
-
-# ---------------------------------------------------------------------------
-# Test 32: Web-only frontend build failure returns canonical code 1
-# ---------------------------------------------------------------------------
-def test_web_only_frontend_failure_returns_canonical_code_1(monkeypatch):
-    def failing_build(*args):
-        raise RuntimeError("Vite compilation exploded")
-
-    monkeypatch.setattr(run, "check_and_build_frontend", failing_build)
-    exit_code = run.cli_main(["--web-only"])
-    assert exit_code == 1
-
-
-# ---------------------------------------------------------------------------
-# Test 33: KeyboardInterrupt during launcher preflight returns graceful 0
-# ---------------------------------------------------------------------------
-def test_keyboard_interrupt_during_launcher_preflight_returns_graceful_zero(monkeypatch):
-    def interrupted_build(*args):
-        raise KeyboardInterrupt()
-
-    monkeypatch.setattr(run, "check_and_build_frontend", interrupted_build)
-    assert run.cli_main([]) == 0
-    assert run.cli_main(["--web-only"]) == 0
-
-
-# ---------------------------------------------------------------------------
-# Test 34: main.py does not call or import frontend build authority
-# ---------------------------------------------------------------------------
-def test_main_does_not_call_or_import_frontend_build_authority():
-    main_path = Path("main.py")
-    content = main_path.read_text(encoding="utf-8")
-    assert "check_and_build_frontend" not in content
-    assert "_ensure_frontend_runtime" not in content
-    assert not hasattr(main, "_ensure_frontend_runtime")
-
-
-# ---------------------------------------------------------------------------
-# Test 35: main.py and web_server.py have no reverse import of run.py
+# Test 31: main.py and web_server.py have no reverse import of run.py
 # ---------------------------------------------------------------------------
 def test_main_and_web_server_have_no_reverse_import_of_run():
     import ast
@@ -2058,7 +1999,7 @@ def test_main_and_web_server_have_no_reverse_import_of_run():
 
 
 # ---------------------------------------------------------------------------
-# Test 36: run.py -> main.py remains the supported dependency direction
+# Test 32: run.py -> main.py remains the supported dependency direction
 # ---------------------------------------------------------------------------
 def test_run_to_main_supported_direction():
     import ast

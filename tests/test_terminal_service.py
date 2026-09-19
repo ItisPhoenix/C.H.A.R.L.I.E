@@ -13,7 +13,7 @@ from charlie.web_server import validate_ws_origin
 def test_validate_ws_origin():
     assert validate_ws_origin(None) is True
     assert validate_ws_origin("") is True
-    assert validate_ws_origin("http://localhost:5173") is True
+    assert validate_ws_origin("http://localhost:8000") is True
     assert validate_ws_origin("http://127.0.0.1:8000") is True
     assert validate_ws_origin("http://localhost") is True
     assert validate_ws_origin("http://127.0.0.1") is True

@@ -1,4 +1,4 @@
-"""FastAPI + WebSocket bridge for the Charlie React HUD.
+"""FastAPI + WebSocket API for the Charlie runtime.
 
 Runs in a separate subprocess spawned by main.py.
 Communicates with the voice process via ZeroMQ (EventBus).
@@ -26,8 +26,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse, Response
 
 from charlie.config import Config, config
 from charlie.ipc import DEFAULT_COMMAND_PORT, DEFAULT_EVENT_PORT, EventBus
@@ -442,7 +441,7 @@ async def lifespan(app: FastAPI):
             logger.debug("EventBus shutdown cleanup issue (non-fatal): %s", exc)
         event_bus = None
 
-app = FastAPI(title="Charlie React HUD", lifespan=lifespan)
+app = FastAPI(title="Charlie Web API", lifespan=lifespan)
 
 # SECURITY: This server has no authentication. It is intended for localhost
 # only. Never bind CHARLIE_HOST=0.0.0.0 (or any non-loopback address) without
@@ -451,8 +450,6 @@ app = FastAPI(title="Charlie React HUD", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
         "tauri://localhost",
         "http://tauri.localhost",
     ],
@@ -460,40 +457,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-_configured_frontend_dist = os.environ.get("CHARLIE_FRONTEND_DIST")
-if _configured_frontend_dist:
-    _FRONTEND_DIST = Path(_configured_frontend_dist)
-else:
-    from charlie.runtime_identity import persistent_frontend_dist as _persistent_frontend_dist
-
-    _FRONTEND_DIST = _persistent_frontend_dist(Path(__file__).resolve().parent.parent)
-
-
-def _frontend_build_identity() -> dict[str, Any] | None:
-    try:
-        manifest = json.loads((_FRONTEND_DIST / "charlie-build.json").read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return None
-    return manifest if isinstance(manifest, dict) else None
-
-
-_FRONTEND_ASSETS = _FRONTEND_DIST / "assets"
-if _FRONTEND_ASSETS.is_dir():
-    app.mount("/assets", StaticFiles(directory=_FRONTEND_ASSETS), name="surface-assets")
-
-
-@app.get("/")
-async def serve_hud() -> FileResponse:
-    """Serve the one React HUD entry point."""
-    index_path = _FRONTEND_DIST / "index.html"
-    if not index_path.is_file():
-        raise HTTPException(status_code=404, detail="frontend not built -- run `npm run build` in frontend/")
-    return FileResponse(
-        index_path,
-        headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
-    )
-
 
 async def broadcast(data: dict):
     """Send a message to connected WebSocket clients.
@@ -870,17 +833,13 @@ async def history(limit: int = 50):
 @app.get("/api/status")
 async def status():
     import platform as _platform
-    frontend_build = _frontend_build_identity()
     return {
         "state": pipeline_state,
         "launch_id": LAUNCH_ID,
         "uptime_seconds": int(time.time() - _START_TIME),
         "pid": os.getpid(),
-        "frontend_build": frontend_build,
         "source_identity": _SOURCE_IDENTITY,
         "source_dirty": _SOURCE_DIRTY,
-        "frontend_authority": (frontend_build or {}).get("authority"),
-        "frontend_dist": str(_FRONTEND_DIST),
         "desktop_control_enabled": config.desktop_control_enabled,
         "os_host": f"{_platform.system()} {_platform.machine()}",
         "runtime_truth": dict(_runtime_truth) if _runtime_truth is not None else None,

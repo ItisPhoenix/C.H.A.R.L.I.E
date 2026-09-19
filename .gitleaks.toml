@@ -6,7 +6,6 @@ useDefault = true
 description = "Global allowlist for tests, examples, and mock data"
 paths = [
     '''(?i)^\.env\.example$''',
-    '''(?i)^frontend/\.oxlintrc\.json$''',
     '''(?i)^data/tiles/.*\.pmtiles$''',
     '''(?i)^tests/.*$''',
 ]

@@ -203,7 +203,7 @@ _SESSION_RESULT_CACHE_MAX = 512
 _SETTINGS_RESULT_CACHE_MAX = 512
 _EXTENSION_RESULT_CACHE_MAX = 512
 _PRIVACY_RESULT_CACHE_MAX = 512
-from charlie.runtime_identity import git_build_identity, persistent_frontend_dist
+from charlie.runtime_identity import git_build_identity
 
 _SOURCE_IDENTITY, _SOURCE_DIRTY = git_build_identity(Path(__file__).resolve().parent)
 _state_machine = StateMachine()  # single authoritative CoreState instance for this process
@@ -3961,20 +3961,6 @@ def _fetch_web_status(host: str, port: int) -> Optional[dict[str, Any]]:
             connection.close()
 
 
-def _expected_frontend_build_identity() -> Optional[dict[str, Any]]:
-    """Read the build identity that the child web process must serve."""
-    configured_dist = os.environ.get("CHARLIE_FRONTEND_DIST")
-    if configured_dist:
-        dist = Path(configured_dist)
-    else:
-        dist = persistent_frontend_dist(Path(__file__).resolve().parent)
-    try:
-        manifest = json.loads((dist / "charlie-build.json").read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return None
-    return manifest if isinstance(manifest, dict) else None
-
-
 def _web_process_owns_pid(process: subprocess.Popen, reported_pid: Any) -> bool:
     """Accept the launcher PID or the real interpreter child PID on Windows."""
     try:
@@ -3996,24 +3982,16 @@ def _web_identity_error(
     status: Optional[dict[str, Any]],
     process: subprocess.Popen,
     launch_id: str,
-    expected_build: Optional[dict[str, Any]],
 ) -> Optional[str]:
     """Return a safe explanation when a ready response is not this launch."""
     if not isinstance(status, dict):
         return "Charlie web runtime returned no valid identity response."
     if status.get("launch_id") != launch_id:
-        return "Charlie web runtime launch identity mismatch; refusing to attach to an unknown or stale HUD."
+        return "Charlie web runtime launch identity mismatch; refusing to attach to an unknown or stale web process."
     if not _web_process_owns_pid(process, status.get("pid")):
-        return "Charlie web runtime process identity mismatch; refusing to attach to an unexpected HUD process."
-    frontend_build = status.get("frontend_build")
-    if not isinstance(frontend_build, dict):
-        return "Charlie web runtime did not report a frontend build identity."
+        return "Charlie web runtime process identity mismatch; refusing to attach to an unexpected web process."
     if status.get("source_identity") != _SOURCE_IDENTITY:
         return "Charlie web runtime source identity differs from its parent runtime."
-    if expected_build is not None:
-        for key in ("build_id", "input_fingerprint", "git_sha", "dirty", "authority"):
-            if key in expected_build and frontend_build.get(key) != expected_build[key]:
-                return f"Charlie web runtime frontend build identity mismatch ({key})."
     return None
 
 
@@ -4073,7 +4051,7 @@ def _start_web_subprocess(
     launch_id: str,
     startup_timeout: float = _WEB_STARTUP_TIMEOUT_SECONDS,
 ) -> subprocess.Popen:
-    """Start only this launch's HUD and require its identity before continuing."""
+    """Start only this launch's web runtime and require its identity before continuing."""
     if _web_port_is_listening(host, port):
         existing_status = _fetch_web_status(host, port)
         if isinstance(existing_status, dict) and existing_status.get("launch_id"):
@@ -4094,7 +4072,6 @@ def _start_web_subprocess(
         raise RuntimeError(message) from exc
 
     _set_subsystem_health("web", HealthStatus.STARTING, "Waiting for owned web runtime")
-    expected_build = _expected_frontend_build_identity()
     deadline = time.monotonic() + startup_timeout
     try:
         while time.monotonic() < deadline:
@@ -4106,7 +4083,7 @@ def _start_web_subprocess(
 
             status = _fetch_web_status(host, port)
             if status is not None:
-                identity_error = _web_identity_error(status, process, launch_id, expected_build)
+                identity_error = _web_identity_error(status, process, launch_id)
                 if identity_error is not None:
                     _set_subsystem_health("web", HealthStatus.DEGRADED, identity_error)
                     raise RuntimeError(identity_error)

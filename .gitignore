@@ -55,19 +55,10 @@ SOUL.md
 Thumbs.db
 desktop.ini
 
-# === Frontend ===
-frontend/node_modules/
-frontend/.next/
-frontend/out/
-frontend/build/
-frontend/dist/
-frontend/.charlie-runtime-build-*/
-frontend/.charlie-build-*/
 dist/
-frontend/.env*
 playwright-report/
 test-results/
-frontend/.vite/
+# === Build & test output ===
 
 # === Temp, Scratch & Cache ===
 tmp/

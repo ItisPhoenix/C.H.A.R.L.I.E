@@ -34,7 +34,7 @@ def temp_repo():
         )
 
         # 2. Create TypeScript / React source
-        ts_dir = repo_path / "frontend" / "src"
+        ts_dir = repo_path / "client" / "src"
         ts_dir.mkdir(parents=True, exist_ok=True)
         ts_file = ts_dir / "SampleComponent.tsx"
         ts_file.write_text(
@@ -125,7 +125,7 @@ def test_code_index_typescript_and_react(temp_repo):
     comp_syms = index.get_symbol("SampleComponent")
     assert len(comp_syms) == 1
     assert comp_syms[0]["kind"] in ("component", "function", "const")
-    assert comp_syms[0]["file_path"] == "frontend/src/SampleComponent.tsx"
+    assert comp_syms[0]["file_path"] == "client/src/SampleComponent.tsx"
 
     # TypeScript interface
     iface_syms = index.get_symbol("SampleProps")
@@ -174,7 +174,7 @@ def test_code_index_deletion(temp_repo):
     assert len(index.get_symbol("useSampleStore")) == 1
 
     # Delete sampleStore.ts
-    store_file = temp_repo / "frontend" / "src" / "sampleStore.ts"
+    store_file = temp_repo / "client" / "src" / "sampleStore.ts"
     store_file.unlink()
 
     r = index.refresh()
@@ -202,7 +202,7 @@ def test_code_index_syntax_error_isolation(temp_repo):
     broken_py = temp_repo / "charlie" / "broken.py"
     broken_py.write_text("def broken_func(:\n    invalid syntax!!!", encoding="utf-8")
 
-    broken_ts = temp_repo / "frontend" / "src" / "broken.tsx"
+    broken_ts = temp_repo / "client" / "src" / "broken.tsx"
     broken_ts.write_text("export const Broken = {{{", encoding="utf-8")
 
     index = CodeIndex(temp_repo)
@@ -325,4 +325,3 @@ def test_code_index_live_repo_sanity():
     assert excerpt is not None
     assert excerpt["start_line"] == 1
     assert excerpt["end_line"] == 15
-

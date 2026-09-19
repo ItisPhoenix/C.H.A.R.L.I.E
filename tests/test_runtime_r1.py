@@ -620,21 +620,11 @@ class _StartupFakeBrain:
         pass
 
 
-def _web_build_identity() -> dict[str, object]:
-    return {
-        "build_id": "build-1",
-        "input_fingerprint": "inputs-1",
-        "git_sha": "source-1",
-        "dirty": True,
-    }
-
-
-def _web_status(process: _WebFakeProcess, launch_id: str, build: dict[str, object]) -> dict[str, object]:
+def _web_status(process: _WebFakeProcess, launch_id: str) -> dict[str, object]:
     return {
         "launch_id": launch_id,
         "pid": process.pid,
         "source_identity": main._SOURCE_IDENTITY,
-        "frontend_build": build,
     }
 
 
@@ -658,13 +648,11 @@ def test_socket_probe_distinguishes_bound_and_free_ports():
 
 def test_free_port_requires_owned_runtime_identity_before_success(monkeypatch):
     process = _WebFakeProcess()
-    build = _web_build_identity()
     launch_id = "launch-current"
     health = HealthRegistry(("web",))
     monkeypatch.setattr(main, "_runtime_health", health)
     _patch_web_spawn(monkeypatch, process)
-    monkeypatch.setattr(main, "_expected_frontend_build_identity", lambda: build)
-    monkeypatch.setattr(main, "_fetch_web_status", lambda host, port: _web_status(process, launch_id, build))
+    monkeypatch.setattr(main, "_fetch_web_status", lambda host, port: _web_status(process, launch_id))
 
     result = main._start_web_subprocess(
         ("python", "web_server_entry.py"),
@@ -681,11 +669,10 @@ def test_free_port_requires_owned_runtime_identity_before_success(monkeypatch):
 
 def test_web_identity_accepts_the_real_child_of_the_launcher(monkeypatch):
     process = _WebFakeProcess(pid=4321)
-    build = _web_build_identity()
     monkeypatch.setattr(main, "_web_process_owns_pid", lambda current, reported: reported == 8765)
 
-    status = _web_status(process, "launch-current", build) | {"pid": 8765}
-    assert main._web_identity_error(status, process, "launch-current", build) is None
+    status = _web_status(process, "launch-current") | {"pid": 8765}
+    assert main._web_identity_error(status, process, "launch-current") is None
 
 
 @pytest.mark.asyncio
@@ -780,7 +767,6 @@ async def test_required_storage_failure_propagates_and_closes_open_stores(monkey
 def test_full_launcher_does_not_mask_runtime_failure(monkeypatch):
     import run
 
-    monkeypatch.setattr(run, "check_and_build_frontend", lambda: None)
     monkeypatch.setattr(main, "main", lambda: None)
 
     def fail(_coroutine):
@@ -794,8 +780,6 @@ def test_full_launcher_does_not_mask_runtime_failure(monkeypatch):
 
 def test_full_launcher_propagates_main_startup_failure(monkeypatch):
     import run
-
-    monkeypatch.setattr(run, "check_and_build_frontend", lambda: None)
 
     async def failing_main():
         raise RuntimeError("brain startup failed")
@@ -862,11 +846,9 @@ def test_stale_charlie_listener_stops_startup_truthfully(monkeypatch):
 
 def test_spawned_web_exit_stops_startup_and_tears_down_child(monkeypatch):
     process = _WebFakeProcess(exit_code=17)
-    build = _web_build_identity()
     health = HealthRegistry(("web",))
     monkeypatch.setattr(main, "_runtime_health", health)
     _patch_web_spawn(monkeypatch, process)
-    monkeypatch.setattr(main, "_expected_frontend_build_identity", lambda: build)
     monkeypatch.setattr(main, "_fetch_web_status", lambda host, port: None)
 
     with pytest.raises(RuntimeError, match="exited before readiness"):
@@ -879,15 +861,11 @@ def test_spawned_web_exit_stops_startup_and_tears_down_child(monkeypatch):
         )
 
     assert process.terminated is True
-
-
 def test_web_readiness_timeout_stops_startup_and_tears_down_child(monkeypatch):
     process = _WebFakeProcess()
-    build = _web_build_identity()
     health = HealthRegistry(("web",))
     monkeypatch.setattr(main, "_runtime_health", health)
     _patch_web_spawn(monkeypatch, process)
-    monkeypatch.setattr(main, "_expected_frontend_build_identity", lambda: build)
     monkeypatch.setattr(main, "_fetch_web_status", lambda host, port: None)
 
     with pytest.raises(RuntimeError, match="did not become ready"):
@@ -901,40 +879,14 @@ def test_web_readiness_timeout_stops_startup_and_tears_down_child(monkeypatch):
         )
 
     assert process.terminated is True
-
-
 def test_wrong_launch_identity_is_rejected_and_child_is_stopped(monkeypatch):
     process = _WebFakeProcess()
-    build = _web_build_identity()
     health = HealthRegistry(("web",))
     monkeypatch.setattr(main, "_runtime_health", health)
     _patch_web_spawn(monkeypatch, process)
-    monkeypatch.setattr(main, "_expected_frontend_build_identity", lambda: build)
-    monkeypatch.setattr(main, "_fetch_web_status", lambda host, port: _web_status(process, "launch-old", build))
+    monkeypatch.setattr(main, "_fetch_web_status", lambda host, port: _web_status(process, "launch-old"))
 
     with pytest.raises(RuntimeError, match="launch identity mismatch"):
-        main._start_web_subprocess(
-            ("python", "web_server_entry.py"),
-            {},
-            host="127.0.0.1",
-            port=8000,
-            launch_id="launch-current",
-        )
-
-    assert process.terminated is True
-
-
-def test_wrong_frontend_identity_is_rejected(monkeypatch):
-    process = _WebFakeProcess()
-    expected = _web_build_identity()
-    served = {**expected, "input_fingerprint": "stale-inputs"}
-    health = HealthRegistry(("web",))
-    monkeypatch.setattr(main, "_runtime_health", health)
-    _patch_web_spawn(monkeypatch, process)
-    monkeypatch.setattr(main, "_expected_frontend_build_identity", lambda: expected)
-    monkeypatch.setattr(main, "_fetch_web_status", lambda host, port: _web_status(process, "launch-current", served))
-
-    with pytest.raises(RuntimeError, match="frontend build identity mismatch"):
         main._start_web_subprocess(
             ("python", "web_server_entry.py"),
             {},

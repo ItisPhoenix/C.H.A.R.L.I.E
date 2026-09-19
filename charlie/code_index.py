@@ -1,7 +1,7 @@
 """Incremental CodeIndex for Charlie V1 repository code introspection.
 
 Provides deterministic, AST-grounded indexing for Charlie's Python backend
-and TypeScript/React frontend source with incremental refresh, path-safe excerpts,
+and TypeScript/React source with incremental refresh, path-safe excerpts,
 symbol discovery, and secret file exclusion.
 """
 

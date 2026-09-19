@@ -52,7 +52,7 @@ _TAG_RE = re.compile(r"<[^>]*>")
 
 
 def _clean_text(value: Any, limit: int = MAX_TEXT) -> str:
-    """Create bounded plain display text; React remains responsible for escaping."""
+    """Create bounded plain display text; clients remain responsible for escaping."""
     text = _CONTROL_RE.sub("", str(value or ""))
     text = _TAG_RE.sub("", text)
     lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]

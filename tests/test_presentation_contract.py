@@ -7,9 +7,8 @@ Verifies:
    (PresentationKind, DismissPolicy, PreferredZone, AnchorTarget)
 4. Zero drift between contract, generated types, and charlie.surface_spec (PrimitiveType, LayoutType, SCHEMA_VERSION)
 5. Workspace, Widget, and Overlay registry resolution, aliases, uniqueness, and collision avoidance
-6. Renderer metadata paths exist on disk for all implemented surfaces
-7. Settings is categorized as an overlay/modal, not a workspace
-8. Robust error handling for malformed contracts
+6. Settings is categorized as an overlay/modal, not a workspace
+7. Robust error handling for malformed contracts
 """
 
 import json
@@ -259,35 +258,6 @@ def test_registry_overlays():
     assert desc.implemented is True
     assert desc.renderer == "SettingsModal"
     assert desc.dismiss_policy == "manual"
-
-
-def test_implemented_renderer_modules_exist_on_disk():
-    """Verify that every surface marked implemented=True references a real existing file."""
-    registry = get_presentation_registry()
-
-    # Workspaces
-    for ws_name in registry.list_workspaces():
-        desc = registry.get_workspace(ws_name)
-        assert desc is not None
-        if desc.implemented and desc.renderer_module:
-            target = REPO_ROOT / desc.renderer_module
-            assert target.exists(), f"Workspace {ws_name} renderer module not found: {target}"
-
-    # Widgets
-    for w_name in registry.list_widgets():
-        desc = registry.get_widget(w_name)
-        assert desc is not None
-        if desc.implemented and desc.renderer_module:
-            target = REPO_ROOT / desc.renderer_module
-            assert target.exists(), f"Widget {w_name} renderer module not found: {target}"
-
-    # Overlays
-    for o_name in registry.list_overlays():
-        desc = registry.get_overlay(o_name)
-        assert desc is not None
-        if desc.implemented and desc.renderer_module:
-            target = REPO_ROOT / desc.renderer_module
-            assert target.exists(), f"Overlay {o_name} renderer module not found: {target}"
 
 
 def test_registry_core_rules_and_states():

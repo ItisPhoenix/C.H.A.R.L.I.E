@@ -7,7 +7,6 @@ A low-latency, voice-first AI assistant that runs entirely on your local machine
 [![CI](https://github.com/ItisPhoenix/C.H.A.R.L.I.E/actions/workflows/ci.yml/badge.svg)](https://github.com/ItisPhoenix/C.H.A.R.L.I.E/actions/workflows/ci.yml)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
-[![Node 20+](https://img.shields.io/badge/node-20%2B-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows&logoColor=white)](#requirements)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -61,14 +60,11 @@ Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
 | **Reflection engine** | Periodic self-reflection (every ~5 turns) consolidates memory and updates the knowledge graph. |
 | **Single-LLM architecture** | One text model handles everything (no fast/small vs. big/slow split) plus a separate, opt-in vision model for screen/image understanding. |
 
-### 🪟 Dashboard
+### 🌐 Web/API bridge
 | | |
 |---|---|
-| **Glassmorphism web dashboard** | Frost-glass layout built with Vite, React 19, TypeScript, Zustand, and Tailwind CSS v4, synced live over WebSocket. See `DASHBOARD_HANDOFF.md` for the current in-progress redesign toward an on-demand floating-panel desktop layout at `/dashboard`. |
-| **Smart Activity Panel** | Live feed of the assistant's intermediate thinking, active tool calls, and results. |
-| **Persistent Voice Dock** | Animated waveform reflecting listening, thinking, and speaking phases. |
-| **Active session sync** | Background voice interactions land directly in the active browser chat, in real time -- gated to the visible tab so a background tab can't steal routing. |
-| **Toast notifications & system-status polling** | Non-blocking alerts and live CPU/RAM/GPU telemetry, hardware/files/services/local-model views. |
+| **Local FastAPI API** | Session, task, health, capability, memory, terminal, and control endpoints remain available to local clients. |
+| **WebSocket event bridge** | Correlated runtime events and commands remain available to future clients without a bundled UI. |
 
 ### 🔌 Extensibility & Reliability
 | | |
@@ -111,7 +107,7 @@ Every tool the Brain can call lives in `charlie/tools.py`, grouped by area:
 **Dynamic, config-gated** -- not fixed code, vary by setup:
 - `plugin_*` tools (filesystem, browser fetch/screenshot, calendar, sandboxed Python) when `PLUGINS_ENABLED=true`
 - MCP server tools when `MCP_ENABLED=true`
-- Extension tools installed via the dashboard's Extensions tab
+- Extension tools installed through the extension API
 
 Every call is capped by `IterationBudget` (12/turn interactive, higher for background tasks).
 
@@ -121,7 +117,6 @@ Every call is capped by `IterationBudget` (12/turn interactive, higher for backg
 
 - **OS**: Windows 11 (PowerShell for system commands; desktop control is Windows-only)
 - **Python**: 3.12+
-- **Node.js**: 20+ (for the dashboard)
 - **GPU**: NVIDIA GPU with CUDA recommended (for Whisper ASR and Kokoro TTS; CPU fallback works but is slower)
 - **LLM**: Any OpenAI-compatible API endpoint
 - **Package manager**: [`uv`](https://docs.astral.sh/uv/) for Python
@@ -141,12 +136,6 @@ cd C.H.A.R.L.I.E
 
 ```bash
 uv sync --locked
-```
-
-For the dashboard UI:
-
-```bash
-cd frontend && npm ci && cd ..
 ```
 
 For agentic desktop control (optional, Windows only):
@@ -193,28 +182,19 @@ settings (VAD/ASR tuning, wake word, memory, MCP/plugins, desktop control, visio
 ### 4. Run
 
 ```bash
-python run.py              # full mode: voice engine + web dashboard + LLM Brain
+python run.py              # full mode: voice engine + web/API bridge + LLM Brain
 ```
 
-Charlie will initialize the voice engine, download models on first run (Whisper, Kokoro), build
-the dashboard if it's stale, and start listening. The web dashboard is served at
-http://localhost:8000 by default. `CHARLIE_PORT` is configurable; `CHARLIE_HOST`
-must remain a loopback address because Charlie's local dashboard has no remote authentication.
+Charlie will initialize the voice engine, download models on first run (Whisper, Kokoro), and start
+listening. The local web/API server uses http://localhost:8000 by default. `CHARLIE_PORT` is
+configurable; `CHARLIE_HOST` must remain a loopback address because the local API has no remote
+authentication.
 
-> **Note on the dashboard and chat:** the web UI and the LLM Brain are one system.
-> In **full mode** the dashboard is fully live -- chat and voice both route through the
-> Brain. The `--web-only` flag serves the UI without the Brain, so chat will not get
-> a reply (use it only for static UI inspection).
+> **Web-only mode:** the `--web-only` flag starts the FastAPI/WebSocket server without the voice
+> pipeline or main Brain process. Use it for API and transport checks.
 
 ```bash
-python run.py --web-only   # UI only, no voice/LLM backend
-```
-
-For frontend-only iteration (hot reload), run the dev server separately -- it proxies `/api/*`
-to the FastAPI backend on `:8000`:
-
-```bash
-cd frontend && npm run dev   # http://localhost:3000
+python run.py --web-only   # API/WebSocket server only
 ```
 
 ---
@@ -269,16 +249,9 @@ See `.env.example` for the complete, commented list. The most commonly tuned one
 │   ├── extensions/            # Extension-install safety gate + adapters
 │   ├── recovery.py            # Shell-command recovery pipeline (auto-fix + approval)
 │   ├── budget.py               # IterationBudget -- caps tool-loop rounds per turn
-│   ├── web_server.py           # FastAPI app + WebSocket handlers
+│   ├── web_server.py           # FastAPI app + WebSocket/API handlers
 │   ├── web_server_entry.py    # Subprocess entry point for the web server
 │   └── desktop/                # UIA tree, OCR, vision grounding, window management, actions
-├── frontend/                   # Vite / React 19 / TypeScript / Zustand dashboard
-│   └── src/
-│       ├── App.tsx              # react-router: "/" + "/dashboard" -> Dashboard, "/surface/:id" -> SurfaceRoute
-│       ├── dashboard/           # /dashboard page -- floating-panel desktop UI (see DASHBOARD_HANDOFF.md)
-│       ├── surfaces/            # Qt-HUD-hosted surface routing (widgets/modals/workspaces/notifications)
-│       ├── store/charlie.ts     # single shared Zustand store, WS-event-driven
-│       └── runtime/bridge.ts    # WebSocket connect/reconnect + typed event decode
 ├── tests/                      # pytest suite (40 files) -- ruff + pytest must pass before commit
 ├── run.py                      # Unified entry point (full mode / --web-only)
 └── main.py                     # Voice loop orchestration, spawns the web server subprocess
@@ -293,15 +266,13 @@ Mic audio -> VoiceEngine (VAD) -> ASR worker subprocess (Whisper) -> Brain.chat_
                                                                           |
                                                 LLM (streaming) -> TextStreamFilter
                                                                           |
-                                          Kokoro TTS (speak) <-> WebSocket -> Dashboard
+                                           Kokoro TTS (speak) <-> WebSocket/API clients
 ```
 
-The voice process and the web dashboard process are separate (`main.py` spawns
+The voice process and the web/API process are separate (`main.py` spawns
 `web_server_entry.py` as a subprocess), bridged over ZeroMQ PUB/SUB + PUSH/PULL
-(`charlie/ipc.py`, ports 5555/5556 by default). The dashboard talks to the web process over
-HTTP/WebSocket; voice input and desktop-control results flow through the same `Brain` instance
-either way, so a chat message typed in the browser and a spoken command produce identical tool
-calls.
+(`charlie/ipc.py`, ports 5555/5556 by default). Local clients talk to the web process over
+HTTP/WebSocket; voice input and desktop-control results flow through the same `Brain` instance.
 
 ### Key design decisions
 
@@ -314,7 +285,7 @@ calls.
 - **Streaming-first.** Every data path is a generator; time-to-first-audio is prioritized over
   waiting for a complete reply.
 - **Session isolation via `launch_id`.** Each `main.py` run gets a UUID passed to the web subprocess
-  via environment variable; the dashboard can filter to "this launch" or "all history."
+  via environment variable; clients can request the appropriate session projection.
 
 ---
 
@@ -367,16 +338,7 @@ uv run ruff check .
 uv run pytest -v
 ```
 
-Frontend (run in `frontend/`, in order):
-
-```bash
-npx tsc --noEmit
-npm run lint
-npm test
-```
-
-All of the above run in CI (`.github/workflows/ci.yml`) on every push/PR to `main`. Both backend
-and frontend checks must pass cleanly before a change is considered done.
+The backend checks run in CI (`.github/workflows/ci.yml`) on every push/PR to `main`.
 
 ---
 
@@ -407,11 +369,6 @@ configured, screen questions fall back to OCR/UIA text description.
 Known Windows-specific issue: uvicorn's `loop="asyncio"` hardcodes `ProactorEventLoop`, which
 pyzmq's asyncio integration can't use. Already fixed via `loop="none"` in both `run.py` and
 `charlie/web_server.py` -- if you see this, check nothing reintroduced `loop="asyncio"`.
-
-**Frontend build looks stale**
-`run.py` only rebuilds the dashboard when a source file under `frontend/src` is newer than
-`frontend/out/index.html`. Force a rebuild with `cd frontend && npm run build`, or delete
-`frontend/out` and rerun `python run.py`.
 
 **Fresh model downloads take a long time on first run**
 Expected -- Whisper (`large-v3` by default) and Kokoro TTS models are pulled on first use. Set

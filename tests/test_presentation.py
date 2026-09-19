@@ -132,7 +132,7 @@ class TestPresentationKindSelection:
             "aliases": [],
             "implemented": True,
             "renderer": "FutureResearch",
-            "renderer_module": "frontend/src/scene/workspaces/ResearchWorkspace.tsx",
+            "renderer_module": "",
             "renderer_export": "FutureResearch",
             "spatial": False,
             "core_position": "dock_bottom_right",
