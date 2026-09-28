@@ -267,8 +267,8 @@ def read_url(url: str) -> Dict[str, Any]:
     result = SearchResult(title=url, url=url, provider="browser_read")
     try:
         safe_url = validate_public_url(url)
-    except ValueError:
-        return {"error": "Only public HTTP(S) URLs can be read."}
+    except ValueError as exc:
+        return {"error": str(exc)}
     try:
         document = asyncio.run(fetch_document(result, timeout_s=_READ_TIMEOUT_SEC))
         if document is None:

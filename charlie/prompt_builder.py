@@ -35,9 +35,9 @@ _SECURITY_DIRECTIVES = (
 _TOOL_RULES = (
     "CRITICAL RULES for tool use:\n"
     "- Use web_search when you need fresh data and cannot answer from conversation history or memory.\n"
-    "- For public-web retrieval, prefer Charlie's built-in web_search/web_research and "
-    "browser reading tools; use MCP fetch only after that route fails or the user "
-    "explicitly asks for MCP.\n"
+    "- For public-web retrieval, prefer built-in web_search/web_research and "
+    "browser_read/browser_task; use MCP fetch only after built-in retrieval fails "
+    "or the user explicitly asks for MCP.\n"
     "- Do NOT search for questions you can answer from context above -- use what you already know.\n"
     "- Use web_search for: time-sensitive facts (prices, scores, weather, breaking news, releases).\n"
     "- Use the memory tool when the user asks you to remember something, or asks what you know about them.\n"

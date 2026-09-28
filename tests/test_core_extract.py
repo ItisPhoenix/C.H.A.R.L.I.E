@@ -174,7 +174,8 @@ class TestGroundingRules:
 
     def test_builtin_web_retrieval_precedes_mcp_fetch(self):
         from charlie.prompt_builder import _TOOL_RULES
-        assert "use MCP fetch only after that route fails" in _TOOL_RULES
+        assert "prefer built-in web_search/web_research and browser_read/browser_task" in _TOOL_RULES
+        assert "use MCP fetch only after built-in retrieval fails" in _TOOL_RULES
 
     def test_multifact_requests_avoid_python_alias_probes(self):
         from charlie.prompt_builder import _TOOL_RULES

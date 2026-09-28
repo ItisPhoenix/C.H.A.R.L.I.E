@@ -90,7 +90,8 @@ def document_from_content(
     title: Optional[str] = None,
 ) -> Optional[SourceDocument]:
     text = content.strip()[:_MAX_DOCUMENT_CHARS]
-    if len(text) < _MIN_CONTENT_CHARS:
+    minimum = 1 if result.provider == "browser_read" else _MIN_CONTENT_CHARS
+    if len(text) < minimum:
         return None
     canonical = canonicalize_url(result.url)
     return SourceDocument(

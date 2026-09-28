@@ -34,6 +34,32 @@ def test_duckduckgo_parser_unwraps_redirect_links_and_rejects_invalid_targets():
     assert parser.results == [("Example article", "https://example.com/article?x=1&y=2", "")]
 
 
+def test_browser_read_accepts_short_page_content():
+    from charlie.research.fetch import document_from_content
+
+    page = SearchResult(title="Example Domain", url="https://example.com", provider="browser_read")
+    search_result = SearchResult(title="Example Domain", url="https://example.com", provider="search")
+
+    document = document_from_content(page, "Example Domain", extraction_method="html-text")
+    short_search_result = document_from_content(
+        search_result,
+        "Example Domain",
+        extraction_method="html-text",
+    )
+
+    assert document is not None and document.content == "Example Domain"
+    assert short_search_result is None
+
+
+def test_browser_read_preserves_public_url_validation_error(monkeypatch):
+    def reject(_url):
+        raise ValueError("Research URL host could not be resolved")
+
+    monkeypatch.setattr("charlie.research.fetch.validate_public_url", reject)
+
+    assert read_url("https://example.invalid") == {"error": "Research URL host could not be resolved"}
+
+
 @pytest.mark.asyncio
 async def test_duckduckgo_provider_prefixes_domain_filter(monkeypatch):
     from charlie.research.providers import DuckDuckGoProvider
@@ -196,7 +222,7 @@ def test_read_url_rejects_private_target_before_playwright(monkeypatch):
         "charlie.browser.actions.controller.run",
         lambda *args, **kwargs: pytest.fail("browser launched"),
     )
-    assert read_url("http://localhost:8080/private")["error"] == "Only public HTTP(S) URLs can be read."
+    assert read_url("http://localhost:8080/private")["error"] == "Research URL targets a private or local host"
 
 
 def test_quick_report_citations_are_validated():
