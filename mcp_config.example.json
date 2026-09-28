@@ -11,7 +11,7 @@
         "ai_coding"
       ],
       "enabled": true,
-      "timeout_ms": 9000000
+      "timeout_ms": 30000
     }
   },
   "mcpToolPolicies": {

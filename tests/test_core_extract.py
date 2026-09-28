@@ -172,6 +172,10 @@ class TestGroundingRules:
         from charlie.prompt_builder import _TOOL_RULES
         assert "When the user's requested facts are verified, stop calling tools and answer." in _TOOL_RULES
 
+    def test_builtin_web_retrieval_precedes_mcp_fetch(self):
+        from charlie.prompt_builder import _TOOL_RULES
+        assert "use MCP fetch only after that route fails" in _TOOL_RULES
+
     def test_multifact_requests_avoid_python_alias_probes(self):
         from charlie.prompt_builder import _TOOL_RULES
         assert "advances an unanswered request part" in _TOOL_RULES
